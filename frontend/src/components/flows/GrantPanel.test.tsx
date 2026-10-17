@@ -50,7 +50,7 @@ describe('GrantPanel', () => {
     const { user, onChange } = await render('run-done')
     await user.click(screen.getByRole('button', { name: 'Revoke grant' }))
     expect(flowRequests()).toEqual([])
-    const dialog = await screen.findByRole('dialog', { name: 'Revoke this grant?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Revoke this grant?' })
     await user.click(within(dialog).getByRole('button', { name: 'Revoke grant' }))
     await waitFor(() => expect(onChange).toHaveBeenCalled())
     expect(flowRequests().map((r) => r.path)).toEqual(['/api/v1/workflow-runs/run-done/grant/revoke'])
@@ -114,6 +114,6 @@ describe('GrantPanel', () => {
     const grant = await grantOf('run-done')
     grant.spec.rules = [{ fn: 'arrange' }]
     renderPage(<GrantPanel runId="run-done" grant={grant} onChange={() => {}} />)
-    expect(screen.getByText(/any model, any number of calls/)).toHaveClass('text-warn')
+    expect(screen.getByText(/any model, any number of calls/)).toHaveClass('text-destructive')
   })
 })

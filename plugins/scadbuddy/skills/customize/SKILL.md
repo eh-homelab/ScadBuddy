@@ -220,6 +220,10 @@ settings are `outward`, and always need a human approval in the ScadBuddy UI
   preset …?" dialog, and `fill` reports it in a `confirm` note. "Replace my
   changes" discards those edits for good. Press it only if you made them; if the
   user did, ask them first.
+- A preset's Duplicate, Edit details and Delete are in its "More for preset …" menu,
+  and at phone width the action bar's other actions are in its "More" popover: click
+  the menu first, and its items appear in the next snapshot
+  (`frontend/src/components/PresetPicker.tsx`, `frontend/src/components/ActionBar.tsx`).
 - For a render that fails or warns, `get_render_diagnostics` gives OpenSCAD's
   warnings and errors with the file and line each names. `get_lsp_diagnostics`
   checks a source's syntax without rendering it. Fixing the template itself is the

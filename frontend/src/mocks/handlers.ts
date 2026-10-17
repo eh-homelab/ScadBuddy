@@ -14,7 +14,6 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
-  LastProject,
   ModelProjectPut,
   ModelProjects,
   CatalogueLibrary,
@@ -114,6 +113,8 @@ const INITIAL_LIBRARY_OUTPUTS: [number, string][] = [
 
 const state = {
   models: [...fixtures.models] as ModelSummary[],
+  /** A duplicate's copy by its `Idempotency-Key`: a re-send gets the first answer, as from the API. */
+  duplicates: new Map<string, ModelSummary>(),
   /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
   printRuns: new Map<string, PrintRun>(),
   schemas: { ...fixtures.schemas },
@@ -146,8 +147,6 @@ const state = {
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback. */
-  lastProjectId: null as number | null,
   /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
   modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
@@ -291,6 +290,7 @@ export function resetMockState(): void {
   resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
+  state.duplicates.clear()
   state.printRuns = new Map()
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
@@ -311,7 +311,6 @@ export function resetMockState(): void {
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
-  state.lastProjectId = null
   state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
@@ -1600,6 +1599,10 @@ export const handlers = [
   // #156 — any template, built-in or mine, copied to a new one of mine that records
   // it as `upstream`, with `base` its current revision (`catalogue.duplicate`).
   http.post(`${base}/models/:slug/duplicate`, async ({ params, request }) => {
+    // A re-send after an answer that never arrived (`command`) is answered as the first was.
+    const key = request.headers.get('Idempotency-Key')
+    const replay = key ? state.duplicates.get(key) : undefined
+    if (replay) return HttpResponse.json(view(replay), { status: 201 })
     const id = String(params['slug'])
     const upstream = state.models.find((m) => m.slug === id)
     if (!upstream) return problem(404, 'Not Found', `no model named '${id}'`)
@@ -1643,6 +1646,7 @@ export const handlers = [
       },
     }
     state.models = [copy, ...state.models]
+    if (key) state.duplicates.set(key, copy)
     // #274: `duplicate` copies `media/`, videos (which are not in git) included.
     for (const [key, bytes] of [...state.mediaFiles]) {
       if (key.startsWith(`${id}/`)) state.mediaFiles.set(`${slug}/${key.slice(id.length + 1)}`, bytes)
@@ -2890,9 +2894,20 @@ export const handlers = [
 
   // Inputs migration (spec 2026-09-27 §8.2): the mock templates have no `migrate`, so
   // the inputs come back as they are, at the version they carry.
-  http.post(`${base}/models/:slug/inputs/migrate`, async ({ request }) => {
+  // A template with a pipeline but no `migrate` (#3777) refuses inputs not at its version,
+  // as the agent does: 422 with the worker's message.
+  http.post(`${base}/models/:slug/inputs/migrate`, async ({ params, request }) => {
     const body = (await request.json()) as { inputs: Record<string, unknown> }
     const v = typeof body.inputs.v === 'number' ? body.inputs.v : 0
+    const slug = String(params['slug'])
+    const current = state.models.find((m) => m.slug === slug)?.inputs_version ?? 0
+    if (fixtures.PIPELINE_WITHOUT_MIGRATE.has(slug) && v !== current) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `inputs at version ${v} cannot be brought up to version ${current}: the template's pipeline defines no migrate`,
+      )
+    }
     return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
   }),
 
@@ -3323,10 +3338,14 @@ export const handlers = [
     const rawPlateId = Number(search.get('plate_id') ?? 1)
     const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
     const every = fixtures.filamentOptions.slots ?? []
+    // #3652 — several plates answer with their slots alone.
+    const plateIds = search.getAll('plate_ids').map(Number)
     const slots =
       search.get('all_plates') === 'true'
         ? every
-        : every.filter((slot) => slot.slot_id === plateId)
+        : plateIds.length > 0
+          ? every.filter((slot) => plateIds.includes(slot.slot_id))
+          : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
@@ -3379,7 +3398,7 @@ export const handlers = [
       1
     // #79 — the project's own library folder replaces the one from Settings for this
     // send, which is what puts the file on Bambuddy's project page.
-    const projectId = body.project_id ?? state.lastProjectId
+    const projectId = body.project_id ?? state.settings.last_project_id ?? null
     const folderId =
       projectId === null
         ? null
@@ -3451,7 +3470,7 @@ export const handlers = [
   http.get(`${base}/print/projects`, () =>
     HttpResponse.json({
       projects: state.projects,
-      last_project_id: state.lastProjectId,
+      last_project_id: state.settings.last_project_id ?? null,
     } satisfies ProjectChoices),
   ),
 
@@ -3496,13 +3515,6 @@ export const handlers = [
     state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
     await delay(150)
     return HttpResponse.json(saved)
-  }),
-
-  // #317 — the project both pickers open on.
-  http.put(`${base}/print/projects/last`, async ({ request }) => {
-    const body = (await request.json()) as LastProject
-    state.lastProjectId = body.project_id ?? null
-    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
   }),
 
   // #1660 — the project each model was last filed into, per preset.
@@ -3550,7 +3562,7 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
-    const projectId = body.project_id ?? state.lastProjectId
+    const projectId = body.project_id ?? state.settings.last_project_id ?? null
     if (projectId === null) {
       return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
     }

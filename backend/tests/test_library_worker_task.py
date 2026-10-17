@@ -219,6 +219,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "client_for", _a_client)
     monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
+    monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -314,6 +315,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         paths=SimpleNamespace(),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        # #2718: the claims sweep prunes batch prints too.
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_previews)),
     )
     state.paths.claims = None
 
@@ -326,7 +329,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             return 0
 
     state.settings_store = SimpleNamespace(load=StoredSettings)
-    state.components = SimpleNamespace(get=lambda key: SimpleNamespace(index=SlowIndex()))
+    # #2718: the claims sweep's batch-print store, beside the library index.
+    state.components = SimpleNamespace(
+        get=lambda key: SimpleNamespace(index=SlowIndex(), prune=slow_previews)
+    )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []
     env = ActivityEnvironment()

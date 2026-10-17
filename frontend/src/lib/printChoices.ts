@@ -49,7 +49,6 @@ export function printChoicesOf(selection: PrintSelection): PrintChoices | null {
       }
 }
 
-
 /**
  * The request fields, beside the plan and the choices, that change what a run slices
  * (#2825): the print sequence, the supports (#1899), the filament profiles left on

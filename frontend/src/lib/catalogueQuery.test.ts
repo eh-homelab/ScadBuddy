@@ -67,6 +67,7 @@ describe('filterModels', () => {
       'ui-demo',
       'builtin:keychain-template',
       'builtin:dollhouse-kit',
+      'ui-unmigrated',
     ])
   })
 
@@ -116,6 +117,7 @@ describe('filterModels', () => {
       'name-keychain',
       'ui-broken',
       'ui-demo',
+      'ui-unmigrated',
     ])
   })
 

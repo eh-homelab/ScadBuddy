@@ -34,6 +34,7 @@ from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.bambu3mf import ArchiveTooLargeError, TooManyTrianglesError
 from scadbuddy.render.geometry_cache import (
     mesh_geometry,
+    painted,
     recolour_piece,
     reusable,
 )
@@ -58,7 +59,7 @@ from scadbuddy.render.paint import PaintCodeError
 from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
-from scadbuddy.render.split import MaterialSplitError
+from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
@@ -164,15 +165,19 @@ class IncompleteRenderError(Exception):
 
 
 def require_whole_3mf(path: Path) -> None:
-    """Raise `IncompleteRenderError` unless ``path`` opens as a zip whose members all
-    read back intact."""
+    """Raise `IncompleteRenderError` unless ``path`` opens as a zip (its central
+    directory, at the end, is what a short write loses) and its model reads back
+    intact. Only the model is read: it is what `render_solids` parses, and checking
+    every member of a large render would decompress all of it for nothing."""
     try:
-        with zipfile.ZipFile(path) as archive:
-            broken = archive.testzip()
+        with zipfile.ZipFile(path) as archive, archive.open(MODEL_ENTRY) as model:
+            # Read to the end: the CRC is checked there, and a mismatch raises.
+            while model.read(1 << 20):
+                pass
+    except KeyError:
+        raise IncompleteRenderError(f"{path.name} is not a whole 3MF: no {MODEL_ENTRY}") from None
     except (OSError, zipfile.BadZipFile, EOFError) as error:
         raise IncompleteRenderError(f"{path.name} is not a whole 3MF: {error}") from None
-    if broken is not None:
-        raise IncompleteRenderError(f"{path.name} is not a whole 3MF: {broken} is corrupt")
 
 
 def _deterministic(error: Exception) -> ApplicationError:
@@ -727,8 +732,14 @@ class RenderActivities:
         if d.geometry is not None and prepared.geometry_key is not None:
             # A cache's hint, after the piece is published: losing it costs a later
             # recolour its shortcut, never this render. A recoloured piece comes with
-            # no key: its copied raw render keeps its source's colours.
+            # no key: its copied raw render keeps its source's colours. A painted piece
+            # is never a source (`reusable` refuses it), so no recolour fetches it.
             try:
+                layout = json.loads(
+                    await asyncio.to_thread((work / LAYOUT_NAME).read_text, "utf-8")
+                )
+                if painted(layout):
+                    return piece
                 await asyncio.to_thread(
                     d.geometry.put,
                     prepared.geometry_key,

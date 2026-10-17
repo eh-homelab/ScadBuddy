@@ -263,7 +263,7 @@ class StoredSettings(BambuddyIds):
     #: a time (:meth:`SettingsStore.set_printer_bed_type`).
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
 
-    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: The default Bambuddy project (#79), set only in Settings (#3188). A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
     #: defaults for the next filing (this, and ``model_projects`` below) rather than
     #: modelling which prints belong to which project: that question is Bambuddy's.
@@ -559,6 +559,11 @@ class SettingsStore:
             name="scadbuddy-settings",
         )
 
+    @property
+    def kek(self) -> Kek | None:
+        """The key the secret settings are sealed with; ``None`` when they are kept plain."""
+        return self._kek
+
     def open(self) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
@@ -848,15 +853,6 @@ class SettingsStore:
         # The dialog's remembered choices, as for a model: no new section is needed.
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
-
-    def remember_project(self, project_id: int | None) -> StoredSettings:
-        """Remember the project the last send went to, so the picker opens on it."""
-        with self._pool.connection() as conn:
-            if project_id is None:
-                conn.execute("DELETE FROM settings WHERE name = 'last_project_id'")
-            else:
-                _put(conn, "last_project_id", project_id)
-        return self._written("last_project")
 
     def set_model_project(
         self, model_id: str, preset_id: str | None, project: ModelProject | None

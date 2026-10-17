@@ -31,7 +31,15 @@ import { useSpeakReplies } from '../../agent/chat/voice'
 import { api, ApiError } from '../../api/client'
 import type { AiSessionEdit, AiSessionView } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
+import { ChevronDownIcon, ImagePlusIcon, XIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Label } from '@/components/ui/label'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Textarea } from '@/components/ui/textarea'
+import { Toggle } from '@/components/ui/toggle'
 import { DurableBadge, OriginBadge } from './badges'
 import { SessionModePicker } from './SessionModePicker'
 import { FeedItemView } from './FeedItemView'
@@ -48,6 +56,7 @@ import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
+import { Tip } from './Tip'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -89,6 +98,11 @@ interface Props {
   /** #931 — a session a page asked to open; selected once, then `onOpenHandled` clears it. */
   openRequest?: OpenRequest | null
   onOpenHandled?: () => void
+  /**
+   * #3164 — whether this tab came back from a reload (`panelMemory`'s `reloaded`), read by
+   * the shell before it saves the panel as open. Without it the chat opens as a new tab.
+   */
+  reloaded?: boolean
 }
 
 export interface OpenRequest {
@@ -118,7 +132,7 @@ function AttachedThumb({ blob, alt }: { blob: Blob; alt: string }) {
     setUrl(made)
     return () => URL.revokeObjectURL(made)
   }, [blob])
-  return url ? <img src={url} alt={alt} className="h-14 w-14 rounded-[4px] border border-line object-cover" /> : null
+  return url ? <img src={url} alt={alt} className="h-14 w-14 rounded-md border border-border object-cover" /> : null
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -149,7 +163,15 @@ function readSessionMode(): SessionMode | '' {
   }
 }
 
-export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest, onOpenHandled }: Props) {
+export function AssistantChat({
+  factory,
+  onClose,
+  focusKey,
+  embedded = false,
+  openRequest,
+  onOpenHandled,
+  reloaded = false,
+}: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
@@ -228,12 +250,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const heading = useRef<HTMLHeadingElement>(null)
   const takeOverButton = useRef<HTMLButtonElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
-  const pickerId = useId()
   const touchedId = useId()
   const filesId = useId()
   const voiceNoteId = useId()
   const archivedNoteId = useId()
-  /** #1885 — a refused Unarchive, shown for that chat only. */
+  const filterId = useId()
+  /** #1885 — a refused Archive (#3738) or Unarchive, shown for that chat only. */
   const [archiveError, setArchiveError] = useState<{ id: string; message: string } | null>(null)
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
@@ -355,7 +377,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     void addImages(files)
   }
   const focusComposer = useCallback(() => composer.current?.focus(), [])
-  const skillMenu = useSkillMenu({ draft, writeDraft, focus: focusComposer, enabled: canSend })
+  const skillMenu = useSkillMenu({ draft, writeDraft, focus: focusComposer, enabled: canSend, anchor: composer })
   const speakReplies = useSpeakReplies()
   const speech = useSpokenReplies(state.activeId, active?.items, speakReplies)
   const dictation = useDictation({
@@ -409,18 +431,23 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [openRequest, select, onOpenHandled])
 
   // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
-  // under way, rather than a blank new chat beside a turn that is still spending.
+  // under way, rather than a blank new chat beside a turn that is still spending. Only a
+  // reloaded tab (#3164): a new one opens on a new chat. So does a panel remounted on the
+  // same page: it unmounts only when the assistant is off, which forgets the chat (#2372,
+  // #3871 review).
   const restored = useRef(false)
   useEffect(() => {
-    if (restored.current || state.order.length === 0) return
+    if (restored.current || !state.listed) return
     restored.current = true
     if (state.activeId || state.awaitingStart || openRequest) {
       rememberSession(state.activeId)
       return
     }
-    const id = sessionToRestore(rememberedSession(), state.order, state.sessions)
+    const id = reloaded ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
     if (id) select(id)
-  }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select])
+    // A remembered chat that is no longer listed, with nothing under way to show instead.
+    else rememberSession(null)
+  }, [state.listed, state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select, reloaded])
   // After the restore, so it does not forget the chat before reading it.
   useEffect(() => {
     if (restored.current) rememberSession(state.activeId)
@@ -506,6 +533,18 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
+  // #3738 — the open chat's Archive and Unarchive: a refusal is shown for that chat only.
+  // True once the agent took it.
+  const setArchived = async (id: string, archived: boolean): Promise<boolean> => {
+    setArchiveError(null)
+    try {
+      await updateSession(id, { archived })
+      return true
+    } catch (caught) {
+      setArchiveError({ id, message: caught instanceof Error ? caught.message : String(caught) })
+      return false
+    }
+  }
   // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
   const cancelOffer = async (id: string) => {
     try {
@@ -552,142 +591,141 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     <div className="flex h-full min-h-0 flex-col">
       {/* #1038 — wraps: the buttons outgrow the 380 px panel once "Sessions (N)" reaches two
           digits, and an unwrapped row pushed Close past the viewport's edge. */}
-      <header className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-2">
-        <h2 ref={heading} tabIndex={-1} className="text-[13px] font-semibold outline-none">
-          Assistant
-        </h2>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-expanded={pickerOpen}
-            aria-controls={pickerId}
-            onClick={() => setPickerOpen((o) => !o)}
-          >
-            Sessions ({sessions.length})
-          </Button>
-          <Button variant="ghost" size="sm" onClick={startNewChat}>
-            New chat
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-pressed={advanced}
-            title="Show every tool call's arguments and sources, and what memory recalled and saved"
-            onClick={toggleAdvanced}
-          >
-            Advanced
-          </Button>
-          <Button variant="ghost" size="sm" aria-label="Close assistant" onClick={onClose}>
-            ✕
-          </Button>
-        </div>
-      </header>
-
-      {pickerOpen && (
-        <nav id={pickerId} aria-label="Sessions" className="shrink-0 border-b border-line bg-surface-2">
-          <div role="group" aria-label="Which chats" className="flex items-center gap-1 px-3 pt-2">
-            {(['chats', 'archived'] as const).map((view) => (
-              <Button
-                key={view}
-                variant="ghost"
-                size="sm"
-                aria-pressed={pickerView === view}
-                onClick={() => setPickerView(view)}
-              >
-                {view === 'chats' ? 'Chats' : 'Archived'}
+      <Collapsible open={pickerOpen} onOpenChange={setPickerOpen} className="shrink-0">
+        <header className="flex flex-wrap items-center gap-1 border-b border-border px-3 py-2">
+          <h2 ref={heading} tabIndex={-1} className="text-sm font-semibold outline-none">
+            Assistant
+          </h2>
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm">
+                Sessions ({sessions.length})
+                <ChevronDownIcon
+                  data-icon="inline-end"
+                  className={`transition-transform motion-reduce:transition-none ${pickerOpen ? 'rotate-180' : ''}`}
+                />
               </Button>
-            ))}
+            </CollapsibleTrigger>
+            <Button variant="ghost" size="sm" onClick={startNewChat}>
+              New chat
+            </Button>
+            <Tip content="Show every tool call's arguments and sources, and what memory recalled and saved">
+              <Toggle size="sm" pressed={advanced} onPressedChange={toggleAdvanced}>
+                Advanced
+              </Toggle>
+            </Tip>
+            <Button variant="ghost" size="icon-sm" aria-label="Close assistant" onClick={onClose}>
+              <XIcon />
+            </Button>
           </div>
-          {pickerView === 'archived' ? (
-            <ArchivedSessions
-              onOpen={(session) => {
-                chat.patch(patchOf(session))
-                chat.select(session.id)
-                setPickerOpen(false)
-                focusSession()
-              }}
-              onUnarchive={(session) => updateSession(session.id, { archived: false })}
-              unarchived={(id) => state.sessions[id]?.archived === false}
-            />
-          ) : (
-            <>
-              {pageModel && (
-                <label className="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-muted">
-                  <input
-                    type="checkbox"
-                    checked={filterBy !== null}
-                    onChange={(event) => setFilteredModel(event.target.checked ? pageModel : null)}
-                  />
-                  Only sessions that changed {pageModel}
-                </label>
-              )}
-              {filterError ? (
-                <p role="alert" className="px-3 pt-1 text-[12px] text-warn">
-                  {filterError instanceof ApiError ? filterError.detail : 'The assistant service did not answer.'} Showing
-                  every session, unfiltered.
-                </p>
-              ) : null}
-              {touchingIds && touchingIds.size >= PICKER_FILTER_LIMIT ? (
-                <p className="px-3 pt-1 text-[11px] text-faint">
-                  Checked against the {PICKER_FILTER_LIMIT} most recently updated sessions that changed {filterBy}.
-                </p>
-              ) : null}
-              {sessions.length === 0 ? (
-                <p className="px-3 py-2 text-[12.5px] text-muted">No sessions yet.</p>
-              ) : filterLoading ? (
-                <p role="status" className="px-3 py-2 text-[12.5px] text-muted">
-                  Finding the sessions that changed {filterBy}…
-                </p>
-              ) : touchingIds && listed.length === 0 ? (
-                <p className="px-3 py-2 text-[12.5px] text-muted">
-                  {touchingIds.size === 0
-                    ? `No session changed ${filterBy}.`
-                    : // The ones that did are older than the sessions this panel has loaded.
-                      `None of the loaded sessions changed ${filterBy}.`}
-                </p>
-              ) : (
-                <SessionSwitcher
-                  sessions={listed}
-                  activeId={state.activeId}
-                  onOpen={(id) => {
-                    chat.select(id)
+        </header>
+
+        {/* #1885 — the chats, or the archived ones. */}
+        <CollapsibleContent asChild>
+          <nav aria-label="Sessions" className="border-b border-border bg-muted/40">
+            <Tabs
+              value={pickerView}
+              onValueChange={(view) => setPickerView(view === 'archived' ? 'archived' : 'chats')}
+              className="gap-0"
+            >
+              <TabsList aria-label="Which chats" className="mx-3 mt-2">
+                <TabsTrigger value="chats" className="px-3">
+                  Chats
+                </TabsTrigger>
+                <TabsTrigger value="archived" className="px-3">
+                  Archived
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="archived">
+                <ArchivedSessions
+                  onOpen={(session) => {
+                    chat.patch(patchOf(session))
+                    chat.select(session.id)
                     setPickerOpen(false)
                     focusSession()
                   }}
-                  onRename={(id, title) => updateSession(id, { title })}
-                  onDone={(id) => updateSession(id, { done: true })}
-                  onArchive={(id) => updateSession(id, { archived: true })}
-                  onCancelOffer={cancelOffer}
+                  onUnarchive={(session) => updateSession(session.id, { archived: false })}
+                  unarchived={(id) => state.sessions[id]?.archived === false}
                 />
-              )}
-            </>
-          )}
-        </nav>
-      )}
+              </TabsContent>
+              <TabsContent value="chats">
+                {pageModel && (
+                  <div className="flex items-center gap-2 px-3 pt-2">
+                    <Checkbox
+                      id={filterId}
+                      checked={filterBy !== null}
+                      onCheckedChange={(checked) => setFilteredModel(checked === true ? pageModel : null)}
+                    />
+                    <Label htmlFor={filterId} className="text-xs font-normal text-muted-foreground">
+                      Only sessions that changed {pageModel}
+                    </Label>
+                  </div>
+                )}
+                {filterError ? (
+                  <p role="alert" className="px-3 pt-1 text-xs text-warn">
+                    {filterError instanceof ApiError ? filterError.detail : 'The assistant service did not answer.'} Showing
+                    every session, unfiltered.
+                  </p>
+                ) : null}
+                {touchingIds && touchingIds.size >= PICKER_FILTER_LIMIT ? (
+                  <p className="px-3 pt-1 text-[11px] text-muted-foreground">
+                    Checked against the {PICKER_FILTER_LIMIT} most recently updated sessions that changed {filterBy}.
+                  </p>
+                ) : null}
+                {sessions.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No sessions yet.</p>
+                ) : filterLoading ? (
+                  <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+                    Finding the sessions that changed {filterBy}…
+                  </p>
+                ) : touchingIds && listed.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">
+                    {touchingIds.size === 0
+                      ? `No session changed ${filterBy}.`
+                      : // The ones that did are older than the sessions this panel has loaded.
+                        `None of the loaded sessions changed ${filterBy}.`}
+                  </p>
+                ) : (
+                  <SessionSwitcher
+                    sessions={listed}
+                    activeId={state.activeId}
+                    onOpen={(id) => {
+                      chat.select(id)
+                      setPickerOpen(false)
+                      focusSession()
+                    }}
+                    onRename={(id, title) => updateSession(id, { title })}
+                    onDone={(id) => updateSession(id, { done: true })}
+                    onArchive={(id) => updateSession(id, { archived: true })}
+                    onCancelOffer={cancelOffer}
+                  />
+                )}
+              </TabsContent>
+            </Tabs>
+          </nav>
+        </CollapsibleContent>
+      </Collapsible>
 
       {active && (
         <div
-          className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]"
+          className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border px-3 py-1.5 text-xs"
           data-testid="active-session-header"
         >
           {/* #2380 — a floor, so the badges and actions wrap under it rather than squeeze it to "q…". */}
-          <span
-            className="min-w-[min(12rem,100%)] flex-1 truncate font-medium"
-            title={active.title}
-            data-testid="active-session-title"
-          >
-            {active.title}
-          </span>
+          <Tip content={active.title}>
+            <span className="min-w-[min(12rem,100%)] flex-1 truncate font-medium" data-testid="active-session-title">
+              {active.title}
+            </span>
+          </Tip>
           <OriginBadge origin={active.origin} />
           {durable && <DurableBadge />}
-          {archived && <span className="rounded-[4px] bg-surface-3 px-1 text-[10.5px] text-muted">Archived</span>}
-          <span className="text-faint" data-testid="agent-status">
+          {archived && <Badge variant="secondary">Archived</Badge>}
+          <span className="text-muted-foreground" data-testid="agent-status">
             {statusLabel(active.status)}
           </span>
           {busy && (
             <Button
-              variant="danger"
+              variant="destructive"
               size="sm"
               onClick={() => {
                 chat.interrupt(active.id)
@@ -698,54 +736,89 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               Stop
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!hasReply}
-            title={
+          <Tip
+            wrap={!hasReply}
+            content={
               hasReply
                 ? 'Copy this chat into a new one and continue there; this one stays as it is'
                 : 'No reply to fork yet: wait for the assistant to answer'
             }
-            data-agent-user-only=""
-            onClick={() => fork(active.id)}
           >
-            Fork
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-expanded={touchedOpen}
-            aria-controls={touchedOpen ? touchedId : undefined}
-            title="What this session's tool calls created, changed or deleted"
-            onClick={() => setTouchedOpen((o) => !o)}
-          >
-            Touched
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-expanded={filesOpen}
-            aria-controls={filesOpen ? filesId : undefined}
-            title="The files in this session's workspace: download them, or upload one for the assistant"
-            onClick={() => setFilesOpen((o) => !o)}
-          >
-            Files
-          </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!hasReply}
+              data-agent-user-only=""
+              onClick={() => fork(active.id)}
+            >
+              Fork
+            </Button>
+          </Tip>
+          {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
+              went unfound. Offered as there, to the owner, while no turn runs or waits (`isBusy`). */}
+          {owned && !busy && !archived && (
+            <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
+              <Button
+                variant="ghost"
+                size="sm"
+                data-agent-user-only=""
+                onClick={() => void setArchived(active.id, true)}
+              >
+                Archive
+              </Button>
+            </Tip>
+          )}
+          {/* Disclosures of the panels below the header (#931, #2329). */}
+          <Tip content="What this session's tool calls created, changed or deleted">
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-expanded={touchedOpen}
+              aria-controls={touchedOpen ? touchedId : undefined}
+              onClick={() => setTouchedOpen((o) => !o)}
+            >
+              Touched
+              <ChevronDownIcon
+                data-icon="inline-end"
+                className={`transition-transform motion-reduce:transition-none ${touchedOpen ? 'rotate-180' : ''}`}
+              />
+            </Button>
+          </Tip>
+          <Tip content="The files in this session's workspace: download them, or upload one for the assistant">
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-expanded={filesOpen}
+              aria-controls={filesOpen ? filesId : undefined}
+              onClick={() => setFilesOpen((o) => !o)}
+            >
+              Files
+              <ChevronDownIcon
+                data-icon="inline-end"
+                className={`transition-transform motion-reduce:transition-none ${filesOpen ? 'rotate-180' : ''}`}
+              />
+            </Button>
+          </Tip>
           <BudgetMeter session={active} />
           {active.parentId && (
-            <div className="flex w-full items-center gap-1 text-[11.5px] text-muted">
-              <button
-                type="button"
-                className="truncate underline decoration-dotted underline-offset-2 hover:text-ink"
+            <div className="flex w-full min-w-0 items-center gap-1">
+              <Button
+                variant="link"
+                size="xs"
+                className="h-auto min-w-0 truncate px-0 text-muted-foreground"
                 onClick={() => {
                   chat.select(active.parentId!)
                   focusSession()
                 }}
               >
-                Forked from {parent?.title ?? 'an earlier chat'}
-              </button>
+                <span className="truncate">Forked from {parent?.title ?? 'an earlier chat'}</span>
+              </Button>
             </div>
+          )}
+          {!archived && archiveError?.id === active.id && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not archived: {archiveError.message}
+            </p>
           )}
           {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
@@ -754,13 +827,13 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           )}
           {active.modeFallback && (
             // Plan 5d — the default asked for durable, and it could not run.
-            <p className="w-full text-[11.5px] text-muted" data-testid="session-mode-fallback">
+            <p className="w-full text-[11.5px] text-muted-foreground" data-testid="session-mode-fallback">
               Running as Classic, since durable sessions cannot start now: {active.modeFallback}
             </p>
           )}
           {!owned && (
             <div className="flex w-full items-center gap-2">
-              <span className="text-muted">Controlled by {active.owner.label}</span>
+              <span className="text-muted-foreground">Controlled by {active.owner.label}</span>
               <Button
                 ref={takeOverButton}
                 size="sm"
@@ -781,7 +854,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         <section
           id={touchedId}
           aria-label="What this session touched"
-          className="shrink-0 border-b border-line bg-surface-2"
+          className="shrink-0 border-b border-border bg-muted/40"
         >
           {/* Read again when the status moves or a tool call finishes, so a running turn's
               changes show as they land. Keyed per session, so a switch reads once. */}
@@ -795,7 +868,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       )}
 
       {active && filesOpen && (
-        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-line bg-surface-2">
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-border bg-muted/40">
           {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
           <SessionFiles
             key={active.id}
@@ -825,7 +898,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
       >
         {state.notice && (
-          <p role="alert" className="text-[12.5px] text-warn">
+          <p role="alert" className="text-xs text-warn">
             {state.notice}
           </p>
         )}
@@ -859,17 +932,23 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           )}
         {itemCount === 0 && !busy && advanced && (
           // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
-          <p className="text-[12px] text-muted">
+          <p className="text-xs text-muted-foreground">
             Advanced: tool arguments, sources and memory details will be shown.
           </p>
         )}
         {itemCount === 0 && !busy && prompts.length > 0 && canSend && (
           <div>
-            <p className="mb-2 text-[12px] text-muted">Try asking</p>
+            <p className="mb-2 text-xs text-muted-foreground">Try asking</p>
             <ul className="flex flex-col items-start gap-1.5">
               {prompts.map((prompt) => (
-                <li key={prompt}>
-                  <Button size="sm" data-agent-user-only="" onClick={() => submit(prompt)}>
+                <li key={prompt} className="max-w-full">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-auto max-w-full py-1 text-left whitespace-normal"
+                    data-agent-user-only=""
+                    onClick={() => submit(prompt)}
+                  >
                     {prompt}
                   </Button>
                 </li>
@@ -888,7 +967,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           />
         )}
         {active?.result && !busy && (
-          <p className="text-[11px] text-faint">
+          <p className="text-[11px] text-muted-foreground">
             {active.result.turns} turn{active.result.turns === 1 ? '' : 's'}
             {active.result.costUsd !== undefined && ` · ${formatCost(active.result.costUsd)}`}
           </p>
@@ -914,7 +993,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         onDragLeave={() => setDropping(false)}
         onDrop={onComposerDrop}
         data-agent-user-only=""
-        className={`relative shrink-0 border-t p-2.5 ${dropping ? 'border-accent bg-accent/5' : 'border-line'}`}
+        className={`relative shrink-0 border-t p-2.5 ${dropping ? 'border-primary bg-primary/5' : 'border-border'}`}
       >
         <label htmlFor="assistant-composer" className="sr-only">
           Message the assistant
@@ -924,35 +1003,36 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             {attached.map((a) => (
               <li key={a.key} className="relative">
                 <AttachedThumb blob={a.image.preview.blob} alt={a.name} />
-                <button
-                  type="button"
-                  aria-label={`Remove ${a.name}`}
-                  title={`Remove ${a.name}`}
-                  onClick={() => removeImage(a.key)}
-                  className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface-2 text-[11px] leading-none hover:bg-surface-3"
-                >
-                  ✕
-                </button>
+                <Tip content={`Remove ${a.name}`}>
+                  <Button
+                    variant="secondary"
+                    size="icon-xs"
+                    aria-label={`Remove ${a.name}`}
+                    onClick={() => removeImage(a.key)}
+                    className="absolute -top-1.5 -right-1.5 rounded-full border border-border"
+                  >
+                    <XIcon />
+                  </Button>
+                </Tip>
               </li>
             ))}
           </ul>
         )}
         {!active && <SessionModePicker value={sessionMode} onChange={pickSessionMode} />}
         {active && archived && (
-          <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+          <div className="mb-1.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <p id={archivedNoteId} className="min-w-0 flex-1">
               This chat is archived, so it is read-only. Unarchive it to continue here, or Fork it.
             </p>
             {owned && (
               <Button
                 size="sm"
+                variant="outline"
                 data-agent-user-only=""
                 onClick={() => {
-                  setArchiveError(null)
                   unarchiving.current = true
-                  updateSession(active.id, { archived: false }).catch((caught: unknown) => {
-                    unarchiving.current = false
-                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) })
+                  void setArchived(active.id, false).then((done) => {
+                    if (!done) unarchiving.current = false
                   })
                 }}
               >
@@ -966,7 +1046,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             )}
           </div>
         )}
-        <textarea
+        <Textarea
           id="assistant-composer"
           ref={composer}
           rows={2}
@@ -984,24 +1064,24 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 ? 'Ask about this page… (Enter to send, Shift+Enter for a new line)'
                 : 'Take over to send messages'
           }
-          className="w-full resize-none rounded-[6px] border border-line bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-line-strong disabled:opacity-50"
+          className="max-h-48 min-h-14 resize-none text-[13px] md:text-[13px]"
         />
         {skillMenu.menu}
         {imageErrors.map((error) => (
-          <p key={error} role="alert" className="mt-1 text-[12px] text-warn">
+          <p key={error} role="alert" className="mt-1 text-xs text-warn">
             {error}
           </p>
         ))}
         {preparing > 0 && (
-          <p role="status" className="mt-1 text-[11.5px] text-faint">
+          <p role="status" className="mt-1 text-[11.5px] text-muted-foreground">
             Preparing {preparing === 1 ? 'the image' : `${preparing} images`}…
           </p>
         )}
         {attached.length > 0 && !draft.trim() && (
-          <p className="mt-1 text-[11.5px] text-faint">Add a message to send with the images.</p>
+          <p className="mt-1 text-[11.5px] text-muted-foreground">Add a message to send with the images.</p>
         )}
         {dictation.error && (
-          <p role="alert" className="mt-1 text-[12px] text-warn">
+          <p role="alert" className="mt-1 text-xs text-warn">
             {dictation.error}
           </p>
         )}
@@ -1018,7 +1098,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               </Button>
             )}
           </div>
-          {busy && <span className="text-[11.5px] text-faint">Wait for this turn to finish, or stop it.</span>}
+          {busy && <span className="text-[11.5px] text-muted-foreground">Wait for this turn to finish, or stop it.</span>}
           <input
             ref={filePicker}
             type="file"
@@ -1033,17 +1113,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               void addImages(files)
             }}
           />
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={!canSend || attached.length >= IMAGES_MAX}
-            title={`Attach images (PNG, JPEG, GIF or WebP; up to ${IMAGES_MAX}). You can also paste or drop them here.`}
-            onClick={() => filePicker.current?.click()}
+          <Tip
+            wrap={!canSend || attached.length >= IMAGES_MAX}
+            content={`Attach images (PNG, JPEG, GIF or WebP; up to ${IMAGES_MAX}). You can also paste or drop them here.`}
           >
-            Image
-          </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!canSend || attached.length >= IMAGES_MAX}
+              onClick={() => filePicker.current?.click()}
+            >
+              <ImagePlusIcon data-icon="inline-start" />
+              Image
+            </Button>
+          </Tip>
           <MicButton dictation={dictation} disabled={!canSend} embedded={embedded} describedBy={voiceNoteId} />
-          <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !canSend || preparing > 0}>
+          <Button type="submit" size="sm" disabled={!draft.trim() || busy || !canSend || preparing > 0}>
             Send
           </Button>
         </div>

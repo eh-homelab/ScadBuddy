@@ -1,3 +1,6 @@
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+
 type Props = {
   value: boolean
   onToggle: () => void
@@ -13,29 +16,16 @@ type Props = {
  */
 export function AdvancedSwitch({ value, onToggle, disabled }: Props) {
   return (
-    <div className="flex items-center gap-3">
-      <span id="print-advanced" className="text-[13px] text-ink">
-        Advanced
-      </span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={value}
-        aria-labelledby="print-advanced"
-        aria-describedby="print-advanced-help"
-        onClick={onToggle}
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <Switch
+        id="print-advanced"
+        checked={value}
+        onCheckedChange={onToggle}
         disabled={disabled}
-        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:opacity-50 ${
-          value ? 'border-accent bg-accent' : 'border-line-strong bg-surface-3'
-        }`}
-      >
-        <span
-          className={`absolute top-[2px] size-3.5 rounded-full transition-[left] ${
-            value ? 'left-[18px] bg-accent-ink' : 'left-[2px] bg-muted'
-          }`}
-        />
-      </button>
-      <span id="print-advanced-help" className="text-[12px] text-faint">
+        aria-describedby="print-advanced-help"
+      />
+      <Label htmlFor="print-advanced">Advanced</Label>
+      <span id="print-advanced-help" className="text-xs text-muted-foreground">
         Choose the nozzle, process, plate, options, project and copies.
       </span>
     </div>

@@ -32,6 +32,7 @@ from typing import IO, Any, Literal, Self
 import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
+from pydantic import ValidationError
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
@@ -216,6 +217,10 @@ class BambuddyAnswerError(ApiError):
     call's span, as a refusal does. Any other error the reader raises leaves it alone."""
 
 
+#: Bambuddy's ``detail`` for an archive it does not have (``routes/archives.py``).
+ARCHIVE_NOT_FOUND = "Archive not found"
+
+
 @dataclass(frozen=True)
 class BambuddyConfig:
     base_url: str
@@ -284,7 +289,10 @@ class BambuddyClient:
         json: Any | None = None,
         files: Any | None = None,
         timeout: float | None = None,
+        passthrough: frozenset[int] = frozenset(),
     ) -> httpx.Response:
+        """One call to Bambuddy; a status in ``passthrough`` is returned to the caller
+        to read, not mapped to an error."""
         with _call_span(operation, method, scope) as current:
             try:
                 response = await self._http.request(
@@ -300,7 +308,7 @@ class BambuddyClient:
                 logger.warning("bambuddy request failed", extra={"method": method, "path": path})
                 raise map_transport(error, what=what) from error
             current.set_attribute("http.response.status_code", response.status_code)
-            if response.is_success:
+            if response.is_success or response.status_code in passthrough:
                 return response
             raise map_response(response, scope=scope, what=what)
 
@@ -671,7 +679,7 @@ class BambuddyClient:
         for row in rows:
             try:
                 parsed.append(ArchiveDetail.model_validate(row))
-            except ValueError:
+            except ValidationError:
                 unparsed += 1
         if unparsed:
             # One line per read, not per row (#3477 review): each such archive falls
@@ -742,6 +750,30 @@ class BambuddyClient:
             what=f"read archive {archive_id}",
         )
         return ArchiveDetail.model_validate(response.json())
+
+    async def archive_deleted(self, archive_id: int) -> bool:
+        """Whether Bambuddy says the archive is gone: its own 404,
+        ``{"detail": "Archive not found"}`` (``routes/archives.py``). A 404 with any
+        other body (a proxy's, a route that moved) raises as any refusal does, so a
+        caller that deletes on the answer never deletes on a guess (#3047)."""
+        what = f"read archive {archive_id}"
+        response = await self._send(
+            "GET",
+            f"/archives/{archive_id}",
+            scope=Scope.READ_STATUS,
+            operation="archives.read",
+            what=what,
+            passthrough=frozenset({status.HTTP_404_NOT_FOUND}),
+        )
+        if response.is_success:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("detail") == ARCHIVE_NOT_FOUND:
+            return True
+        raise map_response(response, scope=Scope.READ_STATUS, what=what)
 
     async def archive_runs(self, archive_id: int) -> ArchiveRunList:
         """Every run of the archive; a reprint inside Bambuddy is a run, not an archive."""

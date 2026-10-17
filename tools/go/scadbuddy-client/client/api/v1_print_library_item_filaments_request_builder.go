@@ -16,13 +16,14 @@ type V1PrintLibraryItemFilamentsRequestBuilder struct {
 
 // V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters spools that can print this library file
 type V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters struct {
-	All_plates       *bool  "uriparametername:\"all_plates\""
-	Max_objects      *int32 "uriparametername:\"max_objects\""
-	Max_paint_digits *int32 "uriparametername:\"max_paint_digits\""
-	Max_triangles    *int32 "uriparametername:\"max_triangles\""
-	Max_visits       *int32 "uriparametername:\"max_visits\""
-	Plate_id         *int32 "uriparametername:\"plate_id\""
-	Printer_id       *int32 "uriparametername:\"printer_id\""
+	All_plates       *bool   "uriparametername:\"all_plates\""
+	Max_objects      *int32  "uriparametername:\"max_objects\""
+	Max_paint_digits *int32  "uriparametername:\"max_paint_digits\""
+	Max_triangles    *int32  "uriparametername:\"max_triangles\""
+	Max_visits       *int32  "uriparametername:\"max_visits\""
+	Plate_id         *int32  "uriparametername:\"plate_id\""
+	Plate_ids        *string "uriparametername:\"plate_ids\""
+	Printer_id       *int32  "uriparametername:\"printer_id\""
 }
 
 // V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
@@ -38,7 +39,7 @@ type V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration struct {
 // NewV1PrintLibraryItemFilamentsRequestBuilderInternal instantiates a new V1PrintLibraryItemFilamentsRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemFilamentsRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemFilamentsRequestBuilder {
 	m := &V1PrintLibraryItemFilamentsRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/filaments{?all_plates*,max_objects*,max_paint_digits*,max_triangles*,max_visits*,plate_id*,printer_id*}", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/filaments{?all_plates*,max_objects*,max_paint_digits*,max_triangles*,max_visits*,plate_id*,plate_ids*,printer_id*}", pathParameters),
 	}
 	return m
 }

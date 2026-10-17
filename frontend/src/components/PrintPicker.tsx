@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
   AnalysisTarget,
+  BatchSummary,
+  FilamentOptions,
   FilamentWarning,
   NozzlePlan as NozzlePlanView,
   Output,
@@ -32,6 +34,7 @@ import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
+import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, singlePlate, withPlate } from '../lib/plateChoice'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
@@ -52,7 +55,7 @@ import { usePreviewSlice } from '../lib/usePreviewSlice'
 import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
-import { useRunPrint } from '../lib/useRunPrint'
+import { printRunBody, useRunPrint } from '../lib/useRunPrint'
 import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
@@ -79,13 +82,27 @@ import { SlicedSettings } from './print/SlicedSettings'
 import { slicedEstimate } from '../lib/slicedEstimate'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
+import { PlateClearNotice } from './print/PlateClearNotice'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
+import { Spinner } from './ui/spinner'
 import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
 /**
@@ -125,8 +142,55 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  */
 const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-installed'])
 
+/**
+ * #2672 — the dialog as one step of a batch print: Back, Skip and Next in place of Print,
+ * the step strip above the choices, and the choices it opens on.
+ */
+/** What a batch step saves: its run request, what the review lists, what the check refuses. */
+export interface BatchStepChoice {
+  request: PrintRunRequest
+  summary: BatchSummary
+  problems: string[]
+}
+
+export interface BatchStep {
+  /** "File 2 of 5 — name". */
+  title: string
+  /** The files strip, given `jump`: a strip button leaves through it, so the step's
+   * choices are saved as Next saves them (#2718 review). */
+  strip: (jump: (step: number) => void) => ReactNode
+  /**
+   * What the step opens on: this file's own saved choices, or the last file's carried
+   * forward. A carried printer always applies; the spools, nozzles, quality and options
+   * only when this file's slots are the same as the one they were chosen for.
+   */
+  seed: PrintRunRequest | null
+  /** `seed` is this file's own (a resume, or Edit from the review): applied whatever its slots. */
+  seedIsOwn: boolean
+  /** The slots a carried `seed` was chosen for, as `slotKeys` makes them. */
+  seedSlots: string[]
+  onBack: (() => void) | null
+  onSkip: () => void
+  onNext: (choice: BatchStepChoice) => void
+  /** A strip button: to `step`, with this step's choices when it has any to save. */
+  onJump: (step: number, choice: BatchStepChoice | null) => void
+  /** The last file: Next goes to the review. */
+  last: boolean
+  /** A step's save in flight. */
+  busy: boolean
+}
+
+/** #2672 — a file's slots, what decides whether the last file's spools carry to it. */
+function slotKeys(filaments: FilamentOptions): string[] {
+  return (filaments.slots ?? [])
+    .map((slot) => `${slot.slot_id}:${slot.material ?? ''}:${(slot.colour ?? '').toUpperCase()}`)
+    .sort()
+}
+
 interface Props {
   open: boolean
+  /** #2672 — one step of a batch print, which never runs a print itself. */
+  batch?: BatchStep
   /** #313 — an output ScadBuddy rendered, or a file in Bambuddy's library. */
   source: PrintSource | undefined
   onClose: () => void
@@ -167,6 +231,7 @@ export function PrintPicker({
   onPrinterModel,
   project,
   printSettings,
+  batch,
   queue = false,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
@@ -236,13 +301,7 @@ export function PrintPicker({
   const picker = usePrintChoices(open, source, carry)
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
-  const { nozzles, tier, processName, bedType, overrides, plate } = selection
-  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
-    source,
-    choices,
-    plate,
-    carry,
-  )
+  const { nozzles, tier, processName, bedType, overrides } = selection
   /**
    * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only
    * and only the plates it holds G-code for are offered.
@@ -254,11 +313,29 @@ export function PrintPicker({
       slicedPlates.length > 0 ? picker.plates.filter((entry) => slicedPlates.includes(entry.index)) : picker.plates,
     [picker.plates, slicedPlates],
   )
-  const { setPlate } = picker
-  useEffect(() => {
-    const first = slicedPlates[0]
-    if (first !== undefined && plate !== 'all' && !slicedPlates.includes(plate)) setPlate(first)
-  }, [slicedPlates, plate, setPlate])
+  /**
+   * #3652 — the plates that print, over the plates offered: every plate unless some are
+   * chosen, one plate (or a list not read yet) being that plate, and a sliced file's
+   * only those it holds G-code for.
+   */
+  const plate = useMemo(
+    () =>
+      offeredChoice(
+        selection.plate,
+        plates.length > 0 ? plates.map((entry) => entry.index) : slicedPlates,
+      ),
+    [selection.plate, plates, slicedPlates],
+  )
+  const single = singlePlate(plate)
+  const first = firstPlate(plate)
+  /** Nothing prints while every plate is unticked (#3652). */
+  const noPlate = plate !== 'all' && plate.length === 0
+  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
+    source,
+    choices,
+    plate,
+    carry,
+  )
 
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
@@ -435,15 +512,23 @@ export function PrintPicker({
   const projectPaths = useMemo(() => breadcrumbs(shownProjects ?? []), [shownProjects])
   const filedUnderLabel =
     projectId === undefined ? null : projectId === null ? 'No project' : (projectPaths.get(projectId) ?? `project ${projectId}`)
-  /** "(change)" opens Advanced, then puts the focus on the project step it shows. */
+  /**
+   * #3771 — "(change)" shows the project picker where the line was, in Simple mode
+   * still: only the Advanced switch changes the mode. The focus goes to the picker.
+   */
+  const [changingProject, setChangingProject] = useState(false)
+  // Advanced shows the picker in its own step; back in Simple, the line names the choice.
+  useEffect(() => {
+    if (!open || picker.advanced) setChangingProject(false)
+  }, [open, picker.advanced])
   const focusProject = useRef(false)
   useEffect(() => {
-    if (!picker.advanced || !focusProject.current) return
+    if (!changingProject || !focusProject.current) return
     focusProject.current = false
     const select = document.getElementById('print-project')
     select?.scrollIntoView?.({ block: 'nearest' })
     select?.focus()
-  }, [picker.advanced])
+  }, [changingProject])
 
   /**
    * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
@@ -457,6 +542,24 @@ export function PrintPicker({
     setProjectCreating(creating)
     project?.onCreating?.(creating)
   }
+  /** #79 — a send to a project uploads into that project's folder. */
+  const projectPicker = project ? (
+    <ProjectPicker
+      value={project.value}
+      onChange={project.onChange}
+      list={project.list}
+      disabled={project.disabled || projectCreating}
+      onCreating={reportProjectCreating}
+    />
+  ) : (
+    <ProjectPicker
+      value={ownProjectId}
+      onChange={setOwnProjectId}
+      list={ownProjects}
+      disabled={projectCreating}
+      onCreating={reportProjectCreating}
+    />
+  )
 
   // #717 — profiles the chosen spools match, each on unless switched off.
   const filamentProfiles = useFilamentProfiles({
@@ -469,7 +572,7 @@ export function PrintPicker({
     source,
     choices,
     printerId,
-    selection,
+    selection: { ...selection, plate },
     plan,
     planChanged,
     copies,
@@ -656,15 +759,13 @@ export function PrintPicker({
    * Not before the plan is seeded: an empty plan is judged once and then again (#2361).
    */
   const printChoices = printChoicesOf(selection)
-  const allPlates = plate === 'all'
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices && planReady
       ? {
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
-          plate_id: allPlates ? 1 : plate,
-          all_plates: allPlates,
+          ...plateFields(plate),
           copies: effectiveCopies,
           options: sentOptions,
         }
@@ -681,8 +782,7 @@ export function PrintPicker({
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
-          plate_id: allPlates ? 1 : plate,
-          all_plates: allPlates,
+          ...plateFields(plate),
           rack_position: rackPosition,
           rack_algorithm: chosenAlgorithm,
           // #2367: the sequence is a process override, so it changes what the run
@@ -700,28 +800,26 @@ export function PrintPicker({
    */
   const sliceable = check.current && check.verdict !== null && (check.verdict.errors ?? []).length === 0
   /**
-   * #2169 — the plate the docked pane shows: the one chosen to print, or one clicked to
-   * look at. "All plates" shows plate 1 until another is clicked.
+   * #2169, #3652 — the plate the docked pane shows: the last one ticked or unticked, else
+   * the first that prints.
    */
   const [clickedPlate, setClickedPlate] = useState<number | null>(null)
-  const previewPlate = clickedPlate ?? (plate === 'all' ? 1 : plate)
+  const previewPlate = clickedPlate ?? first
   useEffect(() => {
     setClickedPlate(null)
-  }, [plate, currentKey])
+  }, [currentKey])
   const multiPlate = plates.length > 1
   const previewLabel = plateLabel(plates, previewPlate)
   // The plate the pane shows, sliced on its own: the run's own slice of it when it is
   // the plate chosen to print.
   const previewRequest =
-    checkRequest && (allPlates || previewPlate !== plate)
-      ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
-      : checkRequest
+    checkRequest && previewPlate !== single ? withPlate(checkRequest, previewPlate) : checkRequest
   const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
   // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
   // plate being printed has landed, its sides are the ones shown.
   // Memoised: `asSliced` builds a new plan on every call, and the effect below stores it,
   // so an unmemoised one re-rendered the dialog without end (#2737 review).
-  const slicedShown = plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
+  const slicedShown = single !== null && previewPlate === single && !previewSlice.stale && check.current
   const nozzlePlan = check.verdict?.nozzle_plan
   const sliceResult = previewSlice.result
   const slicedNow = useMemo(
@@ -730,9 +828,13 @@ export function PrintPicker({
   )
   // #2737 review: previewing another plate does not unsay it. The printed plate's slice
   // still holds for these choices, so its sides stay until the choices or the plate change.
-  const slicedFor = `${plate}|${currentKey}|${check.request}`
+  const slicedFor = `${plateKey(plate)}|${currentKey}|${check.request}`
   const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
   useEffect(() => {
+    // New choices or other plates: the last slice's sides hold only for its own key, so
+    // they are shown for nothing else (#2737 review). They are kept, not dropped, so a
+    // plate ticked and unticked again comes back to them (#3652): the same key is the
+    // same choices on the same plate.
     if (!slicedNow) return
     setLastSliced((last) =>
       last?.key === slicedFor && last.plan === slicedNow ? last : { key: slicedFor, plan: slicedNow },
@@ -740,7 +842,7 @@ export function PrintPicker({
   }, [slicedNow, slicedFor])
   const slicedPlan =
     slicedNow ??
-    (previewPlate !== plate && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
+    (previewPlate !== single && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
@@ -764,10 +866,10 @@ export function PrintPicker({
    * #2365 — the background slice's grams, for the plate the slots describe: the one
    * chosen to print, when its result is of that plate. The result is kept, stale, while
    * the next slice runs or after it fails, so it can be another plate's (#2714 review):
-   * the plate it was sliced for decides, not the plate on screen. "All plates" slices
-   * plate 1 alone, which is not every plate's need.
+   * the plate it was sliced for decides, not the plate on screen. Several plates' slots
+   * are not one sliced plate's need.
    */
-  const slicedForSlots = plate !== 'all' && previewSlice.plateId === plate ? previewSlice.result : null
+  const slicedForSlots = single !== null && previewSlice.plateId === single ? previewSlice.result : null
   const pickerOptions = useMemo(
     () => (filaments ? withSlicedGrams(filaments, slicedForSlots) : null),
     [filaments, slicedForSlots],
@@ -796,6 +898,118 @@ export function PrintPicker({
     </>
   )
 
+  /**
+   * #2672 — a batch step's seed, applied once: the printer first (its choices are read
+   * again for it), then, once this file's spools are known, the rest.
+   */
+  const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
+  const { askPrinter, changeNozzles, changeQuality, setPlate } = picker
+  const restoreProfiles = filamentProfiles.restore
+  useEffect(() => {
+    const seed = batch?.seed
+    if (!seed || seeding.current === 'done' || !choices) return
+    const wanted = seed.printer_id ?? null
+    const known = wanted !== null && printers.some((entry) => entry.id === wanted)
+    if (seeding.current === 'printer') {
+      seeding.current = 'rest'
+      if (known && wanted !== printerId) {
+        askPrinter(wanted)
+        return
+      }
+    }
+    if ((known && printerId !== wanted) || !filaments || !planReady || (!project && ownProjects.loading)) return
+    seeding.current = 'done'
+    if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
+    const chosen = seed.filament_plan.slots ?? []
+    const mine = slotKeys(filaments)
+    const same = mine.length === batch.seedSlots.length && mine.every((key, at) => key === batch.seedSlots[at])
+    if (!batch.seedIsOwn && !same) return
+    const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
+    setPlan((current) =>
+      current.map((choice) => {
+        const pick = chosen.find((entry) => entry.slot_id === choice.slot_id)
+        return pick && inventory.has(pick.spool_id) ? { ...pick } : choice
+      }),
+    )
+    const seedChoices = seed.choices
+    if (!sliced && seedChoices) {
+      if ((seedChoices.nozzles ?? []).length > 0) changeNozzles(seedChoices.nozzles ?? [])
+      changeQuality({ tier: seedChoices.tier ?? null, processName: seedChoices.process_name ?? null })
+    }
+    setOptions(seed.options ?? {})
+    if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
+    if (seed.print_sequence) setPrintSequence(seed.print_sequence)
+    if (batch.seedIsOwn) {
+      // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
+      // the step again without them would queue it without the supports, tower or
+      // profiles the user chose.
+      setPlate(seed.all_plates ? 'all' : seed.plate_ids?.length ? seed.plate_ids : [seed.plate_id ?? 1])
+      setSupports(seed.supports ?? null)
+      setPrimeTower(seed.prime_tower ?? null)
+      restoreProfiles(seed.filament_profiles ?? [])
+    }
+  }, [
+    batch,
+    choices,
+    printers,
+    printerId,
+    filaments,
+    planReady,
+    project,
+    ownProjects.loading,
+    sliced,
+    askPrinter,
+    changeNozzles,
+    changeQuality,
+    setPlan,
+    setPlate,
+    restoreProfiles,
+  ])
+
+  /** #2672 — this step's run request, what the review lists, and what the check refuses. */
+  function stepChoice(): BatchStepChoice | null {
+    if (!batch || !printChoices) return null
+    const request = printRunBody({
+      printerId,
+      plan,
+      printChoices,
+      copies,
+      plate,
+      projectId,
+      options: sentOptions,
+      printSequence,
+      // What Print would send (#1899, #3628, #717): a batch step keeps them for Queue all.
+      supports,
+      primeTower,
+      filamentProfiles: filamentProfiles.active,
+      rackPosition,
+      rackAlgorithm: chosenAlgorithm,
+    })
+    const spools = filaments?.spools ?? []
+    const estimate = sliced ? slicedEstimate(sliced, first, filaments, single ?? 'all') : previewSlice.result
+    const summary: BatchSummary = {
+      printer: printer?.name ?? null,
+      plate: single === null ? platesSummary(plate, plates) : plateLabel(plates, single),
+      spools: plan.map((choice) => {
+        const spool = spools.find((entry) => entry.spool_id === choice.spool_id)
+        const name = spool ? [spool.material, spool.color_name ?? spool.colour].filter(Boolean).join(' ') : `spool ${choice.spool_id}`
+        return `Slot ${choice.slot_id}: ${name}`
+      }),
+      print_seconds: estimate?.print_time_seconds ?? null,
+      filament_g: estimate?.filament_used_g ?? null,
+      slots: filaments ? slotKeys(filaments) : [],
+      warnings: check.current ? shown(check.verdict?.warnings).map((warning) => warning.message) : [],
+    }
+    // A sliced file is never refused (#2671): what its check says is only ever a warning.
+    const problems = check.current && !sliced ? (check.verdict?.errors ?? []) : []
+    return { request, summary, problems }
+  }
+
+  function nextStep() {
+    const choice = stepChoice()
+    if (batch && choice) batch.onNext(choice)
+  }
+
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
     // reopen with Print enabled and send the print a second time (#539 review).
@@ -821,51 +1035,73 @@ export function PrintPicker({
     onClose()
   }
 
-  return (
-    <Dialog
-      open={open}
-      title={queue ? 'Queue' : 'Print'}
-      description={
-        result || unanswered !== null
-          ? undefined
-          : sliced
-            ? 'This file is sliced already. Choose the spools, and Bambuddy queues it as it is.'
-            : picker.advanced
-              ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
-              : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
-      }
-      onClose={close}
-      size={(choices || source) && !result && unanswered === null ? 'split' : 'md'}
-      footer={
-        result ? (
+  const description =
+    result || unanswered !== null
+      ? undefined
+      : sliced
+        ? 'This file is sliced already. Choose the spools, and Bambuddy queues it as it is.'
+        : picker.advanced
+          ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+          : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+  const split = (choices || source) && !result && unanswered === null
+  const footer = batch ? (
           <>
-            <Button onClick={close}>Done</Button>
+            <Button type="button" variant="outline" onClick={close} disabled={batch.busy || projectCreating}>
+              Cancel
+            </Button>
+            {batch.onBack && (
+              <Button type="button" variant="outline" onClick={batch.onBack} disabled={batch.busy}>
+                Back
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={batch.onSkip} disabled={batch.busy} data-testid="batch-skip">
+              Skip
+            </Button>
+            <Button
+              type="button"
+              onClick={nextStep}
+              disabled={batch.busy || loading || !choices || !planReady || ownProjects.loading || projectCreating}
+              data-testid="batch-next"
+            >
+              {batch.busy && <Spinner />}
+              {batch.last ? 'Review' : 'Next'}
+            </Button>
+          </>
+        ) : result ? (
+          <>
+            <Button type="button" variant="outline" onClick={close}>
+              Done
+            </Button>
             {result.bambuddy_url && (
-              <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+              <Button type="button" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
                 Open in queue
               </Button>
             )}
           </>
         ) : unanswered !== null ? (
           <>
-            <Button onClick={close}>Close</Button>
+            <Button type="button" variant="outline" onClick={close}>
+              Close
+            </Button>
             {bambuddyUrl ? (
-              <Button variant="primary" onClick={() => openExternal(`${bambuddyUrl}/queue`)}>
+              <Button type="button" onClick={() => openExternal(`${bambuddyUrl}/queue`)}>
                 {"Open Bambuddy's queue"}
               </Button>
             ) : (
               settings.error && (
-                <Button onClick={settings.reload}>{"Find Bambuddy's queue"}</Button>
+                <Button type="button" variant="outline" onClick={settings.reload}>
+                  {"Find Bambuddy's queue"}
+                </Button>
               )
             )}
           </>
         ) : (
           <>
-            <Button onClick={close} disabled={running || projectCreating}>
+            <Button type="button" variant="outline" onClick={close} disabled={running || projectCreating}>
               Cancel
             </Button>
             <Button
-              variant="primary"
+              type="button"
               onClick={() => void run()}
               // Held while the dialog's own project list loads, so a Simple-mode print
               // cannot go out before the last project has seeded it.
@@ -873,6 +1109,7 @@ export function PrintPicker({
                 running ||
                 loading ||
                 !choices ||
+                noPlate ||
                 !planReady ||
                 refused ||
                 runRefuses ||
@@ -887,8 +1124,25 @@ export function PrintPicker({
             </Button>
           </>
         )
-      }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) close()
+      }}
     >
+      {/* Bounded by the visible height, its body scrolling, so the title and Print stay
+          in reach however tall the choices grow (#87, #1723). */}
+      <DialogContent
+        showCloseButton={false}
+        className={cn('flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0', split ? 'sm:max-w-[1120px]' : 'sm:max-w-lg')}
+      >
+        <DialogHeader className="shrink-0 border-b px-5 py-4">
+          <DialogTitle>{batch ? batch.title : queue ? 'Queue' : 'Print'}</DialogTitle>
+          {description && <DialogDescription>{description}</DialogDescription>}
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       {result ? (
         <QueuedPanel
           result={{ ...result, warnings: shown(result.warnings) }}
@@ -898,7 +1152,7 @@ export function PrintPicker({
           plates={plates}
         />
       ) : unanswered !== null ? (
-        <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
+        <p role="alert" className="text-sm text-destructive" data-testid="run-unanswered">
           {unanswered}{' '}
           {
             "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice."
@@ -906,25 +1160,24 @@ export function PrintPicker({
         </p>
       ) : (
         <>
+          {batch?.strip((step) => batch.onJump(step, stepChoice()))}
           {loading && !choices && (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
-              <Spinner /> Reading the printer and the inventory
-            </p>
+            <div className="mb-4 space-y-2" data-testid="print-loading">
+              <p className="text-sm text-muted-foreground">Reading the printer and the inventory</p>
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </div>
           )}
 
           {loadError && (
-            <div className="flex items-baseline gap-3">
-              <p role="alert" className="text-[13px] text-warn">
+            <div className="mb-4 flex flex-wrap items-baseline gap-x-3">
+              <p role="alert" className="text-sm text-destructive">
                 {loadError}
               </p>
               {/* #482: a Bambuddy blip or timeout should not need the dialog reopened. */}
-              <button
-                type="button"
-                onClick={picker.reload}
-                className="text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
-              >
+              <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={picker.reload}>
                 Retry
-              </button>
+              </Button>
             </div>
           )}
 
@@ -942,38 +1195,35 @@ export function PrintPicker({
                     disabled={projectCreating}
                   />
                   {printers.length > 1 && (
-                    <div>
-                      <label htmlFor="print-printer" className="block text-[13px]">
-                        Printer
-                      </label>
-                      <select
-                        id="print-printer"
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="print-printer">Printer</Label>
+                      <Select
                         value={printerId === null ? '' : String(printerId)}
-                        onChange={(event) =>
-                          picker.askPrinter(
-                            event.target.value === '' ? null : Number(event.target.value),
-                          )
-                        }
-                        className="sb-field mt-1.5 cursor-pointer"
+                        onValueChange={(next) => picker.askPrinter(Number(next))}
                       >
-                        {printerId === null && <option value="">Choose a printer</option>}
-                        {printers.map((entry) => (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.name}
-                            {entry.model ? ` (${entry.model})` : ''}
-                          </option>
-                        ))}
-                      </select>
+                        <SelectTrigger id="print-printer" className="w-full">
+                          <SelectValue placeholder="Choose a printer" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {printers.map((entry) => (
+                            <SelectItem key={entry.id} value={String(entry.id)}>
+                              {entry.name}
+                              {entry.model ? ` (${entry.model})` : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                   )}
+                  {printerId !== null && <PlateClearNotice printerId={printerId} />}
 
                   {filamentError && (
                     <div className="flex items-center gap-3" data-testid="filaments-unavailable">
-                      <p className="text-[12px] text-warn">
+                      <p className="text-xs text-destructive">
                         ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
                         until it loads.
                       </p>
-                      <Button size="sm" onClick={retryFilaments}>
+                      <Button type="button" size="sm" variant="outline" onClick={retryFilaments}>
                         Retry
                       </Button>
                     </div>
@@ -1011,36 +1261,45 @@ export function PrintPicker({
                     />
                   )}
                   {target && known && (
-                    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-                      <legend className="px-1 text-[13px] text-ink">Arrange</legend>
-                      {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
-                      <label htmlFor="arrange-for" className="text-[12px] text-muted">
+                    <Card size="sm" role="group" aria-labelledby="print-arrange">
+                      <CardHeader>
+                        <CardTitle id="print-arrange" className="text-sm">
+                          Arrange
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-2">
+                      {stale && <p className="text-xs text-muted-foreground">{backfillNote([target])}</p>}
+                      <div className="flex flex-wrap items-end gap-2">
+                      <div className="grid min-w-0 flex-1 gap-1.5">
+                      <Label htmlFor="arrange-for" className="text-xs text-muted-foreground">
                         Arrange for
-                      </label>
-                      <select
-                        id="arrange-for"
-                        value={arrangeGoal}
-                        onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
-                        className="sb-field mt-1.5"
-                      >
-                        {Object.entries(GOAL_LABELS)
-                          .filter(([value]) => value !== 'keep_together')
-                          .map(([value, text]) => (
-                            <option key={value} value={value}>
-                              {text}
-                            </option>
-                          ))}
-                      </select>
+                      </Label>
+                      <Select value={arrangeGoal} onValueChange={(next) => setArrangeGoal(next as ArrangeGoal)}>
+                        <SelectTrigger id="arrange-for" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(GOAL_LABELS)
+                            .filter(([value]) => value !== 'keep_together')
+                            .map(([value, text]) => (
+                              <SelectItem key={value} value={value}>
+                                {text}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                      </div>
                       <Button
-                        size="sm"
-                        className="mt-1.5"
+                        type="button"
+                        variant="outline"
                         disabled={arranging || askBackfill}
                         onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
                       >
                         Re-arrange for these spools
                       </Button>
+                      </div>
                       {askBackfill && (
-                        <div className="mt-1.5">
+                        <div>
                           <BackfillPrompt
                             outputs={[target]}
                             onConfirm={() => void rearrange(true)}
@@ -1050,16 +1309,17 @@ export function PrintPicker({
                       )}
                       <BackfillProgress outputs={[target]} progress={backfillProgress} />
                       {arrangeNote && (
-                        <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
+                        <p aria-live="polite" className="text-xs text-muted-foreground">
                           {arrangeNote}
                         </p>
                       )}
                       {arrangeError && (
-                        <p role="alert" className="mt-1.5 text-[13px] text-warn">
+                        <p role="alert" className="text-sm text-destructive">
                           {arrangeError}
                         </p>
                       )}
-                    </fieldset>
+                      </CardContent>
+                    </Card>
                   )}
 
                   {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
@@ -1081,16 +1341,16 @@ export function PrintPicker({
 
               {/* #986 — one plate has no choice to make, but its name still says what prints. */}
               {plates.length === 1 && plates[0]?.name && (
-                <p className="text-[13px]" data-testid="single-plate">
-                  <span className="text-muted">Plate:</span>{' '}
-                  <button
-                    type="button"
-                    onClick={() => setClickedPlate(1)}
-                    className="underline decoration-dotted underline-offset-2 hover:text-accent"
-                    title="Show it in the preview"
-                  >
-                    {plates[0].name}
-                  </button>
+                <p className="text-sm" data-testid="single-plate">
+                  <span className="text-muted-foreground">Plate:</span>{' '}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button type="button" variant="link" className="h-auto p-0" onClick={() => setClickedPlate(1)}>
+                        {plates[0].name}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Show it in the preview</TooltipContent>
+                  </Tooltip>
                 </p>
               )}
 
@@ -1107,25 +1367,31 @@ export function PrintPicker({
 
               {source && !sliced && (
                 <div>
-                  <Button size="sm" variant="ghost" onClick={() => setPreviewOpen(true)} data-testid="plate-preview-open">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setPreviewOpen(true)}
+                    data-testid="plate-preview-open"
+                  >
                     Preview in 3D
                   </Button>
                   {/* Mounted only while open, keyed by plate: each open starts on Colors,
                       with no cut left over from another plate. */}
                   {previewOpen && (
                     <PlatePreviewDialog
-                      key={plate}
+                      key={plateKey(plate)}
                       open
                       onClose={() => setPreviewOpen(false)}
-                      url={sourceApi(source).previewUrl(plate === 'all' ? 1 : plate)}
+                      url={sourceApi(source).previewUrl(first)}
                       label={
                         // An output's preview is the whole output; a library file's, one
-                        // plate, the first when every plate prints.
+                        // plate, the first of several that print.
                         source.kind === 'output' && plates.length > 1
                           ? 'Every plate'
-                          : plate === 'all' && plates.length > 1
-                            ? `${plateLabel(plates, 1)} (first of ${plates.length} plates)`
-                            : plateLabel(plates, plate === 'all' ? 1 : plate)
+                          : single === null && plates.length > 1
+                            ? `${plateLabel(plates, first)} (first of ${plate === 'all' ? plates.length : plate.length} plates)`
+                            : plateLabel(plates, first)
                       }
                       colors={previewColors}
                       toolpathUrl={
@@ -1135,7 +1401,7 @@ export function PrintPicker({
                         previewSlice.result &&
                         !previewSlice.stale &&
                         !(source.kind === 'output' && picker.plates.length > 1) &&
-                        previewPlate === (plate === 'all' ? 1 : plate)
+                        previewPlate === first
                           ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
                           : null
                       }
@@ -1147,24 +1413,40 @@ export function PrintPicker({
               {choices && (
                 <>
                   {/* #1660 — Simple hides the project step, but not where the print is filed. */}
-                  {!picker.advanced && filedUnderLabel !== null && (
-                    <p className="text-[13px] text-muted" data-testid="print-filed-under">
-                      Filed under: <span className="text-ink">{filedUnderLabel}</span>{' '}
-                      <button
+                  {!picker.advanced && changingProject && projectPicker}
+                  {!picker.advanced && !changingProject && filedUnderLabel !== null && (
+                    <p className="text-sm text-muted-foreground" data-testid="print-filed-under">
+                      Filed under: <span className="text-foreground">{filedUnderLabel}</span>{' '}
+                      <Button
                         type="button"
+                        variant="link"
+                        size="sm"
+                        className="h-auto px-0"
                         onClick={() => {
                           focusProject.current = true
-                          picker.toggleAdvanced()
+                          setChangingProject(true)
                         }}
                         disabled={projectCreating}
-                        className="underline decoration-dotted underline-offset-2 hover:text-ink"
                         data-testid="print-filed-under-change"
                       >
                         (change)
-                      </button>
+                      </Button>
                     </p>
                   )}
 
+                  {/* #3635 — Simple mode shows no Options, but never hides a remembered
+                      one that holds the job. */}
+                  {!picker.advanced && (
+                    <PrintOptionsDisclosure
+                      heldOnly
+                      known={remembered}
+                      subject={subject}
+                      printerId={printerId}
+                      value={sentOptions}
+                      toRemember={rememberOptions}
+                      onChange={editOptions}
+                    />
+                  )}
                   {/* #768 — Simple mode sends these steps' defaults without showing them. */}
                   {picker.advanced && (
                     <>
@@ -1257,24 +1539,7 @@ export function PrintPicker({
                         }}
                       />
 
-                      {/* #79 — a send to a project uploads into that project's folder. */}
-                      {project ? (
-                        <ProjectPicker
-                          value={project.value}
-                          onChange={project.onChange}
-                          list={project.list}
-                          disabled={project.disabled || projectCreating}
-                          onCreating={reportProjectCreating}
-                        />
-                      ) : (
-                        <ProjectPicker
-                          value={ownProjectId}
-                          onChange={setOwnProjectId}
-                          list={ownProjects}
-                          disabled={projectCreating}
-                          onCreating={reportProjectCreating}
-                        />
-                      )}
+                      {projectPicker}
 
                       <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
                     </>
@@ -1286,7 +1551,7 @@ export function PrintPicker({
                   {sliced ? (
                     verdict
                   ) : (
-                    <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
+                    <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={single === null}>
                       {verdict}
                     </AnalyzerPanel>
                   )}
@@ -1304,12 +1569,12 @@ export function PrintPicker({
                 spools={filaments?.spools ?? []}
                 plan={plan}
                 colors={previewColors}
-                slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, plate) : previewSlice.result}
+                slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, single ?? 'all') : previewSlice.result}
                 nozzlePlan={previewSlice.plan}
                 plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
                   // The plates offered: a sliced file's own, not every plate Bambuddy lists.
                   plates: plates.length,
-                  chosen: plate,
+                  chosen: single ?? 'all',
                   sliced: previewSlice.plateId,
                 })}
                 stale={previewSlice.stale}
@@ -1321,12 +1586,15 @@ export function PrintPicker({
           )}
 
           {runError && (
-            <p role="alert" className="mt-3 text-[13px] text-warn">
+            <p role="alert" className="mt-3 text-sm text-destructive">
               {runError}
             </p>
           )}
         </>
       )}
+        </div>
+        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">{footer}</DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

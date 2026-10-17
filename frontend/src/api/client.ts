@@ -56,6 +56,10 @@ import type {
   LibraryCopyResult,
   LibraryDeleteResult,
   LibraryFileName,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryListing,
   LibrarySearch,
   LibraryMoveResult,
@@ -70,10 +74,13 @@ import type {
   MediaView,
   MigrateResult,
   ModelPatch,
-  LastProject,
   ModelProjectPut,
   ModelProjects,
   ModelPrintChoices,
+  NewBatchFile,
+  BatchChoice,
+  PrintBatch,
+  BatchQueueProgress,
   ModelSummary,
   ModelVersion,
   Output,
@@ -145,6 +152,7 @@ import type {
   ProjectView,
   RememberedChoices,
   RenderAccepted,
+  CommandAccepting,
   SendRequest,
   SendResult,
   Settings,
@@ -302,6 +310,14 @@ export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/**
+ * Several library files asked by id and Bambuddy has none of them (`bambuddy/errors.py`
+ * `LIBRARY_FILES_MISSING_PROBLEM`): the names route's 502, told apart from a Bambuddy
+ * that failed (`BAMBUDDY_UNAVAILABLE`).
+ */
+export const BAMBUDDY_LIBRARY_FILES_MISSING = 'https://scadbuddy.dev/problems/bambuddy-library-files-missing'
+/** No Bambuddy URL is set (`bambuddy/errors.py` `NOT_CONFIGURED_PROBLEM`). */
+export const BAMBUDDY_NOT_CONFIGURED = 'https://scadbuddy.dev/problems/bambuddy-not-configured'
 /**
  * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
  * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
@@ -587,6 +603,96 @@ async function reattach<T>(
   }
 }
 
+/** #2340 — the Update a 202 `accepting` named is not known: send the request again, same key. */
+export const COMMAND_RESEND = 'https://scadbuddy.dev/problems/command-resend'
+
+function isAccepting(body: unknown): body is CommandAccepting {
+  return typeof body === 'object' && body !== null && (body as { status?: unknown }).status === 'accepting'
+}
+
+/**
+ * #2340 — a command sent with `Prefer: respond-async` (spec 2026-10-13): a 202
+ * `accepting` is followed through its `follow_url` to the answer the route would have
+ * given, instead of sending the request again every few seconds. A follow answered 409
+ * `command-resend` (the Update was never kept, or a closing run rejected it) sends the
+ * request again with its key. Followed for up to `acceptingMs`, as the re-sends were.
+ * `signal` aborting sends one last follow at once, which names a claim already made.
+ */
+async function untilAccepted<T>(
+  send: () => Promise<T | CommandAccepting>,
+  signal?: AbortSignal,
+  within?: Within,
+): Promise<T> {
+  const answer = await untilAnswered(
+    send,
+    (sent) => (isAccepting(sent) ? sent : undefined),
+    // A POST (#2782 review): a render's follow makes its supersede, a change the
+    // cross-site gate must see.
+    (url) => request<T | CommandAccepting>(url, { method: 'POST' }),
+    signal,
+    within,
+  )
+  return answer as T
+}
+
+/**
+ * `untilAccepted` over any answer shape: `pending` names the 202 `accepting` in an
+ * answer, if it is one, and `follow` reads its `follow_url` (#2794: an operation's answer
+ * keeps its status, since its own 202 is a different body).
+ */
+async function untilAnswered<A>(
+  send: () => Promise<A>,
+  pending: (answer: A) => CommandAccepting | undefined,
+  follow: (url: string) => Promise<A>,
+  signal?: AbortSignal,
+  within?: Within,
+): Promise<A> {
+  const began = performance.now()
+  let answer = await send()
+  let last = false
+  let followed = false
+  for (let accepting = pending(answer); accepting; accepting = pending(answer)) {
+    // The last follow after an abort named no claim yet: the abort it is, so a caller
+    // that keeps a superseded action quiet still can (review #2805).
+    if (last) throw signal?.reason
+    if (performance.now() - began >= printRunPoll.acceptingMs) {
+      throw new ApiError({
+        type: STILL_ACCEPTING,
+        title: 'Still starting',
+        status: 503,
+        detail: 'ScadBuddy is still starting this. It may start anyway.',
+      })
+    }
+    // The server's `retry_after` is advisory here and not waited: the follow is itself
+    // a long-poll that waits for the answer, so waiting first only delays it (review
+    // #2849). The first follow goes at once; after
+    // a follow that came back 202, `intervalMs` keeps a floor (review #2805).
+    if (followed) {
+      try {
+        await wait(printRunPoll.intervalMs, signal)
+      } catch {
+        last = true
+      }
+    } else if (signal?.aborted) {
+      last = true
+    }
+    followed = true
+    const url = accepting.follow_url.startsWith(API_BASE)
+      ? accepting.follow_url.slice(API_BASE.length)
+      : accepting.follow_url
+    try {
+      // `finish`, as the POST's own re-send has: a follow in flight when the signal aborts
+      // may have made the supersede's release, so an unanswered one is sent once more to
+      // learn what it claimed, never dropped (#3576).
+      answer = await reattach(() => follow(url), last ? undefined : signal, { finish: true, within })
+    } catch (caught) {
+      if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
+      answer = await send()
+    }
+  }
+  return answer
+}
+
 /**
  * A Bambuddy write as an operation (#1053, spec 2026-10-01 §4.2): one `Idempotency-Key`
  * per call, which a re-send after an answer that never arrived keeps, so the server
@@ -607,9 +713,21 @@ export async function command<T>(
   key: string = newRequestId(),
 ): Promise<T> {
   const signal = init.signal ?? undefined
-  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': key }
-  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
-  return followOperation<T>(first, signal, operations)
+  const headers: Record<string, string> = {
+    ...(init.headers as Record<string, string> | undefined),
+    'Idempotency-Key': key,
+    // #2794: the backend's operations answer a slow start 202 `accepting`, followed here;
+    // the agent's own (`/ai/operations`) do not.
+    ...(operations === '/operations' ? { Prefer: 'respond-async' } : {}),
+  }
+  type Answer = { status: number; body: T | OperationAccepted | CommandAccepting }
+  const first = await untilAnswered<Answer>(
+    () => reattach(() => requestWithStatus<T | OperationAccepted | CommandAccepting>(path, { ...init, headers }), signal),
+    (answer) => (answer.status === 202 && isAccepting(answer.body) ? answer.body : undefined),
+    (url) => requestWithStatus<T | OperationAccepted | CommandAccepting>(url, { method: 'POST' }),
+    signal,
+  )
+  return followOperation<T>(first as { status: number; body: T | OperationAccepted }, signal, operations)
 }
 
 /**
@@ -711,11 +829,20 @@ async function followPrintRun(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<PrintRunResult> {
-  let run = await reattach(
-    () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
-    signal,
-    { within },
-  )
+  // A run no worker has picked up yet is a 202 to follow, not a 503 to re-POST (#2793).
+  const send = () =>
+    reattach(
+      () =>
+        request<PrintRun | CommandAccepting>(path, {
+          method: 'POST',
+          headers: { Prefer: 'respond-async' },
+          body: JSON.stringify(body),
+          signal,
+        }),
+      signal,
+      { within },
+    )
+  let run = await untilAccepted<PrintRun>(send, signal, within)
   const began = performance.now()
   while (run.status === 'running') {
     if (performance.now() - began >= printRunPoll.followMs) {
@@ -824,8 +951,15 @@ export const api = {
       signal,
     }),
 
-  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
-  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+  /** What the editor completes: the host functions the check uses, and the manifest's tools.
+   * With a flow's inputs schema, `inputs()` and its `FlowInputs` too (#2651). */
+  getFlowHostFunctions: (inputsSchema?: Record<string, unknown> | null) =>
+    inputsSchema
+      ? request<FlowHostInterface>('/workflow-script/host-functions', {
+          method: 'POST',
+          body: JSON.stringify({ inputs_schema: inputsSchema }),
+        })
+      : request<FlowHostInterface>('/workflow-script/host-functions'),
 
   getFlowVersionSource: (name: string, commit: string) =>
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
@@ -1257,23 +1391,25 @@ export const api = {
     signal?: AbortSignal,
     requestId: string = newRequestId(),
   ) => {
-    // Sent again while the server is still accepting it (#1053), with one
-    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
-    const headers = { 'Idempotency-Key': requestId }
-    return reattach(
-      () =>
-        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            inputs,
-            version: version ?? null,
-            ...(supersedes ? { supersedes } : {}),
+    // One `Idempotency-Key` (#1053): the server counts a re-send as this one request's
+    // claim. A start still accepting is answered 202 and its Update followed (#2340).
+    const headers = { 'Idempotency-Key': requestId, Prefer: 'respond-async' }
+    const send = () =>
+      reattach(
+        () =>
+          request<RenderAccepted | CommandAccepting>(`/models/${seg(slug)}/render`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              inputs,
+              version: version ?? null,
+              ...(supersedes ? { supersedes } : {}),
+            }),
           }),
-        }),
-      signal,
-      { finish: true },
-    )
+        signal,
+        { finish: true },
+      )
+    return untilAccepted<RenderAccepted>(send, signal)
   },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
@@ -1505,11 +1641,12 @@ export const api = {
    *
    * `plateId` is what the print dialog reads another plate of a multi-plate 3MF by;
    * plate 1 already arrives inside `getChoices`. `allPlates` reads every plate at once —
-   * one row per slot any plate uses — for an all-plates print.
+   * one row per slot any plate uses — for an all-plates print, and `plateIds` those
+   * plates' alone (#3652).
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
@@ -1517,6 +1654,7 @@ export const api = {
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     if (query.allPlates) search.set('all_plates', 'true')
+    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
@@ -1660,13 +1798,6 @@ export const api = {
   createProject: (body: ProjectRequest) =>
     command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** #317 — the project both pickers open on; `null` is "No project". */
-  rememberProject: (projectId: number | null) =>
-    request<LastProject>('/print/projects/last', {
-      method: 'PUT',
-      body: JSON.stringify({ project_id: projectId } satisfies LastProject),
-    }),
-
   /** #1660 — the project this model was last filed into, per preset it was generated with. */
   getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),
 
@@ -1805,6 +1936,21 @@ export const api = {
       body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
+  /** #3650 — a folder renamed, or moved under another (`parent_id` 0 is the top level). */
+  updateLibraryFolder: (folderId: number, update: LibraryFolderUpdate) =>
+    command<LibraryFolder>(`/print/library/folders/${folderId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    }),
+
+  /** #3650 — a new folder, at the top level without `parent_id`. */
+  createLibraryFolder: (body: LibraryFolderCreate) =>
+    command<LibraryFolder>('/print/library/folders', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #3650 — a folder and everything in it: its files to Bambuddy's trash, then its folders. */
+  deleteLibraryFolder: (folderId: number) =>
+    command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
+
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
@@ -1831,7 +1977,7 @@ export const api = {
 
   getLibraryFilaments: (
     fileId: number,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
@@ -1839,6 +1985,7 @@ export const api = {
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     if (query.allPlates) search.set('all_plates', 'true')
+    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
   },
@@ -1871,6 +2018,64 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /** #2672 — a batch print over library files, opened on the first file's step. */
+  createPrintBatch: (files: NewBatchFile[]) =>
+    request<PrintBatch>('/print/batches', { method: 'POST', body: JSON.stringify({ files }) }),
+
+  /** #2672 — a batch print as it was left, to resume it. */
+  getPrintBatch: (batchId: string) => request<PrintBatch>(`/print/batches/${seg(batchId)}`),
+
+  /** #2718 review — batches kept with a file still being checked, to resume one. */
+  listPendingPrintBatches: () => request<PrintBatch[]>('/print/batches'),
+
+  /** #2672 — the step in view: a file's position, or the file count for the review. */
+  putPrintBatchStep: (batchId: string, step: number) =>
+    request<PrintBatch>(`/print/batches/${seg(batchId)}/step`, {
+      method: 'PUT',
+      body: JSON.stringify({ step }),
+    }),
+
+  /** #2672 — one file's choices, or that it is skipped or removed. */
+  putPrintBatchItem: (batchId: string, position: number, choice: BatchChoice) =>
+    request<PrintBatch>(`/print/batches/${seg(batchId)}/items/${position}`, {
+      method: 'PUT',
+      body: JSON.stringify(choice),
+    }),
+
+  /**
+   * #2672 — starts each chosen file's library run and says what happened to each. A
+   * request answers in time rather than for every file: a 202 says where to go on from,
+   * and this follows it to the end (#2951), handing each step's batch to `onProgress`.
+   */
+  queuePrintBatch: async (
+    batchId: string,
+    onProgress?: (batch: PrintBatch) => void,
+    signal?: AbortSignal,
+  ): Promise<PrintBatch> => {
+    let from = 0
+    for (;;) {
+      // Aborted (the dialog closed): send none of the rest; the next Queue all does.
+      signal?.throwIfAborted()
+      const query = from === 0 ? '' : `?from_position=${from}`
+      const answer = await requestWithStatus<PrintBatch | BatchQueueProgress>(
+        `/print/batches/${seg(batchId)}/queue${query}`,
+        { method: 'POST', signal },
+      )
+      if (answer.status !== 202) return answer.body as PrintBatch
+      const progress = answer.body as BatchQueueProgress
+      // Not once the dialog is gone, though the 202 arrived (#2718 review).
+      if (!signal?.aborted) onProgress?.(progress.batch)
+      from = progress.next_position
+    }
+  },
+
+  /** #2672 — forgets the batch; whatever it queued stays queued. */
+  deletePrintBatch: (batchId: string) =>
+    request<void>(`/print/batches/${seg(batchId)}`, { method: 'DELETE' }),
+
+  /** #2672 — one run as it stands, for a batch's per-file result. */
+  getPrintRun: (runId: string) => request<PrintRun>(`/print/runs/${seg(runId)}`),
 
   putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>
     request<ModelPrintChoices>(`/print/library/${fileId}/choices`, {

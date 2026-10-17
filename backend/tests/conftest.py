@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import time
@@ -82,6 +83,16 @@ def _forget_catalogues() -> Iterator[None]:
 @pytest.fixture
 def spans() -> InMemorySpanExporter:
     return _SPANS
+
+
+@pytest.fixture
+def health_socket() -> Iterator[socket.socket]:
+    """A socket bound to a free port, for a worker's health server to serve on (#3807).
+    Held from picking the port to serving it: a port picked, let go and bound again
+    later can be taken by anything else on the runner in between."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield sock
 
 
 def wait_for_span(
@@ -347,6 +358,7 @@ import os
 import pathlib
 import shutil
 import sys
+import time
 
 args = sys.argv[1:]
 # Test settings sit beside the binary: the backend passes openscad no FAKE_* variable.
@@ -410,6 +422,14 @@ if out is not None and out.endswith(".3mf"):
         raise SystemExit(1)
     for line in settings.get("FAKE_STDERR", []):
         print(line, file=sys.stderr)
+    hold = settings.get("FAKE_HOLD")
+    if hold:
+        # A render that runs until the test lets it go (or 60 s pass).
+        pathlib.Path(hold["started"]).touch()
+        for _ in range(1200):
+            if pathlib.Path(hold["release"]).exists():
+                break
+            time.sleep(0.05)
     if "FAKE_3MF" in settings:
         shutil.copyfile(settings["FAKE_3MF"], out)
     raise SystemExit(0)

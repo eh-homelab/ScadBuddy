@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tarfile
 import zipfile
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -83,9 +84,11 @@ from scadbuddy.bambuddy.project_file import (
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.core.tracing import span
-from scadbuddy.library.history import COMMIT_ID_PATTERN
+from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
@@ -97,6 +100,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     require_output,
 )
+from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
@@ -106,6 +110,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
 )
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.jobs import SnapshotUnavailableError, source_directory
 from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
 from scadbuddy.render.schema import ParamValue
@@ -775,8 +780,11 @@ async def backfill_output(
             fetcher,
             fonts,
             activity,
+            # It cannot answer its caller a 202 to follow: a slow start keeps the
+            # default deadline, and its 503 re-send, whatever the caller preferred.
+            respond_async=False,
             # #2280: as the render route's, so a re-send still accepting is one claim.
-            idempotency_key,
+            idempotency_key=idempotency_key,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).
@@ -797,6 +805,8 @@ async def backfill_output(
             f"output {output_id} cannot be rendered again from {meta.slug}@{version[:12]}:"
             f" {error.detail}",
         ) from None
+    # Asked with respond_async=False, the render never answers a 202 to follow.
+    assert not isinstance(accepted, JSONResponse)
     await asyncio.to_thread(outputs.start_backfill, output_id, accepted.job_id)
     job = await asyncio.to_thread(require_job, render, accepted.job_id)
     return _job_status(job, None)
@@ -1088,21 +1098,25 @@ def get_output_plate_thumbnail(
     response_model=GeometryAnalysis,
     summary="Mesh geometry analysis",
 )
-def get_output_geometry(
+async def get_output_geometry(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    paths: PathsDep,
+    history: HistoryDep,
     plate: Annotated[int, Query(ge=1, description="The plate to measure (1-based)")] = 1,
 ) -> GeometryAnalysis:
     """Printability measurements of the closed per-colour solids on one plate of the
     output (#284): open and non-manifold edges with their locations, bounding box,
-    bed contact, height-to-base ratio, overhang area by angle, and estimates of the
-    thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
-    as in the preview. A 3MF with more than one plate (#289) is measured a plate at
-    a time; ``plates`` in the result says how many there are. Computed on first ask
-    and cached beside the output."""
+    bed contact, height-to-base ratio, overhang area by angle, estimates of the
+    thinnest wall and smallest feature, and weak joints (#2146): level sections narrow
+    enough to snap, each with a `split_at_plane` edit whose `object` names the scene
+    object for a mesh model's output. Coordinates are the model's own (mm, Z up), as in
+    the preview. A 3MF with more than one plate (#289) is measured a plate at a time;
+    ``plates`` in the result says how many there are. Computed on first ask and cached
+    beside the output."""
     require_output(outputs, output_id)
     try:
-        return outputs.geometry(output_id, plate)
+        analysis = await asyncio.to_thread(outputs.geometry, output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except NoSuchPlateError as error:
@@ -1112,6 +1126,62 @@ def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
+    return await _attributed(analysis, outputs, output_id, plate, paths=paths, history=history)
+
+
+async def _attributed(
+    analysis: GeometryAnalysis,
+    outputs: OutputStore,
+    output_id: str,
+    plate: int,
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+) -> GeometryAnalysis:
+    """``analysis`` with its weak joints naming their scene objects, when the output is
+    a render of a mesh model (spec 2026-10-11 §9), read at the output's revision. An
+    arranged output's objects were moved off the scene's frame, so it is left as it is,
+    as is one whose revision is not a commit or cannot be read. A named analysis is
+    cached beside the output's geometry (a revision's scene never changes, and
+    `ANALYSIS_VERSION` moves with the analysis); one left as it is never, since the
+    cause may be a git or disk error that passes."""
+    if not analysis.weak_joints:
+        return analysis
+    if await asyncio.to_thread(outputs.arranged_from, output_id):
+        return analysis
+    meta = await asyncio.to_thread(outputs.get, output_id)
+    version = meta.model_version
+    if version is None or not re.fullmatch(COMMIT_ID_PATTERN, version):
+        # No revision to read the scene at: the live scene may have been edited since
+        # the render, and would name the wrong object.
+        logger.info("weak joints of %s left unattributed: no commit recorded", output_id)
+        return analysis
+    cached = await asyncio.to_thread(outputs.attributed, output_id, plate, version)
+    if cached is not None:
+        return cached
+    try:
+        directory, _ = await source_directory(meta.slug, version, paths=paths, history=history)
+    except (
+        # What `source_directory` raises: `last_commit` and `export` (GitError, its
+        # timeout and unavailable kinds), a revision or model path absent at the commit
+        # (RevisionNotFoundError, as a deleted model's older one can be), no history to
+        # export from (SnapshotUnavailableError), and the extraction or the move into
+        # place (a damaged tar, OSError).
+        GitError,
+        RevisionNotFoundError,
+        SnapshotUnavailableError,
+        tarfile.TarError,
+        OSError,
+    ) as error:
+        logger.warning("weak joints of %s left unattributed: %s", output_id, type(error).__name__)
+        return analysis
+    if not directory.is_dir():
+        logger.warning("weak joints of %s left unattributed: %s is gone", output_id, meta.slug)
+        return analysis
+    named = await asyncio.to_thread(attribute, analysis, directory)
+    if named is not analysis:
+        await asyncio.to_thread(outputs.write_attributed, output_id, plate, version, named)
+    return named
 
 
 @router.put(

@@ -11,9 +11,21 @@ import type {
   ModelLibrary,
   ModelSummary,
 } from '../api/types'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
+import { LibraryBigIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
 
 interface Props {
   slug: string
@@ -179,49 +191,46 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => void show()}
-        className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-      >
-        Libraries
+      <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void show()}>
+        <LibraryBigIcon /> Libraries
         {pins.length + invalid.length > 0 && (
-          <span className={`sb-num ml-1.5 ${invalid.length > 0 ? 'text-warn' : 'text-faint'}`}>
+          <Badge variant={invalid.length > 0 ? 'destructive' : 'secondary'} className="sb-num">
             {pins.length + invalid.length}
-          </span>
+          </Badge>
         )}
-      </button>
-      <Dialog
-        open={open}
-        title={`Libraries for ${name}`}
-        description="Adding a library clones it at a tag or branch and pins the commit in this model's history. The model renders with only the libraries pinned here."
-        onClose={close}
-        footer={
-          <Button variant="ghost" onClick={close} disabled={running > 0}>
-            Done
-          </Button>
-        }
-      >
+      </Button>
+      <Dialog open={open} onOpenChange={(next) => !next && close()}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{`Libraries for ${name}`}</DialogTitle>
+          <DialogDescription>
+            Adding a library clones it at a tag or branch and pins the commit in this model&apos;s history. The model
+            renders with only the libraries pinned here.
+          </DialogDescription>
+        </DialogHeader>
         {error ? (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
         ) : catalogue === null ? (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading libraries
-          </p>
+          <div role="status" aria-label="Loading libraries" className="space-y-2">
+            <span className="sr-only">Loading libraries</span>
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
         ) : (
           <div className="space-y-5">
             <section>
-              <h3 className="text-[13px] font-medium">Pinned</h3>
+              <h3 className="text-sm font-medium">Pinned</h3>
               {pins.length + invalid.length === 0 ? (
-                <p className="mt-1 text-[12px] text-muted">
+                <p className="mt-1 text-xs text-muted-foreground">
                   None yet. Add one from the catalogue or by URL.
                 </p>
               ) : (
                 <ul
                   aria-label="Pinned libraries"
-                  className="mt-2 divide-y divide-line rounded-[6px] border border-line"
+                  className="mt-2 divide-y rounded-xl border"
                 >
                   {invalid.map((entry, index) => (
                     <InvalidRow
@@ -243,10 +252,10 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
             {offered.length > 0 && (
               <section>
-                <h3 className="text-[13px] font-medium">Add from catalogue</h3>
+                <h3 className="text-sm font-medium">Add from catalogue</h3>
                 <ul
                   aria-label="Catalogue"
-                  className="mt-2 divide-y divide-line rounded-[6px] border border-line"
+                  className="mt-2 divide-y rounded-xl border"
                 >
                   {offered.map((entry) => (
                     <CatalogueRow key={entry.name} slug={slug} entry={entry} apply={apply} />
@@ -260,6 +269,12 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
             <AddByUrl slug={slug} apply={apply} />
           </div>
         )}
+        <DialogFooter>
+          <Button variant="outline" onClick={close} disabled={running > 0}>
+            Done
+          </Button>
+        </DialogFooter>
+        </DialogContent>
       </Dialog>
     </>
   )
@@ -289,7 +304,7 @@ function useAction(apply: Apply) {
 
 function RowError({ error }: { error: string | null }) {
   return error ? (
-    <p role="alert" className="mt-2 text-[12px] text-warn">
+    <p role="alert" className="mt-2 text-xs text-destructive">
       {error}
     </p>
   ) : null
@@ -299,14 +314,14 @@ function RefInput({ value, onChange }: { value: string; onChange: (ref: string) 
   const id = useId()
   return (
     <>
-      <label htmlFor={id} className="sr-only">
+      <Label htmlFor={id} className="sr-only">
         Ref
-      </label>
-      <input
+      </Label>
+      <Input
         id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="sb-field sb-num h-7 w-28 text-[12px]"
+        className="sb-num h-7 w-28 text-xs"
       />
     </>
   )
@@ -320,8 +335,8 @@ function PinnedRow({ slug, pin, apply }: { slug: string; pin: ModelLibrary; appl
     <li aria-label={pin.name} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <span className="text-[13px] font-medium">{pin.name}</span>
-          <p className="mt-0.5 truncate text-[12px] text-muted">
+          <span className="text-sm font-medium">{pin.name}</span>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
             Pinned to <span className="sb-num">{pin.ref}</span> at{' '}
             <span className="sb-num">{pin.commit.slice(0, 7)}</span>
           </p>
@@ -329,6 +344,7 @@ function PinnedRow({ slug, pin, apply }: { slug: string; pin: ModelLibrary; appl
         <div className="flex shrink-0 items-center gap-2">
           <RefInput value={ref} onChange={setRef} />
           <Button
+            variant="outline"
             size="sm"
             onClick={() =>
               void run('update', () => api.pinModelLibrary(slug, pin.name, { url: pin.url, ref }))
@@ -376,11 +392,11 @@ function InvalidRow({
     <li aria-label={`Invalid entry ${position}: ${name ?? 'unnamed'}`} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <span className="text-[13px] font-medium">{name ?? 'Unnamed entry'}</span>
-          <span className="ml-2 text-[11px] text-warn">Invalid</span>
-          <p className="mt-0.5 text-[12px] text-muted">{entry.problem}</p>
+          <span className="text-sm font-medium">{name ?? 'Unnamed entry'}</span>
+          <Badge variant="destructive" className="ml-2">Invalid</Badge>
+          <p className="mt-0.5 text-xs text-muted-foreground">{entry.problem}</p>
           {name === null && (
-            <p className="mt-0.5 text-[12px] text-muted">
+            <p className="mt-0.5 text-xs text-muted-foreground">
               Remove it from this model's model.json to render the model.
             </p>
           )}
@@ -431,18 +447,19 @@ function CatalogueRow({
               href={entry.homepage}
               target="_blank"
               rel="noreferrer"
-              className="text-[13px] font-medium hover:text-accent"
+              className="text-sm font-medium hover:text-primary"
             >
               {entry.name}
             </a>
           ) : (
-            <span className="text-[13px] font-medium">{entry.name}</span>
+            <span className="text-sm font-medium">{entry.name}</span>
           )}
-          {entry.licence && <span className="ml-2 text-[11px] text-faint">{entry.licence}</span>}
+          {entry.licence && <Badge variant="outline" className="ml-2">{entry.licence}</Badge>}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <RefInput value={ref} onChange={setRef} />
           <Button
+            variant="outline"
             size="sm"
             onClick={() =>
               void run('add', () => api.pinModelLibrary(slug, entry.name, { url: entry.url, ref }))
@@ -479,22 +496,20 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
 
   const field = (key: keyof Draft, label: string, placeholder: string) => (
     <div>
-      <label htmlFor={`${id}-${key}`} className="block text-[13px]">
-        {label}
-      </label>
-      <input
+      <Label htmlFor={`${id}-${key}`}>{label}</Label>
+      <Input
         id={`${id}-${key}`}
         value={draft[key] ?? ''}
         placeholder={placeholder}
         onChange={(event) => setDraft({ ...draft, [key]: event.target.value })}
-        className="sb-field sb-num mt-1.5"
+        className="sb-num mt-2"
       />
     </div>
   )
 
   return (
-    <section className="rounded-[6px] border border-line">
-      <h3 className="border-b border-line px-3 py-2 text-[13px] font-medium">Add by URL</h3>
+    <section className="rounded-xl border">
+      <h3 className="border-b px-3 py-2 text-sm font-medium">Add by URL</h3>
       <form aria-label="Add by URL" onSubmit={(event) => void submit(event)} className="space-y-3 p-3">
         {field('name', 'Name', 'The directory a model uses, e.g. threads')}
         {field('url', 'Git URL', 'https://github.com/owner/repo.git')}
@@ -502,7 +517,6 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
         <div className="flex items-center gap-2">
           <Button
             type="submit"
-            variant="primary"
             disabled={busy !== null || !draft.name || !draft.url || !draft.ref}
             aria-busy={busy !== null}
           >
@@ -510,7 +524,7 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
             Add
           </Button>
           {error && (
-            <p role="alert" className="text-[12px] text-warn">
+            <p role="alert" className="text-xs text-destructive">
               {error}
             </p>
           )}
@@ -579,26 +593,28 @@ function Includes({
 
   return (
     <section aria-label="Includes" aria-busy={checking}>
-      <h3 className="flex items-center gap-2 text-[13px] font-medium">
+      <h3 className="flex items-center gap-2 text-sm font-medium">
         Includes
         {checking && report !== null && (
-          <span className="flex items-center gap-1 text-[12px] font-normal text-muted">
+          <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground">
             <Spinner /> Checking again
           </span>
         )}
       </h3>
       {error ? (
-        <p role="alert" className="mt-1 text-[12px] text-warn">
+        <p role="alert" className="mt-1 text-xs text-destructive">
           Could not check the includes: {error}
         </p>
       ) : report === null ? (
-        <p className="mt-1 flex items-center gap-2 text-[12px] text-muted">
-          <Spinner /> Checking includes
-        </p>
+        <div role="status" aria-label="Checking includes" className="mt-2 space-y-1.5">
+          <span className="sr-only">Checking includes</span>
+          <Skeleton className="h-3 w-3/4" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
       ) : (
         <>
           {unresolved.length === 0 && missingFonts.length === 0 && (
-            <p className="mt-1 text-[12px] text-muted">
+            <p className="mt-1 text-xs text-muted-foreground">
               {(report.includes ?? []).length === 0
                 ? 'The source has no include or use'
                 : 'Every include and use resolves'}
@@ -610,7 +626,7 @@ function Includes({
           {unresolved.length + missingFonts.length > 0 && (
             <ul
               aria-label="Unresolved"
-              className="mt-2 divide-y divide-line rounded-[6px] border border-line"
+              className="mt-2 divide-y rounded-xl border"
             >
               {unresolved.map((include) => (
                 <UnresolvedRow
@@ -630,19 +646,19 @@ function Includes({
             </ul>
           )}
           {missingCheckouts.length > 0 && (
-            <p className="mt-2 text-[12px] text-muted">
+            <p className="mt-2 text-xs text-muted-foreground">
               Not on the volume yet: {missingCheckouts.join(', ')}. The next render clones{' '}
               {missingCheckouts.length === 1 ? 'it' : 'them'} again; until then nothing inside{' '}
               {missingCheckouts.length === 1 ? 'it' : 'them'} can be checked.
             </p>
           )}
           {!report.fonts_checked && (report.fonts ?? []).length > 0 && (
-            <p className="mt-2 text-[12px] text-muted">
+            <p className="mt-2 text-xs text-muted-foreground">
               The fonts were not checked: the server could not ask fontconfig.
             </p>
           )}
           {report.truncated && (
-            <p className="mt-2 text-[12px] text-muted">
+            <p className="mt-2 text-xs text-muted-foreground">
               The check stopped short: this model has more to follow than it reads, so not
               everything is listed.
             </p>
@@ -669,17 +685,17 @@ function UnresolvedRow({
     <li aria-label={`<${include.target}>`} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <span className="sb-num text-[13px]">
+          <span className="sb-num text-sm">
             {include.kind} &lt;{include.target}&gt;
           </span>
-          <p className="mt-0.5 text-[12px] text-muted">
+          <p className="mt-0.5 text-xs text-muted-foreground">
             <span className="sb-num">
               {include.file}:{include.line}
             </span>
             {include.reason ? ` — ${include.reason}` : ''}
           </p>
           {suggestion && (
-            <p className="mt-0.5 text-[12px] text-muted">
+            <p className="mt-0.5 text-xs text-muted-foreground">
               {suggestion.source === 'catalogue'
                 ? `${suggestion.name} from the catalogue provides it`
                 : `${suggestion.name}, as ${suggestion.pinned_by ?? 'another model'} pins it, would provide it`}
@@ -690,6 +706,7 @@ function UnresolvedRow({
         {suggestion && (
           <div className="flex shrink-0 items-center gap-2">
             <Button
+              variant="outline"
               size="sm"
               onClick={() =>
                 void run('pin', () =>
@@ -734,14 +751,14 @@ function MissingFontRow({ family, onInstalled }: { family: string; onInstalled: 
     <li aria-label={`Font ${family}`} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <span className="text-[13px] font-medium">{family}</span>
-          <span className="ml-2 text-[11px] text-warn">Not installed</span>
-          <p className="mt-0.5 text-[12px] text-muted">
+          <span className="text-sm font-medium">{family}</span>
+          <Badge variant="destructive" className="ml-2">Not installed</Badge>
+          <p className="mt-0.5 text-xs text-muted-foreground">
             A render draws this font in the default font instead.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" onClick={() => void install()} disabled={busy} aria-busy={busy}>
+          <Button variant="outline" size="sm" onClick={() => void install()} disabled={busy} aria-busy={busy}>
             {busy && <Spinner />}
             Install {family}
           </Button>

@@ -26,7 +26,9 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
+from scadbuddy.bambuddy import filaments, print_run
 from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
+from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
@@ -957,6 +959,40 @@ def test_the_all_plates_local_read_combines_every_plates_slots(
 
 
 @respx.mock
+def test_the_chosen_plates_filament_read_offers_just_those_plates_slots(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3652: a repeated ``plate_ids`` answers for those plates only, in any order: the
+    rows are plates 1 and 3's slots, never slot 2, which only plate 2 uses. Past
+    ``MAX_PLATES`` entries the read is refused."""
+    configure(client)
+    output_id = make_output(client, model)
+    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    colours = ["#FF0000", "#0047BB", "#FFFFFF"]
+    box = trimesh.creation.box(extents=(10, 10, 2))
+    write_plates_3mf(
+        [
+            PlateParts((ColourPart(slot, f"Part {slot}", colours[slot - 1], box),), (slot,))
+            for slot in (1, 2, 3)
+        ],
+        colours,
+        output_3mf,
+        thumbnails=None,
+    )
+    upload_route()
+    split_plates_routes()
+    hardware_routes()
+    url = f"/api/v1/print/outputs/{output_id}/filaments"
+
+    chosen = client.get(url, params=[("printer_id", 1), ("plate_ids", 3), ("plate_ids", 1)])
+    too_many = client.get(url, params=[("plate_ids", 1)] * (MAX_PLATES + 1))
+
+    assert chosen.status_code == 200, chosen.text
+    assert [slot["slot_id"] for slot in chosen.json()["slots"]] == [1, 3]
+    assert too_many.status_code == 422, too_many.text
+
+
+@respx.mock
 def test_the_all_plates_filament_read_reads_the_spools_once(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1535,6 +1571,57 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
     assert not upload.called
 
 
+@respx.mock
+def test_a_check_of_a_plan_with_no_slots_makes_no_read_of_its_own_for_spool_warnings(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2733 review: the spool warnings need the inventory only for a plan with slots, so
+    the check reads it for them only then. (An output's slot refusals read the spools
+    themselves since #2720; that read is theirs, not this one.)"""
+    output_id = two_colour_output(client, model, paths)
+    upload_route()
+    run_routes()
+    _status(**WIRED)
+    reads: list[object] = []
+    real = filaments.read_inventory
+
+    async def counted(bambuddy: object) -> object:
+        reads.append(bambuddy)
+        return await real(bambuddy)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(print_run, "read_inventory", counted)
+
+    empty = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(), "filament_plan": {"slots": []}},
+    )
+    assert empty.status_code == 200, empty.text
+    assert reads == []
+
+    planned = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    assert planned.status_code == 200, planned.text
+    assert len(reads) == 1
+
+
+@respx.mock
+def test_a_check_of_a_plan_with_slots_fails_when_the_inventory_cannot_be_read(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2733 review: deliberately, a plan with slots needs the inventory for its spool
+    warnings, so a failed assignments read fails the check, as it would fail the run,
+    rather than passing it with the warnings silently missing."""
+    output_id = two_colour_output(client, model, paths)
+    upload_route()
+    run_routes()
+    _status(**WIRED)
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(500))
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 502, check.text
+    assert check.headers["content-type"].startswith("application/problem+json")
+
+
 def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response:
     response: httpx.Response = client.post(
         f"/api/v1/print/outputs/{output_id}/check",
@@ -1687,6 +1774,39 @@ def test_the_check_warns_of_a_plate_the_printer_does_not_take(
         f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type="Supertack Plate")
     )
     assert "plate-not-listed" not in [w["kind"] for w in fine.json()["warnings"]]
+
+
+@respx.mock
+def test_the_check_says_a_spool_is_not_loaded_and_the_plan_mixes_materials(
+    client: TestClient, model: str
+) -> None:
+    """#2722: Checks said nothing of either; the picker said only the first, under the slot."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    # Spool 9 is PETG, loaded in printer 1; spool 5 is PLA on the shelf; spool 10 is
+    # PETG, loaded too. Read off the recordings, so a re-recording cannot change what
+    # this test means without failing here.
+    materials = {s["id"]: s["material"] for s in recording("inventory-spools.json")}
+    loaded = {a["spool_id"] for a in recording("inventory-assignments.json")}
+    assert (materials[9], materials[5], materials[10]) == ("PETG", "PLA", "PETG")
+    assert {9, 10} <= loaded and 5 not in loaded
+    mixed = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    assert mixed.status_code == 200, mixed.text
+    found = [(w["kind"], w["slot_id"]) for w in mixed.json()["warnings"]]
+    assert ("not-loaded", 2) in found
+    assert ("mixed-materials", None) in found
+
+    # Both PETG and both loaded (spools 9 and 10).
+    request = body()
+    request["filament_plan"] = {
+        "slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]
+    }
+    plain = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    assert plain.status_code == 200, plain.text
+    kinds = {w["kind"] for w in plain.json()["warnings"]}
+    assert not kinds & {"not-loaded", "mixed-materials"}
 
 
 @respx.mock

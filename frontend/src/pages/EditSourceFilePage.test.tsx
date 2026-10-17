@@ -201,7 +201,7 @@ describe('EditSourceFilePage (#1290)', () => {
     await waitFor(() => expect(screen.getByLabelText('OpenSCAD source')).toHaveValue(HELPER))
 
     await user.click(await screen.findByRole('button', { name: 'Delete file' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete helper.scad?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete helper.scad?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
 
     await waitFor(() => expect(screen.getByLabelText('OpenSCAD source')).toHaveValue(keychainSource))

@@ -1,5 +1,4 @@
 import type { ActivityFacets } from '../../api/types'
-import { joinList, splitList } from '../../lib/activityQuery'
 
 /** How a principal is shown: the browser is "You", schedules are "System". */
 export function principalLabel(principal: string | null, _facets?: ActivityFacets): string {
@@ -11,12 +10,6 @@ export function principalLabel(principal: string | null, _facets?: ActivityFacet
   } catch {
     return principal
   }
-}
-
-export function chipClass(selected: boolean): string {
-  return `rounded-full border px-2.5 py-0.5 text-[12px] transition-colors ${
-    selected ? 'border-accent bg-accent/15 text-ink' : 'border-line text-muted hover:text-ink'
-  }`
 }
 
 /** The `since` choices; the URL keeps the token, the API gets the absolute time. */
@@ -31,8 +24,8 @@ export function sinceTime(token: string, now = Date.now()): string {
   return option ? new Date(now - option.hours * 3600_000).toISOString() : ''
 }
 
-/** Adds `value` to, or removes it from, a comma-joined list. */
-export function toggleValue(list: string, value: string): string {
-  const values = splitList(list)
-  return joinList(values.includes(value) ? values.filter((v) => v !== value) : [...values, value])
-}
+/**
+ * #3747 — how many chips a filter group shows until its "Show more": every kind there
+ * is, and every subject seen in the window, buried the list under its own filters.
+ */
+export const CHIPS_SHOWN = 10

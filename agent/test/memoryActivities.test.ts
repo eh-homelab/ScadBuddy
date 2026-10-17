@@ -78,6 +78,25 @@ describe('transcriptOf', () => {
     ])
   })
 
+  it('starts every open message on a new line after a call: one message streams at a time (#3362)', () => {
+    // Not a shape the durable log writes today (each text is a whole message); pinned so
+    // a change that interleaves messages sees what a call does to them.
+    const turn = log(
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'One ' }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm2', delta: 'Two ' }),
+      event({ type: 'tool.call', sessionId: SESSION, id: 't1', name: 'render_model', input: { id: 'box' }, risk: 'write' }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'more.' }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm2', delta: 'more.' }),
+    )
+    expect(transcriptOf(turn)).toEqual([
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'One ' }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Two ' }] } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'render_model', input: { id: 'box' } }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'more.' }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'more.' }] } },
+    ])
+  })
+
   it("keeps a message on one line across a subagent's call between its deltas (#3089)", () => {
     const turn = log(
       event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Looking ' }),

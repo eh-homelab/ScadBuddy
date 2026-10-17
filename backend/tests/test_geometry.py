@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import math
 import shutil
+import subprocess
+import sys
+import time
 import zipfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
 import trimesh
+from pydantic import TypeAdapter
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.render import geometry
+from scadbuddy.meshmodel import section
+from scadbuddy.meshmodel.edits import Edit
+from scadbuddy.render import geometry, meshmatch
 from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
 from scadbuddy.render.geometry import (
     MAX_REPORTED_EDGES,
@@ -417,3 +423,198 @@ async def test_a_bundled_model_analyses_as_closed_and_printable(tmp_path: Path) 
     assert _bucket(analysis, 45).area_mm2 == pytest.approx(0.0, abs=1.0)
     assert analysis.thinnest_wall is not None
     assert 1.0 < analysis.thinnest_wall.thickness_mm <= 2.05
+
+
+EDITS = TypeAdapter(list[Edit])
+
+
+def revolved(profile: list[tuple[float, float]]) -> trimesh.Trimesh:
+    return trimesh.creation.revolve(np.array(profile, dtype=float), sections=64)
+
+
+def carrot() -> trimesh.Trimesh:
+    """Body r 10 to z 30, neck r 3 to 35, tuft r 7 to 45 (r 6 puts the neck's top layers
+    exactly on the 25 % rule, which float noise flips)."""
+    return revolved([(0, 0), (10, 0), (10, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
+
+
+def test_a_carrots_neck_is_a_weak_joint_with_a_split_that_fits() -> None:
+    """Spec 2026-10-11 section 9 on the test carrot: the neck is under a quarter of the
+    body below it, with more than 1 cm3 above."""
+    [joint] = analyze_geometry([_part(carrot())]).weak_joints
+    assert 30 < joint.z < 35
+    assert joint.area_mm2 < 0.25 * joint.neighbour_area_mm2
+    assert joint.volume_above_mm3 >= 1000
+    assert joint.room_mm == pytest.approx(3 * math.cos(math.pi / 64), rel=1e-6)
+    suggestion = joint.suggestion
+    assert suggestion.object is None
+    assert suggestion.point == pytest.approx((0, 0, joint.z), abs=1e-6)
+    assert suggestion.normal == (0, 0, 1)
+    assert suggestion.joint is not None
+    assert suggestion.joint.diameter == round(1.2 * joint.room_mm, 2)
+    assert suggestion.joint.peg_on == "above"  # the socket goes into the wide body
+    # The suggestion is an edit_scene edit once it names its object.
+    [edit] = EDITS.validate_python([{**suggestion.model_dump(), "object": "o1"}])
+    assert edit.edit == "split_at_plane"
+
+
+def test_two_colours_printed_as_one_piece_are_measured_together() -> None:
+    """The demo's carrot: an orange body and a green neck and tuft sharing the z = 30
+    face. Apart, neither has a weak section; together the neck is one."""
+    body = revolved([(0, 0), (10, 0), (10, 30), (3, 30), (0, 30)])
+    leaves = revolved([(0, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
+    analysis = analyze_geometry([_part(body, "#F08A24", 1), _part(leaves, "#3A7D2C", 2)])
+    [joint] = analysis.weak_joints
+    assert joint.parts == [1, 2]
+    assert 30 < joint.z < 35
+
+
+def test_two_carrots_are_two_weak_joints() -> None:
+    other = carrot()
+    other.apply_translation((40, 0, 0))
+    both = trimesh.util.concatenate([carrot(), other])
+    assert isinstance(both, trimesh.Trimesh)
+    joints = analyze_geometry([_part(both)]).weak_joints
+    assert sorted(round(j.centroid[0]) for j in joints) == [0, 40]
+
+
+def test_a_straight_cylinder_has_no_weak_joint() -> None:
+    assert (
+        analyze_geometry([_part(trimesh.creation.cylinder(radius=10, height=40))]).weak_joints == []
+    )
+
+
+def test_a_small_tip_is_no_weak_joint() -> None:
+    """A cone narrows to nothing, but under 1 cm3 is above any narrow layer."""
+    cone = revolved([(0, 0), (10, 0), (0, 30)])
+    assert analyze_geometry([_part(cone)]).weak_joints == []
+
+
+def _bed_to_z(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    mesh.apply_translation((0, 0, -mesh.bounds[0][2]))
+    return mesh
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        trimesh.creation.icosphere(subdivisions=4, radius=20),
+        trimesh.creation.capsule(height=30, radius=10),
+        revolved([(0, 0), (20, 0), (0, 40)]),
+    ],
+    ids=["sphere", "capsule", "cone-tip-up"],
+)
+def test_a_curved_end_is_no_weak_joint(mesh: trimesh.Trimesh) -> None:
+    """The layers within a window of an end have no full window on one side, so a
+    tapering end is not a narrow layer (measured: a sphere reported z=0.1)."""
+    assert analyze_geometry([_part(_bed_to_z(mesh))]).weak_joints == []
+
+
+def test_a_cone_tip_down_is_no_weak_joint() -> None:
+    cone = revolved([(0, 0), (0, 40), (20, 40)])
+    assert analyze_geometry([_part(_bed_to_z(cone))]).weak_joints == []
+
+
+def test_a_thin_wall_on_a_floor_is_no_weak_joint() -> None:
+    """A cup: its walls are an eighth of the floor below them, but the section is a
+    ring, whose centre is outside it (measured: a planter in file 688)."""
+    cup = revolved([(0, 0), (30, 0), (30, 30), (28, 30), (28, 2), (0, 2)])
+    assert analyze_geometry([_part(cup)]).weak_joints == []
+
+
+def test_a_neck_too_thin_for_a_peg_suggests_no_joint() -> None:
+    """Room 1.5 mm: a 1.8 mm peg needs 0.9 + 0.2 + 0.8 = 1.9 mm."""
+    thin = revolved([(0, 0), (10, 0), (10, 30), (1.5, 30), (1.5, 35), (8, 35), (8, 45), (0, 45)])
+    [joint] = analyze_geometry([_part(thin)]).weak_joints
+    assert joint.suggestion.joint is None
+
+
+def test_an_open_split_part_is_not_sectioned() -> None:
+    assert analyze_geometry([_part(carrot())], split={"#FF0000"}).weak_joints == []
+
+
+def test_thousands_of_islands_are_sectioned_quickly() -> None:
+    boxes = []
+    for i in range(3000):
+        box = trimesh.creation.box((1, 1, 1))
+        box.apply_translation(((i % 60) * 2.0, (i // 60) * 2.0, 0))
+        boxes.append(box)
+    many = trimesh.util.concatenate(boxes)
+    assert isinstance(many, trimesh.Trimesh)
+    part = _part(many)
+    welded = [geometry._welded(part.mesh)]
+    started = time.monotonic()
+    assert geometry.weak_joints([part], welded, [1], ()) == []
+    assert time.monotonic() - started < 3
+    assert analyze_geometry([part]).weak_joints == []
+
+
+def test_a_stack_of_necks_measures_no_more_than_the_attempt_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One piece (each carrot's tuft touches the next body), many weak runs."""
+    calls = []
+    real = section.measure
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("scadbuddy.render.geometry.measure", counting)
+    stack = revolved([(0, 0), *[p for k in range(30) for p in _stage(k * 45.0)], (0, 30 * 45.0)])
+    joints = analyze_geometry([_part(stack)]).weak_joints
+    assert 0 < len(joints) <= geometry.MAX_WEAK_JOINTS
+    assert len(calls) <= geometry.MAX_WEAK_ATTEMPTS
+
+
+def _stage(base: float) -> list[tuple[float, float]]:
+    return [
+        (10, base),
+        (10, base + 30),
+        (3, base + 30),
+        (3, base + 35),
+        (7, base + 35),
+        (7, base + 45),
+    ]
+
+
+def test_parts_match_points_refuses_are_not_joined(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("too many points in one cell")
+
+    monkeypatch.setattr("scadbuddy.render.geometry.match_points", refuse)
+    body = revolved([(0, 0), (10, 0), (10, 30), (3, 30), (0, 30)])
+    leaves = revolved([(0, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
+    analysis = analyze_geometry([_part(body, "#F08A24", 1), _part(leaves, "#3A7D2C", 2)])
+    assert [j.parts for j in analysis.weak_joints] == [[2]]  # the leaves alone, not the pair
+
+
+def test_only_parts_whose_boxes_touch_are_matched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parts far apart share no point, so `match_points` is asked only of the pair whose
+    boxes (grown by the touch tolerance) meet, not of all n(n-1)/2."""
+    asked: list[tuple[int, int]] = []
+    real = meshmatch.match_points
+
+    def counting(source: Any, query: Any, tol: float) -> Any:
+        asked.append((len(source), len(query)))
+        return real(source, query, tol)
+
+    monkeypatch.setattr(geometry, "match_points", counting)
+    cubes = [_cube(10, (100.0 * i, 0, 0)) for i in range(8)]
+    cubes[1].apply_translation((-100.0 + 10.0, 0, 0))  # cube 1 now touches cube 0
+    welded = [(np.asarray(c.vertices), np.asarray(c.faces)) for c in cubes]
+    pieces = geometry._pieces(welded)
+    assert len(asked) == 1
+    assert sorted(members for members, _, _ in pieces) == [[0, 1], [2], [3], [4], [5], [6], [7]]
+
+
+def test_analysing_geometry_does_not_load_the_scene_edits() -> None:
+    """`render.geometry` needs the joint spec and the section maths, not `edits` (the
+    scene's whole edit vocabulary), so a plain render's analysis stays off that stack."""
+    code = (
+        "import sys, scadbuddy.render.geometry; print('scadbuddy.meshmodel.edits' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert out.strip() == "False"

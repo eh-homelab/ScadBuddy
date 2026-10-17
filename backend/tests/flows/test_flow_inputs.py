@@ -125,6 +125,27 @@ def test_a_long_pattern_is_refused() -> None:
     assert any("pattern" in p for p in schema_problems(schema))
 
 
+def test_a_pattern_that_does_not_compile_is_refused_when_saved() -> None:
+    """#3416: found when the version is registered, not at its first Start: the
+    metaschema's `regex` format already refuses it, before any rule of ours runs."""
+    schema = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": "(", "maxLength": 8}},
+    }
+    assert schema_problems(schema) == ["not a JSON Schema: '(' is not a 'regex'"]
+
+
+def test_a_mismatch_names_the_pattern_not_the_value() -> None:
+    """#3416: as the over-long refusal, the value is never quoted back."""
+    schema = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": "^a+$", "maxLength": 32}},
+    }
+    with pytest.raises(InputsError) as caught:
+        resolve_inputs(schema, {"s": "secret-ish"})
+    assert caught.value.problems == ["s: does not match '^a+$'"]
+
+
 def test_a_required_boolean_is_refused() -> None:
     """#2661: left out, a boolean is false, so `required` could never refuse it."""
     schema = {"type": "object", "properties": {"dry": {"type": "boolean"}}, "required": ["dry"]}

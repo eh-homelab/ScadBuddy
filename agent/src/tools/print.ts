@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { ACCEPTING_MS, command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach, reattachFollowing, RESPOND_ASYNC } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -307,7 +307,7 @@ export const printTools: Tool[] = [
         getChoices(ctx, source, args.printer_id),
         getPlates(ctx, source).catch((err: unknown) => {
           platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
-          // #1814: only the error's name; its message can quote a connection string (telemetry/scrub.ts).
+          // #1814: the error's name and status, never its message, which can quote a connection string (telemetry/scrub.ts).
           console.warn(`get_print_choices: the plates could not be read (${errorName(err)})`)
           return []
         }),
@@ -418,7 +418,9 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'list_print_projects',
-    description: "Bambuddy's projects, to file prints under, and the one last used." + PAGED,
+    description: "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
+      'the user changes, in Settings.' +
+      PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
     source:
@@ -777,22 +779,6 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
-    name: 'remember_last_project',
-    description:
-      'Choose `last_project_id` (null for "No project"): the project a print dialog with no project of its own ' +
-      '(a library file) opens on, and a run that names none is filed under. The Customize page opens on the ' +
-      "project remembered for the model and preset instead (get_remembered_choices' `model_projects`), or on no " +
-      'project. list_print_projects shows the current `last_project_id`.',
-    input: z.object({ project_id: z.number().int().nullable() }),
-    risk: 'write',
-    routes: ['PUT /api/v1/print/projects/last'],
-    handler: async ({ project_id }, { backend }) =>
-      json(
-        await ok(backend.PUT('/api/v1/print/projects/last', { body: { project_id } }), 'remember the project'),
-      ),
-  }),
-
-  defineTool({
     name: 'remember_printer_bed_type',
     description: 'Remember which build plate type is on a printer (null to forget it).',
     input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
@@ -845,7 +831,7 @@ export const printTools: Tool[] = [
       "elsewhere, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
-      'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
+      'project: omit it for the default project (`last_project_id`), or pass null for "No project". ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
@@ -1043,22 +1029,31 @@ export const printTools: Tool[] = [
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
-      const started = await reattach(
+      // A run no worker has picked up yet is a 202 followed to the run, not a 503
+      // re-sent (#2795): each re-send of a print is a chance to print twice.
+      const started = await reattachFollowing(
         ctx,
         () =>
+          // Only the preference, not `CommandHeaders`: a run keys on the body's
+          // `request_id`, never an `Idempotency-Key` (#3086).
           source.kind === 'library'
             ? backend.POST('/api/v1/print/library/{file_id}/run', {
                 params: { path: { file_id: source.id } },
+                headers: RESPOND_ASYNC,
                 signal: ctx.signal,
                 body,
               })
             : backend.POST('/api/v1/print/outputs/{output_id}/run', {
                 params: { path: { output_id: source.id } },
+                headers: RESPOND_ASYNC,
                 signal: ctx.signal,
                 body,
               }),
         `print ${sourceName(args)}`,
-        " The print may still have started: check Bambuddy's queue before printing again.",
+        ` The print may still have started (request ${requestId}): it has no run id yet for get_print_run. ` +
+          `get_print_progress for this ${source.kind === 'library' ? 'library file' : 'output'} is safe to repeat and ` +
+          "shows the print once it starts; check it and Bambuddy's queue before printing again, as calling " +
+          'print_output again would be a second print.',
       )
       return runOutcome(await waitForRun(ctx, started), ctx)
     },

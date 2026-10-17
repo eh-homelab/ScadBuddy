@@ -1,3 +1,7 @@
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { StepCard } from './StepCard'
 import type { PrimeTowerChoice } from '../../api/types'
 
 type Props = {
@@ -48,17 +52,15 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
       (colours === null || colours > 1))
   const noSparse = value?.no_sparse_layers ?? templateSettings?.wipe_tower_no_sparse_layers === '1'
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-      <legend className="px-1 text-[13px] text-ink">Prime tower</legend>
-      <div className="mt-1.5 flex flex-col gap-1">
-        <label htmlFor="prime-tower-select" className="text-[12px] text-muted">
+    <StepCard title="Prime tower">
+      <div className="grid gap-1.5">
+        <Label htmlFor="prime-tower-select" className="text-xs font-normal text-muted-foreground">
           Prime tower
-        </label>
-        <select
-          id="prime-tower-select"
+        </Label>
+        <Select
           value={mode}
-          onChange={(event) => {
-            const next = event.target.value as Mode
+          onValueChange={(chosen) => {
+            const next = chosen as Mode
             if (next === 'default') onChange(null)
             else if (next === 'off') onChange({ enabled: false })
             // Keeps a "No sparse layers" chosen before, so switching back is not a reset.
@@ -69,49 +71,52 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
                   : { enabled: true, no_sparse_layers: value.no_sparse_layers },
               )
           }}
-          className="sb-field"
         >
-          <option value="default">{defaultLabel(templateSettings, fromFile)}</option>
-          <option value="on">On</option>
-          <option value="off">Off</option>
-        </select>
+          <SelectTrigger id="prime-tower-select" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default">{defaultLabel(templateSettings, fromFile)}</SelectItem>
+            <SelectItem value="on">On</SelectItem>
+            <SelectItem value="off">Off</SelectItem>
+          </SelectContent>
+        </Select>
         {/* Only under Default, so it never reads as contradicting an explicit On (#3648 review). */}
         {colours !== null && colours <= 1 && mode === 'default' && (
-          <p className="text-[12px] text-muted">
+          <p className="text-xs text-muted-foreground">
             This plate prints one filament, so the slicer leaves the tower out.
           </p>
         )}
         {mode === 'off' && colours !== null && colours > 1 && (
-          <p className="text-[12px] text-warn">
+          <p className="text-xs text-destructive">
             Without a tower, a filament or nozzle change can leave blobs and gaps on the model.
           </p>
         )}
       </div>
       {on && (
-        <label className="mt-2 flex items-start gap-2 text-[12px] text-ink">
-          <input
-            type="checkbox"
+        <Label className="cursor-pointer items-start pt-1 font-normal leading-snug">
+          <Checkbox
             className="mt-0.5"
             checked={noSparse}
             // Intended: ticking it under Default makes the choice On, since No sparse
             // layers only applies with a tower. PrintPicker.test pins it (select reads On).
-            onChange={(event) => onChange({ enabled: true, no_sparse_layers: event.target.checked })}
+            onCheckedChange={(checked) => onChange({ enabled: true, no_sparse_layers: checked === true })}
           />
           <span>
             No sparse layers
             {/* Unchosen and undeclared, the preset decides: off in every Bambu one (#3648
                 review). Not "process", which a query for the Process select would match. */}
             {value?.no_sparse_layers == null && templateSettings?.wipe_tower_no_sparse_layers === undefined && (
-              <span className="text-muted"> (slicer default)</span>
+              <span className="text-muted-foreground"> (slicer default)</span>
             )}
-            <span className="block text-muted">
+            <span className="block text-xs text-muted-foreground">
               Print the tower only on layers that change filament, for a print whose colours
               change only in a few layers. Experimental in Bambu Studio: the nozzle travels
               down to the tower, so check nothing taller stands in its way.
             </span>
           </span>
-        </label>
+        </Label>
       )}
-    </fieldset>
+    </StepCard>
   )
 }

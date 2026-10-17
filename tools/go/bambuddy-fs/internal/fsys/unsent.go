@@ -97,6 +97,16 @@ func (b base) is(f api.File) bool {
 	return b.ID == f.ID && (b.Created.IsZero() || b.Created.Equal(f.Created))
 }
 
+// movedTo is the base once its file is renamed to f: the same file under a new name
+// and folder, or, when a retype sent it again, f itself with its created_at unknown.
+func (b base) movedTo(f api.File) base {
+	if f.ID != b.ID {
+		return base{ID: f.ID, FolderID: f.FolderID, Name: f.Name}
+	}
+	b.Name, b.FolderID = f.Name, f.FolderID
+	return b
+}
+
 // baseOf is the base for a stored file, with its created_at if known.
 func baseOf(f api.File, created time.Time) base {
 	return base{ID: f.ID, Created: created, FolderID: f.FolderID, Name: f.Name}
@@ -616,7 +626,7 @@ func (q *queue) drop(e *entry) {
 
 // rebase follows a stored file renamed through the mount in every record that
 // replaces it: a base is the file wherever it now lives.
-func (q *queue) rebase(id int, name string, folderID int) {
+func (q *queue) rebase(id int, to api.File) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, e := range q.entries {
@@ -626,7 +636,7 @@ func (q *queue) rebase(id int, name string, folderID int) {
 		}
 		rec := e.rec
 		rec.Bases = slices.Clone(rec.Bases)
-		rec.Bases[i].Name, rec.Bases[i].FolderID = name, folderID
+		rec.Bases[i] = rec.Bases[i].movedTo(to)
 		if err := writeRecord(e.dir, rec); err != nil {
 			slog.Error("updating an unsent write's record failed", "path", e.dir, "err", err)
 			continue

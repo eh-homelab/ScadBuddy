@@ -74,6 +74,8 @@ async def get_archives(
     own), each with its status, times, filament, cost, failure reason and run counts.
     A page shorter than ``limit`` is the last."""
     async with client_for(store.load()) as client:
+        # Strict, unlike the print history's list read (#3477 review): this page *is*
+        # the rows, so one that does not parse fails the read rather than vanish from it.
         rows = await client.archive_outcomes(
             printer_id=printer_id,
             project_id=project_id,

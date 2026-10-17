@@ -231,24 +231,24 @@ describe('Preview scene (#364)', () => {
     scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
     const user = userEvent.setup()
     const { rerender } = render(<Preview job={job('a', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
-    const picker = screen.getByRole('group', { name: 'Plates shown' })
-    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    const picker = screen.getByRole('radiogroup', { name: 'Plates shown' })
+    expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     const all = scene.camera.position.length()
 
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
-    expect(screen.getByRole('button', { name: 'Plate 2 alone' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Plate 2 alone' })).toHaveAttribute('aria-checked', 'true')
     // Plate 2's own mesh (the only one with a 280 mm box), framed, with no outlines.
     expect(scene.camera.position.length()).toBeLessThan(all / 2)
     expect(screen.queryAllByTestId('plate-label')).toHaveLength(0)
 
-    await user.click(screen.getByRole('button', { name: 'All plates' }))
+    await user.click(screen.getByRole('radio', { name: 'All plates' }))
     expect(screen.getAllByTestId('plate-label')).toHaveLength(3)
 
     // A new render shows every plate again, whatever was chosen for the last one.
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
     rerender(<Preview job={job('b', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
-    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     expect(picker).toBeInTheDocument()
   })
 
@@ -264,10 +264,10 @@ describe('Preview scene (#364)', () => {
     const user = userEvent.setup()
     render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
 
-    const picker = screen.getByRole('group', { name: 'Plates shown' })
-    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['All', '2', '5'])
-    await user.click(screen.getByRole('button', { name: 'Plate 5 alone' }))
-    expect(screen.getByRole('button', { name: 'Plate 5 alone' })).toHaveAttribute('aria-pressed', 'true')
+    const picker = screen.getByRole('radiogroup', { name: 'Plates shown' })
+    expect(within(picker).getAllByRole('radio').map((b) => b.textContent)).toEqual(['All', '2', '5'])
+    await user.click(screen.getByRole('radio', { name: 'Plate 5 alone' }))
+    expect(screen.getByRole('radio', { name: 'Plate 5 alone' })).toHaveAttribute('aria-checked', 'true')
   })
 
   it('goes back to every plate when one plate cannot be shown alone, and says so (#2914)', async () => {
@@ -282,16 +282,68 @@ describe('Preview scene (#364)', () => {
     const user = userEvent.setup()
     render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
 
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
     expect(await screen.findByRole('status')).toHaveTextContent('Plate 2 could not be shown alone; showing all plates.')
-    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getAllByTestId('plate-label')).toHaveLength(2)
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 
+  it('blames a plate only when its own mesh failed, not the one still on screen (#3036 review)', async () => {
+    const plates = [1, 2].map((index) => ({
+      index,
+      bbox_mm: box([0, 0, 0], [10, 10, 5]),
+      colors: ['#FF0000'],
+    }))
+    const alone = new THREE.Group()
+    alone.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 10)))
+    scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const user = userEvent.setup()
+    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+    // Every plate together fails just as plate 2 is picked: for that one render the
+    // all-plates mesh is still the one on screen, so it is what broke, not plate 2.
+    scene.failing.add('/api/v1/jobs/a/preview.glb')
+    onTestFinished(() => scene.failing.clear())
+
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
+
+    // Plate 2's own mesh loads, and stays chosen: it is not blamed, nor taken away.
+    await act(async () => {})
+    expect(screen.getByRole('radio', { name: 'Plate 2 alone' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByText(/could not be shown alone/)).not.toBeInTheDocument()
+  })
+
+  it("does not blame the next job's plate for the last job's plate mesh failing (#3646 review)", async () => {
+    const plates = [1, 2].map((index) => ({
+      index,
+      bbox_mm: box([0, 0, 0], [10, 10, 5]),
+      colors: ['#FF0000'],
+    }))
+    const alone = new THREE.Group()
+    alone.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 10)))
+    scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const user = userEvent.setup()
+    const done = job('a', box([0, 0, 0], [10, 10, 5]), { plates })
+    const { rerender } = render(<Preview job={done} rendering={false} />)
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
+
+    // The next render runs; the last one's plate 2 stays on screen until it is done.
+    const next = job('b', box([0, 0, 0], [10, 10, 5]), { status: 'running', preview_url: null, plates })
+    rerender(<Preview job={next} rendering />)
+    scene.failing.add('/api/v1/jobs/a/preview.glb?plate=2')
+    onTestFinished(() => scene.failing.clear())
+    rerender(<Preview job={{ ...next }} rendering />)
+    await act(async () => {})
+
+    // That mesh was job a's: job b never had a plate picked, so nothing says one failed.
+    expect(screen.queryByText(/could not be shown alone/)).not.toBeInTheDocument()
+  })
+
   it('offers no plate picker for a one-plate render', () => {
     render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
-    expect(screen.queryByRole('group', { name: 'Plates shown' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radiogroup', { name: 'Plates shown' })).not.toBeInTheDocument()
   })
 })

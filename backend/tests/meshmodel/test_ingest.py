@@ -88,11 +88,8 @@ def test_a_painted_part_keeps_its_codes_beside_its_mesh() -> None:
     )
     assert scene.objects[0].parts[0].painted
     assert json.loads(files["meshes/o1-p1.paint.json"])["codes"][-1] == "4"
-    # Phases 1-2 carry no paint into renders or prints: the note says so (spec §7).
-    assert scene.notes == [
-        "Carrot: painted in Bambu Studio; the paint is not carried into renders or prints "
-        "until phase 3, so each part prints in its own colour"
-    ]
+    # The render carries the paint (meshmodel/paint.py), so no note says it does not.
+    assert scene.notes == []
 
 
 def test_a_negative_part_is_kept_as_one() -> None:

@@ -17,7 +17,8 @@ test.describe('print history (#310)', () => {
     await expect(prints(page)).toHaveCount(4)
     await expect(page.locator('[data-print="38"]')).toContainText('Deleted in Bambuddy')
 
-    await page.getByLabel('Status').selectOption('failed')
+    await page.getByRole('combobox', { name: 'Status' }).click()
+    await page.getByRole('option', { name: 'Failed' }).click()
     await expect(page).toHaveURL(/\/prints\?status=failed$/)
     await expect(prints(page)).toHaveCount(1)
     await expect(page.locator('[data-print="36"]')).toContainText('Failed')
@@ -28,7 +29,7 @@ test.describe('print history (#310)', () => {
     await page.goForward()
     await page.reload()
     await expect(prints(page)).toHaveCount(1)
-    await expect(page.getByLabel('Status')).toHaveValue('failed')
+    await expect(page.getByRole('combobox', { name: 'Status' })).toHaveText('Failed')
   })
 
   test('text search and Clear filters', async ({ page }) => {
@@ -72,9 +73,9 @@ test.describe('print history (#310)', () => {
     await expect(page).toHaveURL(/\/m\/name-keychain\/prints$/)
     await expect(page.getByRole('heading', { name: 'Prints' })).toBeVisible()
     await expect(prints(page)).toHaveCount(4)
-    await expect(page.getByLabel('Template')).toHaveCount(0)
+    await expect(page.getByRole('combobox', { name: 'Template' })).toHaveCount(0)
 
-    await page.getByRole('group', { name: 'View' }).getByRole('button', { name: 'List' }).click()
+    await page.getByRole('radiogroup', { name: 'View' }).getByRole('radio', { name: 'List' }).click()
     await expect(page).toHaveURL(/\/m\/name-keychain\/prints\?view=list$/)
     await page.goto('/m/name-keychain/prints')
     await expect(page.getByRole('list', { name: 'Prints' })).toHaveAttribute('data-view', 'list')

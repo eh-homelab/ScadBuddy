@@ -15,6 +15,7 @@ import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
 import { type BuiltinContext, builtinServer, classicBuiltinServer } from '../src/builtins/server.js'
 import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
+import { NoUsableCredentialError } from '../src/harness/fallback.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -491,6 +492,38 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(attempts).toBe(2)
     expect(used).toEqual(['sk-ant-key-aaaa', 'sk-ant-key-bbbb'])
+    classic.abortAll()
+  })
+
+  it("refuses WebFetch's model call when the turn has no credential to be on (#3508 review)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    let credential: (() => Promise<unknown>) | undefined
+    let ran = false
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      run: () =>
+        (async function* () {
+          ran = true
+          yield* []
+        })(),
+      nestedQueries: (deps) => {
+        credential = deps.credential
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      // An empty pool: the turn starts no attempt, so it is on no credential.
+      credentials: { candidates: () => Promise.resolve([]), reporter: () => () => Promise.resolve() },
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    const turn = await classic.send(session.id, browser, 'fetch it')
+    await turn.done
+    expect(ran).toBe(false)
+    expect(credential).toBeDefined()
+    await expect(credential!()).rejects.toBeInstanceOf(NoUsableCredentialError)
     classic.abortAll()
   })
 

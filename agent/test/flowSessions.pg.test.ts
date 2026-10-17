@@ -108,6 +108,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect(await waiting).toEqual({ session_id: sid, turn_id: 't1', text: '{"done": true}', outward_calls: 1 })
   })
 
+  it('answers from the latest start of a turnId logged twice, as userTurnText reads it (#3750)', async () => {
+    const sid = await session()
+    const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
+    await log.append(sid, [
+      event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'first', author: owner }),
+      ...say(sid, 'm1', 'the first answer'),
+      event({ type: 'session.result', sessionId: sid, turns: 1 }),
+      event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'again', author: owner }),
+      ...say(sid, 'm2', 'the second answer'),
+      event({ type: 'session.result', sessionId: sid, turns: 2 }),
+      event({ type: 'session.status', sessionId: sid, status: 'idle' }),
+    ])
+    expect(await log.userTurnText(sid, 't1')).toBe('again')
+    expect((await turn(sid, 't1')).text).toBe('the second answer')
+  })
+
   it('fails a turn that ended in an error, never to be retried', async () => {
     const sid = await session()
     const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
@@ -150,6 +166,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       const waited = await failure(turn(sid, 't1'))
       expect(waited.type).toBe(SESSION_REFUSED)
     }
+  })
+
+  // #3778 follow-up: an id that is not a uuid is refused before any query. Reaching
+  // `$1::uuid` it would be a 22P02, which the activity retries, not a refusal.
+  it('refuses an id that is not a uuid without asking the database', async () => {
+    let queries = 0
+    const counted = Object.assign((...args: Parameters<typeof t.db.sql>) => {
+      queries += 1
+      return t.db.sql(...args)
+    }, t.db.sql) as unknown as typeof t.db.sql
+    const guarded = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(counted) })
+    for (const sid of ['-'.repeat(36), 'g'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12), ` ${randomUUID()}`]) {
+      const err = await failure(env().run(guarded[FLOW_SESSION_CHECK]!, { session_id: sid }))
+      expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])
+    }
+    expect(queries).toBe(0)
   })
 
   // #2258: as flowCaller and turnCaller refuse it, never looked up as execution ''.

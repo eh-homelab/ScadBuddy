@@ -696,12 +696,22 @@ async def test_the_own_plugin_loads_unless_settings_switched_it_off(
 
 class Refusing:
     """make_runner for the runner: a segment on a credential in ``refused`` raises
-    ``error``; any other answers. Records each runner's token."""
+    ``error``; any other answers. Records each runner's token. With ``scripted``, the
+    refused segment says ``said`` through the plugin's ScriptedClaude, not this test's
+    own emit() call."""
 
-    def __init__(self, refused: set[str], error: BaseException, said: str | None = None) -> None:
+    def __init__(
+        self,
+        refused: set[str],
+        error: BaseException,
+        said: str | None = None,
+        *,
+        scripted: bool = False,
+    ) -> None:
         self.refused = refused
         self.error = error
         self.said = said
+        self.said_via_scripted = scripted
         self.tokens: list[str] = []
         self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
 
@@ -710,6 +720,8 @@ class Refusing:
         self.tokens.append(token)
         if token in self.refused:
             error, said = self.error, self.said
+            if self.said_via_scripted and said is not None:
+                return RefusesAfterSaying(said, error)
 
             class Raises:
                 async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
@@ -803,16 +815,13 @@ async def test_a_refused_credentials_scripted_notice_never_reaches_the_transcrip
     not this test's own emit() call, so the hold covers the plugin's publishing."""
     await _two_credentials(agent_db)
     notice = "You've hit your session limit · resets 6pm (UTC)"
-    refusing = Refusing(set(), _result_error("API Error: 429 rate limited", status=429))
-    refused = RefusesAfterSaying(notice, refusing.error)
-
-    def make_runner(**kwargs: Any) -> Any:
-        if kwargs["env"]["ANTHROPIC_AUTH_TOKEN"] == TOKEN:
-            refusing.tokens.append(TOKEN)
-            return refused
-        return refusing(**kwargs)
-
-    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=make_runner)
+    refusing = Refusing(
+        {TOKEN},
+        _result_error("API Error: 429 rate limited", status=429),
+        said=notice,
+        scripted=True,
+    )
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
     async with running(temporal_env, connect, runner) as (client, queue):
         sid = await insert_session(agent_db)
         handle = await start_session(client, sid, queue)

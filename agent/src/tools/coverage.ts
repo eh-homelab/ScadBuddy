@@ -40,6 +40,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'timelapse itself through get_print_timelapse.',
   },
   {
+    operation: 'POST /api/v1/commands/{workflow_id}/updates/{update_id}',
+    reason:
+      'Follows a command the backend answered 202 `accepting` (#2795, spec 2026-10-13). The command tools ' +
+      "(render_model, print_output and every Operation route) follow it themselves through `answeredFollowing`; " +
+      'it is not an action of its own.',
+  },
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
     reason:
       "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
@@ -88,6 +95,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "The flow editor's completion and hover (#2487). An agent has the same host functions in " +
       "register_flow's description, and check_flow_script's problems name a wrong call.",
+  },
+  {
+    operation: 'POST /api/v1/workflow-script/host-functions',
+    reason:
+      "The flow editor's completion and hover for a flow with inputs (#2651). An agent reads `inputs()` in " +
+      "register_flow's description, and check_flow_script types it against the schema it is given.",
   },
   {
     operation: 'GET /api/v1/workflow-runs/{run_id}/images/{name}',
@@ -297,6 +310,23 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The print dialog's background reslice (#2169), which shows grams, time and the nozzle plan beside " +
       'the choices while a person changes them. An agent prints through print_output, whose run slices ' +
       'anyway, and reads the plan from the print check.',
+  })),
+  ...(
+    [
+      'POST /api/v1/print/batches',
+      'GET /api/v1/print/batches',
+      'GET /api/v1/print/batches/{batch_id}',
+      'PUT /api/v1/print/batches/{batch_id}/step',
+      'PUT /api/v1/print/batches/{batch_id}/items/{position}',
+      'POST /api/v1/print/batches/{batch_id}/queue',
+      'DELETE /api/v1/print/batches/{batch_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The Library page's stepped batch-print dialog (#2672), whose state is the step a person is on so a " +
+      'reload resumes it. Queue all only starts each file\'s ordinary library run; an agent prints several ' +
+      'library files by calling print_output with each library_file_id, which makes the same refusals.',
   })),
   {
     operation: 'POST /api/v1/print/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
