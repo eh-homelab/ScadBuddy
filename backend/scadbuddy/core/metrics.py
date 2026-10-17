@@ -39,7 +39,9 @@ RenderOutcome = Literal["done", "failed", "superseded"]
 #: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
 #: §7): spelled out here, not imported, so the metrics never load the render stack.
 RenderKind = Literal["render", "arrange"]
-RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write", "recolour"]
+RenderStage = Literal[
+    "source", "render", "split", "solids", "paint", "thumbnail", "write", "recolour"
+]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
@@ -82,20 +84,25 @@ class Metrics:
         # Render queue: admission, then the job's life.
         self.render_submitted = Counter(
             "scadbuddy_render_jobs_submitted",
-            "Render requests accepted onto the queue as a new job.",
+            "Render requests accepted onto the queue as a new job."
+            " A request answered 202 accepting is counted by the follow that gets its"
+            " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],
             registry=r,
         )
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
-            "Render requests answered with an identical job already waiting.",
+            "Render requests answered with an identical job already waiting."
+            " A request answered 202 accepting is counted by the follow that gets its"
+            " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],
             registry=r,
         )
         self.render_accept_pending = Counter(
             "scadbuddy_render_accept_pending",
-            "Render requests answered 503 command-still-accepting: their job was not"
-            " answered in time, and the client sends the same request again; by kind.",
+            "Render requests whose job was not answered in time: answered 503"
+            " command-still-accepting (the client sends the same request again), or 202"
+            " accepting to a client that follows it (#2340); once per request, by kind.",
             ["kind"],
             registry=r,
         )
@@ -178,7 +185,9 @@ class Metrics:
         )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
-            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
+            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting."
+            " A request answered 202 accepting and then refused is not counted: its follow"
+            " cannot tell a render's queue-full from an Arrange's (#2340, #3575).",
             ["kind"],
             registry=r,
         )
@@ -250,6 +259,14 @@ class Metrics:
             "Time from submit until its workflow began the render, by kind.",
             ["kind"],
             buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+        self.project_retries = Counter(
+            "scadbuddy_render_project_retries_total",
+            "Retried writes of a render job's row (the `project` activity), which retries "
+            "without limit: counted as each retry starts, so one per failed write. A "
+            "steady rise is a write that never lands (#857). Alert on this, not the log: "
+            "the warning is logged only at the 12th attempt and every 100th after.",
             registry=r,
         )
         self.render_duration = Histogram(

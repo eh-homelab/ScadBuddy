@@ -5,8 +5,9 @@ import { DuplicateModelButton } from '../components/DuplicateModelButton'
 import { SourceDiff } from '../components/SourceDiff'
 import { SourceFileTabs } from '../components/SourceFileTabs'
 import { SourceWorkbench } from '../components/SourceWorkbench'
-import { Button } from '../components/ui/Button'
-import { Spinner } from '../components/ui/Spinner'
+import { PageLoading, PageProblem } from '../components/PageState'
+import { Button } from '@/components/ui/button'
+import { Toggle } from '@/components/ui/toggle'
 import { modelPath } from '../lib/deeplink'
 import { countConflicts } from '../lib/upstream'
 import { useSubscription } from '../lib/realtime'
@@ -143,11 +144,7 @@ export function EditSourcePage() {
   }
 
   if (loaded.loading || model.loading || upstream.loading || (source === null && !loaded.error)) {
-    return (
-      <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading the source
-      </p>
-    )
+    return <PageLoading label="Loading the source" />
   }
 
   // A source that does not load says so first; the record's read failing is the
@@ -155,25 +152,20 @@ export function EditSourcePage() {
   const sourceUnread = loaded.error !== undefined && !(loaded.error instanceof RecordUnreadError)
   if (sourceUnread || (source === null && !recordError)) {
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">That source is not here</h1>
-        <p className="mt-2 text-[13px] text-muted">{loaded.error?.message}</p>
-        <Link to="/" className="mt-4 inline-block text-[13px] text-accent underline">
-          Back to models
-        </Link>
-      </div>
+      <PageProblem title="That source is not here" message={loaded.error?.message}>
+        <Button asChild variant="outline">
+          <Link to="/">Back to models</Link>
+        </Button>
+      </PageProblem>
     )
   }
 
   // Whether the source may be saved is the record's to say; without it, nothing is offered.
   if (recordError || source === null) {
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">Could not load this model</h1>
-        <p className="mt-2 text-[13px] text-muted">{recordError?.message}</p>
+      <PageProblem title="Could not load this model" message={recordError?.message}>
         <Button
-          size="sm"
-          className="mt-4"
+          type="button"
           onClick={() => {
             model.reload()
             loaded.refresh()
@@ -181,7 +173,7 @@ export function EditSourcePage() {
         >
           Try again
         </Button>
-      </div>
+      </PageProblem>
     )
   }
 
@@ -191,11 +183,11 @@ export function EditSourcePage() {
     <SourceWorkbench
       breadcrumb={
         <>
-          <Link to={modelPath(slug)} className="shrink-0 text-[12px] text-muted hover:text-ink">
+          <Link to={modelPath(slug)} className="shrink-0 text-sm text-muted-foreground hover:text-foreground">
             {model.data?.name ?? slug}
           </Link>
-          <span className="text-faint">/</span>
-          <h1 className="truncate text-[13px] font-medium">
+          <span className="text-muted-foreground">/</span>
+          <h1 className="truncate text-sm font-medium">
             {builtin ? 'View source' : merge ? 'Resolve update' : 'Edit source'}
           </h1>
         </>
@@ -205,20 +197,20 @@ export function EditSourcePage() {
         {theirs !== null && (
           <div data-testid="changed-elsewhere">
             {/* Only the banner row is live: the diff below it would be re-announced on every keystroke (#2194). */}
-            <div role="status" className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]">
+            <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-primary/40 bg-primary/10 px-3 py-1.5 text-xs">
               <span>
                 This source was changed elsewhere since you opened it. Load that version (your
                 edits here are discarded), or keep editing and save over it.
               </span>
-              <Button size="sm" onClick={takeTheirs}>
+              <Button type="button" size="sm" onClick={takeTheirs}>
                 Load their version
               </Button>
-              <Button size="sm" variant="ghost" onClick={keepMine}>
+              <Button type="button" size="sm" variant="ghost" onClick={keepMine}>
                 Keep editing
               </Button>
-              <Button size="sm" variant="ghost" aria-pressed={comparing} onClick={() => setComparing(!comparing)}>
+              <Toggle size="sm" variant="outline" pressed={comparing} onPressedChange={setComparing}>
                 {comparing ? 'Hide changes' : 'Compare'}
-              </Button>
+              </Toggle>
             </div>
             {comparing && <SourceDiff original={theirs.source} modified={source} />}
           </div>
@@ -227,7 +219,7 @@ export function EditSourcePage() {
           <p
             data-testid="merge-banner"
             role="status"
-            className={`border-t border-line px-3 py-1.5 text-[12px] ${merge ? 'text-muted' : 'text-warn'}`}
+            className={`border-t px-3 py-1.5 text-xs ${merge ? 'text-muted-foreground' : 'text-destructive'}`}
           >
             {merge
               ? `Resolving the update from ${merge.id}. Edit each conflict, from <<<<<<< to >>>>>>>, ` +

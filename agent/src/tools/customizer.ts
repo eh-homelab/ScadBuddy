@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { ACCEPTING_MS, command, reattach } from './command.js'
+import { ACCEPTING_MS, command, type CommandHeaders, reattachFollowing, RESPOND_ASYNC } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
@@ -50,7 +50,8 @@ async function getJob(ctx: ToolContext, id: string) {
 
 /**
  * When a render_model or arrange call's own waits end (`waitsMs`: ACCEPTING_MS +
- * renderWaitMs), as one deadline taken when the call starts (#2846). The slot wait and
+ * renderWaitMs), as one deadline taken just before the slot wait (in render_model,
+ * after its parameter checks; arrange takes it first thing) (#2846). The slot wait and
  * the job's wait (`renderWaitMs` at most) both spend from it, so a slot granted late
  * leaves the job less time rather than running the call past `TOOL_DEADLINE_MS`, where
  * it would be answered as "may have taken effect". Only the submit's own accepting wait
@@ -103,13 +104,13 @@ export function releaseWhenSettled(
  * "submits a render and streams progress until it settles"). It always polls once, so
  * a job already settled is answered.
  */
-export async function waitForJob(ctx: ToolContext, id: string, callDeadline: number): Promise<JobStatus> {
-  const deadline = Math.min(callDeadline, performance.now() + ctx.renderWaitMs)
+export async function waitForJob(ctx: ToolContext, id: string, deadline: number): Promise<JobStatus> {
+  const until = Math.min(deadline, performance.now() + ctx.renderWaitMs)
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (settled(job.status) || performance.now() >= deadline) return job
+    if (settled(job.status) || performance.now() >= until) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -240,10 +241,10 @@ export const customizerTools: Tool[] = [
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
-        // Sent again while the backend is still accepting it (#1053), with one
-        // `Idempotency-Key`: the backend counts the re-sends as this one request's claim.
-        const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
-        const accepted = await reattach(
+        // One `Idempotency-Key` (#1053): the backend counts a re-send as this one
+        // request's claim. A start still accepting is a 202 followed to its job (#2795).
+        const headers: CommandHeaders = { 'Idempotency-Key': randomUUID().replaceAll('-', ''), ...RESPOND_ASYNC }
+        const accepted = await reattachFollowing(
           ctx,
           () =>
             ctx.backend.POST('/api/v1/models/{slug}/render', {

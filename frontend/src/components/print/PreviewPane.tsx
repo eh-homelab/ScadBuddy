@@ -2,6 +2,10 @@ import { useCallback, useMemo, useState } from 'react'
 import type { NozzlePlan, SlicePreview, SlotChoice, SlotNeed, SpoolOption } from '../../api/types'
 import { formatDuration, normalizeHex } from '../../lib/format'
 import { spoolLabel } from '../../lib/filaments'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { PlateScene } from './PlateScene'
 import { Swatch } from './Swatch'
 
@@ -15,6 +19,54 @@ function canDraw3d(): boolean {
 }
 
 const SIDE = { L: 'left', R: 'right' } as const
+
+/**
+ * A colour to try on the preview for one slot (#2169): its chip opens a popover with the
+ * colour field, so trying one is a choice of its own, never the slot's spool.
+ */
+function TryColour({
+  slotId,
+  colour,
+  onTry,
+}: {
+  slotId: number
+  colour: string | null | undefined
+  onTry: (colour: string) => void
+}) {
+  const hex = normalizeHex(colour ?? '#000000')
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-label={`Try a colour for slot ${slotId}`}
+              className="shrink-0 cursor-pointer rounded-[4px] outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              <Swatch colour={colour} />
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Try a colour on the preview</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="start" className="w-auto p-3">
+        <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <input
+            type="color"
+            aria-label={`Colour for slot ${slotId}`}
+            value={hex}
+            onChange={(event) => onTry(event.target.value)}
+            className="h-8 w-12 cursor-pointer rounded-md border bg-transparent p-0.5"
+          />
+          <span>
+            Slot {slotId} on the preview only: <span className="sb-num text-foreground">{hex}</span>
+          </span>
+        </label>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 /**
  * #2449 — where the slice departs from the plan it was made with: a planned slot the
@@ -133,16 +185,16 @@ export function PreviewPane({
   }, [colors, slots, tried])
   const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry]))
   const [thumbFailed, setThumbFailed] = useState(false)
-  const departures = sliceDepartures(nozzlePlan, plateSlots, slice)
+  const departures = useMemo(() => sliceDepartures(nozzlePlan, plateSlots, slice), [nozzlePlan, plateSlots, slice])
 
   return (
     <aside className="flex min-w-0 flex-col gap-3" data-testid="preview-pane" aria-label="Preview">
       {label && (
         <p className="text-[13px] text-ink" data-testid="preview-label">
-          <span className="text-muted">Showing</span> {label}
+          <span className="text-muted-foreground">Showing</span> {label}
         </p>
       )}
-      <div className="relative h-[260px] overflow-hidden rounded-[6px] border border-line bg-surface-2 lg:h-[320px]">
+      <Card className="relative h-[260px] gap-0 py-0 lg:h-[320px]" data-testid="preview-canvas">
         {url && canDraw3d() ? (
           <PlateScene url={url} colors={shownColors} cutAt={null} onHeight={onHeight} background={background()} />
         ) : thumbnailUrl && !thumbFailed ? (
@@ -157,11 +209,11 @@ export function PreviewPane({
           <img
             src={thumbnailUrl}
             alt="The plate as last sliced"
-            className="absolute right-2 bottom-2 size-16 rounded-[4px] border border-line bg-surface object-contain"
+            className="absolute right-2 bottom-2 size-16 rounded-md border bg-card object-contain"
             onError={() => setThumbFailed(true)}
           />
         )}
-      </div>
+      </Card>
 
       <ul className="space-y-1.5" data-testid="preview-legend">
         {slots.map((slot) => {
@@ -170,24 +222,20 @@ export function PreviewPane({
           const colour = tried[slot.slot_id] ?? spool?.colour ?? slot.colour
           const amount = grams(sliced.get(slot.slot_id)?.grams)
           return (
-            <li key={slot.slot_id} className="flex min-w-0 items-center gap-2 text-[12px] text-ink">
-              <label className="relative shrink-0 cursor-pointer" title="Try a colour on the preview">
-                <Swatch colour={colour} />
-                <input
-                  type="color"
-                  aria-label={`Try a colour for slot ${slot.slot_id}`}
-                  value={normalizeHex(colour ?? '#000000')}
-                  onChange={(event) => setTried((current) => ({ ...current, [slot.slot_id]: event.target.value }))}
-                  className="absolute inset-0 size-full cursor-pointer opacity-0"
-                />
-              </label>
+            <li key={slot.slot_id} className="flex min-w-0 items-center gap-2 text-[12px] text-foreground">
+              <TryColour
+                slotId={slot.slot_id}
+                colour={colour}
+                onTry={(next) => setTried((current) => ({ ...current, [slot.slot_id]: next }))}
+              />
               <span className="min-w-0 flex-1 truncate">
-                <span className="text-muted">Slot {slot.slot_id}:</span>{' '}
+                <span className="text-muted-foreground">Slot {slot.slot_id}:</span>{' '}
                 {tried[slot.slot_id] ? 'colour tried here, not a spool' : spool ? spoolLabel(spool) : 'no spool chosen'}
               </span>
               {tried[slot.slot_id] && (
-                <button
+                <Button
                   type="button"
+                  variant="link"
                   onClick={() =>
                     setTried((current) => {
                       const next = { ...current }
@@ -195,13 +243,15 @@ export function PreviewPane({
                       return next
                     })
                   }
-                  className="shrink-0 text-[11px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
+                  className="h-auto shrink-0 p-0 text-[11px] text-muted-foreground"
                 >
                   Undo
-                </button>
+                </Button>
               )}
-              {sliced.get(slot.slot_id)?.side && (
-                <span className={`shrink-0 text-muted ${stale ? 'opacity-60' : ''}`} data-testid={`preview-side-${slot.slot_id}`}>
+              {/* #3500 review: a side is a claim about the sliced plate, as the moved-nozzle
+                  note is, so it is hidden while stale with it; the grams only dim. */}
+              {!stale && sliced.get(slot.slot_id)?.side && (
+                <span className="shrink-0 text-muted-foreground" data-testid={`preview-side-${slot.slot_id}`}>
                   {sliced.get(slot.slot_id)?.side === 'L' ? 'left nozzle' : 'right nozzle'}
                 </span>
               )}
@@ -211,15 +261,16 @@ export function PreviewPane({
         })}
       </ul>
 
-      <div className="rounded-[6px] border border-line px-3 py-2 text-[12.5px]" data-testid="slice-summary" aria-live="polite">
+      <Card size="sm" className="gap-0 text-[12.5px]" data-testid="slice-summary" aria-live="polite">
+        <CardContent>
         <div className="flex items-center justify-between gap-2">
-          <span className="text-ink">Slice</span>
+          <span className="font-medium text-foreground">Slice</span>
           {slicing ? (
-            <span className="text-[12px] text-muted" data-testid="slice-status">
+            <span className="text-[12px] text-subtle" data-testid="slice-status">
               {slice ? 'Reslicing for your changes…' : 'Slicing…'}
             </span>
           ) : stale ? (
-            <span className="text-[12px] text-muted" data-testid="slice-status">
+            <span className="text-[12px] text-subtle" data-testid="slice-status">
               Out of date
             </span>
           ) : null}
@@ -228,7 +279,7 @@ export function PreviewPane({
           <dl className={`mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 ${stale ? 'opacity-60' : ''}`} data-stale={stale}>
             {slice.print_time_seconds != null && (
               <>
-                <dt className="text-muted">Time</dt>
+                <dt className="text-subtle">Time</dt>
                 <dd className="sb-num" data-testid="slice-time">
                   {formatDuration(slice.print_time_seconds)}
                 </dd>
@@ -236,7 +287,7 @@ export function PreviewPane({
             )}
             {slice.filament_used_g != null && (
               <>
-                <dt className="text-muted">Filament</dt>
+                <dt className="text-subtle">Filament</dt>
                 <dd className="sb-num" data-testid="slice-grams">
                   {grams(slice.filament_used_g)}
                 </dd>
@@ -244,7 +295,7 @@ export function PreviewPane({
             )}
             {slice.filament_changes != null && (
               <>
-                <dt className="text-muted">Filament changes (purges)</dt>
+                <dt className="text-subtle">Filament changes (purges)</dt>
                 <dd className="sb-num" data-testid="slice-changes">
                   {slice.filament_changes === 0 ? 'none' : slice.filament_changes}
                 </dd>
@@ -252,10 +303,12 @@ export function PreviewPane({
             )}
           </dl>
         ) : (
-          !slicing && !sliceError && <p className="mt-1 text-[12px] text-muted">Sliced once the choices are made.</p>
+          !slicing && !sliceError && <p className="mt-1 text-[12px] text-subtle">Sliced once the choices are made.</p>
         )}
-        {departures.length > 0 && (
-          <ul className={`mt-1 space-y-0.5 text-[12px] text-warn ${stale ? 'opacity-60' : ''}`} data-testid="slice-departures">
+        {/* #3208: hidden while stale, where the grams only dim: the next slice may
+            contradict them. */}
+        {!stale && departures.length > 0 && (
+          <ul className="mt-1 space-y-0.5 text-[12px] text-warn" data-testid="slice-departures">
             {departures.map((note) => (
               <li key={note}>{note}</li>
             ))}
@@ -266,7 +319,8 @@ export function PreviewPane({
             {sliceError}
           </p>
         )}
-      </div>
+        </CardContent>
+      </Card>
     </aside>
   )
 }

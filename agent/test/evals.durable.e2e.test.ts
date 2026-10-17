@@ -23,6 +23,31 @@ function textOf(content: unknown): string {
   return Array.isArray(content) ? (content as { type?: string; text?: string }[]).map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('') : ''
 }
 
+/**
+ * A model call's credentials as a failure can show them in CI's log: which headers it
+ * carried and whether each is this file's token, never a value (#3506). `scenarioCall`
+ * counts from this scenario's first model call, not from the fake's first (#3567).
+ */
+function authOf(call: RecordedRequest, scenarioCall: number): Record<string, unknown> {
+  const header = (name: string) => {
+    const value = call.headers[name]
+    if (value === undefined) return 'absent'
+    const text = Array.isArray(value) ? value.join(', ') : value
+    const [scheme, ...rest] = text.split(' ')
+    const secret = rest.length > 0 ? rest.join(' ') : text
+    const which = secret === TOKEN ? 'this token' : secret.includes(TOKEN) ? 'contains this token' : 'another value'
+    return `${rest.length > 0 ? `${scheme} ` : ''}<${which}, ${secret.length} chars>`
+  }
+  return {
+    scenarioCall,
+    authorization: header('authorization'),
+    'x-api-key': header('x-api-key'),
+    model: call.body?.model,
+    evalTools: call.body?.tools?.some((t) => t.name.startsWith(DURABLE_EVAL_TOOL_PREFIX)) ?? false,
+    userAgent: call.headers['user-agent'],
+  }
+}
+
 /** The engine's rejection and what the workflow adds to it (agent-durable session/workflow.py `refusal`), for a call the eval denied. */
 function deniedNote(c: { tool: string; id: string }): RegExp {
   const quote = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -84,9 +109,14 @@ describe.skipIf(skip !== undefined)(`eval scenarios in a durable session, script
         expect(block?.is_error === true, c.tool).toBe(c.ok === false)
       }
       expect(calls.length).toBeGreaterThan(0)
-      for (const call of calls) {
-        expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
-      }
+      // Described, never quoted: CI masks a header that holds a secret, which left #3506's
+      // failure saying only that '***' was not '***'.
+      expect(
+        calls.flatMap((call, i) =>
+          call.headers.authorization === `Bearer ${TOKEN}` && call.headers['x-api-key'] === undefined ? [] : [authOf(call, i)],
+        ),
+        'model calls without the gateway token alone',
+      ).toEqual([])
       // The append a session sends reached the model, in this mode as in the classic one.
       const withTools = calls.filter((c) => c.body?.tools?.some((t) => t.name.startsWith(DURABLE_EVAL_TOOL_PREFIX)))
       expect(withTools.length).toBeGreaterThan(0)

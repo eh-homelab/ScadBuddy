@@ -2,7 +2,10 @@ import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import type { TabLinkState } from '../agent/link'
 import type { PairingEntry } from '../agent/linkProtocol'
-import { Button } from './ui/Button'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 /**
  * The pairing prompt of AI spec §8.5 (#254): an agent outside ScadBuddy (an MCP client)
@@ -45,32 +48,31 @@ function Request({
     if (code.trim()) onAccept(entry.id, code.trim())
   }
   return (
-    <form
-      onSubmit={submit}
-      aria-label={`Pairing request from ${entry.label}`}
-      className="rounded-[8px] border border-accent/40 bg-surface p-3 text-[12.5px] shadow-2xl"
-    >
-      <p className="text-ink">
+    <Card size="sm" className="px-3 text-[12.5px] shadow-2xl ring-primary/40">
+    <form onSubmit={submit} aria-label={`Pairing request from ${entry.label}`}>
+      <p className="text-foreground">
         <strong className="font-semibold">{entry.label}</strong> asks to use this tab. It could see what is on
         screen and change it the way you can, but never press Print, Send, Delete or Save for you.
       </p>
-      <p className="mt-1 text-muted">
+      <p className="mt-1 text-muted-foreground">
         Allow it only if you asked it to: type the code it gave you. The request ends at {until(entry.expiresAt)}.
       </p>
       <div className="mt-2 flex items-end gap-2">
-        <label htmlFor={inputId} className="flex flex-1 flex-col gap-1 text-muted">
-          Pairing code
-          <input
+        <div className="flex flex-1 flex-col gap-1">
+          <Label htmlFor={inputId} className="text-[12.5px] font-normal text-muted-foreground">
+            Pairing code
+          </Label>
+          <Input
             id={inputId}
             value={code}
             onChange={(event) => setCode(event.target.value)}
             autoComplete="off"
             spellCheck={false}
             placeholder="ABCD-EFGH"
-            className="sb-field font-mono uppercase text-ink"
+            className="h-7 font-mono uppercase"
           />
-        </label>
-        <Button type="submit" variant="primary" size="sm" disabled={!code.trim()}>
+        </div>
+        <Button type="submit" size="sm" disabled={!code.trim()}>
           Allow
         </Button>
         <Button variant="ghost" size="sm" onClick={() => onDeny(entry.id)}>
@@ -83,6 +85,7 @@ function Request({
         </p>
       )}
     </form>
+    </Card>
   )
 }
 
@@ -100,18 +103,19 @@ export function PairingPrompt({ state, onAccept, onDeny, onEnd }: Props) {
         </div>
       ))}
       {state.paired.map((entry) => (
-        <div
+        <Card
           key={entry.id}
+          size="sm"
           role="status"
-          className="pointer-events-auto flex items-center gap-2 rounded-[8px] border border-line bg-surface px-3 py-2 text-[12.5px] shadow-xl"
+          className="pointer-events-auto flex-row items-center gap-2 px-3 py-2 text-[12.5px] shadow-xl"
         >
-          <span className="flex-1 text-ink">
+          <span className="flex-1 text-foreground">
             <strong className="font-semibold">{entry.label}</strong> can use this tab until {until(entry.expiresAt)}.
           </span>
           <Button variant="ghost" size="sm" onClick={() => onEnd(entry.id)}>
             Disconnect
           </Button>
-        </div>
+        </Card>
       ))}
     </section>
   )

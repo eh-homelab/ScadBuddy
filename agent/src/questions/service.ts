@@ -218,6 +218,11 @@ export class QuestionService {
   ): Promise<T> {
     let logged: { events: ServerEvent[]; seqs: number[] } | undefined
     const value = await this.deps.sql.begin(async (tx) => {
+      // The session row first (review of #3685): two resolutions of one session's questions
+      // that overlapped each saw the other as pending and neither moved the session back.
+      // Locked, the second waits for the first's commit, and its refresh reads both. The
+      // ask takes the same lock before it touches a question row, so the order is one.
+      await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR UPDATE`
       const { value, events } = await change(tx)
       if (events.length) logged = { events, seqs: await this.deps.events.append(sessionId, events, tx) }
       return value
@@ -329,11 +334,14 @@ export class QuestionService {
   /**
    * Sets a session that no longer waits on a question back from
    * `waiting_input`: to `waiting_approval` while an approval is pending, to
-   * `running` while its turn is live, else `idle`.
+   * `running` while its turn is live, else `idle`. Runs inside the transaction
+   * that resolves the question, never after it (#3255): the parked turn resumes
+   * on that commit alone (it polls the row), so a later refresh could find the
+   * turn already finished and `idle`, and `running` would never be logged.
+   * Returns the `session.status` event, if the status moved.
    */
-  async refreshStatus(sessionId: string): Promise<void> {
-    await this.atomically(sessionId, async (tx) => {
-      const [row] = await tx<{ status: 'running' | 'idle' | 'waiting_approval' }[]>`
+  private async statusRefresh(tx: TransactionSql, sessionId: string): Promise<ServerEvent[]> {
+    const [row] = await tx<{ status: 'running' | 'idle' | 'waiting_approval' }[]>`
       UPDATE ai_sessions
       SET status = CASE
             WHEN EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
@@ -346,8 +354,21 @@ export class QuestionService {
         AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
                         AND ${isNotDoneSummary(tx)})
       RETURNING status`
-      return { value: undefined, events: row ? [event({ type: 'session.status', sessionId, status: row.status })] : [] }
-    })
+    return row ? [event({ type: 'session.status', sessionId, status: row.status })] : []
+  }
+
+  /**
+   * ``events``, then the session's status refresh when ``resolved`` (#3256 review): in
+   * the same commit as the resolution (#3255), since a turn resumes on that commit
+   * alone. One shape for every resolution, so none drifts from the others.
+   */
+  private async withStatus(
+    tx: TransactionSql,
+    sessionId: string,
+    resolved: boolean,
+    events: ServerEvent[],
+  ): Promise<ServerEvent[]> {
+    return resolved ? events.concat(await this.statusRefresh(tx, sessionId)) : events
   }
 
   /** `question_expiry_seconds`, clamped as `approval_expiry_seconds` is. */
@@ -372,36 +393,30 @@ export class QuestionService {
         UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
         WHERE id = ${id} AND kind = 'question' AND outcome IS NULL AND (${timer} OR expires_at <= now())
         RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return {
-        value: expired,
-        events: expired.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
-        ]),
-      }
+      const events = expired.flatMap((r) => [
+        event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+        inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+      ])
+      return { value: expired, events: await this.withStatus(tx, sessionId, expired.length > 0, events) }
     })
     if (rows.length === 0) return false
     this.wake(id)
-    try {
-      await this.refreshStatus(sessionId)
-    } finally {
-      await this.audited(
-        rows.map((r) => ({
-          kind: 'question',
-          action: 'expired',
-          surface: 'system',
-          actor: SYSTEM_ACTOR,
-          sessionId,
-          turnId: r.turn_id,
-          toolUseId: r.tool_use_id,
-          tier: 'read',
-          outcome: 'refused',
-          detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
-          startedAt: r.created_at,
-          finishedAt: new Date(),
-        })),
-      )
-    }
+    await this.audited(
+      rows.map((r) => ({
+        kind: 'question',
+        action: 'expired',
+        surface: 'system',
+        actor: SYSTEM_ACTOR,
+        sessionId,
+        turnId: r.turn_id,
+        toolUseId: r.tool_use_id,
+        tier: 'read',
+        outcome: 'refused',
+        detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+        startedAt: r.created_at,
+        finishedAt: new Date(),
+      })),
+    )
     return true
   }
 
@@ -474,10 +489,10 @@ export class QuestionService {
       return row
         ? {
             value: row,
-            events: [
+            events: await this.withStatus(tx, sessionId, true, [
               event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal }),
               inputResolved(sessionId, `question:${id}`, 'answer', 'answered'),
-            ],
+            ]),
           }
         : { value: undefined, events: [] }
     })
@@ -488,30 +503,25 @@ export class QuestionService {
       throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
     }
     this.wake(id)
-    try {
-      await this.refreshStatus(sessionId)
-    } finally {
-      // The answer is committed: its row is written even if the status refresh failed.
-      // Hashed, never stored as text: an answer may be anything the user typed.
-      await this.audited([
-        {
-          kind: 'question',
-          action: 'answered',
-          surface: where.surface ?? 'http',
-          actor: principal,
-          clientIp: where.clientIp,
-          sessionId,
-          turnId: answered.turn_id,
-          toolUseId: answered.tool_use_id,
-          tier: 'read',
-          inputHash: this.deps.audit?.hash(answered.tool, { answers }),
-          outcome: 'ok',
-          detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
-          startedAt: answered.created_at,
-          finishedAt: new Date(),
-        },
-      ])
-    }
+    // Hashed, never stored as text: an answer may be anything the user typed.
+    await this.audited([
+      {
+        kind: 'question',
+        action: 'answered',
+        surface: where.surface ?? 'http',
+        actor: principal,
+        clientIp: where.clientIp,
+        sessionId,
+        turnId: answered.turn_id,
+        toolUseId: answered.tool_use_id,
+        tier: 'read',
+        inputHash: this.deps.audit?.hash(answered.tool, { answers }),
+        outcome: 'ok',
+        detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+        startedAt: answered.created_at,
+        finishedAt: new Date(),
+      },
+    ])
   }
 
   /**
@@ -539,38 +549,32 @@ export class QuestionService {
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
           AND (${questionId}::uuid IS NOT NULL OR ${isNotDoneSummary(tx)})
         RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return {
-        value: cancelled,
-        events: cancelled.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
-        ]),
-      }
+      const events = cancelled.flatMap((r) => [
+        event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+        inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+      ])
+      return { value: cancelled, events: await this.withStatus(tx, sessionId, cancelled.length > 0 && options.refresh !== false, events) }
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
-    try {
-      if (options.refresh !== false) await this.refreshStatus(sessionId)
-    } finally {
-      // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
-      // approval cancelled the same way is audited the same way.
-      await this.audited(
-        rows.map((r) => ({
-          kind: 'question',
-          action: 'cancelled',
-          surface: 'system',
-          actor: SYSTEM_ACTOR,
-          sessionId,
-          turnId: r.turn_id,
-          toolUseId: r.tool_use_id,
-          tier: 'read',
-          outcome: 'refused',
-          detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
-          startedAt: r.created_at,
-          finishedAt: new Date(),
-        })),
-      )
-    }
+    // ScadBuddy cancelled it (the turn ended, a handoff), not a person: an
+    // approval cancelled the same way is audited the same way.
+    await this.audited(
+      rows.map((r) => ({
+        kind: 'question',
+        action: 'cancelled',
+        surface: 'system',
+        actor: SYSTEM_ACTOR,
+        sessionId,
+        turnId: r.turn_id,
+        toolUseId: r.tool_use_id,
+        tier: 'read',
+        outcome: 'refused',
+        detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+        startedAt: r.created_at,
+        finishedAt: new Date(),
+      })),
+    )
     return rows.length
   }
 
@@ -594,36 +598,30 @@ export class QuestionService {
         WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = 'tab_disconnected'
           AND outcome IS NULL AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
         RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return {
-        value: resolved,
-        events: resolved.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
-        ]),
-      }
+      const events = resolved.flatMap((r) => [
+        event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
+        inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
+      ])
+      return { value: resolved, events: await this.withStatus(tx, sessionId, resolved.length > 0, events) }
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
-    try {
-      await this.refreshStatus(sessionId)
-    } finally {
-      await this.audited(
-        rows.map((r) => ({
-          kind: 'question',
-          action: 'reconnected',
-          surface: 'system',
-          actor: SYSTEM_ACTOR,
-          sessionId,
-          turnId: r.turn_id,
-          toolUseId: r.tool_use_id,
-          tier: 'read',
-          outcome: 'ok',
-          detail: safeDetail(`${r.tool} attention request ${r.id}: ${reason}`),
-          startedAt: r.created_at,
-          finishedAt: new Date(),
-        })),
-      )
-    }
+    await this.audited(
+      rows.map((r) => ({
+        kind: 'question',
+        action: 'reconnected',
+        surface: 'system',
+        actor: SYSTEM_ACTOR,
+        sessionId,
+        turnId: r.turn_id,
+        toolUseId: r.tool_use_id,
+        tier: 'read',
+        outcome: 'ok',
+        detail: safeDetail(`${r.tool} attention request ${r.id}: ${reason}`),
+        startedAt: r.created_at,
+        finishedAt: new Date(),
+      })),
+    )
     return rows.length
   }
 
@@ -711,35 +709,31 @@ export class QuestionService {
       return row
         ? {
             value: row,
-            events: [
+            events: await this.withStatus(tx, sessionId, true, [
               event({ type: 'question.resolved', sessionId, id, answered: false, reason }),
               inputResolved(sessionId, `question:${id}`, 'answer', 'timed_out', reason),
-            ],
+            ]),
           }
         : { value: undefined, events: [] }
     })
     if (resolved) {
       this.wake(id)
-      try {
-        await this.refreshStatus(sessionId)
-      } finally {
-        await this.audited([
-          {
-            kind: 'question',
-            action: 'timed_out',
-            surface: 'system',
-            actor: SYSTEM_ACTOR,
-            sessionId,
-            turnId: resolved.turn_id,
-            toolUseId: resolved.tool_use_id,
-            tier: 'read',
-            outcome: 'refused',
-            detail: safeDetail(`${resolved.tool} attention request ${id}: ${reason}`),
-            startedAt: resolved.created_at,
-            finishedAt: new Date(),
-          },
-        ])
-      }
+      await this.audited([
+        {
+          kind: 'question',
+          action: 'timed_out',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: resolved.turn_id,
+          toolUseId: resolved.tool_use_id,
+          tier: 'read',
+          outcome: 'refused',
+          detail: safeDetail(`${resolved.tool} attention request ${id}: ${reason}`),
+          startedAt: resolved.created_at,
+          finishedAt: new Date(),
+        },
+      ])
     }
     const row = await this.row(id)
     if (!row) throw new Error(`question ${id} no longer exists`)
@@ -944,7 +938,8 @@ export class QuestionService {
         if (attention?.reason === 'done') return { value: { ...none, asked: true, superseded }, events: tail }
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
-        // shown; each refreshStatus hands back to whichever is still pending).
+        // shown; approvals' refreshStatus and this service's statusRefresh each hand back
+        // to whichever is still pending).
         const moved = await tx`
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
           WHERE id = ${sessionId} AND turn_id = ${turnId} AND status <> 'waiting_input'`

@@ -74,6 +74,9 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     updatedAt: now,
     archivedAt: null,
     unpricedCostUsd: 0,
+    agentModel: null,
+    agentEffort: null,
+    agentType: null,
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}
@@ -159,7 +162,13 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
           seen.push({ turnId, toolUseId: request.toolUseId })
           return Promise.resolve({ approved: false, message: 'denied by the test' })
         },
-        trace: new TurnTrace({ sessionId: session.id, turnId, parent: ROOT_CONTEXT, tierOf: () => 'read' }),
+        trace: new TurnTrace({
+          sessionId: session.id,
+          turnId,
+          parent: ROOT_CONTEXT,
+          tierOf: () => 'read',
+          before: { costUsd: 0, turns: 0 },
+        }),
         signalInterrupt: () => {},
       }
     },

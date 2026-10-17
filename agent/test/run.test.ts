@@ -10,6 +10,7 @@ import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier, ToolDecision } from '../src/harness/permissions.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
+import { loadAgentDefinitions } from '../src/harness/agentDefinitions.js'
 import {
   buildHarnessOptions,
   credentialEnv,
@@ -293,6 +294,26 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
     expect(stderr.join('\n')).not.toContain(GATEWAY_TOKEN)
+  })
+
+  it("runs the turn as a plugin's subagent when given one (a Workflow agent's agentType, #2393)", async () => {
+    script = () => ({ text: 'ok' })
+    const { result } = await collect({
+      paths: { stateDir },
+      credential: gateway(),
+      prompt: 'Make a box',
+      model: 'claude-opus-5-5',
+      maxTurns: 1,
+      effort: 'low',
+      ownPlugin: OWN_PLUGIN_DIR,
+      agent: { name: 'model-author', definition: (await loadAgentDefinitions())['model-author']! },
+    })
+    expect(result).toMatchObject({ subtype: 'success' })
+    const call = fake.messageCalls().at(-1)!
+    // The definition's own prompt (plugins/scadbuddy/agents/model-author.md) is the system prompt.
+    expect(JSON.stringify(call.body?.system)).toContain('You author ScadBuddy templates')
+    // Claude Code sends effort only for a model that takes it (claude-sonnet-4-5 does not, measured).
+    expect(JSON.stringify(call.body)).toContain('"output_config":{"effort":"low"}')
   })
 
   it('recalls into the model’s context at the prompt and retains the transcript at the end (memory hooks)', async () => {

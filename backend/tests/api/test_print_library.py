@@ -4,28 +4,36 @@ any print is (#1752): only how its 3MF is obtained differs from an output's."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import io
 import json
 import time
 import zipfile
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import anyio
 import httpx
 import pytest
 import respx
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.api import library_print
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.library_print import _kept_as_sent
 from scadbuddy.bambuddy import clearance, print_run
+from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
 from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest
-from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
     laid_out_plates,
@@ -33,6 +41,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
 )
 from scadbuddy.render.split import ColourPart
+from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
@@ -155,6 +164,83 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
     assert {"Supplies": 0, "Storage": 1}.items() <= {
         row["name"]: row["depth"] for row in plain["folders"]
     }.items()
+    # #2724: a folder linked to a Bambuddy project names it; that folder is the
+    # project's file list, which a batch print can take. Any other folder names none.
+    by_name = {row["name"]: row for row in plain["folders"]}
+    assert (by_name["Raegan"]["project_id"], by_name["Raegan"]["project_name"]) == (
+        1,
+        "Reagan Keychain",
+    )
+    assert by_name["Supplies"]["project_id"] is None
+
+
+@respx.mock
+def test_a_search_finds_files_in_every_folder_from_one_kept_read(client: TestClient) -> None:
+    """#3630: the whole library in one read, kept; ``fresh`` reads it again."""
+    configure(client)
+    files = listing_routes(recording("library-files-folder.json"))
+
+    found = client.get("/api/v1/print/library/search", params={"q": "dry pods"}).json()
+    again = client.get(
+        "/api/v1/print/library/search", params={"q": "desiccant", "all": "true"}
+    ).json()
+
+    assert files.call_count == 1
+    assert files.calls.last.request.url.params["include_root"] == "false"
+    assert [hit["filename"] for hit in found["files"]] == [
+        "AMS_2_Pro_Dry_Pods_-_ABS.3mf",
+        "AMS_2_Pro_Dry_Pods_-_PETG.3mf",
+        "AMS_2_Pro_Dry_Pods_-_PLA.3mf",
+    ]
+    assert found["hidden"] == 1  # the sliced Dry Pods file, only under Advanced
+    assert {tuple(hit["folder_path"]) for hit in found["files"]} == {("Supplies", "Storage")}
+    assert "Desiccant_Box.stl" in [hit["filename"] for hit in again["files"]]
+
+    # ``fresh`` shares a read that started within 2 s of it (`test_library_search` pins
+    # the read it starts past that), so a burst of fresh searches is one read.
+    client.get("/api/v1/print/library/search", params={"q": "pods", "fresh": "true"})
+
+    assert files.call_count == 1
+
+
+@respx.mock
+def test_a_search_hit_scadbuddy_uploaded_names_its_output(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """As the listing does (#1864): Arrange reads a found file's objects through it."""
+    configure(client)
+    output_id = make_output(client, model)
+    listing_routes(recording("library-files-folder.json"))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(output_id, LibraryCopy(id=48, folder_id=4, target_key="k")))
+
+    hits = client.get("/api/v1/print/library/search", params={"q": "dry pods"}).json()["files"]
+
+    assert {hit["id"]: hit["output_id"] for hit in hits} == {59: None, 52: None, 48: output_id}
+
+
+@respx.mock
+def test_a_search_answers_as_the_listing_does_when_bambuddy_is_unset_or_down(
+    client: TestClient,
+) -> None:
+    """The search's read runs in a shielded task; its problem is still the listing's."""
+    unset_search = client.get("/api/v1/print/library/search", params={"q": "pods"})
+    unset_listing = client.get("/api/v1/print/library")
+    assert (unset_search.status_code, unset_search.json()["type"]) == (
+        unset_listing.status_code,
+        unset_listing.json()["type"],
+    )
+    assert unset_search.status_code == 409
+
+    configure(client)
+    respx.get(f"{API}/library/folders").mock(side_effect=httpx.ConnectError("refused"))
+    respx.get(f"{API}/library/files/").mock(side_effect=httpx.ConnectError("refused"))
+
+    down_search = client.get("/api/v1/print/library/search", params={"q": "pods"})
+    down_listing = client.get("/api/v1/print/library")
+
+    assert down_search.status_code == down_listing.status_code == 502
+    assert down_search.json()["type"] == down_listing.json()["type"]
 
 
 @respx.mock
@@ -441,6 +527,22 @@ SLICED_RUN = {
 
 
 @respx.mock
+def test_a_sliced_run_of_two_copies_queues_a_quantity_of_two(client: TestClient) -> None:
+    """#3437: a sliced file's copies come from the request through the print options
+    (``request_scope``), as any run's do."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queued = queue_route()
+
+    response = run_library(client, 104, json={**SLICED_RUN, "copies": 2})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["copies"] == 2
+    assert json.loads(queued.calls.last.request.content)["quantity"] == 2
+
+
+@respx.mock
 def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: TestClient) -> None:
     """#2532: as the 404 above, an unprintable file's 422 beats the printers' and the
     presets' failures, though they are read beside it."""
@@ -548,10 +650,21 @@ def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -
             sliced_3mf(plates=(1,)),
             2,
             "sliced-plate-missing",
-            "This file holds no plate 2, so plate 1 is queued instead.",
+            "This file holds no plate 2, so plate 1 is queued instead. Held for a manual start.",
             1,
-            False,
+            True,  # another plate than asked for never starts unattended (#3436)
             id="no-such-plate",
+        ),
+        pytest.param(
+            b"not a 3mf",
+            1,
+            "sliced-unchecked",
+            "ScadBuddy could not read this sliced file's settings, so its printer model and"
+            " nozzle were not checked. Held for a manual start: check them before you start"
+            " the print.",
+            1,
+            True,  # nothing was checked, so it is held (#3436)
+            id="unreadable-profile",
         ),
     ],
 )
@@ -610,6 +723,23 @@ def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == []
     assert check.json()["warnings"] == []
+
+
+@respx.mock
+def test_a_sliced_files_checks_say_a_tower_choice_is_not_applied(client: TestClient) -> None:
+    """#3648 review: a sliced file queues as it is, so a prime tower chosen for it is
+    said not to apply rather than silently ignored."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+
+    request = {**SLICED_RUN, "prime_tower": {"enabled": False}}
+    check = client.post("/api/v1/print/library/104/check", json=request)
+
+    assert check.status_code == 200, check.text
+    [warning] = check.json()["warnings"]
+    assert warning["kind"] == "prime-tower-not-applied"
+    assert "already sliced" in warning["message"]
 
 
 @respx.mock
@@ -890,6 +1020,67 @@ def test_a_recorded_slice_bambuddy_no_longer_has_is_sliced_again(client: TestCli
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
     assert sliced.call_count == 2
+
+
+@respx.mock
+@pytest.mark.parametrize("prune_fails", [False, True], ids=["pruned", "prune-fails"])
+def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, prune_fails: bool
+) -> None:
+    """#2955: the recorded slice was still in Bambuddy when the reprint was planned, and
+    gone by its POST /queue/, which Bambuddy answers 400 "Library file not found"
+    (``print_queue.py`` at maziggy/bambuddy@943f3587). Read back, it is a 404, so the
+    plate is sliced again and that slice queued; the run does not fail on it, even when
+    forgetting the gone slice fails (#3495 review)."""
+    if prune_fails:
+
+        async def down(*_: object) -> None:
+            raise RuntimeError("the database is down")
+
+        monkeypatch.setattr(BambuddyUploadStore, "forget_gone_slice", down)
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77, job_id=9)
+    queued = queue_route()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    assert first.status_code == 200, first.text
+    copy_kept(upload)
+
+    kept = {"id": 77, "filename": "sliced.gcode.3mf", "file_type": "gcode.3mf"}
+    respx.get(f"{API}/library/files/77").mock(
+        side_effect=[
+            httpx.Response(200, json={**kept, "file_hash": f"{77:064x}"}),  # the plan
+            httpx.Response(404, json={"detail": "File not found"}),  # the read-back
+        ]
+    )
+    sliced.mock(return_value=httpx.Response(200, json={"job_id": 10, "status": "pending"}))
+    respx.get(f"{API}/slice-jobs/10").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 10, "status": "completed", "result": {"library_file_id": 78}},
+        )
+    )
+    slice_kept(78)
+    accepted = queued.return_value
+    assert accepted is not None
+    queued.mock(
+        side_effect=[httpx.Response(400, json={"detail": "Library file not found"}), accepted]
+    )
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert second.status_code == 200, second.text
+    assert second.json()["sliced_library_file_id"] == 78
+    assert second.json()["slice_job_id"] == 10
+    sent = [json.loads(call.request.content)["library_file_id"] for call in queued.calls]
+    assert sent == [77, 77, 78]
+    assert sliced.call_count == 2
+    # Forgotten as soon as it is found gone, not on the next reprint (#3495 review).
+    copies = asyncio.run(_state(client).uploads.for_output("library:89"))
+    assert [s.id for c in copies for s in c.sliced] == ([77, 78] if prune_fails else [78])
 
 
 @respx.mock
@@ -1729,13 +1920,29 @@ def test_the_library_file_itself_is_served(client: TestClient) -> None:
 
 
 @respx.mock
-def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) -> None:
-    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin."""
+@pytest.mark.parametrize("hashed", [False, True], ids=["streamed", "from-the-cache"])
+def test_the_library_file_is_always_a_download_never_a_page(
+    client: TestClient, hashed: bool
+) -> None:
+    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin,
+    streamed from Bambuddy or served from the download cache (#2788)."""
     configure(client)
+    content = b"<svg onload='alert(1)'/>"
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 89,
+                "filename": "x.svg",
+                "file_type": "svg",
+                "file_hash": hashlib.sha256(content).hexdigest() if hashed else None,
+            },
+        )
+    )
     respx.get(f"{API}/library/files/89/download").mock(
         return_value=httpx.Response(
             200,
-            content=b"<svg onload='alert(1)'/>",
+            content=content,
             headers={"content-type": "image/svg+xml", "content-disposition": "inline"},
         )
     )
@@ -1743,9 +1950,365 @@ def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) 
     served = client.get("/api/v1/print/library/89/file")
 
     assert served.status_code == 200, served.text
+    assert served.content == content
     assert served.headers["content-type"] == "application/octet-stream"
     assert served.headers["content-disposition"].startswith("attachment")
     assert served.headers["x-content-type-options"] == "nosniff"
+
+
+@respx.mock
+def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
+    client: TestClient, app: FastAPI
+) -> None:
+    """#2788: the second whole-file ask is served from the download cache; a ranged ask
+    is still Bambuddy's to answer."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+
+    first = client.get("/api/v1/print/library/89/file")
+    second = client.get("/api/v1/print/library/89/file")
+    ranged = client.get("/api/v1/print/library/89/file", headers={"range": "bytes=0-3"})
+
+    assert first.content == second.content == content
+    assert second.headers["content-length"] == str(len(content))
+    # Served whole from the cache, a resume is still a ranged ask Bambuddy answers.
+    assert second.headers["accept-ranges"] == "bytes"
+    # Its hash names the bytes, so a browser can revalidate it (#2821 review).
+    assert second.headers["etag"] == f'"{hashlib.sha256(content).hexdigest()}"'
+    assert download.call_count == 2
+    assert download.calls[-1].request.headers["range"] == "bytes=0-3"
+    assert ranged.status_code == 200
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None and downloads.has(hashlib.sha256(content).hexdigest())
+
+
+@respx.mock
+def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
+    client: TestClient, app: FastAPI
+) -> None:
+    """Bytes planted under a file's hash in the shared directory are dropped, and the
+    file is served as Bambuddy has it (#2788). Each served copy is the request's own,
+    removed once sent."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    download = library_file(89, content=content, file_hash=sha)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.root.mkdir(parents=True, exist_ok=True)
+    downloads.path(sha).write_bytes(b"planted")
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    # The planted entry was dropped, and what was sent kept in its place.
+    assert downloads.path(sha).read_bytes() == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    spool = state.paths.cache / "library-spool"
+    assert not spool.exists() or list(spool.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_larger_than_its_stated_size_is_not_kept(
+    client: TestClient, app: FastAPI
+) -> None:
+    """A size Bambuddy does not state, or understates, cannot fill the volume: the fill
+    stops at the cache's limit and keeps nothing, while the one download streams on."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.max_bytes = 4 * (len(content) - 1)
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    assert list(downloads.root.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_not_yet_kept_is_streamed_while_it_is_kept(
+    client: TestClient, app: FastAPI
+) -> None:
+    """A miss is not downloaded whole before its first byte is sent (#2788 review): one
+    download is both what is sent and what is kept, with Bambuddy's headers."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "a.3mf", "file_type": "3mf", "file_hash": sha}
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(
+            200,
+            content=content,
+            headers={"accept-ranges": "bytes", "etag": '"bambuddy"'},
+        )
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.content == content
+    assert served.headers["etag"] == '"bambuddy"'
+    assert download.call_count == 1
+    assert downloads.path(sha).read_bytes() == content
+
+
+@respx.mock
+def test_a_library_file_bambuddy_sends_encoded_is_never_kept(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body sent with a Content-Encoding is not the bytes the hash names (#2821
+    review): it is passed on as Bambuddy sent it, and no fill is started for it."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "a.3mf", "file_type": "3mf", "file_hash": sha}
+        )
+    )
+    encoded = gzip.compress(content)
+    respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=encoded, headers={"content-encoding": "gzip"})
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    fills: list[str] = []
+    real_fill = downloads.fill
+
+    def fill(sha256: str) -> Any:
+        fills.append(sha256)
+        return real_fill(sha256)
+
+    monkeypatch.setattr(downloads, "fill", fill)
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.headers["content-encoding"] == "gzip"
+    assert served.content == content
+    assert fills == []
+    assert not downloads.has(sha)
+
+
+@respx.mock
+def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hit is copied whole before its first byte (#2821 review): past
+    CACHED_COPY_MAX_BYTES the file streams from Bambuddy instead, and is not kept again."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    download = library_file(89, content=content, file_hash=sha)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.put(sha, content)
+    assert downloads.has(sha)
+    monkeypatch.setattr(library_print, "CACHED_COPY_MAX_BYTES", len(content) - 1)
+    fills: list[str] = []
+    real_fill = downloads.fill
+
+    def fill(sha256: str) -> Any:
+        fills.append(sha256)
+        return real_fill(sha256)
+
+    monkeypatch.setattr(downloads, "fill", fill)
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.content == content
+    assert download.call_count == 1
+    assert fills == []
+
+
+@respx.mock
+def test_the_hash_read_before_a_download_is_its_own_span(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    """The extra call to Bambuddy before every whole-file download shows in a trace,
+    with whether it found a hash to keep the file under (#2821 review)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+
+    assert client.get("/api/v1/print/library/89/file").status_code == 200
+
+    (read,) = [s for s in spans.get_finished_spans() if s.name == "library.file_hash"]
+    assert read.attributes is not None
+    assert read.attributes["scadbuddy.library.file_id"] == 89
+    assert read.attributes["scadbuddy.cache.cacheable"] is True
+
+
+@respx.mock
+def test_a_failed_read_of_the_files_hash_is_a_miss_and_the_file_still_served(
+    client: TestClient, app: FastAPI
+) -> None:
+    """The hash read is only for the cache (#2821 review): when it fails, the download
+    is still tried, not failed before it starts."""
+    configure(client)
+    content = library_3mf()
+    respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(503))
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.content == content
+    assert download.call_count == 1
+
+
+async def test_a_streamed_file_sent_as_memoryviews_is_kept_whole(tmp_path: Path) -> None:
+    """Every chunk goes into the fill, not only `bytes` ones (#2821 review): a
+    memoryview left out would leave it short of its hash, and nothing kept."""
+    downloads = DownloadCache(tmp_path / "downloads", max_bytes=1 << 20)
+    content = b"first half|second half"
+    sha = hashlib.sha256(content).hexdigest()
+
+    async def chunks() -> AsyncIterator[str | bytes | memoryview]:
+        yield memoryview(content[:10])
+        yield content[10:]
+
+    sent = [
+        chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+        async for chunk in _kept_as_sent(downloads, sha, chunks())
+    ]
+
+    assert b"".join(sent) == content
+    assert downloads.path(sha).read_bytes() == content
+
+
+async def test_a_fill_given_up_is_closed_once_even_when_the_send_is_cancelled() -> None:
+    """#2821 review: the fill was closed in a thread after a chunk past the limit, and
+    `fill` was still set while that ran; a cancel then made the `finally` close it again
+    with the thread still inside it. It is cleared first and closed once."""
+    exits: list[float] = []
+
+    class TooFull:
+        def write(self, chunk: bytes) -> int:
+            raise TooLargeError
+
+    class SlowClose:
+        def __enter__(self) -> TooFull:
+            return TooFull()
+
+        def __exit__(self, *_: object) -> None:
+            exits.append(time.monotonic())
+            time.sleep(0.3)
+
+    class Downloads:
+        def fill(self, sha256: str) -> SlowClose:
+            return SlowClose()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"too much"
+        await anyio.sleep(10)
+
+    async def send() -> None:
+        sent = _kept_as_sent(cast(DownloadCache, Downloads()), "0" * 64, chunks())
+        async with aclosing(sent):
+            async for _ in sent:
+                pass
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(send)
+        await anyio.sleep(0.1)
+        group.cancel_scope.cancel()
+
+    assert len(exits) == 1
+
+
+async def test_a_browser_gone_midway_leaves_no_partial_behind(tmp_path: Path) -> None:
+    """A dropped download is a cancelled scope, where every await raises again (#2821
+    review): the fill is closed before anything is awaited, so its partial goes with it
+    rather than waiting for a prune."""
+    downloads = DownloadCache(tmp_path / "downloads", max_bytes=1 << 20)
+    content = b"first half|second half"
+    sha = hashlib.sha256(content).hexdigest()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        try:
+            yield content[:10]
+            yield content[10:]
+        finally:
+            # Closing Bambuddy's response is awaited, and is where the cancel lands.
+            await asyncio.sleep(0)
+
+    with anyio.CancelScope() as scope:
+        async with aclosing(_kept_as_sent(downloads, sha, chunks())) as sent:
+            async for _ in sent:
+                scope.cancel()
+                break
+
+    assert scope.cancelled_caught
+    assert list(downloads.root.iterdir()) == []
+
+
+@respx.mock
+def test_a_download_cache_that_cannot_be_used_still_serves_the_file(
+    client: TestClient, app: FastAPI
+) -> None:
+    """The cache is best effort: an unwritable directory, or a full volume, is the file
+    streamed from Bambuddy, never a 500 (#2788 review)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.root.parent.mkdir(parents=True, exist_ok=True)
+    downloads.root.write_bytes(b"not a directory")
+
+    for _ in range(2):
+        served = client.get("/api/v1/print/library/89/file")
+        assert served.status_code == 200, served.text
+        assert served.content == content
+
+
+@respx.mock
+def test_a_library_file_too_large_to_keep_is_streamed_as_before(
+    client: TestClient, app: FastAPI
+) -> None:
+    configure(client)
+    content = library_3mf()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 89,
+                "filename": "big.3mf",
+                "file_type": "3mf",
+                "file_size": len(content),
+                "file_hash": hashlib.sha256(content).hexdigest(),
+            },
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    # A quarter of the cap is the most one file may take of it.
+    downloads.max_bytes = 4 * len(content) - 4
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 2
 
 
 def two_plate_3mf() -> bytes:
@@ -1819,6 +2382,29 @@ def test_a_library_3mfs_slots_are_read_from_the_file_never_from_bambuddy(
     assert not asked.called
     # Read once, then from the cache under the file's hash.
     assert download.call_count == 1
+
+
+@respx.mock
+def test_a_library_3mfs_chosen_plates_offer_just_their_slots(client: TestClient) -> None:
+    """#3652: a repeated ``plate_ids`` on a library file answers for those plates only.
+    Plate 2 alone is its own slot 2; plates 2 and 1 together are every slot either uses.
+    Past ``MAX_PLATES`` entries the read is refused."""
+    configure(client)
+    library_file(
+        67, plates="library-plates-multi.json", content=two_plate_3mf(), file_hash="a" * 64
+    )
+    run_routes()
+    url = "/api/v1/print/library/67/filaments"
+
+    plate_2 = client.get(url, params=[("plate_ids", 2)])
+    both = client.get(url, params=[("plate_ids", 2), ("plate_ids", 1)])
+    too_many = client.get(url, params=[("plate_ids", 1)] * (MAX_PLATES + 1))
+
+    assert plate_2.status_code == 200, plate_2.text
+    assert [slot["slot_id"] for slot in plate_2.json()["slots"]] == [2]
+    assert both.status_code == 200, both.text
+    assert [slot["slot_id"] for slot in both.json()["slots"]] == [1, 2, 3]
+    assert too_many.status_code == 422, too_many.text
 
 
 @respx.mock
@@ -2037,3 +2623,30 @@ def test_a_printer_reporting_no_nozzle_leaves_a_sliced_files_nozzle_unchecked() 
     assert "could not be checked" in warning.message
     assert print_run.sliced_warnings(profile, printer, _status("0.6"), [1]) == []
     assert print_run.sliced_warnings(SlicedProfile(), printer, _status(), [1]) == []
+
+
+def test_another_model_of_the_same_g_code_family_is_said_but_not_held() -> None:
+    """#2956: an X1 Carbon slice on a P1S. Bambuddy dispatches G-code across the X1 and
+    P1 series (``GCODE_COMPAT_FAMILIES``), so the run says so and is not held; a model
+    outside the family still is."""
+    profile = SlicedProfile(printer_model="Bambu Lab X1 Carbon")
+
+    [said] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="P1S"), None, [1])
+    [held] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="H2C"), None, [1])
+
+    assert said.kind == "sliced-same-family"
+    assert said.kind not in print_run.HELD_SLICED_KINDS
+    assert held.kind == "sliced-other-model"
+    assert held.kind in print_run.HELD_SLICED_KINDS
+
+
+def test_a_same_family_printer_known_by_its_device_code_is_named_by_its_model() -> None:
+    """#3495 review: Bambuddy may hold a printer's SSDP code ("C12"); the warning names
+    the model it stands for."""
+    profile = SlicedProfile(printer_model="Bambu Lab X1 Carbon")
+
+    [said] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="C12"), None, [1])
+
+    assert said.kind == "sliced-same-family"
+    assert said.message.startswith("Sliced for a X1C; P is a P1S,")
+    assert "C12" not in said.message

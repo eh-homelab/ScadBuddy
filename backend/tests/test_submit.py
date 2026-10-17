@@ -11,8 +11,9 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
-from datetime import timedelta
-from typing import Any, NoReturn
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, NoReturn
+from unittest import mock
 
 import psycopg
 import pytest
@@ -47,6 +48,7 @@ from scadbuddy.render.job_models import (
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
+    JobState,
     QueueFullError,
     now,
     render_key,
@@ -69,6 +71,7 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandClosingError,
+    CommandResendError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -1102,11 +1105,32 @@ def _spy_cancel(
     return cancelled
 
 
-def _legacy(projection: JobProjection) -> Job:
+def _legacy(projection: JobProjection, kind: Literal["render", "arrange"] = "render") -> Job:
     """A pending row an older release inserted: its workflow `render-<id>`."""
     params: dict[str, ParamValue] = {"width": _w()}
-    job = Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
+    job = Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now(), kind=kind)
     return legacy_row(projection, job)
+
+
+async def test_deleting_its_model_cancels_a_legacy_row_whatever_claims_it_holds(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2387: a delete does not wait out a legacy row other presses still claim."""
+    old = _legacy(projection)
+    with projection.pool.connection() as conn:
+        conn.execute("UPDATE render_jobs SET claims = 3 WHERE id = %s", (old.id,))
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        cancelled = _spy_cancel(monkeypatch, client)
+        await service.cancel_renders_of(SLUG)
+        await service.aclose()
+
+    assert cancelled == [workflow_id_for(old.id)]
+    dropped = await asyncio.to_thread(projection.read, old.id)
+    assert dropped.state == "cancelled"
+    assert not await asyncio.to_thread(projection.has_unfinished, SLUG)
 
 
 def test_an_arrange_the_api_settles_is_counted_as_arrange(
@@ -1116,7 +1140,7 @@ def test_an_arrange_the_api_settles_is_counted_as_arrange(
     (``RenderService._settled``) counts under ``kind="arrange"``; the render series
     stay where they were."""
     service = make_service(None, "unused")
-    arrange = _legacy(projection).model_copy(update={"kind": "arrange"})
+    arrange = _legacy(projection, kind="arrange")
 
     for outcome in ("superseded", "failed"):
         service._settled(arrange, outcome)
@@ -1130,6 +1154,61 @@ def test_an_arrange_the_api_settles_is_counted_as_arrange(
         # Registered at zero by Metrics, so == 0 also catches a series never registered.
         assert sample("scadbuddy_render_jobs_finished_total", rendered) == 0
         assert sample("scadbuddy_render_job_latency_seconds_count", rendered) == 0
+
+
+async def test_superseding_an_arrange_through_submit_counts_it_as_arrange(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3464: the public supersede path hands ``_settled`` the arrange row itself, so
+    its supersede counts under ``kind="arrange"``, not as a render."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        arrange = _legacy(projection, kind="arrange")
+        _spy_cancel(monkeypatch, client)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            await service.submit(SLUG, {"width": _w()}, supersedes=arrange.id)
+        await service.aclose()
+
+    # The supersede itself, so the counts cannot pass by some other route to _settled.
+    dropped = await asyncio.to_thread(projection.read, arrange.id)
+    assert dropped is not None
+    assert dropped.state == "cancelled" and dropped.error == SUPERSEDED_ERROR
+    sample = service.metrics.registry.get_sample_value
+    superseded = {"kind": "arrange", "outcome": "superseded"}
+    assert sample("scadbuddy_render_jobs_finished_total", superseded) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", superseded) == 1
+    as_render = {"kind": "render", "outcome": "superseded"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_render) == 0
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
+
+
+async def test_an_arrange_the_reconciler_fails_is_counted_as_arrange(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """#3464, #3487 review: the reconciler's fail path (``settle_legacy``) hands
+    ``_settled`` the arrange row itself, so its failure counts under
+    ``kind="arrange"``, not as a render."""
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        orphan = _legacy(projection, kind="arrange")
+        _aged(projection, orphan.id)
+        failed = await service.settle_legacy()
+        await service.aclose()
+
+    assert failed == [orphan.id]
+    stored = await asyncio.to_thread(projection.read, orphan.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    sample = service.metrics.registry.get_sample_value
+    as_arrange = {"kind": "arrange", "outcome": "failed"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_arrange) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_arrange) == 1
+    as_render = {"kind": "render", "outcome": "failed"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_render) == 0
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
 
 
 async def test_superseding_a_legacy_row_cancels_its_workflow_the_old_way(
@@ -2350,3 +2429,223 @@ async def test_retry_after_is_how_long_renders_take_now(
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 0.2)
         assert await service.retry_after() == 1
         await service.aclose()
+
+
+# --- #2340: a submit answered before its Update is followed to its job ---------------
+
+
+@pytest.fixture
+def short_follow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One follow waits a second, not `FOLLOW_WAIT`, so a test sees it still waiting."""
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
+
+
+async def test_a_submit_no_worker_has_picked_up_is_followed_to_its_job(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection, short_follow: None
+) -> None:
+    """Spec 2026-10-13 §5: past `accept_within` the submit is still accepting; the same
+    Update, followed by its id, answers the job once a worker runs the first task, and
+    no second claim or request is made."""
+    width = _w()
+    request_id = uuid.uuid4().hex
+    key = render_key(SLUG, {"width": width}, None)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        with pytest.raises(CommandStillAcceptingError) as accepting:
+            await service.submit(
+                SLUG,
+                {"width": width},
+                request_id=request_id,
+                accept_within=timedelta(seconds=1),
+            )
+        workflow_id = str(accepting.value.args[0])
+        assert workflow_id == workflow_id_for_key(key)
+        with pytest.raises(CommandStillAcceptingError):
+            await service.follow(workflow_id, request_id, supersedes=None)
+
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            job = await service.follow(workflow_id, request_id, supersedes=None)
+            await _settled(projection, job.id)
+        await service.aclose()
+
+    assert job.slug == SLUG and job.claims == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 1
+    # Once, by the submit's 202: a follow still waiting is the same request (review #2805).
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total", RENDER) == 1
+
+
+async def test_following_an_update_temporal_does_not_know_is_a_resend(
+    make_service: ServiceFactory,
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(CommandResendError):
+            await service.follow(f"render-{uuid.uuid4().hex}", "never-sent", supersedes=None)
+        await service.aclose()
+
+
+async def test_a_followed_submit_releases_the_render_it_supersedes(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection, short_follow: None
+) -> None:
+    """The supersede ran in the submit after its Update answered; answered 202, the
+    submit leaves it to the follow, which makes it once the new job exists."""
+    async with temporal_client() as client:
+        running_queue = f"t-{uuid.uuid4().hex[:8]}"
+        later_queue = f"t-{uuid.uuid4().hex[:8]}"
+        first_service = make_service(client, running_queue)
+        later_service = make_service(client, later_queue)
+        gate = asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate)
+        request_id = uuid.uuid4().hex
+        async with _worker(client, running_queue, acts):
+            old = await first_service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
+            await _until(acts, "render_main")
+            with pytest.raises(CommandStillAcceptingError) as accepting:
+                await later_service.submit(
+                    SLUG,
+                    {"width": _w()},
+                    supersedes=old.id,
+                    request_id=request_id,
+                    accept_within=timedelta(seconds=1),
+                )
+            # Not released before the new job exists.
+            assert (await asyncio.to_thread(projection.read, old.id)).state == "running"
+            async with _worker(client, later_queue, ProjectingActivities(deps)):
+                new = await later_service.follow(
+                    str(accepting.value.args[0]), request_id, supersedes=old.id
+                )
+                released = await _settled(projection, old.id)
+                await _settled(projection, new.id)
+            gate.set()
+        await first_service.aclose()
+        await later_service.aclose()
+
+    assert new.id != old.id
+    assert released.state == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("slug", "state", "same_job", "released"),
+    [
+        (SLUG, "running", False, True),
+        ("another-template", "running", False, False),
+        (SLUG, "done", False, False),
+        (SLUG, "running", True, False),
+    ],
+)
+async def test_a_follow_supersedes_only_what_the_post_would(
+    make_service: ServiceFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    slug: str,
+    state: JobState,
+    same_job: bool,
+    released: bool,
+) -> None:
+    """Review of #2782: the follow URL's `supersedes` is the client's to send, so the
+    follow checks it as the POST does (`_superseded`): the answered job's template,
+    still open, and not the answered job. Anything else is left alone."""
+    answered = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={})
+    old = Job(
+        id=answered.id if same_job else "o" * 32,
+        slug=slug,
+        created_at=datetime.now(UTC),
+        inputs={},
+        state=state,
+        workflow_id="render-old",
+    )
+
+    async def answer(*args: Any, **kwargs: Any) -> RenderAnswer:
+        return RenderAnswer(job=answered)
+
+    monkeypatch.setattr(submit_module, "follow_update", answer)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        monkeypatch.setattr(service.store, "read", lambda job_id: old)
+        supersede = mock.AsyncMock()
+        monkeypatch.setattr(service, "_supersede", supersede)
+        job = await service.follow("render-new", "k", supersedes=old.id)
+        await service.aclose()
+
+    assert job.id == answered.id
+    assert supersede.await_count == (1 if released else 0)
+
+
+async def test_a_follow_waits_its_whole_window_and_its_release_takes_what_is_left(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3041, #3575: a superseding follow waits the whole `FOLLOW_WAIT` on its Update,
+    not a slice of it, and the release after it gets only what is left of one
+    `SUBMIT_DEADLINE`, below Envoy's 15 s: a release still going then is a warning, and
+    the new render is answered."""
+    waits: list[timedelta | None] = []
+    answered = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={})
+    old = Job(
+        id="o" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={}, workflow_id="render-old"
+    )
+
+    async def answer(*args: Any, wait: timedelta | None = None, **kwargs: Any) -> RenderAnswer:
+        waits.append(wait)
+        return RenderAnswer(job=answered)
+
+    async def hangs(*args: Any) -> None:
+        await asyncio.sleep(30)
+
+    assert submit_module.SUBMIT_DEADLINE < 15
+    monkeypatch.setattr(submit_module, "follow_update", answer)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 0.3)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        monkeypatch.setattr(service.store, "read", lambda job_id: old)
+        monkeypatch.setattr(service, "_supersede", hangs)
+        began = asyncio.get_running_loop().time()
+        assert await service.follow("render-new", "k", supersedes=old.id) == answered
+        took = asyncio.get_running_loop().time() - began
+        await service.aclose()
+
+    assert waits == [None]  # the whole FOLLOW_WAIT, as a follow with nothing to release
+    assert took < 5
+
+
+async def test_a_follow_that_finds_the_queue_full_is_not_counted(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3575: a queue-full answer names no job, so the follow cannot tell a render's from
+    an Arrange's; it answers 429 and counts nothing under either kind."""
+
+    async def full(*args: Any, **kwargs: Any) -> RenderAnswer:
+        return RenderAnswer(queue_full=7)
+
+    monkeypatch.setattr(submit_module, "follow_update", full)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        with pytest.raises(QueueFullError):
+            await service.follow("render-x", "k", supersedes=None)
+        sample = service.metrics.registry.get_sample_value
+        rejected = [
+            sample("scadbuddy_render_jobs_rejected_total", {"kind": k})
+            for k in ("render", "arrange")
+        ]
+        await service.aclose()
+
+    assert rejected == [0, 0]
+
+
+async def test_a_follow_of_an_arrange_is_not_answered_as_a_render(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2805: an Arrange shares the `render-` prefix but answers `JobStatus`, and
+    never answers a 202 to follow; the render follow does not answer it as a render."""
+    arranged = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={}, kind="arrange")
+
+    async def answer(*args: Any, **kwargs: Any) -> RenderAnswer:
+        return RenderAnswer(job=arranged)
+
+    monkeypatch.setattr(submit_module, "follow_update", answer)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        with pytest.raises(ApiError) as refused:
+            await service.follow("render-arr", "k", supersedes=None)
+        await service.aclose()
+
+    assert refused.value.status == 404

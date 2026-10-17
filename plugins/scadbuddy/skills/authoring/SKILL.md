@@ -57,16 +57,26 @@ A template that prints best with a process setting changed says so in `model.jso
 ```
 
 - Only `enable_prime_tower`, `wipe_tower_no_sparse_layers`, `enable_support`,
-  `support_type`, `brim_width`, `brim_type` and `print_sequence`. Any other key makes
+  `support_type`, `support_threshold_angle`, `support_on_build_plate_only`,
+  `brim_width`, `brim_type` and `print_sequence`. Any other key makes
   the template fail to load, and the error names the key.
 - Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`),
   and each must be one its key takes (`PRINT_SETTING_VALUES`, from Bambu Studio's
   [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp)):
-  `"0"` or `"1"` for the three switches; `support_type` one of `normal(auto)`,
+  `"0"` or `"1"` for the four switches; `support_type` one of `normal(auto)`,
   `tree(auto)`, `normal(manual)`, `tree(manual)`; `brim_type` one of `auto_brim`,
   `brim_ears`, `outer_only`, `inner_only`, `outer_and_inner`, `no_brim`;
   `print_sequence` `by layer` or `by object`; `brim_width` a non-negative number of
-  millimetres. A bad value fails the load, as an unknown key does.
+  millimetres; `support_threshold_angle` whole degrees from vertical, `0` to `90`.
+  A bad value fails the load, as an unknown key does.
+- **Supports (#1899).** A template whose overhangs cannot be designed away declares
+  them: `"enable_support": "1"` with `"support_type": "tree(auto)"` (Bambu's default,
+  and the one to reach for on an H2C) or `"normal(auto)"`, and optionally the angle and
+  `support_on_build_plate_only`. The print dialog and `print_output` start from that
+  and can change it per print. The support settings, unlike the others, are written in
+  the shape the print's process preset stores them, so the angle needs its values;
+  when those cannot be read the print goes ahead without the angle, with a warning,
+  and `enable_support`, `support_type` and `support_on_build_plate_only` still go.
 - The print run sends them as the slice's `process_overrides`, over the process preset
   the dialog's choices resolve to (`backend/scadbuddy/bambuddy/dispatch.py`,
   `SlicePlan`). A print's own `print_sequence` (`print_output`, #907) goes over the
@@ -674,24 +684,45 @@ with `normal: "largest_flat"`, which is usually the cut face. Pass `joint.key` `
 `hex` so the halves cannot spin; `none` is a round peg. Scale the object before you split
 it, not after.
 
-Printing one colour in place into another (the carrot's leaves into its body): a painted
-region is not a part, so it prints in the part's own colour (below). Anchor it with a
-coloured `add` instead: a `cylinder` in the leaves' colour, centred on the neck where the
-leaves meet the body, wider than the neck and a few mm tall, through it. An `add` with a
-`colour` takes its whole volume from every other colour, so no volume has two colours,
-and the green prints joined into the orange as one piece. An `add` without a `colour` is
-in the object's first colour and carves the others the same way. Keep it short enough to
-touch nothing else on the object, or it joins that too. Sources: the compiler
+Printing one colour in place into another, when the colours are separate parts (a leaves
+part into a body part): anchor it with a coloured `add`, a `cylinder` in the leaves' colour,
+centred on the neck where the leaves meet the body, wider than the neck and a few mm tall,
+through it. An `add` with a `colour` takes its whole volume from every other colour, so no
+volume has two colours, and the green prints joined into the orange as one piece. An `add`
+without a `colour` is in the object's first colour and carves the others the same way. Keep
+it short enough to touch nothing else on the object, or it joins that too. Painted leaves
+need no anchor for their colour (Paint, below). Sources: the compiler
 `backend/scadbuddy/meshmodel/compile.py` (`_apply`); measured on a MakerWorld carrot in
 `backend/tests/test_mesh_models_fixtures.py`
 (`test_the_carrot_neck_anchored_in_green_prints_as_one_piece`: one piece, the two colours'
 volumes summing to the one-colour render's).
 
-Paint: a part painted in Bambu Studio keeps its paint codes beside its mesh, but nothing
-carries them into renders or prints yet (paint transfer is phase 3 of the design, §7):
-OpenSCAD's import drops paint, so each part renders and prints in its own colour.
-`get_scene`'s notes say so for each painted object. Source:
-`backend/scadbuddy/meshmodel/ingest.py`.
+Finding where it snaps: render, save the output, and run `analyze_geometry` on it.
+`weak_joints` lists each level section under a quarter of the wider of the sections 2 mm
+below and above it, with at least 1 cm³ above (a carrot's neck), narrowest first. Each one's
+`suggestion` is a `split_at_plane` edit with a `joint` sized to the section. Its `object`
+is named only for an un-arranged mesh-model render whose output records a revision;
+otherwise (arranged, or model.scad hand-edited) name the object yourself, from
+`get_scene`. Send it with `edit_scene`, with a `lay_flat` of the new half (the next object id)
+in the same call, render, save, and run `analyze_geometry` again; the neck is gone from the
+list. A `joint` of `null` means no peg fits there with two walls round its socket: cut
+where the section is wider, or split without a joint. Sources:
+`docs/superpowers/specs/2026-10-11-mesh-models-design.md` §9;
+`backend/scadbuddy/render/geometry.py` (`weak_joints`);
+`backend/scadbuddy/meshmodel/locate.py`.
+
+Paint: a part painted in Bambu Studio keeps its codes beside its mesh, and a model's
+one-plate renders carry them onto the rendered part: a triangle the render left as it was keeps its
+painting exactly, and a new face (a cut, a socket, an `add` carved out of it) takes the
+colour of the painted triangle it lies on when that triangle is one colour, otherwise the
+part's own. A mirrored object (a negative scale) keeps only whole-triangle colours, and
+`get_scene`'s notes say so. Multi-plate renders are not painted, and neither is a render
+of a hand-edited `model.scad` or with an unreadable paint file (each says so in the render's
+warnings). A render made before this was released, at the same revision
+and parameters, is reused as it was, without paint: any edit renders it afresh. Sources:
+`docs/superpowers/specs/2026-10-11-mesh-models-design.md` §7;
+`backend/scadbuddy/meshmodel/paint.py`; measured on a MakerWorld carrot in
+`backend/tests/test_mesh_models_paint.py`.
 
 What the backend refuses (a 422 from `edit_scene`, with the reason in the message; read it,
 do not retry the same edit):

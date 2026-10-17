@@ -113,6 +113,8 @@ def test_every_active_printer_says_what_it_is_doing(client: TestClient) -> None:
 
     assert cards[3]["activity"] == "unknown"
     assert cards[3]["error"]
+    # #3632: a failed read does not know the plate is clear, so it never says so.
+    assert cards[3]["awaiting_plate_clear"] is None
 
 
 @respx.mock
@@ -169,6 +171,36 @@ def test_the_print_dialogs_status_read_takes_the_same_drifted_payload() -> None:
 
     assert (read.progress, read.remaining_time, read.total_layers) == (None, 12, 90)
     assert [error.full_code for error in read.hms_errors] == ["201359426"]
+
+
+@pytest.mark.parametrize(("sent", "read"), [(True, True), (False, False), ("yes", None), (1, None)])
+def test_the_plate_flag_is_unknown_unless_it_is_a_bool(sent: Any, read: bool | None) -> None:
+    """#3632: a drifted ``awaiting_plate_clear`` is unknown, never a quiet "no"."""
+    assert (
+        PrinterStatus.model_validate(status(1, awaiting_plate_clear=sent)).awaiting_plate_clear
+        is read
+    )
+
+
+def test_a_status_without_the_plate_flag_reads_as_not_waiting() -> None:
+    without = {name: value for name, value in status(1).items() if name != "awaiting_plate_clear"}
+
+    assert PrinterStatus.model_validate(without).awaiting_plate_clear is False
+
+
+@respx.mock
+def test_a_finished_plate_is_on_the_card(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(
+            200, json=status(1, state="FINISH", awaiting_plate_clear="pending")
+        )
+    )
+
+    card = client.get("/api/v1/print/printers/now").json()["printers"][0]
+
+    assert (card["activity"], card["awaiting_plate_clear"]) == ("finished", None)
 
 
 def test_a_number_too_large_for_a_float_reads_as_unknown() -> None:

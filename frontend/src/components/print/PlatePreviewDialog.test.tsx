@@ -108,8 +108,9 @@ describe('PlatePreviewDialog (#1723)', () => {
     const slider = screen.getByRole('slider', { name: 'Layer height' })
     // Starts with the whole model showing: the cut at its (rounded-up) top.
     expect(screen.getByTestId('scene')).toHaveAttribute('data-cut', '10')
-    expect(slider).toHaveAttribute('max', '10')
-    fireEvent.change(slider, { target: { value: '4' } })
+    expect(slider).toHaveAttribute('aria-valuemax', '10')
+    // A Radix slider moves by key: Page Down is ten steps of 0.2 mm.
+    for (let press = 0; press < 3; press += 1) fireEvent.keyDown(slider, { key: 'PageDown' })
     expect(screen.getByTestId('scene')).toHaveAttribute('data-cut', '4')
     fireEvent.click(screen.getByRole('radio', { name: 'Colors' }))
     expect(screen.getByTestId('scene')).toHaveAttribute('data-cut', 'null')
@@ -158,8 +159,8 @@ describe('PlatePreviewDialog · the slice (#2072)', () => {
     expect(scene).toHaveAttribute('data-layer', '1')
     expect(screen.queryByRole('slider', { name: 'Layer height' })).toBeNull()
     const slider = screen.getByRole('slider', { name: 'Layer' })
-    expect(slider).toHaveAttribute('max', '2')
-    fireEvent.change(slider, { target: { value: '1' } })
+    expect(slider).toHaveAttribute('aria-valuemax', '2')
+    fireEvent.keyDown(slider, { key: 'ArrowLeft' })
     expect(screen.getByTestId('toolpath')).toHaveAttribute('data-layer', '0')
     expect(screen.getByText(/Layer/, { selector: 'span' }).parentElement).toHaveTextContent('Layer 1 of 2, at 0.20 mm')
     expect(within(screen.getByRole('list', { name: 'Features' })).getAllByRole('listitem').map((item) => item.textContent)).toEqual([

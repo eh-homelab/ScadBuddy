@@ -21,7 +21,7 @@ export interface Toolpath {
 
 export const STRIDE = 8
 export const TRAVEL = 0
-/** The wire format this decodes (`bambuddy/toolpath.py`'s `VERSION`). */
+/** The wire format this decodes: `backend/scadbuddy/bambuddy/toolpath.py`'s `VERSION`. */
 export const TOOLPATH_VERSION = 1
 
 export function decodeToolpath(buffer: ArrayBuffer): Toolpath {
@@ -138,6 +138,16 @@ export function printedUpTo(path: Toolpath): number[] {
     counts.push(count)
   }
   return counts
+}
+
+/**
+ * The vertex count a Layers draw range shows: every line up to `layer` (two vertices
+ * a line, from `printedUpTo`), or all of them with no layer chosen or no layers at all.
+ * A layer below the first draws the first, as one past the top draws the top.
+ */
+export function layerDrawCount(upTo: number[] | null, layer: number | null): number {
+  const lines = upTo === null || layer === null ? undefined : upTo[Math.max(0, Math.min(layer, upTo.length - 1))]
+  return lines === undefined ? Infinity : 2 * lines
 }
 
 /**

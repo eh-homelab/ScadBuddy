@@ -5,13 +5,13 @@ import importlib
 import logging
 import pkgutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Final
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
@@ -39,6 +39,7 @@ from scadbuddy.api import (
     print_attachments,
     telemetry,
 )
+from scadbuddy.api.accepting import install_accepting_handler, note_preference
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
@@ -53,7 +54,9 @@ from scadbuddy.api.limits import (
 )
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.bambuddy.attachments import sweep_gone_archives
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
@@ -61,6 +64,7 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -95,6 +99,7 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
+from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
@@ -111,10 +116,12 @@ from scadbuddy.workflows.flow_triggers import FlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
+    ATTACHMENTS_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
@@ -140,6 +147,10 @@ API_PREFIX = "/api/v1"
 EXCLUDED_URLS: Final = ",".join(
     f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
 )
+
+#: How long a batch print nobody touches is kept (#2718 review): long past any print
+#: it started, which Bambuddy's queue and the print runs keep on their own.
+BATCH_TTL = timedelta(days=7)
 
 logger = logging.getLogger(__name__)
 
@@ -497,7 +508,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        await _heartbeating(_sweep_claims_logged(state))
+        await _heartbeating(_sweep_claims_and_batches_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -518,6 +529,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_preview_slices() -> None:
         await _heartbeating(_sweep_preview_slices_logged(state))
 
+    @activity.defn(name=LOST_SLICES_SWEEP)
+    async def sweep_lost_slice_starts() -> None:
+        await _heartbeating(_sweep_lost_slices_logged(state))
+
     @activity.defn(name=GIT_SWEEP)
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
@@ -525,6 +540,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     @activity.defn(name=ACTIVITY_SWEEP)
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
+
+    @activity.defn(name=ATTACHMENTS_SWEEP)
+    async def sweep_print_attachments() -> None:
+        await _heartbeating(_sweep_print_attachments_logged(state))
 
     return [
         prune_jobs,
@@ -536,9 +555,27 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         reap_output_holds,
         sweep_flow_runs,
         sweep_preview_slices,
+        sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
+        sweep_print_attachments,
     ]
+
+
+async def _sweep_print_attachments_logged(state: AppState) -> None:
+    """#3047: the attachments of archives deleted in Bambuddy."""
+    store = state.components.get(PRINT_ATTACHMENTS)
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            gone = await sweep_gone_archives(client, store)
+        except Exception:
+            logger.exception("could not sweep the attachments of deleted archives")
+            raise
+        if gone:
+            logger.info("forgot the attachments of deleted archives", extra={"count": gone})
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _sweep_activity_logged(state: AppState) -> None:
@@ -583,12 +620,28 @@ async def _prune_jobs_logged(state: AppState) -> None:
         raise
 
 
-async def _sweep_claims_logged(state: AppState) -> None:
+async def _sweep_claims_and_batches_logged(state: AppState) -> None:
+    """The claims sweep, which also forgets batch prints left untouched for `BATCH_TTL`:
+    both are a delete on the prune cadence (`PRUNE_SWEEPS`), so the batch prune rides
+    this activity rather than adding a sweep a replica on an older build could not run
+    (#2718 review). Its failure is logged as the batch prune's own."""
+    # Each its own: one failing never starves the other, as the flow sweeps.
+    failed: Exception | None = None
     try:
         await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
-    except Exception:
+    except Exception as err:
         logger.exception("could not sweep operation claims")
-        raise
+        failed = err
+    try:
+        # #2718 review: a batch print closed without Cancel or Done stays otherwise.
+        pruned = await state.components.get(PRINT_BATCHES).prune(BATCH_TTL)
+        if pruned:
+            logger.info("forgot batch prints left untouched", extra={"count": pruned})
+    except Exception as err:
+        logger.exception("could not prune batch prints")
+        failed = failed or err
+    if failed is not None:
+        raise failed
 
 
 async def _sweep_flow_runs_logged(state: AppState) -> None:
@@ -617,25 +670,60 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
 
 
 async def _sweep_preview_slices_logged(state: AppState) -> None:
+    """#2169: the dialog's background slices no run queued. On `SWEEPS`' Schedule only,
+    so the sweeps' switch turns it off."""
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            removed = await sweep_preview_slices(client, state.uploads)
+        except Exception:
+            logger.exception("could not sweep the print dialog's background slices")
+            raise
+        if removed:
+            logger.info("removed unprinted background slices", extra={"count": removed})
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _sweep_lost_slices_logged(state: AppState) -> None:
+    """#2715: what print runs' lost slice starts left. On the prune Schedule too: the
+    job that names the file is kept only 30 minutes."""
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            lost = await sweep_lost_slices(client, state.uploads)
+        except Exception:
+            logger.exception("could not sweep the files of lost slice starts")
+            raise
+        if lost:
+            logger.info("removed the files of lost slice starts", extra={"count": lost})
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _with_bambuddy(
+    state: AppState, sweep: Callable[[BambuddyClient], Awaitable[None]]
+) -> None:
+    """Run ``sweep`` with a Bambuddy client; nothing to do when Bambuddy is not set up.
+    What ``sweep`` raises it has logged, and is raised as it is."""
     settings = await asyncio.to_thread(state.settings_store.load)
+    # Held, not raised in place: a sweep's own ApiError must miss the handler below,
+    # which would log it again as Bambuddy unreachable, or drop it as NOT_CONFIGURED.
+    failed: Exception | None = None
     try:
         async with client_for(settings) as client:
-            removed = await sweep_preview_slices(client, state.uploads)
-            # #2715: and what print runs' lost slice starts left, on the same tick.
-            lost = await sweep_lost_slices(client, state.uploads)
+            try:
+                await sweep(client)
+            except Exception as err:
+                failed = err
     except ApiError as error:
         if error.type == NOT_CONFIGURED_PROBLEM:
-            logger.debug("no background-slice sweep: Bambuddy is not set up")
+            logger.debug("no slice sweep: Bambuddy is not set up")
             return
-        logger.exception("could not sweep the print dialog's background slices")
+        logger.exception("could not reach Bambuddy to sweep slices")
         raise
-    except Exception:
-        logger.exception("could not sweep the print dialog's background slices")
-        raise
-    if removed:
-        logger.info("removed unprinted background slices", extra={"count": removed})
-    if lost:
-        logger.info("removed the files of lost slice starts", extra={"count": lost})
+    if failed is not None:
+        raise failed
 
 
 async def _maintain_models_git_logged(state: AppState) -> None:
@@ -929,7 +1017,8 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
     # timeout on a slow Temporal.
     handoff = asyncio.create_task(_hand_off_watches(state, client))
     try:
-        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+        where = {name: kind.where for name, kind in ops.kinds.items()}
+        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
     finally:
         # A row whose follow did not start stays for the next boot.
         handoff.cancel()
@@ -1068,11 +1157,15 @@ async def _serve_until(
 
 
 async def _end_lost_runs_until(
-    client: Client, store: PrintRunStore, operations: OperationStore, stop: asyncio.Event
+    client: Client,
+    store: PrintRunStore,
+    operations: OperationStore,
+    stop: asyncio.Event,
+    where: Mapping[str, str],
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
-    terminated in the Temporal UI."""
+    terminated in the Temporal UI. ``where``: each operation kind's what-to-check."""
     while not stop.is_set():
         try:
             ended = await reconcile_lost_runs(client, store)
@@ -1081,7 +1174,7 @@ async def _end_lost_runs_until(
         except Exception:
             logger.exception("could not check print runs for lost executions")
         try:
-            ended = await reconcile_lost_operations(client, operations)
+            ended = await reconcile_lost_operations(client, operations, where=where)
             if ended:
                 logger.warning("ended operations whose execution was gone", extra={"count": ended})
         except Exception:
@@ -1141,6 +1234,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
+            # #2788: on the API's /data, so every replica shares it.
+            downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
@@ -1266,16 +1361,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
-        if worker is not None:
-            stop.set()
-            await _stop_worker(state, *worker)
-        await components.aclose()
-        await state.render.aclose()
-        await asyncio.to_thread(state.projection.close)
-        await asyncio.to_thread(state.presets.close)
-        await state.events.aclose()
-        await state.store.aclose()
-        await asyncio.to_thread(state.settings_store.close)
+        # Each close runs even when one before it raises, so a component (or a pool)
+        # failing on its way out cannot leak the pools and the bus's listener (#653).
+        # The stack unwinds last-pushed first: pushed here in reverse of the order run.
+        async with AsyncExitStack() as closing:
+            closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
+            closing.push_async_callback(state.store.aclose)
+            closing.push_async_callback(state.events.aclose)
+            closing.push_async_callback(asyncio.to_thread, state.presets.close)
+            closing.push_async_callback(asyncio.to_thread, state.projection.close)
+            closing.push_async_callback(state.render.aclose)
+            closing.push_async_callback(components.aclose)
+            if worker is not None:
+                # Pushed last, so it runs first: the worker stops before the queue and
+                # the pools it uses close, and its failing still lets them close (#3125).
+                stop.set()
+                closing.push_async_callback(_stop_worker, state, *worker)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
@@ -1297,10 +1398,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
         # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
         telemetry={"auto_configure": False},
+        # #2794: whether a request follows a 202 itself, for `run_operation`.
+        dependencies=[Depends(note_preference)],
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
+    install_accepting_handler(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
     # A commit made for the agent is authored as the agent (#252).

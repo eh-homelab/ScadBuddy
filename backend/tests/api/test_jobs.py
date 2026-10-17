@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -14,11 +15,14 @@ from httpx import Response
 from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.api import commands as commands_api
 from scadbuddy.api import jobs as jobs_api
+from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM, SNAPSHOT_UNAVAILABLE
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy import library_view
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
@@ -29,7 +33,9 @@ from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
 from scadbuddy.workflows.commands import (
+    FAST_ACCEPT,
     CommandClosedError,
+    CommandResendError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -231,6 +237,26 @@ def test_a_plate_of_an_unreadable_or_vanished_3mf(
     gone = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
     assert gone.status_code == 404, gone.text
     assert "is gone" in gone.json()["detail"]
+
+
+def test_a_plate_too_big_to_read_is_refused_as_an_outputs_plate_is(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3554: out of memory cutting a job's plate is the output route's 422, not a 500."""
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 4}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    def oom(*_: object) -> object:
+        raise MemoryError
+
+    with monkeypatch.context() as patched:
+        patched.setattr(library_view, "read_plate_parts", oom)
+        refused = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == str(ReadOutOfMemoryError())
 
 
 def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:
@@ -676,3 +702,178 @@ def test_bad_inputs_are_refused_before_a_job_exists(
     assert detail in refused.json()["detail"]
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     assert state.render.store.list_jobs() == []
+
+
+# --- #2340: Prefer: respond-async answers 202 and the client follows the Update -------
+
+
+def test_a_render_still_accepting_answers_202_to_a_client_that_follows(
+    client: TestClient, model: str
+) -> None:
+    """Spec 2026-10-13 §5.1: no 503 for a slow pickup when the client follows the
+    Update itself; it waits `FAST_ACCEPT`, and its key is the Update it follows."""
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "k" * 32, "Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["status"] == "accepting"
+    assert (body["workflow_id"], body["update_id"]) == ("render-abc", "k" * 32)
+    assert body["follow_url"] == f"/api/v1/commands/render-abc/updates/{'k' * 32}"
+    assert response.headers["location"] == body["follow_url"]
+    assert response.headers["retry-after"] == "2"
+    assert response.headers["preference-applied"] == "respond-async"
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["accept_within"] == FAST_ACCEPT
+
+
+def test_a_followed_render_without_a_key_gets_one_to_follow(client: TestClient, model: str) -> None:
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 202, response.text
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == response.json()["update_id"]
+    assert len(response.json()["update_id"]) == 32
+
+
+def test_a_supersede_without_a_key_is_refused_even_under_respond_async(
+    client: TestClient, model: str
+) -> None:
+    """Review #2805: the key a 202 needs is made only after this check, as a made key is
+    new on every send and would let each re-send release the superseded job again."""
+    submit = mock.AsyncMock()
+    with mock.patch.object(RenderService, "submit", submit):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}, "supersedes": "a" * 32},
+            headers={"Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 422, response.text
+    assert "Idempotency-Key" in response.json()["detail"]
+    submit.assert_not_awaited()
+
+
+def test_a_render_answered_at_once_is_its_job_under_respond_async(
+    client: TestClient, model: str
+) -> None:
+    """#3042, spec 2026-10-13 §4: the healthy path does not change. A submit that
+    answers within `FAST_ACCEPT` is the 202 `RenderAccepted` it always was, not an
+    `accepting` to follow, and the preference is not echoed, as nothing applied it."""
+    quick = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "submit", quick):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "k" * 32, "Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {
+        "job_id": "j" * 32,
+        "status_url": f"/api/v1/jobs/{'j' * 32}",
+        "inputs": {"params": {"width": 12}, "v": 0},
+    }
+    assert "preference-applied" not in response.headers
+    assert quick.await_args is not None
+    assert quick.await_args.kwargs["accept_within"] == FAST_ACCEPT
+
+
+def _job(job_id: str = "j" * 32) -> Job:
+    return Job(id=job_id, slug="demo", created_at=datetime.now(UTC), inputs={"v": 0})
+
+
+def test_following_a_render_answers_its_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attributed: list[str] = []
+
+    async def attribute(index: object, activity_id: str) -> None:
+        attributed.append(activity_id)
+
+    monkeypatch.setattr(commands_api, "attribute_request", attribute)
+    follow = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "follow", follow):
+        response = client.post(
+            "/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"}
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "job_id": "j" * 32,
+        "status_url": f"/api/v1/jobs/{'j' * 32}",
+        "inputs": {"v": 0},
+    }
+    follow.assert_awaited_once_with("render-abc", "k1", supersedes="old")
+    # Attributed in Activity as the render route attributes it: that route answered 202
+    # and attributed nothing, so without this the render's principal stays NULL.
+    assert attributed == [f"render:{'j' * 32}"]
+
+
+def test_following_a_render_still_accepting_is_202_again(client: TestClient) -> None:
+    still = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
+    with mock.patch.object(RenderService, "follow", still):
+        response = client.post(
+            "/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"}
+        )
+
+    assert response.status_code == 202
+    assert response.json()["follow_url"] == "/api/v1/commands/render-abc/updates/k1?supersedes=old"
+
+
+def test_following_an_unknown_update_says_to_send_the_request_again(client: TestClient) -> None:
+    lost = mock.AsyncMock(side_effect=CommandResendError("render-abc"))
+    with mock.patch.object(RenderService, "follow", lost):
+        response = client.post("/api/v1/commands/render-abc/updates/k1")
+
+    assert response.status_code == 409
+    assert response.json()["type"] == COMMAND_RESEND_PROBLEM
+
+
+def test_following_a_full_queue_is_the_renders_own_refusal(client: TestClient) -> None:
+    full = mock.AsyncMock(side_effect=QueueFullError(3, 7))
+    with mock.patch.object(RenderService, "follow", full):
+        response = client.post("/api/v1/commands/render-abc/updates/k1")
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "7"
+
+
+def test_only_a_render_is_followed(client: TestClient) -> None:
+    follow = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "follow", follow):
+        response = client.post("/api/v1/commands/op-abc/updates/k1")
+
+    assert response.status_code == 404
+    follow.assert_not_awaited()
+
+
+def test_a_follow_is_a_write_the_cross_site_gate_checks(client: TestClient) -> None:
+    """Review of #2782: a render's follow makes its supersede (it releases, maybe cancels,
+    the job it replaces), so it is a POST: a page on another origin cannot make a LAN
+    user's browser send it, as it could an `<img src>` GET."""
+    configured = client.put("/api/v1/settings", json={"public_url": "https://scad.example.com/"})
+    assert configured.status_code == 200, configured.text
+    follow = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "follow", follow):
+        read = client.get("/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"})
+        foreign = client.post(
+            "/api/v1/commands/render-abc/updates/k1",
+            params={"supersedes": "old"},
+            headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+        )
+
+    assert read.status_code == 405, read.text
+    assert foreign.status_code == 403, foreign.text
+    follow.assert_not_awaited()

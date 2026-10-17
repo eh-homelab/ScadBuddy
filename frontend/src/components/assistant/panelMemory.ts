@@ -1,4 +1,4 @@
-import type { Origin, SessionStatus } from '../../agent/chat/protocol'
+import type { Origin, Owner, SessionStatus } from '../../agent/chat/protocol'
 
 /**
  * #2372 — what a reload (or a crashed tab) brings back: whether the assistant panel was
@@ -34,20 +34,31 @@ export const rememberSession = (id: string | null): void => write(ACTIVE_KEY, id
 const UNDER_WAY: readonly SessionStatus[] = ['running', 'waiting_input', 'waiting_approval']
 
 /**
+ * Whether this tab is coming back from a reload: it remembers a chat or an open panel.
+ * A tab duplicated from this one, or opened by it, starts with a copy of its
+ * sessionStorage, so it counts too and picks up the same chat, as a reload would.
+ */
+export const reloaded = (): boolean => rememberedSession() !== null || panelWasOpen()
+
+/**
  * The chat to show once the list has come in: the one this tab last showed, if it is
- * still listed, else the newest chat (not an MCP client's or an analyzer's session) that
- * is running or waiting on the user. `order` is newest first.
+ * still listed, else the newest of the viewer's own chats (not an MCP client's or an
+ * analyzer's session, nor another owner's, #3164) that is running or waiting on the user.
+ * `order` is newest first.
  */
 export function sessionToRestore(
   remembered: string | null,
   order: readonly string[],
-  sessions: Readonly<Record<string, { status: SessionStatus; origin: Origin } | undefined>>,
+  sessions: Readonly<
+    Record<string, { status: SessionStatus; origin: Origin; owner: Pick<Owner, 'kind'> } | undefined>
+  >,
 ): string | null {
   if (remembered && sessions[remembered]) return remembered
   return (
     order.find((id) => {
       const s = sessions[id]
-      return s?.origin === 'chat' && UNDER_WAY.includes(s.status)
+      // Any browser owner is "you", as in OwnerBadge: a deployment has one browser principal.
+      return s?.origin === 'chat' && s.owner.kind === 'browser' && UNDER_WAY.includes(s.status)
     }) ?? null
   )
 }

@@ -1,3 +1,4 @@
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { NozzleChoice } from '../../api/types'
 
 type Flow = NozzleChoice['flow']
@@ -19,25 +20,25 @@ type Props = {
  */
 export function FlowChoice({ value, onChange }: Props) {
   return (
-    <div role="radiogroup" aria-label="Nozzle" className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-      <span className="text-[13px] text-ink">Nozzle</span>
-      <div className="flex gap-1.5">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <span id="print-flow" className="text-sm font-medium">
+        Nozzle
+      </span>
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        spacing={0}
+        value={value}
+        // Choosing the chosen one again turns nothing off: there is always a flow.
+        onValueChange={(next) => next && onChange(next as Flow)}
+        aria-labelledby="print-flow"
+      >
         {FLOWS.map(({ flow, label }) => (
-          <button
-            key={flow}
-            type="button"
-            role="radio"
-            aria-checked={value === flow}
-            onClick={() => onChange(flow)}
-            data-testid={`flow-${flow}`}
-            className={`rounded-[6px] border px-3 py-1.5 text-[13px] ${
-              value === flow ? 'border-accent bg-accent/8 text-ink' : 'border-line text-muted hover:text-ink'
-            }`}
-          >
+          <ToggleGroupItem key={flow} value={flow} data-testid={`flow-${flow}`} className="px-3">
             {label}
-          </button>
+          </ToggleGroupItem>
         ))}
-      </div>
+      </ToggleGroup>
     </div>
   )
 }

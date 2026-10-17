@@ -22,6 +22,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'already reports the same characters as a missing-glyph warning, which render_model returns to an agent.',
   },
   {
+    operation: 'GET /api/v1/print/library/names',
+    reason:
+      "Settings' Remembered choices labels its library-file rows by name (#2349). An agent reads a file's name " +
+      'with the library listing tools.',
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
@@ -32,6 +38,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "One timelapse still as a JPEG (#2512), the print page's poster and seek strip. An agent watches the " +
       'timelapse itself through get_print_timelapse.',
+  },
+  {
+    operation: 'POST /api/v1/commands/{workflow_id}/updates/{update_id}',
+    reason:
+      'Follows a command the backend answered 202 `accepting` (#2795, spec 2026-10-13). The command tools ' +
+      "(render_model, print_output and every Operation route) follow it themselves through `answeredFollowing`; " +
+      'it is not an action of its own.',
   },
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
@@ -82,6 +95,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "The flow editor's completion and hover (#2487). An agent has the same host functions in " +
       "register_flow's description, and check_flow_script's problems name a wrong call.",
+  },
+  {
+    operation: 'POST /api/v1/workflow-script/host-functions',
+    reason:
+      "The flow editor's completion and hover for a flow with inputs (#2651). An agent reads `inputs()` in " +
+      "register_flow's description, and check_flow_script types it against the schema it is given.",
   },
   {
     operation: 'GET /api/v1/workflow-runs/{run_id}/images/{name}',
@@ -200,6 +219,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: ANALYZERS_LATER,
   },
   {
+    operation: 'POST /api/v1/print/filament-profiles/preview',
+    reason:
+      "The print dialog's preview of a profile against the process preset its choices resolve to (#717). An " +
+      'agent reads profiles with get_filament_profiles and applies one through print_output, whose run ' +
+      'warns (profile-not-applied) when one cannot apply.',
+  },
+  {
     operation: 'GET /api/v1/analyzers/decisions',
     reason: ANALYZERS_LATER,
   },
@@ -284,6 +310,23 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The print dialog's background reslice (#2169), which shows grams, time and the nozzle plan beside " +
       'the choices while a person changes them. An agent prints through print_output, whose run slices ' +
       'anyway, and reads the plan from the print check.',
+  })),
+  ...(
+    [
+      'POST /api/v1/print/batches',
+      'GET /api/v1/print/batches',
+      'GET /api/v1/print/batches/{batch_id}',
+      'PUT /api/v1/print/batches/{batch_id}/step',
+      'PUT /api/v1/print/batches/{batch_id}/items/{position}',
+      'POST /api/v1/print/batches/{batch_id}/queue',
+      'DELETE /api/v1/print/batches/{batch_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The Library page's stepped batch-print dialog (#2672), whose state is the step a person is on so a " +
+      'reload resumes it. Queue all only starts each file\'s ordinary library run; an agent prints several ' +
+      'library files by calling print_output with each library_file_id, which makes the same refusals.',
   })),
   {
     operation: 'POST /api/v1/print/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',

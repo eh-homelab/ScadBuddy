@@ -49,6 +49,8 @@ import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf,
 
 export const TURN_SPAN = 'agent.turn'
 export const RESUME_SPAN = 'agent.turn.resume'
+/** The warm cache's acquire for a turn (spec 2026-10-13 §5.3): `warm.outcome` is hit, miss or recycle, `warm.reason` why a recycle. */
+export const WARM_SPAN = 'agent.turn.spawn'
 
 export function toolSpanName(tool: string): string {
   return `agent.tool/${tool}`
@@ -64,8 +66,9 @@ export type TurnTraceOptions = {
   /**
    * #2376 — the session's spend and model turns before this turn. An outcome carries the
    * session's running totals, so without these a late turn of a long chat reads as costly.
+   * Required (#3244): a caller that left it out would put the session's total on the turn.
    */
-  before?: { costUsd: number; turns: number }
+  before: { costUsd: number; turns: number }
 }
 
 type Segment = {
@@ -122,7 +125,7 @@ export class TurnTrace implements GateTrace {
     this.#sessionId = options.sessionId
     this.#turnId = options.turnId
     this.#tierOf = options.tierOf
-    this.#before = options.before ?? { costUsd: 0, turns: 0 }
+    this.#before = options.before
     this.#segment = this.#open(TURN_SPAN, 0, options.parent, [])
   }
 
@@ -145,6 +148,24 @@ export class TurnTrace implements GateTrace {
   /** The open segment's context: what the turn's own work runs under. */
   context(): Context {
     return trace.setSpan(ROOT_CONTEXT, this.#segment.span)
+  }
+
+  /**
+   * One `agent.turn.spawn` span under the open segment around the warm cache's
+   * acquire (sessions/warm.ts): its outcome and reason, or its failure's class.
+   */
+  async warm<T extends { outcome: string; reason?: string | undefined }>(acquire: () => Promise<T>): Promise<T> {
+    const span = tracer().startSpan(WARM_SPAN, { attributes: this.#ids() }, this.context())
+    try {
+      const acquired = await acquire()
+      span.setAttributes({ 'warm.outcome': acquired.outcome, ...(acquired.reason === undefined ? {} : { 'warm.reason': acquired.reason }) })
+      return acquired
+    } catch (err) {
+      recordFailure(span, err)
+      throw err
+    } finally {
+      span.end()
+    }
   }
 
   #startTool(toolUseId: string, name: string, parent: Context, attributes: Attributes = {}, links: Link[] = []): Span {
@@ -334,6 +355,20 @@ export class TurnTrace implements GateTrace {
     else if (!decision) links = [{ context: parkedSpan }]
     call.span = this.#startTool(toolUseId, call.name, parent, { 'scadbuddy.approval_id': approval.id }, links)
     call.ended = false
+  }
+
+  /**
+   * What a turn that lost its claim spent and could not add to its session (manager.ts
+   * chargeLostTurn): kept on the open segment, so the spend that never reached
+   * `cost_usd` can be found and summed, not only read off a log line (#3888 review).
+   * That is the segment finish() ends with the outcome and `scadbuddy.cost_usd`: the root
+   * `agent.turn`, or an `agent.turn.resume` when the turn parked and its root has ended
+   * (an ended span drops an attribute). Sum it by attribute, across both span names
+   * (#3928 review).
+   */
+  unrecordedSpend(usd: number): void {
+    if (this.#finished) return
+    this.#openSegment().span.setAttribute('scadbuddy.unrecorded_cost_usd', usd)
   }
 
   /** The turn failed with `err`: its class goes on the open segment if the outcome is `failed`, never its message. */

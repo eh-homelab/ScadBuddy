@@ -25,7 +25,7 @@ from test_session_runner import KEK, insert_gateway, running
 
 from scadbuddy_durable.secrets import Kek
 from scadbuddy_durable.session import subagents
-from scadbuddy_durable.session.runner import ScadBuddyRunner
+from scadbuddy_durable.session.runner import ScadBuddyRunner, _http_url, _url_problem
 
 # agent/src/temporal/subagentToken.ts with the key bytes 0..31, measured 2026-10-11 (tsx).
 TS_KEY = "bc894da44adc3eb7b9ae28157c522fa844548a85811fd015f3d5203ab63f4aa3"
@@ -324,3 +324,91 @@ async def test_the_bundled_claude_code_gives_the_server_to_the_subagent_only(
         fake.close()
         stand_in.close()
         await asyncio.sleep(0)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_workflow_agents_chat_runs_as_its_subagent_type(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2393: a chat whose agent_type names a definition (a Workflow agent's, the agent's
+    workflowAgents.ts) runs its segment as that subagent: the bundled Claude Code's main
+    thread gets the definition's prompt, and its own effort."""
+    subagent_prompt = "You author ScadBuddy templates"
+    fake = FakeAnthropic(lambda body: {"text": "ok"}).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    plugin = tmp_path / "scadbuddy"
+    plugin.mkdir()
+    (plugin / "skills").symlink_to(REPO / "plugins" / "scadbuddy" / "skills")
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(plugin),
+            subagent_url="http://127.0.0.1:1/x",
+            agents_dir=str(AGENTS),
+            make_runner=ClaudeAgentSdkRunner,
+        )
+        async with running(temporal_env, connect, runner) as (client, queue):
+            sid = await insert_session(agent_db)
+            await agent_db.execute(
+                "UPDATE ai_sessions SET durable_turn_id = %s, agent_model = %s,"
+                " agent_effort = %s, agent_type = %s WHERE id = %s",
+                (str(uuid.uuid4()), "claude-opus-5-5", "low", "model-author", sid),
+            )
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "make a box")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+        main = [b for b in fake.messages() if b.get("tools")]
+        assert main
+        for body in main:
+            assert subagent_prompt in json.dumps(body.get("system"))
+            assert body.get("model") == "claude-opus-5-5"
+            assert body.get("output_config", {}).get("effort") == "low"
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+
+
+# _url_problem: why a stored subagent URL was refused (#3054). It is only for a URL
+# _http_url refused, which its one caller holds; pinned here, not asserted (#3765).
+@pytest.mark.parametrize(
+    ("value", "problem"),
+    [
+        ("file:///etc/passwd", "scheme 'file'"),
+        ("javascript:alert(1)", "scheme 'javascript'"),
+        ("ws://agent.svc/mcp", "scheme 'ws'"),
+        # urlsplit reads `localhost:8081/mcp`'s host as its scheme: not named.
+        ("localhost:8081/mcp", "no scheme"),
+        ("agent.svc/mcp", "no scheme"),
+        ("http:///mcp", "no host"),
+        ("http://[::1/mcp", "unparseable"),
+    ],
+)
+def test_url_problem_names_why_a_refused_url_was_refused(value: str, problem: str) -> None:
+    assert not _http_url(value)
+    assert _url_problem(value) == problem
+
+
+@pytest.mark.parametrize(
+    "value", ["http://agent.svc/mcp", "https://agent.svc:8443/internal/durable/mcp"]
+)
+def test_url_problem_misreads_an_accepted_url(value: str) -> None:
+    """Accepted, so the worker never asks why: on one, it reads "no host", which is wrong.
+    That misreading is why _url_problem is only for a URL _http_url refused."""
+    assert _http_url(value)
+    assert _url_problem(value) == "no host"

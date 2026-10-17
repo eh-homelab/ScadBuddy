@@ -898,15 +898,17 @@ async def list_prints(
             with span(
                 "prints.archive_window", attributes={"scadbuddy.archives": len(batch)}
             ) as current:
-                # How many the list read held, so a trace shows its hit rate (#2819).
-                held = await cache.prime(
+                # How many were not kept already, and how many of those the list read
+                # held, so a trace shows its hit rate (#2819).
+                primed = await cache.prime(
                     client,
                     [link.archive_id for link in batch],
                     date_from=date_from,
                     date_to=date_to,
                     limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
                 )
-                current.set_attribute("scadbuddy.archives_listed", held)
+                current.set_attribute("scadbuddy.archives_missing", primed.missing)
+                current.set_attribute("scadbuddy.archives_listed", primed.listed)
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )

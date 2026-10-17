@@ -23,6 +23,11 @@ export default defineConfig({
     // per test, so leave them be rather than raise them to match.
     expect: { poll: { timeout: 5000 } },
     testTimeout: 20_000,
+    // #3608: the Postgres tests' hooks copy, then force-drop, a database of their own
+    // (test/support/postgres.ts), and #1746's tenfold slowdown reaches them too. At
+    // vitest's 10 s default a loaded runner timed out a setup or teardown that had done
+    // nothing wrong (#3608 in CI, #3629 beside other suites), so hooks get a test's room.
+    hookTimeout: 20_000,
     // Migrates the template every Postgres test's database is copied from, once
     // (#2018; test/support/postgres.ts).
     globalSetup: ['test/support/globalSetup.ts'],

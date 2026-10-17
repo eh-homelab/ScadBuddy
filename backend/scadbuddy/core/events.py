@@ -84,7 +84,9 @@ class BaseEvent(BaseModel):
     at: datetime = Field(default_factory=_now, description="When it was published")
 
 
-JobKind = Literal["job.pending", "job.running", "job.done", "job.failed", "job.superseded"]
+JobKind = Literal[
+    "job.pending", "job.running", "job.done", "job.failed", "job.superseded", "job.cancelled"
+]
 
 
 class JobEvent(BaseEvent):
@@ -92,9 +94,10 @@ class JobEvent(BaseEvent):
 
     ``job.pending`` is published for a new job and again for one requeued after its
     worker was lost; a submit coalesced onto a waiting job publishes nothing, as that
-    job did not change. ``job.superseded`` ends a job a newer render replaced before
-    it started (its stored state is ``failed``), so nobody following it waits on.
-    Expired jobs are ``job.failed``."""
+    job did not change. ``job.superseded`` ends a job a newer render replaced (its
+    stored state is ``cancelled``), so nobody following it waits on; ``job.cancelled``
+    ends one whose last request was let go with no replacement (#607). Expired jobs
+    are ``job.failed``."""
 
     kind: JobKind
     job_id: str
@@ -245,7 +248,6 @@ SettingsSection = Literal[
     "model_choices",
     "printer_bed_type",
     "printer_rack_algorithm",
-    "last_project",
     "model_project",
     "remembered",
 ]

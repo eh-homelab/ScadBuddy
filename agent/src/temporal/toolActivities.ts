@@ -338,12 +338,17 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
   if (DURABLE_ONLY_NAMES.has(tool.name) || tool.name.startsWith('browser_')) {
     throw ApplicationFailure.nonRetryable(`${tool.name} is not for flows: a flow has no session and no browser tab`, NOT_FOR_FLOWS)
   }
-  // A lookup that throws (the database is away) is left to the activity's retries.
-  const owner = deps.flows ? await deps.flows.startedBy(flow) : undefined
-  if (owner === undefined) {
-    throw ApplicationFailure.nonRetryable(`${tool.name}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
+  // #2258: without the execution's run id the request id (`flow:<run>:<execution>:<call>`)
+  // matches no decision, so the call would be refused NotApproved with no reason given.
+  const runId = Context.current().info.workflowExecution?.runId
+  if (!runId) {
+    throw ApplicationFailure.nonRetryable(`${tool.name}: flow run ${flow}'s call carries no workflow execution run id`, UNKNOWN_FLOW)
   }
-  const runId = Context.current().info.workflowExecution?.runId ?? ''
+  // A lookup that throws (the database is away) is left to the activity's retries.
+  const owner = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
+  if (owner === undefined) {
+    throw ApplicationFailure.nonRetryable(`${tool.name}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
+  }
   // A token starter's run acts with what its token holds now, as its sessions' turns do (#2320).
   const tiers = owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner)
   const flows = deps.flows

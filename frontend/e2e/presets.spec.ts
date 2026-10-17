@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { choose } from './select'
 
 test.describe('template presets', () => {
   test.skip(
@@ -10,10 +11,10 @@ test.describe('template presets', () => {
     page,
   }) => {
     await page.goto('/m/name-keychain')
-    const preset = page.getByLabel('Preset')
+    const preset = page.getByRole('combobox', { name: 'Preset' })
     const name = page.getByRole('textbox', { name: 'Name on the tag' })
 
-    await preset.selectOption({ label: 'Mum' })
+    await choose(page, preset, 'Mum')
     await expect(name).toHaveValue('Mum')
 
     await name.fill('Dad')
@@ -25,36 +26,37 @@ test.describe('template presets', () => {
     await dialog.getByRole('button', { name: 'Save' }).click()
 
     await expect(dialog).toBeHidden()
-    await expect(preset.locator('option:checked')).toHaveText('Dad')
+    await expect(preset).toHaveText('Dad')
     await expect(page.getByTestId('preset-modified')).toHaveCount(0)
   })
 
-  test('ArrowDown over unsaved edits asks about the first preset once, and gives focus back (#1457)', async ({
+  test('a pick over unsaved edits asks once, and Cancel gives focus back (#1457)', async ({
     page,
   }) => {
-    // Chromium fires a change per ArrowDown on a closed select, which jsdom cannot
-    // reproduce: before #359, arrowing applied each preset in turn over the edits.
+    // #3672 — a Radix select opens on ArrowDown rather than changing its value per press
+    // as Chromium's native one did, so the pick is made from the list.
     await page.goto('/m/name-keychain')
-    // Exact: the confirmation's own label starts with "Apply preset".
-    const preset = page.getByLabel('Preset', { exact: true })
-    const name = page.getByRole('textbox', { name: 'Name on the tag' })
+    const preset = page.getByRole('combobox', { name: 'Preset' })
+    // Hidden from the accessibility tree while the question is open over it.
+    const name = page.getByRole('textbox', { name: 'Name on the tag', includeHidden: true })
     // The list loads before the select takes keys (it is disabled until then).
     await expect(preset).toBeEnabled({ timeout: 20_000 })
     await name.fill('Emmalina')
 
     await preset.focus()
-    for (let press = 0; press < 3; press += 1) await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('ArrowDown')
+    await page.getByRole('listbox').getByRole('option', { name: 'Tiny', exact: true }).click()
 
-    const dialog = page.getByRole('dialog')
+    const dialog = page.getByRole('alertdialog')
     await expect(dialog).toHaveCount(1)
     await expect(dialog).toHaveAccessibleName('Apply preset Tiny?')
     await expect(name).toHaveValue('Emmalina')
-    await expect(preset).toHaveValue('')
+    await expect(page.getByRole('combobox', { name: 'Preset', includeHidden: true })).toHaveText('Choose a preset…')
 
     await dialog.getByRole('button', { name: 'Cancel' }).click()
     await expect(dialog).toBeHidden()
     await expect(preset).toBeFocused()
-    await expect(preset).toHaveValue('')
+    await expect(preset).toHaveText('Choose a preset…')
     await expect(name).toHaveValue('Emmalina')
   })
 
@@ -89,7 +91,7 @@ test.describe('the "Changed from" note (#352)', () => {
     test(`stays one line inside the picker at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 })
       await page.goto('/m/name-keychain')
-      await page.getByLabel('Preset').selectOption({ label: 'Old engraving' })
+      await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old engraving')
       await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
 
       const note = page.getByTestId('preset-modified')
@@ -119,17 +121,18 @@ test.describe('duplicating a preset', () => {
     page,
   }) => {
     await page.goto('/m/name-keychain')
-    const preset = page.getByLabel('Preset')
-    await preset.selectOption({ label: 'Tiny' })
+    const preset = page.getByRole('combobox', { name: 'Preset' })
+    await choose(page, preset, 'Tiny')
     await expect(page.getByRole('button', { name: /^Update preset / })).toHaveCount(0)
 
-    await page.getByRole('button', { name: 'Duplicate preset Tiny' }).click()
+    await page.getByRole('button', { name: 'More for preset Tiny' }).click()
+    await page.getByRole('menuitem', { name: 'Duplicate preset Tiny' }).click()
     const dialog = page.getByRole('dialog', { name: 'Duplicate Tiny' })
     await expect(dialog.getByLabel('Preset name')).toHaveValue('Tiny copy')
     await dialog.getByRole('button', { name: 'Duplicate' }).click()
 
     await expect(dialog).toBeHidden()
-    await expect(preset.locator('option:checked')).toHaveText('Tiny copy')
+    await expect(preset).toHaveText('Tiny copy')
     await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Bo')
     await page.getByRole('button', { name: /^Update preset / }).click()
     await expect(page.getByTestId('preset-modified')).toHaveCount(0)
@@ -144,16 +147,17 @@ test.describe('a preset\'s details (#327)', () => {
 
   test('shows a shipped preset\'s details, and a saved one\'s can be edited', async ({ page }) => {
     await page.goto('/m/name-keychain')
-    const preset = page.getByLabel('Preset', { exact: true })
+    const preset = page.getByRole('combobox', { name: 'Preset' })
     const details = page.getByTestId('preset-details')
 
-    await preset.selectOption({ label: 'Tiny' })
+    await choose(page, preset, 'Tiny')
     await expect(details.getByRole('listitem')).toHaveText(['small', 'zip pull'])
     await expect(details.locator('strong')).toHaveText('zip pull')
 
-    await preset.selectOption({ label: 'Old engraving' })
+    await choose(page, preset, 'Old engraving')
     await expect(details).toHaveCount(0)
-    await page.getByRole('button', { name: 'Edit details of preset Old engraving' }).click()
+    await page.getByRole('button', { name: 'More for preset Old engraving' }).click()
+    await page.getByRole('menuitem', { name: 'Edit details of preset Old engraving' }).click()
     const dialog = page.getByRole('dialog', { name: 'Edit details of Old engraving' })
     await dialog.getByLabel('Preset name').fill('Engraved')
     await dialog.getByLabel('Description (optional, Markdown)').fill('Deep *engraving*.')
@@ -161,7 +165,7 @@ test.describe('a preset\'s details (#327)', () => {
     await dialog.getByRole('button', { name: 'Save' }).click()
 
     await expect(dialog).toBeHidden()
-    await expect(preset.locator('option:checked')).toHaveText('Engraved')
+    await expect(preset).toHaveText('Engraved')
     await expect(details.getByRole('listitem')).toHaveText(['engraved', 'deep'])
     await expect(details.locator('em')).toHaveText('engraving')
   })

@@ -1,7 +1,10 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { FeedItem } from '../../agent/chat/state'
+import { api } from '../../api/client'
+import { server } from '../../mocks/server'
 import { FeedItemView } from './FeedItemView'
 
 const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
@@ -35,6 +38,77 @@ describe('the approval card', () => {
       }
       unmount()
     }
+  })
+})
+
+describe("a headless-browser navigation's approval card (#982)", () => {
+  const nav = (tool = 'mcp__playwright__browser_navigate', input = '{"url":"https://cults3d.com/en/3d-model/spool"}') => {
+    const onDecide = vi.fn()
+    const item: FeedItem = {
+      kind: 'approval',
+      id: 'a2',
+      tool: 'toolu_9',
+      summary: `${tool} ${input}`,
+      state: 'pending',
+    }
+    const view = render(<FeedItemView item={item} sessionId="session-9" onDecide={onDecide} onAnswer={vi.fn()} />)
+    return { onDecide, ...view }
+  }
+
+  it('shows the full URL and offers once, for this chat, always, and deny, for the user only', () => {
+    nav()
+    expect(screen.getByText('https://cults3d.com/en/3d-model/spool')).toBeInTheDocument()
+    for (const name of ['Allow once', 'Allow for this chat', 'Always allow cults3d.com', 'Deny']) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('data-agent-user-only')
+    }
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('"Allow for this chat" approves the origin for the session, then approves the call', async () => {
+    const { onDecide } = nav()
+    await userEvent.click(screen.getByRole('button', { name: 'Allow for this chat' }))
+    await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('a2', true))
+    // Saved before the approval is sent, so the card says so whatever the approval does.
+    expect(screen.getByRole('status')).toHaveTextContent('Saved: https://cults3d.com is allowed for this chat.')
+    const listed = await api.getBrowserOrigins()
+    expect(listed.approved).toContainEqual(expect.objectContaining({ session_id: 'session-9', origin: 'https://cults3d.com', scope: 'session' }))
+  })
+
+  it('"Always allow" adds the origin to the allow list, then approves; a refused write approves nothing', async () => {
+    const { onDecide, unmount } = nav()
+    await userEvent.click(screen.getByRole('button', { name: 'Always allow cults3d.com' }))
+    await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('a2', true))
+    expect((await api.getBrowserOrigins()).allow).toContain('https://cults3d.com')
+    unmount()
+
+    server.use(http.post('/api/v1/ai/settings/browser-origins/allow', () => HttpResponse.json({ detail: 'must come from the ScadBuddy UI' }, { status: 403 })))
+    const again = nav()
+    await userEvent.click(screen.getByRole('button', { name: 'Always allow cults3d.com' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('must come from the ScadBuddy UI')
+    expect(again.onDecide).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['http on another port', 'http://printer.lan:8080/status', 'http://printer.lan:8080'],
+    ['https on another port', 'https://printer.lan:8443/status', 'https://printer.lan:8443'],
+    ['http on its default port', 'http://printer.lan/status', 'http://printer.lan'],
+  ])('names the whole origin "Always allow" saves when it is not https on its default port: %s', (_label, url, origin) => {
+    const { unmount } = nav(undefined, JSON.stringify({ url }))
+    expect(screen.getByRole('button', { name: `Always allow ${origin}` })).toBeInTheDocument()
+    unmount()
+  })
+
+  it('is the ordinary card, showing the whole summary, when the input is not exactly {url}', () => {
+    nav(undefined, '{"opts":{"url":"https://makerworld.com/"},"url":"https://evil.example/"}')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Always allow/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/evil\.example/)).toBeInTheDocument()
+  })
+
+  it("is the ordinary card for the bridge's own browser_navigate, which drives the user's tab", () => {
+    nav('mcp__scadbuddy__browser_navigate')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Allow once' })).not.toBeInTheDocument()
   })
 })
 
@@ -81,8 +155,8 @@ describe('the memory line', () => {
     for (const [item, headline] of cases) {
       const { unmount } = memory(item, true)
       const line = screen.getByTestId('agent-memory')
-      expect(line).toHaveAttribute('open')
-      expect(line.querySelector('summary')).toHaveTextContent(headline)
+      expect(line).toHaveAttribute('data-state', 'open')
+      expect(line.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent(headline)
       expect(line).toHaveTextContent('Bank scadbuddy')
       if (item.detail) expect(line).toHaveTextContent(item.detail)
       unmount()
@@ -90,20 +164,20 @@ describe('the memory line', () => {
     memory({ count: 1, input: 'make a <b>box</b>', memories: ['1. The user prints in PETG.'] }, true)
     expect(screen.getByTestId('agent-memory')).toHaveTextContent('Bank scadbuddy · 1 found')
     const query = screen.getByTestId('agent-memory-input')
-    expect(query).toHaveAttribute('open')
-    expect(query.querySelector('summary')).toHaveTextContent('Query')
+    expect(query).toHaveAttribute('data-state', 'open')
+    expect(query.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent('Query')
     // Plain text, never markup: memories and queries are untrusted.
     expect(query).toHaveTextContent('make a <b>box</b>')
     expect(query.querySelector('b')).toBeNull()
     const found = screen.getByTestId('agent-memory-output')
-    expect(found).toHaveAttribute('open')
+    expect(found).toHaveAttribute('data-state', 'open')
     expect(found).toHaveTextContent('1. The user prints in PETG.')
   })
 
   it("labels a retain's input as what was saved", () => {
     memory({ action: 'retain', input: 'user: a box, 40 mm' }, true)
     const saved = screen.getByTestId('agent-memory-input')
-    expect(saved.querySelector('summary')).toHaveTextContent('Saved')
+    expect(saved.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent('Saved')
     expect(saved).toHaveTextContent('user: a box, 40 mm')
     expect(screen.queryByTestId('agent-memory-output')).toBeNull()
   })
@@ -134,7 +208,8 @@ describe('the tool card', () => {
     expect(tool).toHaveTextContent('Done')
     expect(tool).not.toHaveTextContent('Set 1 parameter')
     expect(screen.queryByTestId('agent-tool-arguments')).toBeNull()
-    expect(tool.querySelector('details')).not.toHaveAttribute('open')
+    expect(screen.getByRole('button', { name: /^Why\?/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('link', { hidden: true, name: 'Customizer docs' })).not.toBeVisible()
   })
 
   it('in advanced mode shows its arguments and sources, open', () => {

@@ -303,14 +303,17 @@ is `classifyFailure()` in
 | Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. Through a gateway, Claude Code first sends a refused 400 or 422 once more on the same credential without its `thinking.display` field (and that field's `anthropic-beta` value), so a gateway that refuses only that field still answers the turn, at the cost of one refused request a turn. |
 
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
-fails mid-way (after tool calls ran) resumes the session on the next
-credential with a short "continue" prompt, so no tool runs twice and the prompt is not
-sent twice. Each credential is tried at most once per turn. Every disable, cooldown,
+fails mid-way (after tool calls ran) resumes the session on the next credential with a
+short "continue" prompt, so no tool runs twice and the prompt is not sent twice. Each
+credential is tried at most once per turn. In a durable session, while another
+credential could still take the segment over, the assistant's text reaches the
+transcript only at the next tool call or at the end of the segment, not block by
+block, so a refused credential's notice never shows (#2945). Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
-is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with
-`ai` set to one of:
+is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with `ai`
+set to one of:
 
 - `unavailable (every Claude credential is rate limited)`, with `recovers_at`: every
   credential is cooling down and will be usable again on its own;
@@ -345,7 +348,8 @@ fallback when there is no UI.
 The routes without `/entries` are the single-credential routes from #1000. They act on
 the first credential by priority, for scripts written against them. They are
 **deprecated** (#2768): the UI no longer uses them, and every answer carries
-`Deprecation: true` and a `Link` header naming `/api/v1/ai/credentials/entries` as the
+`Deprecation: @1791936000` (RFC 9745: deprecated at 2026-10-14T00:00:00Z) and a `Link`
+header naming `/api/v1/ai/credentials/entries` as the
 successor. The `/entries` and `/order` routes manage every credential (#1093); use them
 in anything new.
 
@@ -376,13 +380,15 @@ It reads the new entry's `id` with `jq`; where the shell has no `jq`, read `id` 
 the `POST`'s JSON answer by hand. The `POST` adds a credential every time it runs, so
 running it again leaves a duplicate: to replace an existing key, `PUT` it to
 `/api/v1/ai/credentials/entries/{id}` instead, taking its `id` from
-`GET /api/v1/ai/credentials/entries`.
+`GET /api/v1/ai/credentials/entries`. `jq -e` fails when the `POST` was refused (a
+`403`, `400` or `503` has no `id`), so the test runs only for a credential that was
+added; rerun the `POST` without `| jq` to read why it was refused.
 
 ```bash
 id=$(curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/entries \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
-  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -r .id)
-curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
+  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -er .id) &&
+  curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
 # Replacing that key later, rather than adding another:
 curl -sS -X PUT "http://localhost:8081/api/v1/ai/credentials/entries/$id" \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
@@ -626,7 +632,11 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); `printer_camera_enabled`, on unless stored
+  ([§12](#12-the-http-request-tool-827)); `browser_origins`, the headless browser's allow and deny
+  lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
+  through `PUT /api/v1/ai/settings/browser-origins`
+  ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
+  `printer_camera_enabled`, on unless stored
   `false`: while it is off a `get_printer_camera` call (from a turn, `/mcp` or a durable
   session) is refused before the backend is asked, which Settings → Printer camera writes
   through `PUT /api/v1/ai/settings/printer-camera`
@@ -661,10 +671,10 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn does not offer the ones that work in the
-  background of a classic turn's Claude Code and are not yet provided (`Workflow` and
-  `PushNotification`), and says which it left out. Every other one is offered, each
+  background of a classic turn's Claude Code and are not yet provided (`PushNotification`),
+  and says which it left out. Every other one is offered, each
   parked for approval (#2393, below); `CronCreate`, `CronDelete`, `CronList`,
-  `ScheduleWakeup`, `Monitor` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
+  `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -711,6 +721,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
+
+The agent also reads the backend's flow tables, which the backend migrates. Its
+database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
+reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
+Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
+tool call, as a lookup error the activity retries until it gives up.
 
 ## 8. Per-query limits
 
@@ -882,7 +898,7 @@ as a classic turn counts Claude Code's own calls. The inputs are Claude Code's o
 `test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
 answers its wording, measured in a classic turn on Claude Code 2.1.296.
 
-`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor` and `TaskStop` are kept by the
+`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are kept by the
 session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs in its
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
@@ -922,7 +938,37 @@ and says how many follow; the rest go in the next once the session is idle again
 A classic session's command runs on one replica's queue, so a rollout that replaces that
 pod ends it as `failed` (its heartbeat stops and it is not retried): re-arm it after a
 deploy. A durable session's command and any WebSocket are not tied to one pod this way.
-`Workflow` and `PushNotification` are not provided yet, and the session says so. The
+A `Workflow` is a task of the same kind too (Claude Code's tool, its texts measured on
+2.1.296). Its script runs as one heartbeating activity on any agent (`wf_run`), in
+QuickJS compiled to WebAssembly (`background/workflowRunner.ts`), never in the service's
+own JavaScript: a script is model-written code, and Node's `vm`, Temporal's workflow
+sandbox included, is not a boundary. Inside it there is no `process`, `require`, `fetch`,
+file or clock (`new Date()`, `Date.now()` and `Math.random()` throw, as Claude Code's
+do), memory is capped at 64 MiB, and a stretch that runs 5 s without awaiting is
+stopped. Each `agent()` is a chat of its own under the session (`SessionManager.startChild`,
+`background/workflowAgents.ts`): the session's mode, its budget (the lineage's, as a
+fork's), owned by whoever started the workflow, so its tool calls park in the gate as
+theirs do. Its task is framed as Claude Code's harness frames it, its instructions are
+Claude Code's for a workflow subagent, and its result is its final reply; with
+`schema`, the JSON object it replies with, checked (`z.fromJSONSchema`) and asked for
+again twice at most. At most 4 run at once and 50 in all, and a run expires after 6 hours.
+An agent's `model` and `effort` are its chat's own (`ai_sessions.agent_model`,
+`agent_effort`, read by a classic turn and by the durable runner in place of Settings');
+`agentType` names the plugin's subagent definition (`agents/<name>.md`) the chat's turns run
+as: the definition passed in `agents` and named by `agent` (`harness/agentDefinitions.ts`
+in a classic turn, `--agents`/`--agent` in a durable segment; Claude Code 2.1.296 does not
+take a plugin's own agent for the main thread, measured); `general-purpose` is none, and an
+unknown name fails the call with the list there is; `isolation: 'worktree'` fails
+the call as `EnterWorktree` does, the workspace being no git repository. Each result is
+journalled (`ai_workflow_calls`, by the call's key and occurrence), so a retry of the
+activity after its worker died, and `resumeFromRunId`, answer the calls already made.
+Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
+(interrupts and marks done) the ones an earlier attempt left open and no journal row names,
+since a worker that died never ran its agents' cleanup (#3395).
+The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
+which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
+`<task-notification>`, sent as a monitor's events are.
+`PushNotification` is not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
@@ -1081,15 +1127,14 @@ so a change applies from the next turn.
 - `GET` and `HEAD` run at once; `POST`, `PUT`, `PATCH` and `DELETE` wait for an
   approval in the UI.
 - Limits: 30 s per request by default (the model may ask for up to 120 s), 5
-  redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved under the
-  state volume, in `work/sessions/<id>/http/` (the 10 newest per session), so size
-  that volume for it. A durable session's go to `durable-turns/<id>/http/` on the replica
-  whose `turn_tools` listed the turn: its `http_request` calls are pinned to that
-  replica's own queue for the turn, so a body saved in one turn may be on another pod in
-  the next, and `http_response_read` then answers that there is no such saved response
-  (#2497; save to the workspace to keep one across turns). They are removed with the
-  session by `forgetSubject` on its pod, and by every pod's hourly sweep once the
-  session's row is gone (a flow run's after 7 days; #2496).
+  redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved in
+  Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, classic and
+  durable alike, so any replica pages it with `http_response_read`. That is up to
+  10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
+  per-session storage. The rows go with the session. A flow run's bodies stay on the
+  replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
+  pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
+  directory a pod left before #2374.
 - Every request is listed in Settings → **AI activity** under **HTTP requests**, with
   its method, host, status and size. A request whose body was saved has a **View /
   download body** link (#1292): plain text and JSON open as text, anything else

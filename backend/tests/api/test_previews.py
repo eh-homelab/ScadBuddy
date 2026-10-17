@@ -18,6 +18,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import suppress
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -139,13 +140,19 @@ async def _schedule_gone(state: AppState, schedule_id: str) -> None:
     """Return once the Schedule is deleted, within ~30 s."""
     assert state.temporal is not None
     handle = state.temporal.get_schedule_handle(schedule_id)
+    last: RPCError | None = None
     for _ in range(600):
         try:
             await handle.describe()
-        except RPCError:
-            return
+        except RPCError as error:
+            # Only "not found" is the deletion; a transient error (UNAVAILABLE while the
+            # client connects) is not, so it is read again.
+            if error.status == RPCStatusCode.NOT_FOUND:
+                return
+            last = error
         await asyncio.sleep(0.05)
-    raise AssertionError(f"{schedule_id} was never deleted")
+    # The last error says whether Temporal kept failing or the Schedule really stayed.
+    raise AssertionError(f"{schedule_id} was never deleted (last error: {last!r})")
 
 
 def backfilled(client: TestClient, state: AppState, runs: int = 1) -> None:
@@ -745,6 +752,10 @@ def test_previews_off_leaves_no_backfill_schedule(
         await prune(state)
 
     monkeypatch.setattr(main, "_prune_jobs_logged", prune_jobs)
+    # The held run is cancelled only by the first boot's worker stop, which would wait
+    # out the full graceful shutdown and then the sweep join (about 40 s) for it.
+    monkeypatch.setattr(main, "LIBRARY_GRACEFUL_SHUTDOWN", timedelta(seconds=0.5))
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 0.5)
     app, booted = _boot(settings, StubRender(paths))
     with TestClient(app) as client:
         backfilled(client, booted)

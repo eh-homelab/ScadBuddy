@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { Link } from 'react-router'
+import { XIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { dismissToast, getToasts, holdToast, releaseToast, subscribeToasts } from '../../lib/toast'
 
 export function Toasts() {
@@ -11,7 +13,7 @@ export function Toasts() {
     <div
       aria-live="polite"
       data-testid="toasts"
-      className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-2"
+      className="pointer-events-none fixed right-4 bottom-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
     >
       {shown.map((one) => (
         <div
@@ -20,23 +22,22 @@ export function Toasts() {
           onMouseLeave={() => releaseToast(one.id, 'hover')}
           onFocus={() => holdToast(one.id, 'focus')}
           onBlur={() => releaseToast(one.id, 'focus')}
-          className="pointer-events-auto flex items-start gap-2 rounded-[6px] border border-line bg-surface px-3 py-2 text-[13px] shadow-lg"
+          className="pointer-events-auto flex items-center gap-2 rounded-xl bg-popover py-2 pr-2 pl-4 text-sm text-popover-foreground shadow-lg ring-1 ring-foreground/10 duration-200 animate-in fade-in-0 slide-in-from-bottom-2"
         >
           {one.href ? (
-            <Link to={one.href} className="min-w-0 flex-1 truncate hover:underline" onClick={() => dismissToast(one.id)}>
+            <Link
+              to={one.href}
+              className="min-w-0 flex-1 truncate font-medium underline-offset-4 hover:underline"
+              onClick={() => dismissToast(one.id)}
+            >
               {one.title}
             </Link>
           ) : (
-            <span className="min-w-0 flex-1 truncate">{one.title}</span>
+            <span className="min-w-0 flex-1 truncate font-medium">{one.title}</span>
           )}
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={() => dismissToast(one.id)}
-            className="shrink-0 text-muted hover:text-ink"
-          >
-            ×
-          </button>
+          <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => dismissToast(one.id)}>
+            <XIcon aria-hidden="true" />
+          </Button>
         </div>
       ))}
     </div>

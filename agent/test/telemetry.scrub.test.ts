@@ -3,6 +3,7 @@ import { type Span, SpanKind, SpanStatusCode } from '@opentelemetry/api'
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace'
 import { describe, expect, it } from 'vitest'
 import { errorName, framesOnly, ScrubbingSpanExporter } from '../src/telemetry/scrub.js'
+import { ToolError } from '../src/tools/registry.js'
 
 // The scrub in front of every exporter (spec 2026-10-01 §6): no exception
 // message, query string or user agent leaves the process, in any form.
@@ -181,6 +182,21 @@ describe('errorName', () => {
     expect(errorName(err)).toBe('TypeError')
     expect(errorName('postgres://user:secret@db')).toBe('string')
     expect(errorName(undefined)).toBe('undefined')
+  })
+
+  it('names a short code and an HTTP status, which quote nothing, and no other field', () => {
+    const terminated = Object.assign(new Error('terminating connection'), { name: 'PostgresError', code: '57P01' })
+    expect(errorName(terminated)).toBe('PostgresError 57P01')
+    expect(errorName(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }))).toBe('Error ECONNREFUSED')
+    // Node's own codes are longer than an errno's; the cap keeps them.
+    expect(errorName(Object.assign(new Error('x'), { code: 'ERR_SCRIPT_EXECUTION_TIMEOUT' }))).toBe(
+      'Error ERR_SCRIPT_EXECUTION_TIMEOUT',
+    )
+    expect(errorName(new ToolError('Bambuddy did not answer', 502, 'upstream said postgres://u:p@h'))).toBe('ToolError 502')
+    // A code that could quote something, and a status that is not one, are left out.
+    expect(errorName(Object.assign(new Error('x'), { code: 'postgres://user:secret@db' }))).toBe('Error')
+    expect(errorName(Object.assign(new Error('x'), { code: 'a b', status: 'secret' }))).toBe('Error')
+    expect(errorName(Object.assign(new Error('x'), { status: 70000 }))).toBe('Error')
   })
 })
 

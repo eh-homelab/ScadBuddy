@@ -81,6 +81,11 @@ logger = logging.getLogger(__name__)
 #: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
 DisplayUnit = Literal["mm", "in"]
 
+#: The longest retention (``print_run_retention_seconds``, ``operation_retention_seconds``,
+#: ``activity_ttl_seconds``): ten years. Each prune computes ``now() - retention`` in
+#: Postgres, which raises "timestamp out of range" for a value a few thousand years long.
+RETENTION_MAX_SECONDS = 3650 * 86400.0
+
 #: Where an env-seeded field's value comes from (#322): a value saved in the UI, the
 #: deployment's ``SCADBUDDY_<FIELD>``, the built-in default, or a clear saved in the UI,
 #: which the environment's value does not override.
@@ -258,7 +263,7 @@ class StoredSettings(BambuddyIds):
     #: a time (:meth:`SettingsStore.set_printer_bed_type`).
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
 
-    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: The default Bambuddy project (#79), set only in Settings (#3188). A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
     #: defaults for the next filing (this, and ``model_projects`` below) rather than
     #: modelling which prints belong to which project: that question is Bambuddy's.
@@ -282,6 +287,17 @@ class StoredSettings(BambuddyIds):
     #: (#836). Stored like ``printer_print_options``, one key at a time in the jsonb
     #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``.
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
+
+    @field_validator(
+        "print_run_retention_seconds",
+        "operation_retention_seconds",
+        "activity_ttl_seconds",
+    )
+    @classmethod
+    def _bounded_retention(cls, value: float | None) -> float | None:
+        """A retention stored before :data:`RETENTION_MAX_SECONDS` was enforced is read
+        as the maximum, so it cannot fail every prune (or every insert that prunes)."""
+        return None if value is None else min(value, RETENTION_MAX_SECONDS)
 
     @field_validator("printer_rack_algorithms", mode="before")
     @classmethod
@@ -388,9 +404,13 @@ class SettingsPatch(BaseModel):
     display_unit: DisplayUnit | None = None
     #: At least a day, past the repeat window: a pruned row would turn a retry of a print
     #: (or an operation) that succeeded into a second one (review #1061).
-    print_run_retention_seconds: float | None = Field(default=None, ge=86400)
-    operation_retention_seconds: float | None = Field(default=None, ge=86400)
-    activity_ttl_seconds: float | None = Field(default=None, ge=86400)
+    print_run_retention_seconds: float | None = Field(
+        default=None, ge=86400, le=RETENTION_MAX_SECONDS
+    )
+    operation_retention_seconds: float | None = Field(
+        default=None, ge=86400, le=RETENTION_MAX_SECONDS
+    )
+    activity_ttl_seconds: float | None = Field(default=None, ge=86400, le=RETENTION_MAX_SECONDS)
     activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
     activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
         default=None, max_length=50
@@ -538,6 +558,11 @@ class SettingsStore:
             kwargs={"autocommit": True, "row_factory": dict_row, **TCP_KEEPALIVE},
             name="scadbuddy-settings",
         )
+
+    @property
+    def kek(self) -> Kek | None:
+        """The key the secret settings are sealed with; ``None`` when they are kept plain."""
+        return self._kek
 
     def open(self) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot."""
@@ -828,15 +853,6 @@ class SettingsStore:
         # The dialog's remembered choices, as for a model: no new section is needed.
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
-
-    def remember_project(self, project_id: int | None) -> StoredSettings:
-        """Remember the project the last send went to, so the picker opens on it."""
-        with self._pool.connection() as conn:
-            if project_id is None:
-                conn.execute("DELETE FROM settings WHERE name = 'last_project_id'")
-            else:
-                _put(conn, "last_project_id", project_id)
-        return self._written("last_project")
 
     def set_model_project(
         self, model_id: str, preset_id: str | None, project: ModelProject | None

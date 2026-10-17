@@ -7,7 +7,7 @@ import type { SlotChoice } from '../api/types'
 import { installTestTracing } from '../test/tracing'
 import { DEFAULT_NOZZLES } from './printChoices'
 import type { PrintSelection } from './usePrintChoices'
-import { useRunPrint } from './useRunPrint'
+import { printRunBody, useRunPrint } from './useRunPrint'
 
 const OUTPUT = 'a'.repeat(32)
 /** Hoisted: a fresh `[]` per render would itself count as a change of plan. */
@@ -207,5 +207,25 @@ describe('useRunPrint, traced', () => {
     } finally {
       tracing.uninstall()
     }
+  })
+})
+
+describe('printRunBody', () => {
+  it("carries the supports and filament profiles Print sends, so a batch step keeps them (#2672)", () => {
+    const body = printRunBody({
+      printerId: 1,
+      plan: PLAN,
+      printChoices: { nozzles: [...DEFAULT_NOZZLES], tier: 'standard' } as unknown as Parameters<typeof printRunBody>[0]['printChoices'],
+      copies: null,
+      plate: [1],
+      projectId: undefined,
+      options: {} as Parameters<typeof printRunBody>[0]['options'],
+      printSequence: null,
+      supports: { enabled: true } as unknown as Parameters<typeof printRunBody>[0]['supports'],
+      filamentProfiles: ['p1'],
+      rackPosition: null,
+      rackAlgorithm: null,
+    })
+    expect(body).toMatchObject({ supports: { enabled: true }, filament_profiles: ['p1'] })
   })
 })

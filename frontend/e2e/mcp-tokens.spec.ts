@@ -9,7 +9,8 @@ type Scope = Page | FrameLocator
 async function createToken(scope: Scope, name: string) {
   const section = scope.getByRole('region', { name: 'MCP access tokens' })
   await section.getByLabel('Token name').fill(name)
-  await section.getByLabel('Access').selectOption('write')
+  await section.getByLabel('Access').click()
+  await scope.getByRole('option', { name: 'Write', exact: true }).click()
   await section.getByRole('button', { name: 'Create token' }).click()
   const panel = section.getByTestId('minted-token')
   await expect(panel).toContainText(`New token: ${name}`)
@@ -48,7 +49,7 @@ test.describe('MCP access tokens', () => {
     await expect(page.locator('body')).not.toContainText(token)
 
     await section.getByRole('button', { name: 'Revoke Claude Code' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Revoke Claude Code?' })
+    const dialog = page.getByRole('alertdialog', { name: 'Revoke Claude Code?' })
     await dialog.getByRole('button', { name: 'Revoke token' }).click()
     await expect(dialog).toBeHidden()
     await expect(rows.first()).toContainText('Revoked')
@@ -72,7 +73,7 @@ test.describe('MCP access tokens', () => {
 
     // The revoke dialog works in the frame too.
     await frame.getByRole('button', { name: 'Revoke In the frame' }).click()
-    await frame.getByRole('dialog', { name: 'Revoke In the frame?' }).getByRole('button', { name: 'Revoke token' }).click()
+    await frame.getByRole('alertdialog', { name: 'Revoke In the frame?' }).getByRole('button', { name: 'Revoke token' }).click()
     await expect(frame.getByRole('button', { name: 'Revoke In the frame' })).toHaveCount(0)
   })
 })

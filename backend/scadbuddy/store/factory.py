@@ -19,6 +19,7 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore, StoreUsage
+from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.fonts import FontMirror
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalBlobStore
@@ -43,6 +44,8 @@ class StoreBundle:
     fonts: FontMirror | None
     source: RenderSettingsSource
     remote: BambuddyContentBackend | None = None
+    #: #2788: whole Bambuddy downloads by sha256, when this process keeps them.
+    downloads: DownloadCache | None = None
     #: The local backend's last walk, `(monotonic time, usage)`, for `store_usage`'s max age.
     local_usage: tuple[float, StoreUsage] | None = field(default=None, repr=False)
 
@@ -66,10 +69,22 @@ def build_store(
     history: ModelHistory | None,
     fonts: FontService,
     metrics: Metrics | None,
+    downloads_dir: Path | None = None,
 ) -> StoreBundle:
+    """``downloads_dir`` is where this process keeps whole Bambuddy downloads (#2788),
+    None for none: the API passes its default, a worker only one it is set (README)."""
     local = LocalBlobStore(paths.blobs)
+    downloads = (
+        DownloadCache(
+            downloads_dir,
+            max_bytes=config.download_cache_max_bytes,
+            min_age=config.activity_timeout,
+        )
+        if downloads_dir is not None and config.download_cache_max_bytes > 0
+        else None
+    )
     if backend == "local":
-        return StoreBundle("local", local, None, None, None, None, source)
+        return StoreBundle("local", local, None, None, None, None, source, downloads=downloads)
     # From any source, the environment's seed included: a Bambuddy store without a URL
     # or an inbox could store nothing, so the process does not start on it.
     if not current.bambuddy_url or current.library_folder_id is None:
@@ -88,6 +103,8 @@ def build_store(
         max_total_bytes=config.store_max_total_bytes,
         max_count=config.store_max_count,
         metrics=metrics,
+        downloads=downloads,
+        spool=paths.cache / "blob-spool",
     )
     blobs = CachedBlobStore(
         local,
@@ -106,6 +123,7 @@ def build_store(
         FontMirror(content, fonts, locks=locks),
         source,
         remote,
+        downloads=downloads,
     )
 
 

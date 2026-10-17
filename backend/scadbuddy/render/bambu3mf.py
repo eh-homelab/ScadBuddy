@@ -9,7 +9,8 @@ import tempfile
 import uuid
 import zipfile
 from array import array
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -309,6 +310,11 @@ def root_model(
     *,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """The package's root model: each plate's objects and their build items.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     items: list[str] = []
     each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
@@ -362,6 +368,12 @@ def model_settings(
     covers: bool,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """``Metadata/model_settings.config``: each object's parts and extruders, and each
+    plate.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     plate_entries: list[str] = []
     each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
@@ -605,7 +617,10 @@ class PlateEntry:
     index: int
     thumbnail: str | None
     #: What the plate holds, for a label (#929): its ``plater_name``, else the names of
-    #: the objects on it joined with " + ", else ``None``.
+    #: the objects on it joined with " + ", else ``None``. A plate ScadBuddy wrote with
+    #: several objects carries the model's name (with " (plate N)" when the file has
+    #: several plates) as its ``plater_name``; a one-object plate has none, so it is
+    #: named by its object.
     name: str | None = None
 
 
@@ -827,12 +842,11 @@ def _attribute(tag: str, name: str) -> str | None:
 #: under this; a longer one is not that writer's, and is parsed instead. It bounds what
 #: one vertex costs as an array row, whatever the file holds (#2877).
 _MAX_WRITTEN_NUMBER = 32
-#: A ``<vertex>`` exactly as :func:`object_model` writes one, and any tag named so: the
-#: two counted against each other, so a file written any other way is parsed instead.
+#: A ``<vertex>`` exactly as :func:`object_model` writes one, counted against every tag
+#: named so (:data:`_NAMED_TAG`), so a file written any other way is parsed instead.
 _WRITTEN_VERTEX = re.compile(
     rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
 )
-_ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
 #: How far into a ``<triangle>`` tag its paint code is looked for: the writer puts it after
 #: three vertex indices, well inside this.
 _MAX_TRIANGLE_LEAD = 256
@@ -844,15 +858,40 @@ _PAINT_CODE = re.compile(
     rb"<triangle\b[^>]{0,%d}?\s%s=\"([^\"]{0,%d})\""
     % (_MAX_TRIANGLE_LEAD, PAINT_ATTRIBUTE.encode(), MAX_CODE_DIGITS + 1)
 )
-_ANY_PAINT = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="')
+# The name first and the space behind it after, so `re` searches for the name as a
+# literal rather than trying every space in the file (#3678).
+_ANY_PAINT = re.compile(rb'%s(?<=\s%s)="' % ((PAINT_ATTRIBUTE.encode(),) * 2))
 #: The elements :func:`object_model` writes exactly one of; another count is the shape
 #: the parse refuses or reads otherwise (#2024), so it is left to the parse.
-_ONE_EACH = tuple(
-    re.compile(rb"<(?:[\w.-]+:)?%s\b" % tag)
-    for tag in (b"object", b"mesh", b"vertices", b"triangles")
-)
-#: Vertices turned into numbers at a time, so the copy never costs more than a batch.
-_VERTEX_BATCH = 65536
+_ONE_EACH = (b"object", b"mesh", b"vertices", b"triangles")
+#: Any tag of those names or named ``vertex``, under any prefix: one pass counts them
+#: all, where a pass each cost a second of a re-placement (#3678).
+_NAMED_TAG = re.compile(rb"<(?:[\w.-]+:)?(%s)\b" % b"|".join((*_ONE_EACH, b"vertex")))
+#: Bytes searched at a time (#3678). Each window ends just before a ``<``, so no tag
+#: the counts compare starts in one window and ends in the next, and the matches of one
+#: window are all that is held as Python objects at once. A tag a window boundary does
+#: split (a quoted value holding a ``<``) is missed by its pattern and still counted by
+#: the one it is checked against, which leaves the file to the parse.
+_WINDOW = 1 << 20
+#: The writer's root, in the core namespace that makes its bare ``<vertex>`` tags the
+#: 3MF's own; and any default namespace declared, the two counted against each other,
+#: so a file that puts its vertices in another namespace is left to the parse.
+_CORE_ROOT = re.compile(rb'<model\b[^>]{0,1024}?\sxmlns="%s"' % re.escape(CORE_NS.encode()))
+_ANY_DEFAULT_NAMESPACE = re.compile(rb"xmlns(?<=\sxmlns)\s*=")
+_LEADING_SPACE = re.compile(rb"\s*")
+
+
+def _windows(
+    data: bytes | bytearray, start: int, end: int | None = None
+) -> Iterator[tuple[int, int]]:
+    """``data`` from ``start`` to ``end`` (its end: None) as :data:`_WINDOW`-sized
+    ``(start, end)`` offsets, each ending just before a ``<``."""
+    end = len(data) if end is None else end
+    while start < end:
+        stop = data.find(b"<", start + _WINDOW, end)
+        stop = end if stop == -1 else stop
+        yield start, stop
+        start = stop
 
 
 def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
@@ -863,50 +902,64 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
     otherwise or with a coordinate past :data:`_MAX_WRITTEN_NUMBER`, a comment, an
     entity, a processing instruction, no vertex at all, other than one object, mesh,
     ``<vertices>`` and ``<triangles>``, a paint code off a triangle or past its cap),
-    which :func:`_plate_geometry` then parses as it always has.
+    which :func:`_plate_geometry` then parses as it always has. Its root must declare
+    the core namespace as its one default, as the parse requires of every vertex.
+
+    Triangles are not read, so a vertex index out of range is not refused here as the
+    parse refuses it: the box does not need them, and a re-placed object file is copied
+    as it was written, never rebuilt from its triangles.
 
     Every value is bounded before it is copied: no entity is expanded (none is
-    accepted), coordinates are read a batch at a time into rows of at most
+    accepted), coordinates are read a :data:`_WINDOW` at a time into rows of at most
     :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
     # The writer's one processing instruction is its XML declaration; any other, like a
     # comment, CDATA or an entity, is something the pattern does not read as XML does.
-    body = data[data.index(b"?>") + 2 :] if data.startswith(b"<?xml ") and b"?>" in data else data
-    if any(marker in body for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+    # Searched from an offset, never sliced: a slice is a copy of the whole file.
+    start = data.find(b"?>") + 2 if data.startswith(b"<?xml ") else 0
+    if start == 1:
         return None
-    if any(sum(1 for _ in tag.finditer(data)) != 1 for tag in _ONE_EACH):
+    if any(data.find(marker, start) != -1 for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+        return None
+    # Matched where the root element starts, the first thing after the declaration:
+    # a ``<model>`` inside some other root is not the 3MF's. Searched for instead, the
+    # bounded run would be retried from every ``<model`` in a file of them, 1 KB a time.
+    root = _LEADING_SPACE.match(data, start)
+    if (
+        root is None
+        or _CORE_ROOT.match(data, root.end()) is None
+        or sum(1 for _ in _ANY_DEFAULT_NAMESPACE.finditer(data)) != 1
+    ):
         return None
     low = np.full(3, np.inf)
     high = np.full(3, -np.inf)
-    count = 0
-    batch: list[tuple[bytes, bytes, bytes]] = []
-
-    def reduce() -> None:
-        points = np.array(batch, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
-        np.minimum(low, points.min(axis=0), out=low)
-        np.maximum(high, points.max(axis=0), out=high)
-        batch.clear()
-
-    try:
-        for match in _WRITTEN_VERTEX.finditer(data):
-            batch.append((match[1], match[2], match[3]))
-            count += 1
-            if len(batch) == _VERTEX_BATCH:
-                reduce()
-        if batch:
-            reduce()
-    except ValueError:
-        return None
-    if not count or count != sum(1 for _ in _ANY_VERTEX.finditer(data)):
-        return None
+    written = found = paints = 0
     codes: set[bytes] = set()
-    found = 0
-    for match in _PAINT_CODE.finditer(data):
-        code = match.group(1)
-        if len(code) > MAX_CODE_DIGITS or not code.isascii():
-            return None
-        codes.add(code)
-        found += 1
-    if found != sum(1 for _ in _ANY_PAINT.finditer(data)):
+    tags: Counter[bytes] = Counter()
+    # Each pattern is run over a window by `findall`, which matches in C: a Python step
+    # per vertex or triangle cost most of a re-placement (#3678).
+    for low_at, high_at in _windows(data, start):
+        rows = _WRITTEN_VERTEX.findall(data, low_at, high_at)
+        if rows:
+            try:
+                points = np.array(rows, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
+            except ValueError:
+                return None
+            np.minimum(low, points.min(axis=0), out=low)
+            np.maximum(high, points.max(axis=0), out=high)
+            written += len(rows)
+        tags.update(_NAMED_TAG.findall(data, low_at, high_at))
+        found_here = _PAINT_CODE.findall(data, low_at, high_at)
+        found += len(found_here)
+        codes.update(found_here)
+        # Counted, never collected: the attribute needs no ``<``, so a window holds as
+        # many as a run of them fits, and a list of them would cost several times the
+        # file (security review of #3711).
+        paints += sum(1 for _ in _ANY_PAINT.finditer(data, low_at, high_at))
+    if any(tags[tag] != 1 for tag in _ONE_EACH):
+        return None
+    if not written or written != tags[b"vertex"] or found != paints:
+        return None
+    if any(len(code) > MAX_CODE_DIGITS or not code.isascii() for code in codes):
         return None
     painted: set[int] = set()
     for code in codes:
@@ -1133,7 +1186,7 @@ def replate_3mf(
             _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
             _set_towers(settings, [placement.tower for placement in placements])
             changed[name] = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
-    return _rezipped(payload, changed)
+    return rezipped(payload, changed)
 
 
 @dataclass(frozen=True)
@@ -1404,6 +1457,143 @@ class _MeshTarget:
         return self.builder.close()
 
 
+#: A model entry is held whole, to be read by :func:`_written_mesh`, up to this size;
+#: a larger one is parsed as it inflates, as every entry was before #3679.
+_HELD_ENTRY = 64 * 1024 * 1024
+#: The values of a ``<vertex>`` and a ``<triangle>`` as :func:`object_model` writes
+#: them: a coordinate as `_number` writes it (fixed point, at most six decimals), an
+#: index in decimal digits, a paint code in hex. Each is one `float`, `int`, numpy and
+#: the parse agree on, and holds no ``<``, ``&`` or quote, so a tag written so reads as
+#: the parse reads it.
+_COORDINATE = rb"-?[0-9]{1,24}(?:\.[0-9]{1,6})?"
+_INDEX = rb"[0-9]{1,18}"
+_CODE = rb"[0-9A-Fa-f]{1,%d}" % MAX_CODE_DIGITS
+
+
+def _vertex_tag(coordinate: bytes) -> bytes:
+    return rb'<vertex x="%s" y="%s" z="%s"/>' % (coordinate, coordinate, coordinate)
+
+
+def _triangle_tag(index: bytes, code: bytes) -> bytes:
+    return rb'<triangle v1="%s" v2="%s" v3="%s"(?: %s="%s")?/>' % (
+        index,
+        index,
+        index,
+        PAINT_ATTRIBUTE.encode(),
+        code,
+    )
+
+
+#: A window of a block that holds nothing but those tags and the space between them.
+_ONLY_VERTICES = re.compile(rb"(?:\s*%s)*\s*" % _vertex_tag(_COORDINATE))
+_ONLY_TRIANGLES = re.compile(rb"(?:\s*%s)*\s*" % _triangle_tag(_INDEX, _CODE))
+#: Each triangle's paint code, empty for one without.
+_TRIANGLE_CODES = re.compile(_triangle_tag(_INDEX, b"(%s)" % _CODE))
+_PAINT_CODES = re.compile(rb' %s="%s"' % (PAINT_ATTRIBUTE.encode(), _CODE))
+#: The text around a tag's values, each turned to a space: what is left of a block
+#: these patterns matched is its numbers, space-separated, for `np.fromstring`.
+_VERTEX_TEXT = (b'<vertex x="', b'" y="', b'" z="', b'"/>')
+_TRIANGLE_TEXT = (b'<triangle v1="', b'" v2="', b'" v3="', b'"/>')
+
+
+def _numbers(window: bytes, text: tuple[bytes, ...], dtype: type) -> np.ndarray:
+    for each in text:
+        window = window.replace(each, b" ")
+    return np.fromstring(window, dtype=dtype, sep=" ")
+
+
+def _written_mesh(
+    data: bytes | bytearray, max_triangles: int | None, max_vertices: int | None
+) -> ParsedModel | None:
+    """``data`` as :func:`parse_model` reads it, when it is an object file in
+    :func:`object_model`'s shape: its ``<vertices>`` and ``<triangles>`` read straight
+    into arrays by pattern, in C, and the rest parsed as XML with those two emptied
+    (#3679). A Python call per vertex and triangle was most of recolouring a large
+    3MF: 49 s for an 86 MB one, whose covers are redrawn from its meshes.
+
+    ``None`` unless the file has one ``<mesh>`` with one ``<vertices>`` and one
+    ``<triangles>``, each holding only tags written exactly as that writer writes them
+    and the space between, no comment, CDATA, doctype or processing instruction past
+    the declaration (where a block's tags could hide), and no more vertices or
+    triangles than allowed: :func:`parse_model` then parses it as it always has, and
+    raises whatever it raises."""
+    if b"<!" in data or data.find(b"<?", 1) != -1:
+        return None
+    blocks = []
+    for tag in (b"vertices", b"triangles"):
+        opening, closing = b"<%s>" % tag, b"</%s>" % tag
+        if data.count(opening) != 1 or data.count(closing) != 1:
+            return None
+        start, end = data.find(opening) + len(opening), data.find(closing)
+        if start > end:
+            return None
+        blocks.append((start, end))
+    (vertices_at, vertices_end), (triangles_at, triangles_end) = blocks
+    if vertices_end > triangles_at:
+        return None
+    # Each window is checked to hold nothing but the writer's tags, then its numbers are
+    # read in C: the text around them turned to spaces, the rest left to numpy.
+    points: list[np.ndarray] = []
+    for low, high in _windows(data, vertices_at, vertices_end):
+        if _ONLY_VERTICES.fullmatch(data, low, high) is None:
+            return None
+        values = _numbers(bytes(data[low:high]), _VERTEX_TEXT, np.float64)
+        if len(values) != 3 * data.count(b"<vertex ", low, high):
+            return None
+        points.append(values)
+    faces: list[np.ndarray] = []
+    codes: list[str] = []
+    painted = data.find(PAINT_ATTRIBUTE.encode(), triangles_at, triangles_end) != -1
+    for low, high in _windows(data, triangles_at, triangles_end):
+        if _ONLY_TRIANGLES.fullmatch(data, low, high) is None:
+            return None
+        window = bytes(data[low:high])
+        if painted:
+            # Decoded together: a call per triangle was a second of a large file. The
+            # codes are hex, so a newline joins and splits them unambiguously.
+            found = _TRIANGLE_CODES.findall(window)
+            if found:
+                codes.extend(b"\n".join(found).decode("ascii").split("\n"))
+            window = _PAINT_CODES.sub(b"", window)
+        values = _numbers(window, _TRIANGLE_TEXT, np.int64)
+        if len(values) != 3 * data.count(b"<triangle ", low, high):
+            return None
+        faces.append(values)
+    vertices = np.concatenate(points).reshape(-1, 3) if points else np.empty((0, 3))
+    triangles = np.concatenate(faces).reshape(-1, 3) if faces else np.empty((0, 3), dtype=np.int64)
+    if (max_vertices is not None and len(vertices) > max_vertices) or (
+        max_triangles is not None and len(triangles) > max_triangles
+    ):
+        return None
+    target = _MeshTarget()
+    parser = ET.XMLParser(target=target)
+    for low, high in ((0, vertices_at), (vertices_end, triangles_at), (triangles_end, len(data))):
+        parser.feed(data[low:high])
+    root: ET.Element = parser.close()
+    # The two blocks are the one mesh's own: a ``<vertices>`` anywhere else, or a
+    # second mesh, is something the parse reads otherwise.
+    if (
+        len(target.meshes) != 1
+        or sum(1 for _ in root.iter(_VERTICES)) != 1
+        or sum(1 for _ in root.iter(_TRIANGLES)) != 1
+    ):
+        return None
+    mesh = next(iter(target.meshes))
+    if mesh.find(_VERTICES) is None or mesh.find(_TRIANGLES) is None:
+        return None
+    count = len(triangles)
+    target.meshes[mesh] = MeshArrays(
+        vertices=vertices,
+        faces=triangles,
+        pid=np.full(count, -1, dtype=np.int32),
+        pids=(),
+        p1=np.full(count, -1, dtype=np.int64),
+        paint=tuple(codes) if any(codes) else None,
+        prusa_painted=False,
+    )
+    return ParsedModel(root, target.meshes)
+
+
 def parse_model(
     archive: zipfile.ZipFile,
     name: str,
@@ -1419,17 +1609,36 @@ def parse_model(
     is not numbers."""
     target = _MeshTarget(max_triangles, max_vertices)
     parser = ET.XMLParser(target=target)
+
+    def feed(chunk: bytes | bytearray) -> None:
+        try:
+            parser.feed(chunk)
+        except OverflowError:
+            # An index past 64 bits: as unreadable as one that is not a number.
+            raise ValueError(f"{name} has a vertex index out of range") from None
+
     read = 0
+    # Held whole while it fits, to be read by pattern (#3679); fed to the parse once
+    # it is past what is held, or when it is not in the writer's shape.
+    held: bytearray | None = bytearray()
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             read += len(chunk)
             if cap is not None and read > cap:
                 raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
-            try:
-                parser.feed(chunk)
-            except OverflowError:
-                # An index past 64 bits: as unreadable as one that is not a number.
-                raise ValueError(f"{name} has a vertex index out of range") from None
+            if held is None:
+                feed(chunk)
+                continue
+            held += chunk
+            if read > _HELD_ENTRY:
+                feed(held)
+                held = None
+    if held is not None:
+        written = _written_mesh(held, max_triangles, max_vertices)
+        if written is not None:
+            return written
+        for at in range(0, len(held), _CHUNK):
+            feed(held[at : at + _CHUNK])
     root: ET.Element = parser.close()
     return ParsedModel(root, target.meshes)
 
@@ -1547,7 +1756,7 @@ def _entry(name: str) -> zipfile.ZipInfo:
     return info
 
 
-def _rezipped(payload: bytes, changed: Mapping[str, bytes]) -> bytes:
+def rezipped(payload: bytes, changed: Mapping[str, bytes]) -> bytes:
     """``payload`` with each entry in ``changed`` replaced, written in the writer's policy
     (:func:`_entry`), so a replated file is byte-identical to one written for this plate
     directly, covers included.

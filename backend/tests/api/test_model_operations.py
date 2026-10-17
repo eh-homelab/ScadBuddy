@@ -332,14 +332,20 @@ def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_name
 ) -> None:
     """Review 3c 1.2: a final answer drops the request's claims, except the bytes an
     operation still running holds by the same name."""
-    monkeypatch.setattr(
-        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
-    )
+
+    def short_for_slow(client: Client, workflow: str, arg: Any, **kwargs: Any) -> Any:
+        # Only the slow create must outlast its deadline: the quick one has to answer
+        # 201, and a 1 s deadline was too short for it on a loaded shard (#3499).
+        seconds = 1 if arg.subject == "slow" else 60
+        return start_command(client, workflow, arg, deadline=timedelta(seconds=seconds), **kwargs)
+
+    monkeypatch.setattr(operations_api, "start_command", short_for_slow)
     create = models_api._create
 
     async def slow_for_slow(*args: Any, **kwargs: Any) -> Any:
-        if kwargs["slug"] == "slow":
-            await asyncio.sleep(3)
+        # The quick create's 1.5 s only reproduces #3499 (it ran past 1 s on a loaded
+        # shard): it is what makes this test fail under a shared 1 s deadline, so keep it.
+        await asyncio.sleep(3 if kwargs["slug"] == "slow" else 1.5)
         return await create(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_create", slow_for_slow)
@@ -373,14 +379,14 @@ def test_a_duplicate_made_between_the_check_and_the_run_refuses_the_delete(
     refuse = models_api.refuse_delete
     calls = 0
 
-    def duplicated_after_the_check(*args: Any) -> None:
+    def duplicated_after_the_check(*args: Any, **kwargs: Any) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            refuse(*args)
+            refuse(*args, **kwargs)
             _state(app).catalogue.duplicate("base", "copy", "Copy")
             return
-        refuse(*args)
+        refuse(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "refuse_delete", duplicated_after_the_check)
     key = {"Idempotency-Key": uuid.uuid4().hex}

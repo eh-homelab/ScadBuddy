@@ -1,34 +1,53 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
-import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output } from '../api/types'
+import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output, PrintSummary } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
+import { LazyArrangedPlates } from '../components/ArrangedPlates'
 import { BlobDownload } from '../components/BlobDownload'
 import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
+import { statusLabel } from '../components/prints/status'
 import { PrintPicker } from '../components/PrintPicker'
 import { SendDialog } from '../components/SendDialog'
-import { Button } from '../components/ui/Button'
-import { Dialog } from '../components/ui/Dialog'
-import { Spinner } from '../components/ui/Spinner'
+import { PageLoading } from '../components/PageState'
+import { Spinner } from '../components/ui/spinner'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { MoreHorizontalIcon } from 'lucide-react'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { wasSent } from '../lib/sent'
-import { formatBbox, formatValue, timeAgo } from '../lib/format'
+import { formatBbox, formatValue, shortId, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
-
-/** Output ids are 32 hex characters; only the head of one is worth showing. */
-function shortId(id: string): string {
-  return id.slice(0, 8)
-}
 
 export function HistoryPage() {
   const { slug = '' } = useParams()
@@ -40,6 +59,12 @@ export function HistoryPage() {
   // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
   // on `print:<output id>`, which this list does not follow.
   const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
+  // The rows as they are now, for an edit that lands after an await (#2786 review): a
+  // rename or a delete answered late must not bring back what changed meanwhile.
+  const rows = useRef(outputsState.data)
+  useEffect(() => {
+    rows.current = outputsState.data
+  })
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
   const settings = useAsync(() => api.getSettings(), []).data
@@ -55,6 +80,31 @@ export function HistoryPage() {
   const [arrangedOutput, setArrangedOutput] = useState<Output | null>(null)
   /** #2287 — the output in the print dialog (History's Print, or the arranged result's). */
   const [printFor, setPrintFor] = useState<Output | undefined>(undefined)
+  /** #2288 — the dialog was opened by Queue: the print waits for a manual start. */
+  const [queueing, setQueueing] = useState(false)
+  /** #2288 — the output whose preview is open large. */
+  const [previewFor, setPreviewFor] = useState<Output | undefined>(undefined)
+  /**
+   * #2288 — each output's newest print as the Prints page has it, so a row says how its
+   * print went rather than only that it was queued. Best effort: unread, rows say less.
+   * Only the slug's newest 100 prints are read (`/prints` has no filter by output), so an
+   * output whose last print is older than those falls back to its queue id, as if it
+   * had not printed yet.
+   */
+  // Read again when any listed output's print starts or settles (#2786 review): a print
+  // that finishes while the page is open says so without a reload. Not on its progress
+  // ticks: each would be a read of Bambuddy's prints for an outcome that has not changed.
+  const printsState = useAsync(
+    () => api.listPrints({ slug }, { limit: 100 }).catch(() => ({ items: [], next_cursor: null })),
+    [slug],
+    (outputsState.data ?? []).map((output) => `print:${output.id}`),
+    (signal) => signal === 'resync' || signal.kind !== 'print.progress',
+  )
+  const lastPrints = new Map<string, PrintSummary>()
+  // Newest first: the first one seen for an output is its last print.
+  for (const print of printsState.data?.items ?? []) {
+    if (print.output_id && !lastPrints.has(print.output_id)) lastPrints.set(print.output_id, print)
+  }
   /** #902 — the outputs the last Arrange could not re-render, said once it has closed. */
   const [skipped, setSkipped] = useState<string | null>(null)
   /** #2284 — the last Arrange's result, said by where it was filed: maybe another model. */
@@ -67,7 +117,7 @@ export function HistoryPage() {
     try {
       // A user action of its own in Tempo (#2292), the delete its child.
       await traceAction('delete', { 'scadbuddy.output_id': id }, () => api.deleteOutput(id, deleteInboxCopies))
-      outputsState.setData((outputsState.data ?? []).filter((o) => o.id !== id))
+      outputsState.setData((rows.current ?? []).filter((o) => o.id !== id))
       setPicked((current) => current.filter((p) => p !== id))
       setConfirmFor(undefined)
     } finally {
@@ -84,33 +134,33 @@ export function HistoryPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-4xl px-4 py-6">
         <div className="mb-5 flex items-baseline gap-2">
-          <Link to="/" className="text-[12px] text-muted hover:text-ink">
+          <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
             Models
           </Link>
-          <span className="text-faint">/</span>
-          <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
+          <span className="text-muted-foreground">/</span>
+          <Link to={modelPath(slug)} className="text-sm text-muted-foreground hover:text-foreground">
             {modelState.data?.name ?? slug}
           </Link>
-          <span className="text-faint">/</span>
-          <h1 className="text-[13px] font-medium">History</h1>
+          <span className="text-muted-foreground">/</span>
+          <h1 className="text-sm font-medium">History</h1>
         </div>
 
-        {loading && (
-          <p className="flex items-center gap-2 py-16 text-[13px] text-muted">
-            <Spinner /> Loading history
-          </p>
-        )}
+        {loading && <PageLoading label="Loading history" />}
 
         {!loading && outputsState.data?.length === 0 && (
-          <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
-            <h2 className="text-[15px] font-medium">Nothing generated yet</h2>
-            <p className="mt-2 text-[13px] text-muted">
-              Every output you generate is kept here with the parameters that made it.
-            </p>
-            <Button variant="primary" className="mt-4" onClick={() => void navigate(modelPath(slug))}>
-              Open the customizer
-            </Button>
-          </div>
+          <Card className="border border-dashed text-center ring-0">
+            <CardHeader>
+              <CardTitle>
+                <h2>Nothing generated yet</h2>
+              </CardTitle>
+              <CardDescription>Every output you generate is kept here with the parameters that made it.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button type="button" onClick={() => void navigate(modelPath(slug))}>
+                Open the customizer
+              </Button>
+            </CardContent>
+          </Card>
         )}
 
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
@@ -127,6 +177,8 @@ export function HistoryPage() {
             )}
             <div className="mb-2 flex justify-end">
               <Button
+                type="button"
+                variant="outline"
                 size="sm"
                 disabled={picked.length === 0}
                 onClick={() => {
@@ -139,17 +191,17 @@ export function HistoryPage() {
               </Button>
             </div>
             {skipped && (
-              <p role="alert" className="mb-2 text-[13px] text-warn">
+              <p role="alert" className="mb-2 text-sm text-destructive">
                 {skipped}
               </p>
             )}
             {saved && (
-              <p role="status" aria-label="Arranged" className="mb-2 text-[13px] text-ink">
+              <p role="status" aria-label="Arranged" className="mb-2 text-sm">
                 {savedNote(saved, slug)}
                 {saved.output.slug !== slug && (
                   <>
                     {' '}
-                    <Link to={modelPath(saved.output.slug, 'history')} className="text-accent underline">
+                    <Link to={modelPath(saved.output.slug, 'history')} className="text-primary underline-offset-4 hover:underline">
                       Open in History
                     </Link>
                   </>
@@ -175,6 +227,17 @@ export function HistoryPage() {
                   onDelete={() => setConfirmFor(output)}
                   bambuddyUrl={bambuddyUrl}
                   pinned={modelState.data?.libraries}
+                  onQueue={() => {
+                    setQueueing(true)
+                    setPrintFor(output)
+                  }}
+                  onPreview={() => setPreviewFor(output)}
+                  onRenamed={(renamed) =>
+                    outputsState.setData((rows.current ?? []).map((o) => (o.id === renamed.id ? renamed : o)))
+                  }
+                  lastPrint={lastPrints.get(output.id)}
+                  // Its plates show once, in the next-step card above (#2754 review).
+                  platesAbove={arrangedRow?.id === output.id}
                 />
               ))}
             </ul>
@@ -195,9 +258,31 @@ export function HistoryPage() {
       <PrintPicker
         open={printFor !== undefined}
         source={printFor ? { kind: 'output', output: printFor } : undefined}
-        onClose={() => setPrintFor(undefined)}
-        onRan={() => outputsState.reload()}
+        queue={queueing}
+        onClose={() => {
+          setPrintFor(undefined)
+          // A Queue lasts as long as its dialog: the next one opened is a Print unless asked.
+          setQueueing(false)
+        }}
+        onRan={() => {
+          outputsState.reload()
+          printsState.refresh()
+        }}
       />
+      <Dialog open={previewFor !== undefined} onOpenChange={(open) => !open && setPreviewFor(undefined)}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{previewFor ? (previewFor.name ?? shortId(previewFor.id)) : ''}</DialogTitle>
+          </DialogHeader>
+          {previewFor && (
+            <img
+              src={api.outputThumbnailUrl(previewFor.id)}
+              alt={`Preview of ${previewFor.name ?? shortId(previewFor.id)}`}
+              className="mx-auto max-h-[70vh] w-auto rounded-lg bg-muted"
+            />
+          )}
+        </DialogContent>
+      </Dialog>
       <SendDialog
         open={sendFor !== undefined}
         output={sendFor}
@@ -214,11 +299,20 @@ export function HistoryPage() {
           setArranging(false)
           setPicked([])
           setArrangedOutput(arranged.output)
-          outputsState.reload()
+          // #2283 — in place: the list stays up and gains the new row, rather than
+          // dropping to "Loading history" until the read answers.
+          outputsState.refresh()
         }}
       />
     </div>
   )
+}
+
+/** #2288 — a print's outcome in its colour: green only for one that succeeded. */
+function printTone(status: string): string {
+  if (status === 'completed') return 'text-ok'
+  if (status === 'failed' || status === 'cancelled') return 'text-destructive'
+  return 'text-muted-foreground'
 }
 
 /** The copy the output was last uploaded as; copies are recorded in upload order. */
@@ -279,66 +373,60 @@ function DeleteOutputDialog({
     }
   }
 
+  const alsoId = `also-inbox-${output?.id ?? ''}`
   return (
-    <Dialog
-      open={output !== undefined}
-      title={`Delete ${output?.name ?? (output ? shortId(output.id) : '')}?`}
-      onClose={close}
-      footer={
-        <>
-          <Button variant="ghost" onClick={close} disabled={deleting}>
-            Cancel
-          </Button>
-          <Button variant="danger" onClick={() => void confirm()} disabled={deleting} {...USER_ONLY}>
+    <AlertDialog open={output !== undefined} onOpenChange={(open) => !open && close()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{`Delete ${output?.name ?? (output ? shortId(output.id) : '')}?`}</AlertDialogTitle>
+          <AlertDialogDescription>
+            The output, its file and its parameters are deleted. This cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {copies.length > 0 && (
+          <div className="flex flex-col gap-2 text-sm">
+            <p className="text-muted-foreground">This output has copies in Bambuddy&apos;s library:</p>
+            <ul className="list-disc pl-5 text-muted-foreground" aria-label="Library copies">
+              {copies.map((copy) => {
+                const place = placeOf(copy, inboxFolderId)
+                return (
+                  <li key={copy.id}>
+                    <span className="sb-num">#{copy.id}</span>{' '}
+                    {place === 'inbox'
+                      ? 'in the inbox folder'
+                      : place === 'project'
+                        ? 'in a project folder, kept'
+                        : 'folder not recorded; checked before deleting'}
+                  </li>
+                )
+              })}
+            </ul>
+            {removable > 0 ? (
+              <div className="flex items-center gap-2">
+                <Checkbox id={alsoId} checked={alsoInbox} onCheckedChange={(next) => setAlsoInbox(next === true)} />
+                <Label htmlFor={alsoId} className="font-normal">
+                  Also delete the inbox copies in Bambuddy
+                </Label>
+              </div>
+            ) : (
+              <p className="text-muted-foreground">Copies in project folders stay in Bambuddy.</p>
+            )}
+            <p className="text-xs text-muted-foreground">Sliced files and project copies are never deleted from here.</p>
+          </div>
+        )}
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+          <Button type="button" variant="destructive" onClick={() => void confirm()} disabled={deleting} {...USER_ONLY}>
             {deleting ? <Spinner /> : 'Delete output'}
           </Button>
-        </>
-      }
-    >
-      <p className="text-[13px] text-ink">
-        The output, its file and its parameters are deleted. This cannot be undone.
-      </p>
-      {copies.length > 0 && (
-        <>
-          <p className="mt-3 text-[13px] text-muted">This output has copies in Bambuddy&apos;s library:</p>
-          <ul className="mt-1 list-disc pl-5 text-[13px] text-muted" aria-label="Library copies">
-            {copies.map((copy) => {
-              const place = placeOf(copy, inboxFolderId)
-              return (
-                <li key={copy.id}>
-                  <span className="sb-num">#{copy.id}</span>{' '}
-                  {place === 'inbox'
-                    ? 'in the inbox folder'
-                    : place === 'project'
-                      ? 'in a project folder, kept'
-                      : 'folder not recorded; checked before deleting'}
-                </li>
-              )
-            })}
-          </ul>
-          {removable > 0 ? (
-            <label className="mt-3 flex items-center gap-2 text-[13px] text-ink">
-              <input
-                type="checkbox"
-                checked={alsoInbox}
-                onChange={(event) => setAlsoInbox(event.target.checked)}
-              />
-              Also delete the inbox copies in Bambuddy
-            </label>
-          ) : (
-            <p className="mt-3 text-[13px] text-muted">Copies in project folders stay in Bambuddy.</p>
-          )}
-          <p className="mt-2 text-[12px] text-faint">
-            Sliced files and project copies are never deleted from here.
-          </p>
-        </>
-      )}
-      {error && (
-        <p role="alert" className="mt-3 text-[13px] text-warn">
-          {error}
-        </p>
-      )}
-    </Dialog>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
@@ -379,7 +467,7 @@ function OutputLibraries({
 }) {
   if (libraries.length === 0) return null
   return (
-    <p className="sb-num mt-1 text-[12px] text-muted" aria-label="Rendered with libraries">
+    <p className="sb-num mt-1 text-xs text-muted-foreground" aria-label="Rendered with libraries">
       {libraries.map((library, index) => {
         const change = pinChange(library, pinned)
         return (
@@ -391,7 +479,7 @@ function OutputLibraries({
             {change && (
               <>
                 {' '}
-                <span className="text-warn">({change})</span>
+                <span className="text-destructive">({change})</span>
               </>
             )}
           </span>
@@ -410,9 +498,14 @@ function OutputRow({
   onEdit,
   onSend,
   onPrint,
+  onQueue,
+  onPreview,
+  onRenamed,
+  lastPrint,
   onDelete,
   bambuddyUrl,
   pinned,
+  platesAbove = false,
 }: {
   output: Output
   schema: CustomizerSchema
@@ -423,10 +516,19 @@ function OutputRow({
   onEdit: () => void
   onSend: () => void
   onPrint: () => void
+  /** #2288 — the print dialog, set to wait in Bambuddy's queue for a manual start. */
+  onQueue: () => void
+  /** #2288 — the row's preview, large. */
+  onPreview: () => void
+  onRenamed: (output: Output) => void
+  /** #2288 — the output's newest print, from the Prints page's own read. */
+  lastPrint: PrintSummary | undefined
   onDelete: () => void
   bambuddyUrl: string | undefined
   /** The model's current pins; undefined until the model has loaded, so nothing is flagged. */
   pinned: ModelLibrary[] | undefined
+  /** The just-arranged output, whose plates `ArrangedNext` shows above the list already. */
+  platesAbove?: boolean
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
@@ -442,97 +544,205 @@ function OutputRow({
   const arrangedFrom = (output.arranged_from ?? []).length
   // #975 — what each row's buttons are named after, so a list of them can tell the rows apart.
   const label = output.name ?? shortId(output.id)
+  /** #2288 — the name being typed, while Rename is open. */
+  const [naming, setNaming] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
+
+  async function rename(name: string) {
+    setRenaming(true)
+    setRenameError(null)
+    try {
+      onRenamed(await api.renameOutput(output.id, name.trim() || null))
+      setNaming(null)
+    } catch (caught) {
+      setRenameError(caught instanceof ApiError ? caught.detail : String(caught))
+    } finally {
+      setRenaming(false)
+    }
+  }
 
   return (
-    <li className="rounded-[6px] border border-line bg-surface p-3">
+    <li>
+      <Card size="sm" className="px-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2.5">
-            <input
-              type="checkbox"
-              aria-label={`Select ${output.name ?? shortId(output.id)}`}
-              checked={picked}
-              onChange={onPick}
-              className="accent-[var(--sb-accent)]"
-            />
-            <ColorStrip colors={output.colors ?? []} size="sm" />
-            <span className="text-[13px] text-ink">{label}</span>
-            <span className="text-[12px] text-faint">{timeAgo(output.created_at)}</span>
+        {/* #2288 — every output's picture; an arranged one also shows its plates below. */}
+        {output.has_thumbnail ? (
+          <button
+            type="button"
+            onClick={onPreview}
+            aria-label={`Preview ${label}`}
+            className="shrink-0 rounded-lg border bg-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <img src={api.outputThumbnailUrl(output.id)} alt="" className="h-16 w-16 rounded-lg object-contain" />
+          </button>
+        ) : (
+          <div
+            aria-label={`No preview of ${label}`}
+            className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg border border-dashed text-center text-[10px] text-muted-foreground"
+          >
+            No preview
           </div>
-          <p className="sb-num mt-1 text-[12px] text-muted">
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2.5">
+            <Checkbox aria-label={`Select ${output.name ?? shortId(output.id)}`} checked={picked} onCheckedChange={onPick} />
+            <ColorStrip colors={output.colors ?? []} size="sm" />
+            {naming === null ? (
+              <span className="text-sm font-medium">{label}</span>
+            ) : (
+              <form
+                className="flex items-center gap-1.5"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void rename(naming)
+                }}
+              >
+                <Input
+                  aria-label={`Name for ${label}`}
+                  value={naming}
+                  placeholder={shortId(output.id)}
+                  onChange={(event) => setNaming(event.target.value)}
+                  maxLength={200}
+                  autoFocus
+                  className="h-7"
+                />
+                <Button size="sm" type="submit" disabled={renaming}>
+                  {renaming ? <Spinner /> : 'Save'}
+                </Button>
+                <Button type="button" size="sm" variant="ghost" disabled={renaming} onClick={() => setNaming(null)}>
+                  Cancel
+                </Button>
+              </form>
+            )}
+            <span className="text-xs text-muted-foreground">{timeAgo(output.created_at)}</span>
+          </div>
+          {renameError && (
+            <p role="alert" className="mt-1 text-xs text-destructive">
+              {renameError}
+            </p>
+          )}
+          <p className="sb-num mt-1 text-xs text-muted-foreground">
             {output.bbox_mm ? formatBbox(output.bbox_mm, unit) : 'No dimensions recorded'}
-            {(output.plates ?? []).length > 1 &&
+            {/* #2288 — how its last print went, linked to ScadBuddy's print page. Being
+                queued says nothing of that, so the queue ids are neutral and show only
+                until a print is on record. */}
+            {lastPrint && (
+              <Link
+                to={`/prints/${lastPrint.archive_id}`}
+                className={`ml-2 underline underline-offset-2 ${printTone(lastPrint.status)}`}
+              >
+                {`Last print: ${statusLabel(lastPrint.status)}`}
+              </Link>
+            )}
+            {!lastPrint &&
+              (output.plates ?? []).length > 1 &&
               (output.plates ?? []).map((plate) => (
                 <BambuddyId
                   key={plate.queue_item_id}
-                  className="ml-2 text-ok"
+                  className="ml-2 text-muted-foreground"
                   href={bambuddyUrl && `${bambuddyUrl}/queue/${plate.queue_item_id}`}
                 >
                   {plateLabel(plateNames, plate.plate_id)} queued #{plate.queue_item_id}
                 </BambuddyId>
               ))}
-            {output.queue_item_id && (output.plates ?? []).length <= 1 && (
+            {!lastPrint && output.queue_item_id && (output.plates ?? []).length <= 1 && (
               <BambuddyId
-                className="ml-2 text-ok"
+                className="ml-2 text-muted-foreground"
                 href={bambuddyUrl && `${bambuddyUrl}/queue/${output.queue_item_id}`}
               >
                 queued #{output.queue_item_id}
               </BambuddyId>
             )}
             {!output.queue_item_id && lastCopy(output) && (
-              <BambuddyId className="ml-2 text-muted" href={bambuddyUrl && `${bambuddyUrl}/library`}>
+              <BambuddyId className="ml-2 text-muted-foreground" href={bambuddyUrl && `${bambuddyUrl}/library`}>
                 in library #{lastCopy(output)?.id}
               </BambuddyId>
             )}
           </p>
           <OutputLibraries libraries={output.libraries ?? []} pinned={pinned} />
+          {/* #2282 — an arranged output's layout is what it is: its plates, on the row. */}
+          {arrangedFrom > 0 && !platesAbove && <LazyArrangedPlates outputId={output.id} size="sm" />}
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           {arrangedFrom > 0 ? (
-            <span className="text-[12px] text-muted">
+            <span className="text-xs text-muted-foreground">
               {`Arranged from ${arrangedSources(output.arranged_from ?? [])}`}
             </span>
           ) : (
-            <Button size="sm" onClick={onEdit} aria-label={`Edit ${label}`}>
+            <Button type="button" variant="outline" size="sm" onClick={onEdit} aria-label={`Edit ${label}`}>
               Edit
             </Button>
           )}
-          <Button size="sm" onClick={onPrint} aria-label={`Print ${label}`}>
+          <Button type="button" size="sm" onClick={onPrint} aria-label={`Print ${label}`}>
             Print
           </Button>
           {/* #2287 — "again" only for an output that went to Bambuddy before. */}
-          <Button size="sm" onClick={onSend} aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}>
+          <Button type="button" variant="outline" size="sm" onClick={onSend} aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}>
             {sent ? 'Send again' : 'Send'}
           </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            onClick={onDelete}
-            disabled={deleting}
-            aria-label={`Delete ${label}`}
-            {...USER_ONLY}
+          <BlobDownload
+            url={api.downloadUrl(output.id)}
+            // The server names it (`download_filename`), as every other download of it.
+            filename={`${output.slug}-${output.id}.3mf`}
+            className="px-1 text-sm text-primary underline-offset-4 hover:underline"
           >
-            {deleting ? <Spinner /> : 'Delete'}
-          </Button>
+            Download 3MF
+          </BlobDownload>
+          {/* #3672 — the row's other actions, in one menu. */}
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="ghost" size="icon-sm" aria-label={`More for ${label}`} disabled={deleting}>
+                {deleting ? <Spinner /> : <MoreHorizontalIcon />}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-auto min-w-40">
+              <DropdownMenuItem onSelect={() => setTimeout(onQueue, 0)} aria-label={`Queue ${label}`}>
+                Queue
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={naming !== null}
+                // After the menu has put the focus back on its button, so the name field keeps it.
+                onSelect={() =>
+                  setTimeout(() => {
+                    setRenameError(null)
+                    setNaming(output.name ?? '')
+                  }, 0)
+                }
+                aria-label={`Rename ${label}`}
+              >
+                Rename
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => setTimeout(onDelete, 0)}
+                aria-label={`Delete ${label}`}
+                {...USER_ONLY}
+              >
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
-      <div className="mt-3 border-t border-line pt-2.5">
+      <div className="border-t pt-2.5">
         {diff.length === 0 ? (
-          <p className="text-[12px] text-faint">Model defaults, unchanged.</p>
+          <p className="text-xs text-muted-foreground">Model defaults, unchanged.</p>
         ) : (
           // #1036 — the caption column is capped at half the card: as `auto`, a long caption
           // took the whole row on a phone and pushed the values off the screen.
-          <dl className="grid grid-cols-[fit-content(50%)_minmax(0,1fr)] gap-x-4 gap-y-1 text-[12px]">
+          <dl className="grid grid-cols-[fit-content(50%)_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
             {diff.map((entry) => (
               <div key={entry.name} className="contents">
-                <dt className="text-muted">{entry.caption}</dt>
+                <dt className="text-muted-foreground">{entry.caption}</dt>
                 <dd className="sb-num min-w-0">
-                  <span className="text-ink">{formatValue(entry.value)}</span>
+                  <span className="text-foreground">{formatValue(entry.value)}</span>
                   {/* #975 — read as "21, default 20", not "2120": the strike-through alone is CSS. */}
                   <span className="sr-only">, default </span>
-                  <del className="ml-2 text-faint">{formatValue(entry.initial)}</del>
+                  <del className="ml-2 text-muted-foreground">{formatValue(entry.initial)}</del>
                 </dd>
               </div>
             ))}
@@ -543,7 +753,7 @@ function OutputRow({
       {/* A pipeline output's bill of materials and extra files (spec 2026-09-27 §5.2). */}
       <BomTable bom={output.bom ?? []} />
       {(output.files ?? []).length > 0 && (
-        <ul className="mt-2 flex flex-wrap gap-3 text-[12px]">
+        <ul className="flex flex-wrap gap-3 text-xs">
           {(output.files ?? []).map((name) => (
             <li key={name}>
               {/* #2287 — through downloadBlob: a plain link is dropped in Bambuddy's frame (#612). */}
@@ -554,6 +764,7 @@ function OutputRow({
           ))}
         </ul>
       )}
+      </Card>
     </li>
   )
 }

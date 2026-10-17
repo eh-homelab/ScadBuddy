@@ -147,4 +147,32 @@ describe('ActivityDrawer', () => {
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(await screen.findByRole('dialog', { name: 'Parent' })).toBeInTheDocument()
   })
+
+  it('keeps a JSON block collapsed for its own row only', async () => {
+    seedActivity([
+      failedImport({ id: 'render:p', kind: 'render', title: 'Parent', status: 'running', detail: { request: { a: 1 } } }),
+      failedImport({
+        id: 'render:c',
+        kind: 'render',
+        title: 'Child piece',
+        parent_id: 'render:p',
+        status: 'succeeded',
+        detail: { request: { b: 2 } },
+      }),
+    ])
+    const { user } = renderPage(<ActivityDrawer id="render:p" onClose={() => {}} />)
+    await user.click(await screen.findByRole('switch', { name: 'Advanced' }))
+    const request = async () => screen.findByRole('button', { name: 'Request' })
+    expect(await request()).toHaveAttribute('aria-expanded', 'true')
+    await user.click(await request())
+    expect(await request()).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(await screen.findByRole('button', { name: 'Child piece' }))
+    expect(await screen.findByRole('dialog', { name: 'Child piece' })).toBeInTheDocument()
+    await waitFor(async () => expect(await request()).toHaveAttribute('aria-expanded', 'true'))
+
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(await screen.findByRole('dialog', { name: 'Parent' })).toBeInTheDocument()
+    await waitFor(async () => expect(await request()).toHaveAttribute('aria-expanded', 'false'))
+  })
 })

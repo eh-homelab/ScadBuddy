@@ -46,7 +46,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await expect(allowable.getByRole('listitem')).toHaveCount(2)
     await expect(allowable).toContainText('"command" hook')
     await shell.getByRole('button', { name: 'Remove' }).click()
-    await page.getByRole('dialog', { name: 'Remove shell?' }).getByRole('button', { name: 'Remove package' }).click()
+    await page.getByRole('alertdialog', { name: 'Remove shell?' }).getByRole('button', { name: 'Remove package' }).click()
     await expect(shell).toHaveCount(0)
 
     await section.getByLabel('Repository URL').fill('https://git.example/greeter.git')
@@ -87,7 +87,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await expect(card.getByText('Enabled', { exact: true })).toBeVisible()
 
     await card.getByRole('button', { name: 'Remove' }).click()
-    await page.getByRole('dialog', { name: 'Remove greeter?' }).getByRole('button', { name: 'Remove package' }).click()
+    await page.getByRole('alertdialog', { name: 'Remove greeter?' }).getByRole('button', { name: 'Remove package' }).click()
     await expect(section.getByText('No plugin packages installed.')).toBeVisible()
   })
 
@@ -113,6 +113,12 @@ test.describe('assistant plugins in Settings (#297)', () => {
     expect(tick).toMatchObject({ ok: false, error: { code: 'refused' } })
     const approve = await bridgeCall(page, 'click', { role: 'button', name: 'Approve this pin' })
     expect(approve).toMatchObject({ ok: false, error: { code: 'refused' } })
+    // The approval is still open, and closing it leaves the pin unapproved. (The dialog is
+    // modal: the page behind it is out of the accessibility tree until it closes.)
+    const dialog = page.getByRole('dialog', { name: 'Approve greeter' })
+    await expect(dialog).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
     await expect(section.getByText('Awaiting approval')).toBeVisible()
   })
 
@@ -123,9 +129,10 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await expect(card).toContainText('Authorization: …9f3a')
     await card.getByRole('button', { name: 'Test connection' }).click()
     await expect(card.getByRole('status')).toContainText('connected; 3 tools')
-    await expect(card.getByLabel('Tier of recall')).toHaveValue('read')
+    await expect(card.getByLabel('Tier of recall')).toHaveText('read')
     await expect(card.getByLabel('Tier of files.list')).toBeDisabled()
-    await card.getByLabel('Tier of retain').selectOption('write')
+    await card.getByLabel('Tier of retain').click()
+    await page.getByRole('option', { name: 'write', exact: true }).click()
     await card.getByRole('button', { name: 'Save tool settings' }).click()
     await card.getByRole('button', { name: 'Enable' }).click()
     await expect(card.getByText('Enabled', { exact: true })).toBeVisible()

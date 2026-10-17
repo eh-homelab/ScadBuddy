@@ -49,7 +49,9 @@ describe('SettingsPage activity settings', () => {
     await loaded()
     const follow = screen.getByLabelText('Notify me about activity from')
 
-    await user.type(follow, 'browser, token:t1')
+    // Pasted: each keystroke re-renders all of Settings (#1485).
+    await user.click(follow)
+    await user.paste('browser, token:t1')
     await user.click(save())
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     expect(put.mock.calls[0]?.[0]).toMatchObject({ activity_follow: ['browser', 'token:t1'] })
@@ -58,7 +60,7 @@ describe('SettingsPage activity settings', () => {
     await landed(put, 0)
 
     await user.clear(follow)
-    await user.type(follow, 'none')
+    await user.paste('none')
     await user.click(save())
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect(put.mock.calls[1]?.[0]).toMatchObject({ activity_follow: [] })
@@ -78,11 +80,13 @@ describe('SettingsPage activity settings', () => {
     await loaded()
     const ttl = screen.getByLabelText('Keep activity for (seconds)')
     const repair = screen.getByLabelText('Repair activity rows from the last (seconds)')
+    // Folded until opened, as a user finds them; a refused value opens the fold itself.
+    await user.click(screen.getByRole('button', { name: 'Advanced: activity retention' }))
 
     await user.type(ttl, '3600')
     await user.type(repair, '5')
     await user.click(save())
-    expect(await screen.findByText('Enter at least 86400 seconds.')).toBeInTheDocument()
+    expect(await screen.findByText('Enter 86400 to 315360000 seconds.')).toBeInTheDocument()
     expect(screen.getByText('Enter 600 to 604800 seconds.')).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
 
@@ -108,9 +112,29 @@ describe('SettingsPage activity settings', () => {
   it('keeps the retention fields under Advanced', async () => {
     renderPage(<SettingsPage />)
     await loaded()
-    const details = screen.getByLabelText('Keep activity for (seconds)').closest('details')
-    expect(details).not.toBeNull()
-    expect(details).not.toBe(screen.getByLabelText('Notify me about activity from').closest('details'))
+    const fold = '[data-slot=collapsible]'
+    const details = screen.getByLabelText('Keep activity for (seconds)').closest(fold)
+    expect(details).toHaveTextContent('Advanced: activity retention')
+    expect(details).not.toBe(screen.getByLabelText('Notify me about activity from').closest(fold))
     expect(details).toContainElement(screen.getByLabelText('Repair activity rows from the last (seconds)'))
+  })
+
+  it('opens the fold when a save refuses a field folded inside it (#3671)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await loaded()
+    const toggle = screen.getByRole('button', { name: 'Advanced: activity retention' })
+    const ttl = screen.getByLabelText('Keep activity for (seconds)')
+
+    await user.click(toggle)
+    await user.type(ttl, '3600')
+    await user.click(toggle)
+    expect(ttl).not.toBeVisible()
+
+    await user.click(save())
+    expect(await screen.findByText('Enter 86400 to 315360000 seconds.')).toBeVisible()
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(ttl).toBeVisible()
+    expect(put).not.toHaveBeenCalled()
   })
 })

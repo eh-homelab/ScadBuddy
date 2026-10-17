@@ -15,7 +15,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from claude_agent_sdk import ProcessError, ResultError
@@ -41,7 +41,7 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
-from temporalio.claude_agent_sdk._events import emit
+from temporalio.claude_agent_sdk._events import _EMIT, emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
@@ -566,6 +566,7 @@ async def _segment_options(
     tmp_path: Path,
     *,
     plugin_dir: str | None = None,
+    agent: tuple[str | None, str | None, str | None] | None = None,
 ) -> dict[str, Any]:
     await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
     recording = Recording()
@@ -574,6 +575,12 @@ async def _segment_options(
     )
     async with running(temporal_env, connect, runner) as (client, queue):
         sid = await insert_session(agent_db)
+        if agent:
+            await agent_db.execute(
+                "UPDATE ai_sessions SET agent_model = %s, agent_effort = %s, agent_type = %s"
+                " WHERE id = %s",
+                (*agent, sid),
+            )
         handle = await start_session(client, sid, queue)
         try:
             await send(handle, "hi")
@@ -654,6 +661,20 @@ async def test_a_segment_runs_on_the_model_chosen_in_settings(
     assert made["model"] == "claude-sonnet-test"
 
 
+async def test_a_workflow_agents_chat_runs_on_its_own_model_and_effort(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2393: agent() options kept on its chat (workflowAgents.ts) win over Settings'; a
+    subagent type with no definitions here is not passed on."""
+    await _setting(agent_db, "model", '"claude-sonnet-test"')
+    made = await _segment_options(
+        temporal_env, agent_db, connect, tmp_path, agent=("claude-haiku-test", "low", "nope")
+    )
+    assert made["model"] == "claude-haiku-test"
+    assert made["extra_options"]["effort"] == "low"
+    assert "extra_args" not in made["extra_options"]
+
+
 async def test_no_model_setting_leaves_the_engine_default(
     temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
 ) -> None:
@@ -675,12 +696,22 @@ async def test_the_own_plugin_loads_unless_settings_switched_it_off(
 
 class Refusing:
     """make_runner for the runner: a segment on a credential in ``refused`` raises
-    ``error``; any other answers. Records each runner's token."""
+    ``error``; any other answers. Records each runner's token. With ``scripted``, the
+    refused segment says ``said`` through the plugin's ScriptedClaude, not this test's
+    own emit() call."""
 
-    def __init__(self, refused: set[str], error: BaseException, said: str | None = None) -> None:
+    def __init__(
+        self,
+        refused: set[str],
+        error: BaseException,
+        said: str | None = None,
+        *,
+        scripted: bool = False,
+    ) -> None:
         self.refused = refused
         self.error = error
         self.said = said
+        self.said_via_scripted = scripted
         self.tokens: list[str] = []
         self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
 
@@ -689,6 +720,8 @@ class Refusing:
         self.tokens.append(token)
         if token in self.refused:
             error, said = self.error, self.said
+            if self.said_via_scripted and said is not None:
+                return RefusesAfterSaying(said, error)
 
             class Raises:
                 async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
@@ -761,6 +794,94 @@ async def test_a_refused_credentials_notice_never_reaches_the_transcript(
     assert refusing.tokens == [TOKEN, TOKEN + "-second"]
 
 
+class RefusesAfterSaying(ScriptedClaude):
+    """A scripted model whose answer is the refusal notice, published through the
+    plugin's own ``emit`` (as its runner publishes each ``TextBlock``), and which then
+    fails the way a refused credential does."""
+
+    def __init__(self, notice: str, error: BaseException) -> None:
+        super().__init__(lambda prompt, _: Final(notice))
+        self.error = error
+
+    async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+        await super().run(inp, attempt)
+        raise self.error
+
+
+async def test_a_refused_credentials_scripted_notice_never_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#3383: the same as above with the notice published by the plugin's ScriptedClaude,
+    not this test's own emit() call, so the hold covers the plugin's publishing."""
+    await _two_credentials(agent_db)
+    notice = "You've hit your session limit · resets 6pm (UTC)"
+    refusing = Refusing(
+        {TOKEN},
+        _result_error("API Error: 429 rate limited", status=429),
+        said=notice,
+        scripted=True,
+    )
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_refused_last_credentials_notice_is_shown_and_marked_as_no_reply(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#3703: with no credential to fall back to, the refusal notice is the turn's answer
+    to the panel (why it failed), so it is published; but it is marked ``notice``, so the
+    turn's retain (memoryActivities.ts transcriptOf) never keeps it as the assistant's."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9", secret=TOKEN)
+    notice = "You've hit your weekly limit · resets Oct 18, 1pm (UTC)"
+    refused = RefusesAfterSaying(notice, _result_error("API Error: 429 rate limited", status=429))
+
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=lambda **_: refused)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+
+            # The published notice is what is checked; the turn's end is
+            # test_a_segment_every_credential_refuses_ends_the_turn_once's (#3705).
+            async def shown() -> bool:
+                return any(e["type"] == "assistant.text.delta" for e in await events(agent_db, sid))
+
+            await until(shown, 60.0)
+        finally:
+            await handle.terminate()
+    deltas = [e for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert [(e["delta"], e.get("notice")) for e in deltas[:1]] == [(notice, True)]
+
+
+def test_the_plugins_runner_publishes_text_through_the_held_contextvar() -> None:
+    """#3383: HeldText holds by setting the plugin's private ``_EMIT``. The plugin's real
+    runner publishes each ``TextBlock`` with ``emit`` (no Claude Code CLI runs here, so
+    this checks the path rather than driving it); a pin bump that moves that publishing
+    off ``_EMIT`` fails here, not silently in production."""
+    from temporalio.claude_agent_sdk import _runner as plugin_runner
+
+    publish = vars(plugin_runner)["emit"]  # what its TextBlock loop calls
+    assert publish is emit
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        publish({"type": "text", "text": "held"})
+    finally:
+        _EMIT.reset(token)
+    assert [e["text"] for e in seen] == ["held"]
+
+
 async def test_a_first_credentials_answer_still_reaches_the_transcript(
     temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
 ) -> None:
@@ -801,6 +922,84 @@ async def test_a_failure_of_the_request_does_not_try_another_credential(
             await handle.terminate()
     assert len(refusing.tokens) >= 2
     assert set(refusing.tokens) == {TOKEN}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _result_error("API Error: 401 invalid x-api-key", status=401),
+        _result_error("API Error: 429 rate limited", status=429),
+        _result_error("API Error: 400 Your credit balance is too low", status=400),
+    ],
+)
+async def test_a_segment_every_credential_refuses_ends_the_turn_once(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    error: ResultError,
+) -> None:
+    """#3705: with every credential refused there is nothing a retry could change: the
+    segment is not retried (each retry ran the refused keys again and published the
+    notice again). The turn ends once, with the notice and its error."""
+    await _two_credentials(agent_db)
+    notice = "You've hit your weekly limit · resets Oct 18, 1pm (UTC)"
+    refusing = Refusing({TOKEN, TOKEN + "-second"}, error, said=notice)
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            await settled(connect, sid, timeout=30.0)
+        finally:
+            await handle.terminate()
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+    logged = await events(agent_db, sid)
+    assert [e["delta"] for e in logged if e["type"] == "assistant.text.delta"] == [notice]
+    assert len([e for e in logged if e["type"] == "error"]) == 1
+
+
+class FailsOnce:
+    """make_runner whose first segment fails with ``error``, and every later one answers."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.tokens: list[str] = []
+        self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
+
+    def __call__(self, **kwargs: Any) -> Any:
+        self.tokens.append(kwargs["env"]["ANTHROPIC_AUTH_TOKEN"])
+        if len(self.tokens) > 1:
+            return self.scripted
+        error = self.error
+
+        class Raises:
+            async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                raise error
+
+        return Raises()
+
+
+async def test_a_transient_failure_of_the_last_credential_is_still_retried(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#3705: only a refusal is final. A 5xx is the endpoint's, not the key's: the
+    segment is retried, on the same key, and the turn answers."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9", secret=TOKEN)
+    failing = FailsOnce(_result_error("API Error: 529 overloaded", status=529))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=failing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    assert failing.tokens == [TOKEN, TOKEN]
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
 
 
 async def test_a_fallback_never_runs_past_the_budget_a_refused_attempt_spent(
@@ -954,9 +1153,9 @@ async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
 
 
 class _Answers:
-    """make_runner whose segment answers ``out``, whatever it is asked."""
+    """make_runner whose segment answers ``out``, or raises it, whatever it is asked."""
 
-    def __init__(self, out: SegmentOutput) -> None:
+    def __init__(self, out: SegmentOutput | Exception) -> None:
         self.out = out
         self.budgets: list[float] = []
 
@@ -966,6 +1165,8 @@ class _Answers:
 
         class Answers:
             async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                if isinstance(out, Exception):
+                    raise out
                 return out
 
         return Answers()
@@ -975,15 +1176,18 @@ def _credential() -> Credential:
     return Credential(id="c1", priority=0, kind="gateway", base_url="http://x", secret=TOKEN)
 
 
-async def _segment(out: SegmentOutput, left: float) -> SegmentOutput:
-    # `_on_credentials` reads neither the connector nor the SegmentInput: the runner it
-    # builds is `_Answers`, which answers `out` whatever it is given. Both are None here.
+def _no_database() -> Any:
+    raise AssertionError("_on_credentials connected to the database: _segment has none")
+
+
+async def _segment(out: SegmentOutput | Exception, left: float) -> SegmentOutput:
+    """`_on_credentials` on one credential whose runner (`_Answers`) answers ``out``. It
+    has no database: a path that charges a refused attempt fails here saying so."""
     answers = _Answers(out)
-    runner = ScadBuddyRunner(cast(Any, None), KEK, cwd="/tmp", make_runner=answers)
+    runner = ScadBuddyRunner(_no_database, KEK, cwd="/tmp", make_runner=answers)
     settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
-    got = await runner._on_credentials(
-        "s", "wf", cast(Any, None), 1, [_credential()], left, {}, settings
-    )
+    inp = SegmentInput(session_id="s", prompt="hi", tools=[])
+    got = await runner._on_credentials("s", "wf", inp, 1, [_credential()], left, {}, settings)
     assert answers.budgets == [left]
     return got
 
@@ -1004,6 +1208,20 @@ async def test_a_segment_that_reached_its_cap_is_charged_at_least_what_was_left(
     higher. Either way the turn ends as the budget's."""
     out = SegmentOutput(session_id="s", is_error=True, error=error, cost_usd=cost)
     got = await _segment(out, left=1.0)
+    assert got.error == BUDGET_EXHAUSTED
+    assert got.cost_usd == pytest.approx(charged)
+
+
+@pytest.mark.parametrize(("cost", "charged"), [(0.0, 1.0), (1.5, 1.5)])
+async def test_a_raised_cap_ends_the_turn_as_the_budgets_too(cost: float, charged: float) -> None:
+    """#3356: a cap the plugin raises rather than returns is the same cap: charged at
+    least what was left, and ended as the budget's, not failed."""
+    err = ResultError(
+        "Claude Code returned an error result: Reached maximum budget ($1.00)",
+        data={"total_cost_usd": cost},
+        exit_code=1,
+    )
+    got = await _segment(err, left=1.0)
     assert got.error == BUDGET_EXHAUSTED
     assert got.cost_usd == pytest.approx(charged)
 

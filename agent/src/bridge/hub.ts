@@ -195,6 +195,13 @@ export class TabHub implements BrowserTabs {
   readonly #tabs = new Map<string, TabConnection>()
   /** sessionId → tabId, least recently paired first (Map keeps insertion order). */
   readonly #sessionTabs = new Map<string, string>()
+  /**
+   * sessionId → the sequence number of its latest pairing here, kept and evicted with
+   * `#sessionTabs`. A re-pairing to the same tab still changes it, which comparing tab
+   * ids could not tell apart (#3787 review).
+   */
+  readonly #sessionTabSeqs = new Map<string, number>()
+  #pairSeq = 0
   readonly #pairings: PairingStore | undefined
   readonly #relay: TabRelay | undefined
   readonly #sessionTabStore: SessionTabStore | undefined
@@ -283,14 +290,23 @@ export class TabHub implements BrowserTabs {
         ),
       )
     }
+    this.#pairHere(sessionId, tabId)
+  }
+
+  /** This replica's map, and the tab's listener: a pairing's local half. */
+  #pairHere(sessionId: string, tabId: string): void {
     this.#sessionTabs.delete(sessionId)
     this.#sessionTabs.set(sessionId, tabId)
-    while (this.#sessionTabs.size > MAX_SESSION_TABS) {
-      const oldest = this.#sessionTabs.keys().next().value as string
-      this.#sessionTabs.delete(oldest)
-      this.#sessionTabsUnstored.delete(oldest)
-    }
+    this.#sessionTabSeqs.set(sessionId, ++this.#pairSeq)
+    while (this.#sessionTabs.size > MAX_SESSION_TABS) this.#forgetSessionTab(this.#sessionTabs.keys().next().value as string)
     if (this.#tabs.has(tabId)) this.#sessionTabBack(sessionId)
+  }
+
+  /** Drops a session from the map and from what is kept beside it, together, so none outlives the others (#3825 review). */
+  #forgetSessionTab(sessionId: string): void {
+    this.#sessionTabs.delete(sessionId)
+    this.#sessionTabSeqs.delete(sessionId)
+    this.#sessionTabsUnstored.delete(sessionId)
   }
 
   #sessionTabBack(sessionId: string): void {
@@ -300,17 +316,11 @@ export class TabHub implements BrowserTabs {
   }
 
   /**
-   * Whether `sessionId`'s tab is connected to any replica now. The tab is the
-   * store's row when there is one, as for a call (`#resolve`): this replica's map
-   * goes stale as soon as another replica pairs the session elsewhere.
-   */
-  async sessionHasTab(sessionId: string): Promise<boolean> {
-    return (await this.sessionTab(sessionId)).connected
-  }
-
-  /**
-   * `sessionHasTab`, with the tab it asked about: `pairSessionIfStill` takes it back,
-   * so a pairing decided on this answer cannot overwrite a newer one (#2271).
+   * `sessionId`'s tab, and whether it is connected to any replica now. The tab is
+   * the store's row when there is one, as for a call (`#resolve`): this replica's
+   * map goes stale as soon as another replica pairs the session elsewhere.
+   * `pairSessionIfStill` takes the tab back, so a pairing decided on this answer
+   * cannot overwrite a newer one (#2271).
    */
   async sessionTab(sessionId: string): Promise<{ tabId: string | undefined; connected: boolean }> {
     const tabId = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
@@ -323,8 +333,58 @@ export class TabHub implements BrowserTabs {
    * that answer was on its way (#2271): the newer pairing wins. Whether it paired.
    */
   async pairSessionIfStill(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean> {
-    const now = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
-    if (now !== seen) return false
+    const store = this.#sessionTabStore
+    if (store?.setIf && !this.#sessionTabsUnstored.has(sessionId)) {
+      // Compared and written in one statement, queued behind this replica's own
+      // writes: no pairing, here or on another replica, lands between the two.
+      const setIf = store.setIf.bind(store)
+      // This replica's own pairing as the write leaves: one made here while it is out
+      // is newer, and its write is queued after this one, so it keeps the map. Compared
+      // by sequence, not tab: a re-pairing to the same tab is newer too (#3787 review).
+      const before = this.#sessionTabSeqs.get(sessionId)
+      const written = this.#sessionTabWrites.then(() => setIf(sessionId, tabId, seen))
+      this.#sessionTabWrites = written.then(
+        () => {},
+        () => {},
+      )
+      try {
+        if (!(await written)) return false
+      } catch (err) {
+        // As pairSession's own failed write: paired here only, and marked unstored
+        // so this replica prefers its map. No unconditional write is queued, which
+        // could overwrite a newer pairing once the store answers again (#3478 review).
+        this.logError(err)
+        if (this.#sessionTabs.get(sessionId) !== seen) return false
+        this.#sessionTabsUnstored.add(sessionId)
+        this.#pairHere(sessionId, tabId)
+        return true
+      }
+      // No entry: none was made, or it was evicted while the write was out, and the map
+      // takes this write's tab. Evicted can also mean a newer pairing here was made and
+      // then evicted, whose queued write owns the row: the map then names the older tab
+      // until that session pairs again. Reads prefer the stored row, so only a replica
+      // with no store to ask would act on it, and only after MAX_SESSION_TABS pairings
+      // in one write's flight (#3825 review).
+      const now = this.#sessionTabSeqs.get(sessionId)
+      if (now === undefined || now === before) this.#pairHere(sessionId, tabId)
+      return true
+    }
+    if (store) {
+      // A session whose last write here failed is this replica's map's until a write
+      // lands (#2211), so it is compared with that map's answer and paired as a send
+      // pairs it. A pairing on another replica between the read and the write can
+      // still be overwritten here: the row is not trusted for it, so cannot compare.
+      const now = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
+      if (now !== seen) return false
+      this.pairSession(sessionId, tabId)
+      return true
+    }
+    return this.#pairIfStillHere(sessionId, tabId, seen)
+  }
+
+  /** With nothing shared to ask: this replica's map, compared and paired with no await between. */
+  #pairIfStillHere(sessionId: string, tabId: string, seen: string | undefined): boolean {
+    if (this.#sessionTabs.get(sessionId) !== seen) return false
     this.pairSession(sessionId, tabId)
     return true
   }

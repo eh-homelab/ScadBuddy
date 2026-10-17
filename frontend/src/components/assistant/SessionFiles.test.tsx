@@ -156,11 +156,58 @@ describe('SessionFiles', () => {
     const user = userEvent.setup()
     render()
     await user.click(await screen.findByRole('button', { name: 'Delete notes.txt' }))
-    const confirm = screen.getByRole('group', { name: 'Delete notes.txt?' })
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete notes.txt?' })
     await user.click(within(confirm).getByRole('button', { name: 'Cancel' }))
     expect(screen.getByText('notes.txt')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Delete notes.txt' }))
-    await user.click(within(screen.getByRole('group', { name: 'Delete notes.txt?' })).getByRole('button', { name: 'Delete file' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete notes.txt?' })).getByRole('button', { name: 'Delete file' }))
+    expect(await screen.findByText(/No files yet/)).toBeInTheDocument()
+  })
+
+  it('keeps the confirm open until the delete is answered, and shows a refusal after it (review of #3727)', async () => {
+    seedSessionFile('sess-f', 'notes.txt', text('hello'), 'text/plain')
+    let refuse: (reason: unknown) => void = () => {}
+    const remove = vi
+      .spyOn(api, 'deleteAiSessionFile')
+      .mockImplementation(() => new Promise((_, reject) => (refuse = reject)))
+    const user = userEvent.setup()
+    render()
+    await user.click(await screen.findByRole('button', { name: 'Delete notes.txt' }))
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete notes.txt?' })
+    await user.click(within(confirm).getByRole('button', { name: 'Delete file' }))
+    expect(remove).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('alertdialog', { name: 'Delete notes.txt?' })).toBeInTheDocument()
+    expect(within(confirm).getByRole('button', { name: 'Delete file' })).toBeDisabled()
+    await act(async () => refuse(new ApiError(409, 'busy')))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(await screen.findByText(/notes\.txt was not deleted/)).toBeInTheDocument()
+    expect(screen.getByText('notes.txt')).toBeInTheDocument()
+  })
+
+  it('keeps each overlapping delete to its own file, and both rows go (review of #3732)', async () => {
+    seedSessionFile('sess-f', 'a.txt', text('a'), 'text/plain')
+    seedSessionFile('sess-f', 'b.txt', text('b'), 'text/plain')
+    // Each delete is held until the test answers it, then runs for real (the list reads again after).
+    const answers: Record<string, () => void> = {}
+    const real = api.deleteAiSessionFile.bind(api)
+    vi.spyOn(api, 'deleteAiSessionFile').mockImplementation((id, path) =>
+      new Promise<void>((resolve) => (answers[path] = resolve)).then(() => real(id, path)),
+    )
+    const user = userEvent.setup()
+    render()
+    const confirmFor = async (path: string) => {
+      await user.click(await screen.findByRole('button', { name: `Delete ${path}` }))
+      return screen.findByRole('alertdialog', { name: `Delete ${path}?` })
+    }
+    await user.click(within(await confirmFor('a.txt')).getByRole('button', { name: 'Delete file' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(await confirmFor('b.txt')).getByRole('button', { name: 'Delete file' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    // A's delete is still in flight: its confirm, opened again, cannot send a second one.
+    expect(within(await confirmFor('a.txt')).getByRole('button', { name: 'Delete file' })).toBeDisabled()
+    await act(async () => answers['b.txt']!())
+    expect(screen.getByRole('alertdialog', { name: 'Delete a.txt?' })).toBeInTheDocument()
+    await act(async () => answers['a.txt']!())
     expect(await screen.findByText(/No files yet/)).toBeInTheDocument()
   })
 

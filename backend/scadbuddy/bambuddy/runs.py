@@ -169,11 +169,24 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     """The run subject (``PrintSubject.run_subject``) plus the request as parsed, so key
     order and spacing do not matter.
 
-    ``request_id``, ``print_sequence``, ``rack_position`` and ``rack_algorithm`` are part
-    of it when sent; without them the key is what it was before the fields existed.
+    ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm``,
+    ``filament_profiles``, ``supports`` (#1899), ``prime_tower`` (#3628) and
+    ``plate_ids`` (#3652) are part of it when sent; without them the key is what it was
+    before the fields existed.
     """
-    optional = ("request_id", "print_sequence", "rack_position", "rack_algorithm")
+    optional = (
+        "request_id",
+        "print_sequence",
+        "rack_position",
+        "rack_algorithm",
+        "supports",
+        "prime_tower",
+        "plate_ids",
+    )
     exclude = {name for name in optional if getattr(request, name) is None}
+    # #717: no profiles is the key from before the field existed.
+    if not request.filament_profiles:
+        exclude.add("filament_profiles")
     body = request.model_dump(mode="json", exclude=exclude or None)
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
@@ -216,6 +229,12 @@ class PrintRunStore:
 
     async def get(self, run_id: str) -> PrintRun | None:
         return await asyncio.to_thread(self._get, run_id)
+
+    async def get_many(self, run_ids: list[str]) -> dict[str, PrintRun]:
+        """The runs of ``run_ids`` still kept, by id, in one read (#2718 review)."""
+        if not run_ids:
+            return {}
+        return await asyncio.to_thread(self._get_many, run_ids)
 
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         """The output's newest run, for as long as retention keeps it (#1049): the one
@@ -358,6 +377,14 @@ class PrintRunStore:
                 f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
             ).fetchone()
         return PrintRun.model_validate(row) if row else None
+
+    def _get_many(self, run_ids: list[str]) -> dict[str, PrintRun]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = ANY(%s)", (run_ids,)
+            ).fetchall()
+        runs = [PrintRun.model_validate(row) for row in rows]
+        return {run.id: run for run in runs}
 
     def _insert(
         self,

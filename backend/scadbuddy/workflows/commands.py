@@ -41,11 +41,24 @@ COMMAND_ANSWER_DEADLINE = timedelta(seconds=10)
 CONNECT_MARGIN_SECONDS = 2.0
 #: What a client waits before it sends the same request again.
 RETRY_AFTER_SECONDS = 2
+#: How long a route whose client asked for an asynchronous answer (`Prefer:
+#: respond-async`) waits on the command's Update before it answers 202 for the client to
+#: follow (spec 2026-10-13 §5.1): long enough for a healthy worker's ~100-300 ms.
+FAST_ACCEPT = timedelta(seconds=3)
+#: How long one follow of a command's Update waits on it (spec 2026-10-13 §5.2).
+FOLLOW_WAIT = COMMAND_ANSWER_DEADLINE
 
 
 class CommandStillAcceptingError(Exception):
     """The command's Update did not answer within the deadline. The execution goes on,
     and the same request attaches to it."""
+
+
+class CommandResendError(Exception):
+    """The Update a client follows is not known: never durably admitted, rejected by a
+    closing run, or its execution gone. The client sends its request again with the
+    same key, which starts or joins the command as any re-send does (spec 2026-10-13
+    §5.2)."""
 
 
 class TemporalUnavailableError(Exception):
@@ -297,3 +310,47 @@ def _retrieve_start_error(operation: WithStartWorkflowOperation[object, object])
 def _read_error(future: asyncio.Future[Any]) -> None:
     if not future.cancelled():
         future.exception()
+
+
+async def follow_update[T](
+    client: Client,
+    id: str,
+    update_id: str,
+    *,
+    result_type: type[T],
+    wait: timedelta | None = None,
+) -> T:
+    """The outcome of the Update ``update_id`` that a command route sent ``id`` and
+    answered 202 for (spec 2026-10-13 §5.2), waited on for up to ``wait`` (`FOLLOW_WAIT`,
+    read at call time so a test can shorten it). Still not
+    answered, it is `CommandStillAcceptingError`; unknown (or its execution gone, or it
+    outlived its execution), `CommandResendError`; a failed call, as `start_command`
+    reads one. A refusal the Update itself raised is raised as it is."""
+    if wait is None:
+        wait = FOLLOW_WAIT
+    handle = client.get_workflow_handle(id).get_update_handle(update_id, result_type=result_type)
+    # As in `start_command`: `rpc_timeout` bounds each poll, the outer bound the wait.
+    bound = asyncio.timeout(wait.total_seconds() + CONNECT_MARGIN_SECONDS)
+    try:
+        async with bound:
+            answer: T = await handle.result(rpc_timeout=wait)
+            return answer
+    except TimeoutError as error:
+        raise CommandStillAcceptingError(id) from error
+    except WorkflowUpdateRPCTimeoutOrCancelledError as error:
+        task = asyncio.current_task()
+        if not bound.expired() and task is not None and task.cancelling():
+            raise asyncio.CancelledError from error
+        raise CommandStillAcceptingError(id) from error
+    except (RPCError, RuntimeError) as error:
+        if isinstance(error, RPCError) and execution_gone(error):
+            # "update ... not found", or no such execution: nothing to follow.
+            raise CommandResendError(id) from error
+        if (failure := temporal_failure(error, id)) is None:
+            raise
+        raise failure from error
+    except WorkflowUpdateFailedError as error:
+        cause = error.cause
+        if isinstance(cause, ApplicationError) and cause.type == UPDATE_OUTLIVED:
+            raise CommandResendError(id) from error
+        raise

@@ -69,7 +69,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
     expect(names()).toEqual(['Crème Coaster'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 8')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 9')
   })
 
   it('adds a card tag to the filter from the URL-encoded chip', async () => {
@@ -95,7 +95,7 @@ describe('CataloguePage filters (#276)', () => {
     renderCatalogue('/?tag=keychain&origin=builtin')
     expect(await screen.findByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
     expect(names()).toEqual(['Keychain Template'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 8')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 9')
   })
 
   it('sorts by name', async () => {
@@ -103,7 +103,8 @@ describe('CataloguePage filters (#276)', () => {
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     expect(names()[0]).toBe('Name Keychain')
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Sort' }), 'Name')
+    await user.click(screen.getByRole('combobox', { name: 'Sort' }))
+    await user.click(await screen.findByRole('option', { name: 'Name' }))
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(names()).toEqual([
       'Ball Maze',
@@ -114,6 +115,7 @@ describe('CataloguePage filters (#276)', () => {
       'Name Keychain',
       'UI Broken',
       'UI Demo',
+      'Unmigrated Inputs',
     ])
   })
 
@@ -125,7 +127,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement)
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(screen.getByRole('searchbox')).toHaveValue('')
-    expect(names()).toHaveLength(8)
+    expect(names()).toHaveLength(9)
   })
 
   it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {
@@ -134,7 +136,7 @@ describe('CataloguePage filters (#276)', () => {
     const tags = within(screen.getByRole('group', { name: 'Tags' }))
     expect(tags.getByRole('button', { name: 'template 1' })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Mine' }))
+    await user.click(screen.getByRole('radio', { name: 'Mine' }))
     expect(tags.queryByRole('button', { name: /^template/ })).not.toBeInTheDocument()
 
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'coaster')
@@ -702,13 +704,13 @@ describe('CataloguePage list mode (#278)', () => {
   it('shows cards for a URL with no view, and writes the view into it', async () => {
     const { user } = renderCatalogue('/?tag=keychain')
     await screen.findByRole('heading', { name: 'Name Keychain' })
-    const view = screen.getByRole('group', { name: 'View' })
-    expect(within(view).getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    const view = screen.getByRole('radiogroup', { name: 'View' })
+    expect(within(view).getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
     expect(rows()).toHaveLength(0)
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
 
     // Replaced, not pushed: List then Back returns to the normalized entry.
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=list$/)
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
@@ -726,11 +728,11 @@ describe('CataloguePage list mode (#278)', () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(8)
+    expect(rows()).toHaveLength(9)
 
-    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    await user.click(screen.getByRole('radio', { name: 'Cards' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(rows()).toHaveLength(0)
   })
@@ -738,8 +740,8 @@ describe('CataloguePage list mode (#278)', () => {
   it('shows what the URL says on in-app navigation to the catalogue', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(8)
+    await user.click(screen.getByRole('radio', { name: 'List' }))
+    expect(rows()).toHaveLength(9)
 
     // The agent's `navigate` and the Models tab name no view, so they show Cards.
     await user.click(screen.getByRole('button', { name: 'Agent navigate' }))
@@ -748,10 +750,10 @@ describe('CataloguePage list mode (#278)', () => {
     )
     expect(rows()).toHaveLength(0)
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     await user.click(screen.getByRole('link', { name: 'Models' }))
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/))
-    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
   })
 
   it('keeps List on Back from a model', async () => {
@@ -782,37 +784,37 @@ describe('CataloguePage list mode (#278)', () => {
       { route: '/?view=list' },
     ).user
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(8)
+    expect(rows()).toHaveLength(9)
 
     await user.click(screen.getByRole('link', { name: 'Crème Coaster' }))
     await screen.findByText('Customizer')
     await user.click(screen.getByRole('button', { name: 'Back' }))
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(8)
+    expect(rows()).toHaveLength(9)
   })
 
   it('undoes and redoes a view toggle with back and forward', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(8)
+    await user.click(screen.getByRole('radio', { name: 'List' }))
+    expect(rows()).toHaveLength(9)
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(rows()).toHaveLength(0)
-    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Forward' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(8)
+    expect(rows()).toHaveLength(9)
   })
 
   it('keeps the filters and sort when the view changes', async () => {
     const { user } = renderCatalogue('/?tag=keychain&sort=name')
     await screen.findByRole('heading', { name: 'Keychain Template' })
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&sort=name&view=list')
     expect(names()).toEqual(['Keychain Template', 'Name Keychain'])
   })
@@ -1010,11 +1012,11 @@ describe('CataloguePage list mode (#278)', () => {
   it('names the models list the same in both views', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(8)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(9)
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(8)
-    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(8)
+    await user.click(screen.getByRole('radio', { name: 'List' }))
+    expect(rows()).toHaveLength(9)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(9)
   })
 
   it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {

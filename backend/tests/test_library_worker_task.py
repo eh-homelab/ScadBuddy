@@ -8,7 +8,7 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,8 +17,15 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.workflows.housekeeping import GIT_SWEEP, PRUNE_SWEEPS, SWEEPS
+from scadbuddy.workflows.housekeeping import (
+    GIT_SWEEP,
+    LOST_SLICES_SWEEP,
+    PREVIEWS_SWEEP,
+    PRUNE_SWEEPS,
+    SWEEPS,
+)
 from tests.test_print_worker_task import StubWorker
 
 
@@ -211,6 +218,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_flow_runs", _broken_async)
     monkeypatch.setattr(main, "client_for", _a_client)
     monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
+    monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
+    monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -300,14 +309,14 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
     monkeypatch.setattr(main, "client_for", _a_client)
-    monkeypatch.setattr(main, "sweep_preview_slices", slow_previews)
-    # #2715: the same tick sweeps lost slice starts.
     monkeypatch.setattr(main, "sweep_lost_slices", slow_previews)
     state = SimpleNamespace(
         render=SimpleNamespace(prune=slow_prune),
         paths=SimpleNamespace(),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        # #2718: the claims sweep prunes batch prints too.
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_previews)),
     )
     state.paths.claims = None
 
@@ -320,7 +329,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             return 0
 
     state.settings_store = SimpleNamespace(load=StoredSettings)
-    state.components = SimpleNamespace(get=lambda key: SimpleNamespace(index=SlowIndex()))
+    # #2718: the claims sweep's batch-print store, beside the library index.
+    state.components = SimpleNamespace(
+        get=lambda key: SimpleNamespace(index=SlowIndex(), prune=slow_previews)
+    )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []
     env = ActivityEnvironment()
@@ -536,26 +548,65 @@ async def test_the_shutdown_waits_for_a_stuck_backfill_only_so_long(
         release.set()
 
 
-async def test_the_background_slice_sweep_also_sweeps_lost_slice_starts(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("sweep", "expected"), [(PREVIEWS_SWEEP, ["previews"]), (LOST_SLICES_SWEEP, ["lost"])]
+)
+async def test_each_slice_sweep_is_its_own_activity(
+    sweep: str, expected: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2715: what a print run's lost slice start left goes on the same tick, every
-    `PRUNE_INTERVAL`, inside Bambuddy's 30 minutes of keeping a finished job."""
+    """The background slices obey the sweeps' switch, the lost slice starts (#2715) run
+    on the prune Schedule too, inside Bambuddy's 30 minutes of keeping a finished job:
+    two activities, each sweeping only its own."""
     swept: list[str] = []
 
-    async def previews(*args: object) -> int:
-        swept.append("previews")
-        return 0
+    def record(name: str) -> Callable[..., Awaitable[int]]:
+        async def run(*args: object) -> int:
+            swept.append(name)
+            return 1
 
-    async def lost(*args: object) -> int:
-        swept.append("lost")
-        return 1
+        return run
 
     monkeypatch.setattr(main, "client_for", _a_client)
-    monkeypatch.setattr(main, "sweep_preview_slices", previews)
-    monkeypatch.setattr(main, "sweep_lost_slices", lost)
+    monkeypatch.setattr(main, "sweep_preview_slices", record("previews"))
+    monkeypatch.setattr(main, "sweep_lost_slices", record("lost"))
     state = SimpleNamespace(settings_store=SimpleNamespace(load=lambda: None), uploads=None)
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
 
-    await main._sweep_preview_slices_logged(state)  # type: ignore[arg-type]
+    await ActivityEnvironment().run(activities[sweep])
 
-    assert swept == ["previews", "lost"]
+    assert swept == expected
+
+
+def test_the_background_slices_obey_the_sweeps_switch() -> None:
+    """The owner's sweeps-off setting deletes the sweeps' Schedule; the prune Schedule
+    runs whatever it is. The background slices are only on the first."""
+    assert PREVIEWS_SWEEP in SWEEPS
+    assert PREVIEWS_SWEEP not in PRUNE_SWEEPS
+    assert LOST_SLICES_SWEEP in PRUNE_SWEEPS
+
+
+@pytest.mark.parametrize(
+    ("sweep", "message"),
+    [
+        (PREVIEWS_SWEEP, "could not sweep the print dialog's background slices"),
+        (LOST_SLICES_SWEEP, "could not sweep the files of lost slice starts"),
+    ],
+)
+async def test_a_failing_slice_sweep_is_logged_once_and_fails(
+    sweep: str, message: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sweep's own failure is logged as its own, not as Bambuddy unreachable too."""
+
+    async def fail(*args: object) -> int:
+        raise ApiError(503, "Bambuddy is busy")
+
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", fail)
+    monkeypatch.setattr(main, "sweep_lost_slices", fail)
+    state = SimpleNamespace(settings_store=SimpleNamespace(load=lambda: None), uploads=None)
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"), pytest.raises(ApiError):
+        await ActivityEnvironment().run(activities[sweep])
+
+    assert [record.getMessage() for record in caplog.records] == [message]

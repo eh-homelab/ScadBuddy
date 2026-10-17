@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { choose } from './select'
 
 /**
  * #2166, #2169, #2164 — the maintainer's H2C (two 0.4 High Flow nozzles, the Filament
@@ -43,9 +44,9 @@ test.describe('print dialog on the H2C', () => {
     const dialog = await openDialog(page)
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     const step = dialog.getByTestId('nozzle-plan-step')
-    await expect(step.getByLabel(/Slot 1: Mistletoe Green/)).toHaveValue('')
-    await step.getByLabel(/Slot 1: Mistletoe Green/).selectOption('L')
-    await step.getByLabel(/Slot 2: Inland Black/).selectOption('L')
+    await expect(step.getByLabel(/Slot 1: Mistletoe Green/)).toHaveText(/^Automatic/)
+    await choose(page, step.getByLabel(/Slot 1: Mistletoe Green/), 'Left')
+    await choose(page, step.getByLabel(/Slot 2: Inland Black/), 'Left')
     await expect(dialog.getByTestId('nozzle-plan')).toContainText('Mistletoe Green → left')
     await expect(dialog.getByTestId('slice-changes')).toHaveText('24', { timeout: 15_000 })
   })
@@ -91,21 +92,45 @@ test.describe('print dialog on the H2C', () => {
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
   })
 
-  // #2169 — a plate clicked loads into the pane; one chosen to print does too.
-  test('a plate clicked is the one the preview shows', async ({ page }) => {
+  // #2169, #3652 — every plate prints until some are chosen; a plate clicked, on its
+  // image or its name, is ticked or unticked and shown in the pane.
+  test('plates are chosen as a set, and the last one clicked is the one the preview shows', async ({ page }) => {
     await page.goto('/library?print=67&file=67')
     const dialog = page.getByRole('dialog', { name: 'Print' })
     const label = dialog.getByTestId('preview-label')
-    await expect(label).toHaveText('Showing Plate 1')
+    // Two plates share a name, so the label says which one (#3652).
+    await expect(label).toHaveText('Showing Side (plate 1)')
     const plates = dialog.getByTestId('plate-choice')
+    await expect(plates.getByRole('checkbox')).toHaveCount(3)
+    for (const box of await plates.getByRole('checkbox').all()) await expect(box).toBeChecked()
+    await expect(dialog.getByTestId('plates-summary')).toContainText('All 3 plates')
+
     const mesh = page.waitForRequest((request) => request.url().includes('/print/library/67/preview.glb?plate=2'))
-    await plates.getByTestId('preview-plate-2').click()
+    await plates.getByTestId('plate-card-2').locator('img').click()
     await mesh
-    await expect(label).toHaveText('Showing Plate 2')
-    await expect(plates.getByRole('radio', { name: /Plate 1/ })).toBeChecked()
-    await plates.getByRole('radio', { name: 'All plates' }).check()
-    await expect(label).toHaveText('Showing Plate 1')
-    await plates.getByRole('radio', { name: /Plate 2/ }).check()
-    await expect(label).toHaveText('Showing Plate 2')
+    await expect(label).toHaveText('Showing Side (plate 2)')
+    await expect(plates.getByTestId('plate-2')).not.toBeChecked()
+    await expect(plates.getByTestId('plate-previewed-2')).toHaveText('Previewing')
+    await expect(dialog.getByTestId('plates-summary')).toContainText('Plates 1 and 3 (2 of 3)')
+
+    // Several plates are one print request.
+    const run = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/run'))
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    expect((await run).postDataJSON()).toMatchObject({ plate_ids: [1, 3], all_plates: false })
+  })
+
+  test('no plate chosen holds Print, and the keyboard ticks a plate', async ({ page }) => {
+    await page.goto('/library?print=67&file=67')
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    const plates = dialog.getByTestId('plate-choice')
+    await expect(plates.getByTestId('plate-1')).toBeChecked()
+    await plates.getByTestId('plates-none').click()
+    await expect(dialog.getByTestId('plates-summary')).toContainText('No plate chosen')
+    await expect(dialog.getByTestId('run-print')).toBeDisabled()
+    await plates.getByTestId('plate-3').focus()
+    await page.keyboard.press('Space')
+    await expect(plates.getByTestId('plate-3')).toBeChecked()
+    await expect(dialog.getByTestId('plates-summary')).toContainText('Plate 3 (1 of 3)')
+    await expect(dialog.getByTestId('run-print')).toBeEnabled()
   })
 })

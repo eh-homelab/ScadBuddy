@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import cast
@@ -377,9 +378,108 @@ async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
         "playwright__browser_navigate": "write",
         "other__unlisted": "outward",
     }
-    # Said, naming the tool and never the agent's value (#3144).
-    assert "other__unlisted" in caplog.text
-    assert "admin" not in caplog.text
+    # Said, naming the tool and never the agent's value (#3144). The record itself, so
+    # a warning that never reached caplog cannot pass (#3245).
+    [warned] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "other__unlisted" in warned.getMessage()
+    assert "admin" not in warned.getMessage()
+
+
+@pytest.mark.requires_postgres
+async def test_a_manifest_tier_that_is_not_a_tier_is_labelled_outward(
+    agent_db: Conn,
+    connect: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3245: the manifest's own tiers were used as they were, so one that is not a tier
+    reached the transcript's label."""
+    # Through parse_manifest, as a worker reads it, so this covers parse plus label (#3916).
+    [odd] = tools.parse_manifest(
+        [
+            {
+                "name": "odd_tool",
+                "description": "odd",
+                "input_schema": {"type": "object"},
+                "tier": "<b>admin</b>",
+            }
+        ]
+    )
+    monkeypatch.setattr(tools, "_MANIFEST", (*MANIFEST, odd))
+    caplog.clear()  # parse_manifest's own warning: the turn must add none of its own
+    sid = await insert_session(agent_db)
+    stream = [
+        {"type": "prompt", "text": "go", "offset": 0},
+        {"type": "tool_call", "id": "a", "name": "odd_tool", "offset": 1},
+        {"type": "tool_call", "id": "b", "name": MANIFEST[0].name, "offset": 2},
+        {"type": "done", "result": "", "offset": 3},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING):
+        await env.run(
+            acts.follow_session,
+            FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True),
+        )
+    risks = {e["name"]: e["risk"] for e in await events(agent_db, sid) if e["type"] == "tool.call"}
+    assert risks == {"odd_tool": "outward", MANIFEST[0].name: MANIFEST[0].tier}
+    # Said once, by parse_manifest, not again on every turn (#3581).
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_a_manifest_tier_that_is_not_a_tier_is_said_once_and_kept(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3581: the manifest is the worker's for its life, so its bad tier is said at parse
+    time, naming the tool and never the value, and the worker still starts. The tier is
+    kept as given (#3882): follow_session labels it outward, and Settings can still raise
+    the tool (test_tool_overrides)."""
+    entry = {"name": "odd_tool", "description": "odd", "input_schema": {"type": "object"}}
+    with caplog.at_level(logging.WARNING):
+        [odd, fine] = tools.parse_manifest(
+            [{**entry, "tier": "<b>admin</b>"}, {**entry, "name": "fine", "tier": "write"}]
+        )
+    assert (odd.tier, fine.tier) == ("<b>admin</b>", "write")
+    [warned] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "odd_tool" in warned.getMessage()
+    assert "admin" not in warned.getMessage()
+
+
+@pytest.mark.requires_postgres
+async def test_a_listed_tier_that_is_not_a_tier_overrides_the_manifests_with_outward(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3581: the listing wins over the manifest even when what it lists is not a tier,
+    and outward is the label then, not the manifest's."""
+    read = next(e for e in MANIFEST if e.tier == "read")
+    sid = await insert_session(agent_db)
+    stream = [
+        {"type": "prompt", "text": "go", "offset": 0},
+        {"type": "tool_call", "id": "a", "name": read.name, "offset": 1},
+        {"type": "done", "result": "", "offset": 2},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    await env.run(
+        acts.follow_session,
+        FollowArgs(
+            session_id=sid, workflow_id=f"session-{sid}", prompted=True, tiers={read.name: "bogus"}
+        ),
+    )
+    risks = {e["name"]: e["risk"] for e in await events(agent_db, sid) if e["type"] == "tool.call"}
+    assert risks == {read.name: "outward"}
 
 
 def test_risk_tiers_are_the_agents() -> None:

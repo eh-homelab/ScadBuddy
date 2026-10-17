@@ -117,6 +117,7 @@ def test_a_template_s_invalid_model_json_fails_the_save_naming_the_key(
         "job_id"
     ]
     wait_for_job(client, job_id)
+    # An int, not a string: print_settings values are StrictStr.
     _declare(paths, model, {"enable_support": 1})
 
     saved = client.post(

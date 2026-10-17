@@ -52,6 +52,11 @@ history above is from before it, and none lost a slice. Recorded by the patched 
 ``slice_lost_then_sliced`` (the sidecar dies under the first slice; the second is
 queued) and ``slice_lost_every_time`` (all ``SLICE_ATTEMPTS`` lost; the run is recorded
 failed), both with a one-second ``SLICE_BACKOFF``.
+
+``REUSED_GONE_PATCH`` (#2955) slices a plate again when the earlier slice it reused is
+gone from Bambuddy as it is queued. No history above reused a slice. Recorded by the
+patched one: ``reused_slice_gone_then_sliced`` (the first ``print_enqueue`` raises
+``SLICE_GONE``; the plate is sliced, and that slice queued).
 """
 
 from __future__ import annotations
@@ -103,6 +108,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "cancelled_during_fail",
         "slice_lost_then_sliced",
         "slice_lost_every_time",
+        "reused_slice_gone_then_sliced",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:

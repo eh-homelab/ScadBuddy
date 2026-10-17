@@ -1,6 +1,8 @@
 import path from 'node:path'
 import {
+  type AgentDefinition,
   type CanUseTool,
+  type EffortLevel,
   type HookCallbackMatcher,
   type HookEvent,
   type McpHttpServerConfig,
@@ -19,6 +21,7 @@ import {
   type DecisionListener,
   makeCanUseTool,
   makePreToolUseHook,
+  makeResultScreenHook,
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
@@ -27,6 +30,7 @@ import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, typ
 import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
 import { declaresRemoteServers } from '../plugins/packages/mcp.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
+import type { BrowserGuard } from '../browser/guard.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
 import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
@@ -105,6 +109,10 @@ export type HarnessRun = {
   prompt: string | AsyncIterable<SDKUserMessage>
   /** Claude model id or alias; the SDK's default when omitted. */
   model?: string
+  /** How much effort the model puts into its responses (a Workflow agent's chat); the SDK's default when omitted. */
+  effort?: EffortLevel
+  /** A subagent definition the turn's main thread runs as (a Workflow agent's chat, harness/agentDefinitions.ts). */
+  agent?: { name: string; definition: AgentDefinition }
   maxTurns?: number
   maxBudgetUsd?: number
   /**
@@ -173,6 +181,12 @@ export type HarnessRun = {
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
   /**
+   * The headless browser's navigation lists (#982, browser/guard.ts): the input guard
+   * on the remote plugins' `browser_*` calls, and a PostToolUse hook that withholds a
+   * page the browser reached that the lists do not let the model read.
+   */
+  browser?: BrowserGuard
+  /**
    * Settings → Plugins' overrides of the built-in tools (#1953,
    * plugins/builtInTools.ts): raised tiers, applied over every other tier
    * here, and disabled tools, put in `disallowedTools`.
@@ -223,6 +237,8 @@ export type HarnessRun = {
   traceHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
+  /** Tests only: the SDK's own process hook, to count and inspect spawns (test/warm.sdk.test.ts). */
+  spawnClaudeCodeProcess?: Options['spawnClaudeCodeProcess']
   /** The resolver WebFetch's egress check uses (webFetchEgress.ts); the system's when omitted. */
   resolve?: Resolver
 }
@@ -386,7 +402,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       return tier === undefined ? undefined : policy.tierOf(name, tier)
     }
   }
-  const permission = makeCanUseTool(tierOf, run.onDecision, gate)
+  const browser = run.browser
+  const guard = browser ? (name: string, input: unknown) => browser.check(name, input) : undefined
+  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
   const abort = new AbortController()
   const options: Options = {
     ...base,
@@ -406,12 +424,15 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       mergeHooks(
         {
           PreToolUse: [
-            makePreToolUseHook(tierOf, run.onDecision, gate),
+            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
             // Claude Code's own WebFetch, which an allowed package may be given, fetches
             // where the agent's egress check does not reach; this checks it first.
             webFetchEgressHook(run.resolve),
             ...(questions ? [QUESTION_PROMPT_HOOK] : []),
           ],
+          ...(browser
+            ? { PostToolUse: [makeResultScreenHook((name, input, text) => browser.screen(name, input, text), browser.covers)] }
+            : {}),
         },
         run.memoryHooks,
       ),
@@ -422,6 +443,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const disallowed = [...remote.disallowedTools, ...(policy?.disallowed ?? [])]
   if (disallowed.length) options.disallowedTools = disallowed
   if (run.model !== undefined) options.model = run.model
+  if (run.effort !== undefined) options.effort = run.effort
+  if (run.agent !== undefined) {
+    // Claude Code takes the main thread's agent from `agents`, not from a plugin (measured on 2.1.296).
+    options.agents = { ...options.agents, [run.agent.name]: run.agent.definition }
+    options.agent = run.agent.name
+  }
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
   if (run.sessionStore !== undefined) {
@@ -437,6 +464,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     options.sessionStoreFlush = 'eager'
   }
   if (run.cwd !== undefined) options.cwd = run.cwd
+  if (run.spawnClaudeCodeProcess !== undefined) options.spawnClaudeCodeProcess = run.spawnClaudeCodeProcess
   if (run.includePartialMessages) options.includePartialMessages = true
   const plugins = [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? [])].map((p) => {
     assertPluginAllowed(p)

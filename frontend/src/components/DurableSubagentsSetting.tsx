@@ -1,9 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 /**
  * Where a durable segment's subagents reach ScadBuddy's tools, stored by the agent service
@@ -51,56 +49,36 @@ export function DurableSubagentsSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Durable subagents</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <label className="flex flex-col gap-1 text-[13px]">
-          Tools URL
-          <input
+    <SettingCard title="Durable subagents">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <LabeledInput
+            label="Tools URL"
             type="url"
             value={urlText}
             onChange={(event) => setUrl(event.target.value)}
             placeholder="http://127.0.0.1:8081/internal/durable/subagent-mcp"
-            className="sb-field"
             aria-describedby="durable-subagents-help"
           />
-        </label>
-        <label className="flex flex-col gap-1 text-[13px]">
-          Allowed worker addresses
-          <input
+          <LabeledInput
+            label="Allowed worker addresses"
             type="text"
             value={peersText}
             onChange={(event) => setPeers(event.target.value)}
             placeholder="loopback only"
-            className="sb-field"
             aria-describedby="durable-subagents-help"
           />
-        </label>
-        <p id="durable-subagents-help" className="text-[12px] text-muted">
-          A durable session&apos;s subagents call ScadBuddy&apos;s tools on the assistant service. Leave both empty when
-          the durable worker runs beside the assistant (the same pod). When it runs on its own, set the URL it reaches
-          the assistant at, and the addresses or CIDR ranges it calls from, separated by commas (no range broader than
-          a /8, or an IPv6 /32; one inside ::ffff:0:0/96, the IPv4-mapped block, no broader than a /104). Each call still needs a token for one running turn, and a network policy that lets
-          only the durable worker reach the assistant&apos;s port is required: a pod range also holds the ingress&apos;s
-          pods. Applies from the next turn.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
+          <p id="durable-subagents-help" className="text-xs text-muted-foreground">
+            A durable session&apos;s subagents call ScadBuddy&apos;s tools on the assistant service. Leave both empty when
+            the durable worker runs beside the assistant (the same pod). When it runs on its own, set the URL it reaches
+            the assistant at, and the addresses or CIDR ranges it calls from, separated by commas (no range broader than
+            a /8, or an IPv6 /32; one inside ::ffff:0:0/96, the IPv4-mapped block, no broader than a /104). Each call still needs a token for one running turn, and a network policy that lets
+            only the durable worker reach the assistant&apos;s port is required: a pod range also holds the ingress&apos;s
+            pods. Applies from the next turn.
           </p>
-        )}
+        </SettingBody>
+        <SaveFooter saving={saving} disabled={!changed} saved={saved && !changed ? 'Saved.' : null} error={error} />
       </form>
-    </section>
+    </SettingCard>
   )
 }

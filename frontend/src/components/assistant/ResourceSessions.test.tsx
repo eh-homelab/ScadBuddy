@@ -47,8 +47,8 @@ describe('ResourceSessions', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     await user.click(toggle)
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    const menu = screen.getByRole('list', { name: 'Assistant sessions that changed this' })
-    const items = within(menu).getAllByRole('button')
+    const menu = await screen.findByRole('listbox', { name: 'Assistant sessions that changed this' })
+    const items = within(menu).getAllByRole('option')
     expect(items.map((i) => i.textContent)).toEqual([
       expect.stringMatching(/^Untitled session.*Working/),
       expect.stringMatching(/^Make the bin.*Idle/),
@@ -57,10 +57,10 @@ describe('ResourceSessions', () => {
 
     await user.click(items[1]!)
     expect(openSession).toHaveBeenCalledWith('sess-old')
-    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument())
   })
 
-  it('closes on Escape, giving focus back to the toggle, and when focus leaves it', async () => {
+  it('finds a session by typing, opens it from the keyboard, and closes on Escape or a click outside (#3673)', async () => {
     setSessionResources('sess-a', [row({ type: 'model', id: 'my-bin', model: 'my-bin' })], { title: 'A' })
     const { user } = renderPage(
       <AssistantOpenerContext.Provider value={{ openSession: vi.fn() }}>
@@ -70,17 +70,19 @@ describe('ResourceSessions', () => {
     )
     const toggle = await screen.findByRole('button', { name: 'Changed by assistant (1)' })
     await user.click(toggle)
-    await user.tab()
-    expect(screen.getByRole('button', { name: /^A/ })).toHaveFocus()
+    const search = await screen.findByRole('combobox', { name: 'Find a session' })
+    await waitFor(() => expect(search).toHaveFocus())
+    await user.keyboard('zzz')
+    expect(await screen.findByText('No session matches.')).toBeInTheDocument()
+    await user.clear(search)
     await user.keyboard('{Escape}')
-    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument())
     expect(toggle).toHaveFocus()
 
     await user.click(toggle)
-    await user.tab()
-    await user.tab()
-    expect(screen.getByRole('button', { name: 'elsewhere' })).toHaveFocus()
-    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    await screen.findByRole('listbox')
+    await user.click(screen.getByRole('button', { name: 'elsewhere' }))
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument())
   })
 
   it('says when there are more sessions than it lists', async () => {
@@ -90,9 +92,9 @@ describe('ResourceSessions', () => {
     }
     const { user } = renderWith({ type: 'model', id: 'big' })
     await user.click(await screen.findByRole('button', { name: `Changed by assistant (${RESOURCE_SESSIONS_SHOWN}+)` }))
-    const list = screen.getByRole('list', { name: 'Assistant sessions that changed this' })
-    expect(within(list).getAllByRole('button')).toHaveLength(RESOURCE_SESSIONS_SHOWN)
-    expect(within(list).getByText(`Showing the ${RESOURCE_SESSIONS_SHOWN} most recent.`)).toBeInTheDocument()
+    const list = await screen.findByRole('listbox', { name: 'Assistant sessions that changed this' })
+    expect(within(list).getAllByRole('option')).toHaveLength(RESOURCE_SESSIONS_SHOWN)
+    expect(screen.getByText(`Showing the ${RESOURCE_SESSIONS_SHOWN} most recent.`)).toBeInTheDocument()
   })
 
   it('looks an output up by its own id, under the label given', async () => {
@@ -108,7 +110,7 @@ describe('ResourceSessions', () => {
     try {
       const { user } = renderWith({ type: 'output', id: 'out/7' }, vi.fn(), 'Output changed by assistant')
       await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
-      expect(screen.getByRole('button', { name: /Saved it/ })).toBeInTheDocument()
+      expect(await screen.findByRole('option', { name: /Saved it/ })).toBeInTheDocument()
       expect(requests).toEqual(['/api/v1/ai/resources/output/out%2F7/sessions'])
       expect(searches).toEqual(['?limit=101'])
     } finally {

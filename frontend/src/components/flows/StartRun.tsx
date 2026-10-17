@@ -5,9 +5,9 @@ import { api, ApiError } from '../../api/client'
 import type { FlowGrantSpec } from '../../api/types'
 import { inputFields, type InputField } from '../../lib/flowInputs'
 import { flowRunPath } from '../../lib/flows'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Spinner } from '../ui/spinner'
 import { GrantEditor } from './GrantEditor'
 import { useInputs } from './inputsForm'
 
@@ -32,16 +32,16 @@ export function StartRun({
   name,
   schema,
   disabled = false,
-  size = 'md',
-  variant = 'primary',
+  size = 'default',
+  variant = 'default',
   withGrant = false,
 }: {
   flowId: string
   name?: string
   schema?: Schema
   disabled?: boolean
-  size?: 'sm' | 'md'
-  variant?: 'primary' | 'default'
+  size?: 'sm' | 'default'
+  variant?: 'default' | 'outline'
   withGrant?: boolean
 }) {
   const navigate = useNavigate()
@@ -89,16 +89,23 @@ export function StartRun({
 
   return (
     <>
-      <Button variant={variant} size={size} onClick={() => void press('inputs')} disabled={disabled || busy}>
-        {busy && !form ? <Spinner /> : 'Start run'}
+      <Button
+        variant={variant}
+        size={size}
+        onClick={() => void press('inputs')}
+        disabled={disabled || busy}
+        aria-busy={busy && !form}
+      >
+        {busy && !form && <Spinner />}
+        Start run
       </Button>
       {withGrant && (
-        <Button size={size} onClick={() => void press('grant')} disabled={disabled || busy} {...USER_ONLY}>
+        <Button variant="outline" size={size} onClick={() => void press('grant')} disabled={disabled || busy} {...USER_ONLY}>
           Start with a grant…
         </Button>
       )}
       {error && !form && (
-        <p role="alert" className="text-[12.5px] text-warn">
+        <p role="alert" className="text-[12.5px] text-destructive">
           {error}
         </p>
       )}
@@ -134,7 +141,7 @@ function refusal(caught: unknown): string {
 
 function Refusal({ error }: { error?: string }) {
   return error ? (
-    <p role="alert" className="whitespace-pre-wrap text-[13px] text-warn">
+    <p role="alert" className="text-[13px] whitespace-pre-wrap text-destructive">
       {error}
     </p>
   ) : null
@@ -165,26 +172,29 @@ function InputsDialog({
   }
 
   return (
-    <Dialog
-      open
-      title={`Start ${name}`}
-      description="This flow takes inputs. Each starts at its default; text you clear is sent empty, and a number or a choice left blank takes its default."
-      onClose={onClose}
-      footer={
-        <>
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{`Start ${name}`}</DialogTitle>
+          <DialogDescription>
+            This flow takes inputs. Each starts at its default; text you clear is sent empty, and a number or a choice
+            left blank takes its default.
+          </DialogDescription>
+        </DialogHeader>
+        <form id={formId} noValidate onSubmit={submit} className="flex flex-col gap-4">
+          {rendered}
+          <Refusal error={error} />
+        </form>
+        <DialogFooter>
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form={formId} disabled={busy}>
-            {busy ? <Spinner /> : 'Start run'}
+          <Button type="submit" form={formId} disabled={busy} aria-busy={busy}>
+            {busy && <Spinner />}
+            Start run
           </Button>
-        </>
-      }
-    >
-      <form id={formId} noValidate onSubmit={submit} className="flex flex-col gap-3">
-        {rendered}
-        <Refusal error={error} />
-      </form>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
@@ -205,31 +215,30 @@ function GrantDialog({
 }) {
   const { parse, rendered } = useInputs(fields)
   return (
-    <Dialog
-      open
-      title="Start with a grant"
-      description="What the run's outward calls may do without asking you."
-      onClose={onClose}
-    >
-      {fields.length > 0 && (
-        <section aria-label="Inputs" className="mb-4 flex flex-col gap-3">
-          <h3 className="text-[13px] font-medium">Inputs</h3>
-          {rendered}
-        </section>
-      )}
-      <GrantEditor
-        submitLabel="Start run"
-        busy={busy}
-        onSubmit={(grant) => {
-          if (fields.length === 0) return onStart({ grant })
-          const inputs = parse()
-          if (inputs) onStart({ inputs, grant })
-        }}
-        onCancel={onClose}
-      />
-      <div className="mt-2">
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Start with a grant</DialogTitle>
+          <DialogDescription>What the run&apos;s outward calls may do without asking you.</DialogDescription>
+        </DialogHeader>
+        {fields.length > 0 && (
+          <section aria-label="Inputs" className="flex flex-col gap-4">
+            <h3 className="text-[13px] font-medium">Inputs</h3>
+            {rendered}
+          </section>
+        )}
+        <GrantEditor
+          submitLabel="Start run"
+          busy={busy}
+          onSubmit={(grant) => {
+            if (fields.length === 0) return onStart({ grant })
+            const inputs = parse()
+            if (inputs) onStart({ inputs, grant })
+          }}
+          onCancel={onClose}
+        />
         <Refusal error={error} />
-      </div>
+      </DialogContent>
     </Dialog>
   )
 }

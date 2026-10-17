@@ -22,8 +22,13 @@ export function flowOf(workflowId?: string): string | undefined {
 
 /** Who started a flow run, and whether a person approved one of its calls. */
 export interface FlowRuns {
-  /** The run's starter as a session owner; undefined when there is no such run. */
-  startedBy(runId: string): Promise<Owner | undefined>
+  /**
+   * The run's starter as a session owner; undefined when there is no such run, when it
+   * has closed, or when `execution` (the calling workflow execution's run id) is one a
+   * Reset replaced (#2258): once its run is over, a new `flow-<id>` execution is lent
+   * nobody's identity.
+   */
+  startedBy(runId: string, execution: string): Promise<Owner | undefined>
   /**
    * Whether `workflow_run_decisions` approves the call `requestId`
    * (`flow:<run>:<workflow run>:<call>`) with this `inputHash`: the call's tool and input
@@ -65,9 +70,32 @@ export class PgFlowRuns implements FlowRuns {
     this.#sql = sql
   }
 
-  async startedBy(runId: string): Promise<Owner | undefined> {
-    const [row] = await this.#sql<{ started_by: StartedBy }[]>`SELECT started_by FROM workflow_runs WHERE id = ${runId}`
-    if (!row) return undefined
+  async startedBy(runId: string, execution: string): Promise<Owner | undefined> {
+    // A Reset of a closed run (backend flows/store.py _reset_run) holds the row FOR
+    // UPDATE while it starts the new execution, and opens it only after: the lock waits
+    // for that, or the new execution's first call reads the old closed row and is
+    // refused. It is taken by id alone, as a row a WHERE filters out is never waited on.
+    // FOR SHARE needs UPDATE on workflow_runs, not only SELECT: a role narrowed to
+    // SELECT would fail every flow tool call here. Every call also waits behind a
+    // writer's FOR UPDATE on the row (_project, _reset_run), which is held only briefly.
+    const [row] = await this.#sql<{ started_by: StartedBy; open: boolean; unrecorded: boolean }[]>`
+      SELECT started_by,
+             status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids)) AS open,
+             workflow_run_id IS DISTINCT FROM ${execution} AND NOT (${execution} = ANY(superseded_run_ids)) AS unrecorded
+        FROM workflow_runs WHERE id = ${runId}
+         FOR SHARE`
+    if (row && !row.open && row.unrecorded) {
+      // Closed, and this execution is neither the row's nor one a Reset replaced: a Reset
+      // that started it and has not committed yet (_reset_run's "landed although this
+      // call failed" path, which its own retry commits). Thrown as a lookup failure, so
+      // the activity's retries wait for that commit rather than refusing for good. That
+      // window is short: a flow tool call retries at most 3 times
+      // (backend workflows/flow_tools.py, maximum_attempts=3), seconds with the default
+      // backoff, far less than a Reset operation's own retry. A Reset that takes longer
+      // to commit fails the call, and the flow's own step reports it.
+      throw new Error(`flow run ${runId} is closed and has not recorded execution ${execution} yet`)
+    }
+    if (!row?.open) return undefined
     const by = row.started_by
     if (by.kind === 'browser') return { kind: 'browser', id: 'browser', label: 'You' }
     if (by.kind !== 'agent' || typeof by.principal !== 'string') return undefined
