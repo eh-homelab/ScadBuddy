@@ -4,12 +4,11 @@ migration between its backends (spec 2026-10-16 §4.3)."""
 from __future__ import annotations
 
 import asyncio
-from itertools import permutations
-from typing import get_args
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
-from temporalio.client import WorkflowExecutionStatus
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ValidationError
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
@@ -18,11 +17,11 @@ from scadbuddy.core.config import StoreBackend
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.store.content import StoreUsage
 from scadbuddy.store.factory import store_usage
+from scadbuddy.store.index import BlobIndex
 from scadbuddy.workflows.commands import execution_gone
 from scadbuddy.workflows.store_migration import StoreMigration
 from scadbuddy.workflows.store_migration_models import (
     StoreMigrationParams,
-    StoreMigrationProgress,
     migration_id,
 )
 
@@ -69,22 +68,61 @@ async def migrate_store(
     return StoreMigrationStarted(workflow_id=handle.id)
 
 
+class StoreMigrationStatus(BaseModel):
+    source: StoreBackend
+    target: StoreBackend
+    #: Rows on `source` not yet copied to `target`, and those copied (switched at the
+    #: next start on `target`).
+    remaining: int
+    copied: int
+    #: The latest run's keys it could not copy.
+    failed: list[str]
+    running: bool
+
+
 @router.get(
     "/store/migrate",
-    response_model=StoreMigrationProgress,
+    response_model=StoreMigrationStatus,
     summary="Blob store migration progress",
-    description="The running migration's blobs moved, left, and failed; 404 when none runs.",
+    description=(
+        "The pair's rows still to copy and copied, and its latest run's failed keys;"
+        " 404 when no run for the pair ever started."
+    ),
 )
-async def get_store_migration(ops: OperationsDep) -> StoreMigrationProgress:
-    remote = [name for name in get_args(StoreBackend) if name != "local"]
-    for source, target in permutations(remote, 2):
-        handle = ops.client.get_workflow_handle(migration_id(source, target))
+async def get_store_migration(
+    state: StateDep,
+    ops: OperationsDep,
+    source: StoreBackend = "bambuddy",
+    target: StoreBackend = "s3",
+) -> StoreMigrationStatus:
+    try:
+        StoreMigrationParams(source=source, target=target)
+    except ValidationError as error:
+        raise RequestValidationError(error.errors()) from error
+    handle = ops.client.get_workflow_handle_for(StoreMigration.run, migration_id(source, target))
+    try:
+        described = await handle.describe()
+    except RPCError as error:
+        if execution_gone(error):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no store migration ran") from error
+        raise
+    running = described.status == WorkflowExecutionStatus.RUNNING
+    if running:
+        failed = (await handle.query(StoreMigration.progress)).failed
+    else:
         try:
-            described = await handle.describe()
-        except RPCError as error:
-            if execution_gone(error):
-                continue
-            raise
-        if described.status == WorkflowExecutionStatus.RUNNING:
-            return await handle.query(StoreMigration.progress)
-    raise HTTPException(status.HTTP_404_NOT_FOUND, "no store migration is running")
+            failed = (await handle.result()).failed
+        except WorkflowFailureError:
+            # Failed or ended before its result (an unready backend, a terminate).
+            failed = []
+    remaining, copied = await asyncio.to_thread(
+        BlobIndex(state.settings_store.pool).migration_counts, source, target
+    )
+    return StoreMigrationStatus(
+        source=source,
+        target=target,
+        remaining=remaining,
+        copied=copied,
+        failed=failed,
+        running=running,
+    )

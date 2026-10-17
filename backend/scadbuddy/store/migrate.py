@@ -1,5 +1,7 @@
-"""Recorded blobs moved from one content backend to another (spec 2026-10-16 §4.3):
-each object copied, checked against its row's sha256, and its row swapped over."""
+"""Recorded blobs copied from one content backend to another (spec 2026-10-16 §4.3):
+each object copied, checked against its row's sha256, and the copy recorded beside the
+row (`migrated_backend`). The row keeps naming the source, which the running processes
+still read, until a start on the target switches it (`BlobIndex.switch_migrated`)."""
 
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from scadbuddy.library.settings_store import StoreNotReadyError, load_render_sto
 from scadbuddy.store.backends import build_backend
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.content import ContentBackend
-from scadbuddy.store.content_models import BlobMissingError, BlobRef, BlobScope, BlobStat
+from scadbuddy.store.content_models import BlobMissingError, BlobScope, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ MIGRATE_BATCH = "store_migrate_batch"
 
 class MigrationBatch(BaseModel):
     moved: int
-    #: Rows still on the source, but those skipped and those that failed.
+    #: Rows still to copy, but those skipped and those that failed.
     remaining: int
     failed: list[str]
 
@@ -53,10 +55,12 @@ async def migrate_batch(
     heartbeat: Callable[[str], None],
     skip: Collection[str] = (),
 ) -> MigrationBatch:
-    """Move up to ``limit`` of ``source``'s rows, least recently touched first, to
-    ``target``. A row whose object is gone or not its sha256, whose copy the target
-    refused, or that moved on meanwhile (its swap missed) is ``failed`` and stays."""
-    rows = await asyncio.to_thread(index.oldest, source.backend, limit=limit, skip=list(skip))
+    """Copy up to ``limit`` of ``source``'s rows not yet on ``target``, least recently
+    touched first. A row whose object is gone or not its sha256, whose copy the target
+    refused, or that moved on meanwhile (its mark missed) is ``failed``."""
+    rows = await asyncio.to_thread(
+        index.unmigrated, source.backend, target.backend, limit=limit, skip=list(skip)
+    )
     moved, failed = 0, []
     for row in rows:
         heartbeat(row.key)
@@ -64,7 +68,9 @@ async def migrate_batch(
             moved += 1
         else:
             failed.append(row.key)
-    remaining = await asyncio.to_thread(index.count, source.backend, skip=[*skip, *failed])
+    remaining, _ = await asyncio.to_thread(
+        index.migration_counts, source.backend, target.backend, skip=[*skip, *failed]
+    )
     return MigrationBatch(moved=moved, remaining=remaining, failed=failed)
 
 
@@ -93,15 +99,8 @@ async def _move(
         except Exception:
             logger.warning("the target refused a blob", extra={"key": row.key}, exc_info=True)
             return False
-    moved = BlobRef(
-        sha256=ref.sha256,
-        kind=ref.kind,
-        backend=target.backend,
-        backend_id=backend_id,
-        size=ref.size,
-    )
     return await asyncio.to_thread(
-        index.swap, row.key, moved, expected=ref, slug=row.slug, meta=row.meta
+        index.mark_migrated, row.key, ref, backend=target.backend, backend_id=backend_id
     )
 
 

@@ -11,8 +11,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
 from scadbuddy.store import migrate
+from scadbuddy.store.index import BlobIndex
 from scadbuddy.store.migrate import MigrationBatch
+from tests.support.store import store_pool
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -70,18 +74,32 @@ def test_post_starts_once_and_get_reports_progress(
     assert again.status_code == 202
     assert again.json() == first.json()
 
-    def progressed() -> bool:
-        answer = client.get("/api/v1/store/migrate")
-        return answer.status_code == 200 and bool(answer.json()["moved"] == 2)
+    def status() -> dict[str, Any]:
+        answer = client.get("/api/v1/store/migrate", params={"source": "bambuddy", "target": "s3"})
+        assert answer.status_code == 200, answer.text
+        body: dict[str, Any] = answer.json()
+        return body
 
-    _until(progressed)
-    assert client.get("/api/v1/store/migrate").json() == {
-        "moved": 2,
-        "remaining": 3,
+    _until(lambda: status()["failed"] == ["k"])
+    # The counts are the table's: no row is on Bambuddy here.
+    assert status() == {
+        "source": "bambuddy",
+        "target": "s3",
+        "remaining": 0,
+        "copied": 0,
         "failed": ["k"],
+        "running": True,
     }
     release.set()
-    _until(lambda: client.get("/api/v1/store/migrate").status_code == 404)
+    _until(lambda: not status()["running"])
+    # Closed, its result still names what it could not copy.
+    assert status()["failed"] == ["k"]
+    assert (
+        client.get(
+            "/api/v1/store/migrate", params={"source": "s3", "target": "bambuddy"}
+        ).status_code
+        == 404
+    )
     # One execution: the second POST joined the first, which skipped what failed.
     assert calls == [("bambuddy", "s3", 7, []), ("bambuddy", "s3", 7, ["k"])]
 
@@ -96,3 +114,22 @@ def test_post_starts_once_and_get_reports_progress(
 )
 def test_a_migration_needs_two_remote_backends(client: TestClient, body: dict[str, str]) -> None:
     assert client.post("/api/v1/store/migrate", json=body).status_code == 422
+    assert client.get("/api/v1/store/migrate", params=body).status_code == 422
+
+
+def test_a_start_switches_the_rows_copied_to_its_backend(
+    settings: Settings, pg_conninfo: str
+) -> None:
+    with store_pool(pg_conninfo) as pool, pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size,"
+            " migrated_backend, migrated_backend_id) VALUES"
+            " ('copied', 'a', 'piece', 'bambuddy', '7', 1, 'local', 'piece/a'),"
+            " ('elsewhere', 'b', 'piece', 'bambuddy', '8', 1, 's3', 't/piece/b')"
+        )
+    with TestClient(create_app(settings)), store_pool(pg_conninfo) as pool:
+        index = BlobIndex(pool)
+        copied, elsewhere = index.get("copied"), index.get("elsewhere")
+    assert copied is not None and elsewhere is not None
+    assert (copied.ref.backend, copied.ref.backend_id) == ("local", "piece/a")
+    assert (elsewhere.ref.backend, elsewhere.ref.backend_id) == ("bambuddy", "8")

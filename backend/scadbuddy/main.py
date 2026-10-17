@@ -103,6 +103,7 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.index import BlobIndex
 from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
@@ -1267,6 +1268,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # will not start) releases what is open, the store and its pool included, rather
     # than leaking it for this failed boot.
     try:
+        # Spec 2026-10-16 §4.3: once the store is ready, the rows a migration copied to
+        # its backend are that backend's.
+        switched = await asyncio.to_thread(BlobIndex(pool).switch_migrated, current.store_backend)
+        if switched:
+            logger.info(
+                "switched migrated blobs",
+                extra={"backend": current.store_backend, "rows": switched},
+            )
         state.paths.ensure()
         # Before the built-in sync: an existing models directory becomes revision 1,
         # so what a newer image changes in a built-in is a commit on top of it rather

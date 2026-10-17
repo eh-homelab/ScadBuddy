@@ -18,8 +18,21 @@ from scadbuddy.store.content_models import BlobRef, BlobStat, ReuseLostError
 logger = logging.getLogger(__name__)
 Pool = ConnectionPool[Connection[DictRow]]
 _COLUMNS = "key, sha256, kind, backend, backend_id, size, slug, meta, touched_at"
+#: A write that points a row at another object drops its migrated copy, now stale
+#: (spec 2026-10-16 §4.3); one that names the same object keeps it. Its parameters are
+#: `_kept_copy`'s.
+_KEEP_COPY = (
+    "migrated_backend = CASE WHEN (sha256, backend, backend_id) = (%s, %s, %s)"
+    " THEN migrated_backend END,"
+    " migrated_backend_id = CASE WHEN (sha256, backend, backend_id) = (%s, %s, %s)"
+    " THEN migrated_backend_id END"
+)
 #: Attempts at an index write that Postgres picks as a deadlock's victim (`_retrying`).
 _DEADLOCK_ATTEMPTS = 3
+
+
+def _kept_copy(ref: BlobRef) -> tuple[str, ...]:
+    return (ref.sha256, ref.backend, ref.backend_id) * 2
 
 
 def _stat(row: DictRow) -> BlobStat:
@@ -152,10 +165,10 @@ class BlobIndex:
                     row = self._locked(conn, key, ref, reuse=reuse, columns=_COLUMNS)
                     if row is not None:
                         conn.execute(
-                            "UPDATE store_blobs SET sha256 = %s, kind = %s, backend = %s,"
-                            " backend_id = %s, size = %s, slug = %s, meta = %s,"
+                            f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
+                            " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
                             " touched_at = now() WHERE key = %s",
-                            (*values, key),
+                            (*_kept_copy(ref), *values, key),
                         )
                         return _stat(row).ref
                     inserted = conn.execute(
@@ -174,13 +187,12 @@ class BlobIndex:
         key: str,
         ref: BlobRef,
         *,
-        expected: str | BlobRef | None,
+        expected: str | None,
         slug: str | None,
         meta: dict[str, Any],
         reuse: bool = False,
     ) -> bool:
-        """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row), a
-        sha256 or, as a `BlobRef`, that object on its backend.
+        """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row).
         With ``reuse``, ``ref`` names an existing object (`_locked`)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
 
@@ -195,17 +207,11 @@ class BlobIndex:
                         (*values, key),
                     )
                 else:
-                    sha, at = (
-                        (expected.sha256, (expected.backend, expected.backend_id))
-                        if isinstance(expected, BlobRef)
-                        else (expected, (None, None))
-                    )
                     cursor = conn.execute(
-                        "UPDATE store_blobs SET sha256 = %s, kind = %s, backend = %s,"
-                        " backend_id = %s, size = %s, slug = %s, meta = %s, touched_at = now()"
-                        " WHERE key = %s AND sha256 = %s"
-                        " AND (%s::text IS NULL OR (backend = %s AND backend_id = %s))",
-                        (*values, key, sha, at[0], *at),
+                        f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
+                        " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
+                        " touched_at = now() WHERE key = %s AND sha256 = %s",
+                        (*_kept_copy(ref), *values, key, expected),
                     )
                 return cursor.rowcount == 1
 
@@ -292,24 +298,57 @@ class BlobIndex:
             ).fetchall()
         return [_stat(row) for row in rows]
 
-    def oldest(self, backend: str, *, limit: int, skip: Sequence[str]) -> list[BlobStat]:
-        """Up to ``limit`` rows on ``backend``, least recently touched first, but ``skip``."""
+    def unmigrated(
+        self, source: str, target: str, *, limit: int, skip: Sequence[str]
+    ) -> list[BlobStat]:
+        """Up to ``limit`` rows on ``source`` with no copy on ``target``, least recently
+        touched first, but ``skip``."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s"
-                " AND NOT key = ANY(%s) ORDER BY touched_at, key LIMIT %s",
-                (backend, list(skip), limit),
+                " AND migrated_backend IS DISTINCT FROM %s AND NOT key = ANY(%s)"
+                " ORDER BY touched_at, key LIMIT %s",
+                (source, target, list(skip), limit),
             ).fetchall()
         return [_stat(row) for row in rows]
 
-    def count(self, backend: str, *, skip: Sequence[str]) -> int:
+    def migration_counts(
+        self, source: str, target: str, *, skip: Sequence[str] = ()
+    ) -> tuple[int, int]:
+        """Rows on ``source`` still to copy to ``target`` (but ``skip``), and those copied."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT count(*) AS n FROM store_blobs WHERE backend = %s AND NOT key = ANY(%s)",
-                (backend, list(skip)),
+                "SELECT count(*) FILTER (WHERE migrated_backend IS DISTINCT FROM %s"
+                " AND NOT key = ANY(%s)) AS remaining,"
+                " count(*) FILTER (WHERE migrated_backend = %s) AS copied"
+                " FROM store_blobs WHERE backend = %s",
+                (target, list(skip), target, source),
             ).fetchone()
         assert row is not None
-        return int(row["n"])
+        return int(row["remaining"]), int(row["copied"])
+
+    def mark_migrated(self, key: str, ref: BlobRef, *, backend: str, backend_id: str) -> bool:
+        """Record ``key``'s copy on ``backend`` only if the row still names ``ref``'s
+        bytes on ``ref``'s backend; a row that moved on is left for the next pass."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE store_blobs SET migrated_backend = %s, migrated_backend_id = %s"
+                " WHERE key = %s AND sha256 = %s AND backend = %s",
+                (backend, backend_id, key, ref.sha256, ref.backend),
+            )
+        return cursor.rowcount == 1
+
+    def switch_migrated(self, backend: str) -> int:
+        """Point every row copied to ``backend`` at its copy, in one statement: the
+        migration's switch, run when a process starts on ``backend``."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE store_blobs SET backend = migrated_backend,"
+                " backend_id = migrated_backend_id, migrated_backend = NULL,"
+                " migrated_backend_id = NULL WHERE migrated_backend = %s",
+                (backend,),
+            )
+        return cursor.rowcount
 
     def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
         """Distinct stored objects and their bytes, in total and per kind."""
