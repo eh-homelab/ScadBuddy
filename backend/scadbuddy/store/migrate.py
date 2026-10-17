@@ -13,7 +13,6 @@ import tempfile
 from collections.abc import Callable
 from contextlib import AsyncExitStack, aclosing
 from datetime import datetime
-from time import monotonic
 from typing import Any
 
 from pydantic import BaseModel
@@ -32,8 +31,9 @@ from scadbuddy.store.index import BlobIndex, Pool
 logger = logging.getLogger(__name__)
 
 MIGRATE_BATCH = "store_migrate_batch"
-#: The most heartbeats a batch sends per second, whatever its chunks and parts.
-HEARTBEAT_INTERVAL = 1.0
+#: How often a copy heartbeats while its bytes move: well inside the activity's 60 s
+#: heartbeat timeout, so a slow blob is not taken for a lost worker.
+HEARTBEAT_EVERY = 10.0
 #: What a row keeps of the error that stopped its copy.
 ERROR_CHARS = 500
 
@@ -55,30 +55,29 @@ class MigrateBatchInput(BaseModel):
     started: datetime
 
 
-class _Coalesced:
-    """``beat(key)`` at most once per `HEARTBEAT_INTERVAL`."""
+class _Spool(io.BufferedRandom):
+    """The copy's temporary file. It counts its reads, which an upload makes a part at a
+    time in its own threads: `_beat_while` heartbeats from the event loop while the count
+    moves (temporalio's heartbeat is not callable from another thread)."""
 
-    def __init__(self, beat: Callable[[str], None]) -> None:
-        self._beat = beat
-        self._last: float | None = None
-
-    def __call__(self, key: str) -> None:
-        now = monotonic()
-        if self._last is None or now - self._last >= HEARTBEAT_INTERVAL:
-            self._last = now
-            self._beat(key)
-
-
-class _Beating(io.BufferedRandom):
-    """A spool that heartbeats on each read, so an upload a part at a time does."""
-
-    def __init__(self, raw: io.RawIOBase, beat: Callable[[], None]) -> None:
+    def __init__(self, raw: io.RawIOBase) -> None:
         super().__init__(raw)
-        self._beating = beat
+        self.progress = 0
 
     def read(self, size: int | None = -1, /) -> bytes:
-        self._beating()
+        self.progress += 1
         return super().read(size)
+
+
+async def _beat_while(spool: _Spool, key: str, beat: Callable[[str], None]) -> None:
+    """``beat(key)`` now, then every `HEARTBEAT_EVERY` that the copy made progress: a
+    stalled copy stops beating, and its heartbeat timeout ends it."""
+    seen = -1
+    while True:
+        if spool.progress != seen:
+            seen = spool.progress
+            beat(key)
+        await asyncio.sleep(HEARTBEAT_EVERY)
 
 
 async def migrate_batch(
@@ -94,16 +93,14 @@ async def migrate_batch(
     touched first, but those whose copy failed since ``started``. A row whose object
     cannot be read or is not its sha256, or whose copy the target refused, records the
     error and is ``failed``; one that moved on meanwhile (its mark missed) is left for
-    the next batch. ``heartbeat`` is called with the key per chunk and per read of the
-    copy, at most once a second."""
-    beat = _Coalesced(heartbeat)
+    the next batch. ``heartbeat`` is called with the key, from the event loop, while
+    each copy makes progress (`_beat_while`)."""
     rows = await asyncio.to_thread(
         index.unmigrated, source.backend, target.backend, limit=limit, started=started
     )
     moved, failed = 0, []
     for row in rows:
-        beat(row.key)
-        error = await _copy(index, source, target, row, beat)
+        error = await _copy(index, source, target, row, heartbeat)
         if error is None:
             moved += 1
         elif error:
@@ -129,33 +126,47 @@ async def _copy(
     beat: Callable[[str], None],
 ) -> str | None:
     """None once copied and recorded, "" when the row moved on, else the error."""
-    ref = row.ref
-    # Closed by the `_Beating` that wraps it.
+    # Closed by the `_Spool` that wraps it.
     raw = await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", buffering=0))  # noqa: SIM115
     assert isinstance(raw, io.RawIOBase)
-    with _Beating(raw, lambda: beat(row.key)) as spool:
-        digest = hashlib.sha256()
+    with _Spool(raw) as spool:
+        beating = asyncio.create_task(_beat_while(spool, row.key, beat))
         try:
-            async with aclosing(source.download(ref.backend_id)) as chunks:
-                async for chunk in chunks:
-                    beat(row.key)
-                    digest.update(chunk)
-                    await asyncio.to_thread(spool.write, chunk)
-        except Exception as error:
-            # Missing, unreadable or refused: one bad object never fails the batch.
-            logger.warning("could not read a blob to copy", extra={"key": row.key}, exc_info=True)
-            return _error(error)
-        if digest.hexdigest() != ref.sha256:
-            logger.warning("a blob to copy is not its sha256", extra={"key": row.key})
-            return f"sha256 mismatch: the source object is {digest.hexdigest()}"
-        await asyncio.to_thread(spool.seek, 0)
-        try:
-            backend_id = await target.upload(
-                ref.kind, spool, name=row.key, scope=BlobScope(slug=row.slug)
-            )
-        except Exception as error:
-            logger.warning("the target refused a blob", extra={"key": row.key}, exc_info=True)
-            return _error(error)
+            return await _copy_through(index, source, target, row, spool)
+        finally:
+            beating.cancel()
+
+
+async def _copy_through(
+    index: BlobIndex,
+    source: ContentBackend,
+    target: ContentBackend,
+    row: BlobStat,
+    spool: _Spool,
+) -> str | None:
+    ref = row.ref
+    digest = hashlib.sha256()
+    try:
+        async with aclosing(source.download(ref.backend_id)) as chunks:
+            async for chunk in chunks:
+                spool.progress += 1
+                digest.update(chunk)
+                await asyncio.to_thread(spool.write, chunk)
+    except Exception as error:
+        # Missing, unreadable or refused: one bad object never fails the batch.
+        logger.warning("could not read a blob to copy", extra={"key": row.key}, exc_info=True)
+        return _error(error)
+    if digest.hexdigest() != ref.sha256:
+        logger.warning("a blob to copy is not its sha256", extra={"key": row.key})
+        return f"sha256 mismatch: the source object is {digest.hexdigest()}"
+    await asyncio.to_thread(spool.seek, 0)
+    try:
+        backend_id = await target.upload(
+            ref.kind, spool, name=row.key, scope=BlobScope(slug=row.slug)
+        )
+    except Exception as error:
+        logger.warning("the target refused a blob", extra={"key": row.key}, exc_info=True)
+        return _error(error)
     marked = await asyncio.to_thread(
         index.mark_migrated, row.key, ref, backend=target.backend, backend_id=backend_id
     )

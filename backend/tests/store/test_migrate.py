@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import itertools
+import os
 from collections.abc import AsyncGenerator, Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from temporalio import activity
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store import migrate
@@ -273,35 +276,80 @@ async def test_a_target_failure_is_recorded_and_its_error_is_capped(
         await target.aclose()
 
 
-class _Chunked(LocalContentBackend):
-    """Downloads in three chunks."""
+class _Slow(LocalContentBackend):
+    """Downloads in three chunks, a pause before each."""
 
     async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         data = b"".join([chunk async for chunk in super().download(backend_id)])
         for part in (data[:2], data[2:4], data[4:]):
+            await asyncio.sleep(0.12)
             yield part
 
 
-@pytest.mark.parametrize(("step", "least"), [(0.0, 1), (2.0, 5)], ids=["fast", "slow"])
-async def test_a_copy_heartbeats_per_chunk_at_most_once_a_second(
-    pool: Pool,
-    tmp_path: Path,
-    target: S3ContentBackend,
-    monkeypatch: pytest.MonkeyPatch,
-    step: float,
-    least: int,
+def _beats_into(env: ActivityEnvironment, beats: list[Any]) -> None:
+    """Records each heartbeat, refusing one off the event loop, as a worker's would:
+    temporalio's heartbeat queues it with `put_nowait` and `create_task`."""
+
+    def beat(*details: Any) -> None:
+        asyncio.get_running_loop()
+        beats.append(details)
+
+    env.on_heartbeat = beat
+
+
+async def test_a_slow_copy_heartbeats_from_the_event_loop_while_it_streams(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    backend = _Chunked(tmp_path / "a")
+    monkeypatch.setattr(migrate, "HEARTBEAT_EVERY", 0.05)
+    backend = _Slow(tmp_path / "a")
     index = BlobIndex(pool)
     ref = await ContentStore(backend, index).put("piece", b"sixbyt", name="s", scope=SCOPE)
-    ticks = itertools.count()
-    monkeypatch.setattr(migrate, "monotonic", lambda: next(ticks) * step)
-    beats: list[str] = []
+    key = f"piece-{ref.sha256}"
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    _beats_into(env, beats)
     try:
-        await _batch(index, backend, target, heartbeat=beats.append)
-        assert set(beats) == {f"piece-{ref.sha256}"}
-        # The row, each of its three chunks, and at least one of the upload's reads.
-        assert len(beats) == 1 if step == 0 else len(beats) >= least
+        result = await env.run(
+            migrate_batch,
+            index,
+            backend,
+            target,
+            limit=10,
+            started=index.now(),
+            heartbeat=activity.heartbeat,
+        )
+        assert result == MigrationBatch(moved=1, remaining=0, failed=[])
+        assert _copy(pool, key)[0::2] == ("s3", None)
+        assert len(beats) >= 3 and set(beats) == {(key,)}
+    finally:
+        await target.aclose()
+
+
+async def test_a_multipart_upload_reading_in_threads_copies_inside_an_activity(
+    pool: Pool, tmp_path: Path, s3: S3Settings
+) -> None:
+    """The S3 upload hashes and reads its parts in threads; a heartbeat there would
+    have no event loop."""
+    target = S3ContentBackend(s3, multipart_threshold=5 << 20, part_size=5 << 20)
+    src = local_content(tmp_path / "a", pool)
+    ref = await src.put("piece", os.urandom((5 << 20) + 1024), name="big", scope=SCOPE)
+    index = BlobIndex(pool)
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    _beats_into(env, beats)
+    try:
+        result = await env.run(
+            migrate_batch,
+            index,
+            src.backend,
+            target,
+            limit=10,
+            started=index.now(),
+            heartbeat=activity.heartbeat,
+        )
+        assert result == MigrationBatch(moved=1, remaining=0, failed=[])
+        assert _copy(pool, f"piece-{ref.sha256}")[2] is None
+        assert beats
     finally:
         await target.aclose()
 
