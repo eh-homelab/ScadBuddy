@@ -743,7 +743,7 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     if (plates and plate not in plates) or (not plates and plate != 1):
         raise NoSuchPlateError(plate, count)
     instances: dict[str, int] = {}
-    by_colour: dict[str, list[trimesh.Trimesh]] = {}
+    by_colour: dict[str, list[ColourPart]] = {}
     for item in items:
         object_id = item.get("objectid", "")
         instance = instances.get(object_id, 0)
@@ -755,15 +755,30 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         for part in parts:
             if part.negative:
                 continue  # cut out by the slicer: neither shown nor checked
-            by_colour.setdefault(part.colour, []).append(part.mesh)
+            by_colour.setdefault(part.colour, []).append(part)
     found: list[ColourPart] = []
-    for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
+    for index, (colour, parts) in enumerate(by_colour.items(), start=1):
+        meshes = [part.mesh for part in parts]
         joined = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         if isinstance(joined, trimesh.Trimesh):
-            found.append(ColourPart(index, f"Color {index}", colour, joined))
+            found.append(ColourPart(index, f"Color {index}", colour, joined, _joined_paint(parts)))
     if not found:
         raise UnreadableObjectsError(f"plate {plate} of the 3MF places no object with any geometry")
     return PlateRead(found, count)
+
+
+def _joined_paint(parts: list[ColourPart]) -> Paint | None:
+    """The painting of ``parts`` joined in order (an unpainted part's faces unpainted),
+    or None when none is painted: a preview draws each colour where its painting puts
+    it, and the checks see the joined mesh whole (#3956). Every painted part of one file
+    names the file's filaments, so their colours are one tuple."""
+    painted = [part.paint for part in parts if part.paint is not None]
+    if not painted:
+        return None
+    codes: list[str] = []
+    for part in parts:
+        codes += part.paint.codes if part.paint is not None else [""] * len(part.mesh.faces)
+    return Paint(tuple(codes), painted[0].colours)
 
 
 def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_Archive], T]) -> T:

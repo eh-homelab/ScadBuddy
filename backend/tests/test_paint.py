@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
-from scadbuddy.render.paint import PaintCodeError, remap, single_code, states, uniform_state
+from scadbuddy.render.paint import (
+    PaintCodeError,
+    pieces,
+    remap,
+    single_code,
+    states,
+    uniform_state,
+)
 
 # Codes for a whole triangle painted with extruders 1-4, as Bambu Studio's
 # `TriangleSelector::serialize` (linked in the module) writes them.
@@ -111,3 +119,78 @@ def test_single_code_refuses_a_state_no_code_names() -> None:
         single_code(256)
     with pytest.raises(PaintCodeError):
         single_code(-1)
+
+
+# #3956: where each leaf lies, as Bambu Studio's `TriangleSelector::perform_split` puts it.
+V0, V1, V2 = np.array([0.0, 0, 0]), np.array([4.0, 0, 0]), np.array([0.0, 4, 0])
+CORNERS = np.array([V0, V1, V2])
+
+
+def _code(*nodes: tuple[int, int]) -> str:
+    """A code from its nodes in stream order, each (sides, special side or state)."""
+    bits = [(value >> bit) & 1 for node in nodes for value in node for bit in range(2)]
+    bits += [0] * (-len(bits) % 4)
+    nibbles = [sum(bits[at + bit] << bit for bit in range(4)) for at in range(0, len(bits), 4)]
+    return "".join("0123456789ABCDEF"[n] for n in reversed(nibbles))
+
+
+def _found(code: str, corners: np.ndarray = CORNERS) -> dict[tuple[tuple[float, ...], ...], int]:
+    return {
+        tuple(map(tuple, triangle.tolist())): state for triangle, state in pieces(code, corners)
+    }
+
+
+def _tri(*points: np.ndarray) -> tuple[tuple[float, ...], ...]:
+    return tuple(tuple(p.tolist()) for p in points)
+
+
+def _area(triangle: np.ndarray) -> float:
+    return float(np.linalg.norm(np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])) / 2)
+
+
+def test_an_unsplit_triangle_is_one_piece() -> None:
+    assert _found("") == {_tri(V0, V1, V2): 0}
+    assert _found(WHOLE[3]) == {_tri(V0, V1, V2): 3}
+
+
+def test_one_split_side_halves_the_side_opposite_the_special_corner() -> None:
+    # "481": special side 0, children last first: extruder 2, then 1 (as above).
+    assert _code((1, 0), (0, 2), (0, 1)) == "481"
+    m12 = (V1 + V2) / 2
+    assert _found("481") == {_tri(V0, V1, m12): 1, _tri(m12, V2, V0): 2}
+
+
+def test_the_special_side_turns_the_split() -> None:
+    m20 = (V2 + V0) / 2  # special side 1: the corners from V1 on, so V2-V0 is halved
+    assert _found(_code((1, 1), (0, 2), (0, 1))) == {_tri(V1, V2, m20): 1, _tri(m20, V0, V1): 2}
+
+
+def test_two_split_sides_meet_at_the_special_corner() -> None:
+    m01, m02 = (V0 + V1) / 2, (V0 + V2) / 2
+    code = _code((2, 0), (0, 1), (0, 2), (0, 1))  # children 2, 1, 0
+    assert _found(code) == {_tri(V0, m01, m02): 1, _tri(m01, V1, m02): 2, _tri(V1, V2, m02): 1}
+
+
+def test_three_split_sides_leave_the_middle_last() -> None:
+    m01, m12, m20 = (V0 + V1) / 2, (V1 + V2) / 2, (V2 + V0) / 2
+    code = _code((3, 0), (0, 2), (0, 1), (0, 1), (0, 1))  # the middle (child 3) first
+    assert _found(code) == {
+        _tri(V0, m01, m20): 1,
+        _tri(m01, V1, m12): 1,
+        _tri(m12, V2, m20): 1,
+        _tri(m01, m12, m20): 2,
+    }
+
+
+def test_nested_splits_cover_the_triangle_exactly() -> None:
+    # A child split again: areas add up to the whole, whatever the depth.
+    code = _code((3, 0), (1, 2), (0, 2), (0, 1), (0, 1), (0, 1), (0, 0))
+    got = pieces(code, CORNERS)
+    assert len(got) == 5  # three leaves, and a child halved
+    assert sum(_area(t) for t, _ in got) == pytest.approx(_area(CORNERS))
+
+
+@pytest.mark.parametrize("code", ["4", "481"])
+def test_pieces_refuses_what_states_refuses(code: str) -> None:
+    with pytest.raises(PaintCodeError):
+        pieces(code + "0F", CORNERS)
