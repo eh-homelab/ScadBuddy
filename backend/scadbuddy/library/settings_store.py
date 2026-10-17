@@ -580,6 +580,11 @@ class SettingsStore:
             name="scadbuddy-settings",
         )
 
+    @property
+    def kek(self) -> Kek | None:
+        """The key the secret settings are sealed with; ``None`` when they are kept plain."""
+        return self._kek
+
     def open(self) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot."""
         self._pool.open(wait=True, timeout=self.connect_timeout)

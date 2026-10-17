@@ -12,7 +12,7 @@ import type {
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
-import { plateFields, plateKey } from './plateChoice'
+import { type PlateChoice, plateFields, plateKey } from './plateChoice'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -70,6 +70,55 @@ function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes
 }
 
 const NONE: string[] = []
+
+/**
+ * The run request the dialog's choices make, without a press's `request_id`: what Print
+ * sends, and what a batch print's step keeps for Queue all to send (#2672).
+ */
+export function printRunBody({
+  printerId,
+  plan,
+  printChoices,
+  copies,
+  plate,
+  projectId,
+  folderId = null,
+  options,
+  printSequence,
+  supports = null,
+  primeTower = null,
+  filamentProfiles = [],
+  rackPosition,
+  rackAlgorithm,
+}: {
+  printerId: number | null
+  plan: SlotChoice[]
+  printChoices: NonNullable<ReturnType<typeof printChoicesOf>>
+  copies: number | null
+  plate: PlateChoice
+  projectId: number | null | undefined
+  folderId?: number | null
+  options: PrintOptions
+  printSequence: PrintSequence | null
+  supports?: SupportsChoice | null
+  primeTower?: PrimeTowerChoice | null
+  filamentProfiles?: readonly string[]
+  rackPosition: number | null
+  rackAlgorithm: RackAlgorithm | null
+}): PrintRunRequest {
+  return {
+    printer_id: printerId,
+    filament_plan: { slots: plan, force_colour_match: false },
+    choices: printChoices,
+    ...(copies === null ? {} : { copies }),
+    ...plateFields(plate),
+    ...(folderId !== null ? { folder_id: folderId } : projectId === undefined ? {} : { project_id: projectId }),
+    options,
+    ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
+    rack_position: rackPosition,
+    rack_algorithm: rackAlgorithm,
+  }
+}
 
 /**
  * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
@@ -187,16 +236,22 @@ export function useRunPrint({
     setRefused(false)
     try {
       const body: PrintRunRequest = {
-        printer_id: printerId,
-        filament_plan: { slots: plan, force_colour_match: false },
-        choices: printChoices,
-        ...(copies === null ? {} : { copies }),
-        ...plateFields(plate),
-        ...(folderId !== null ? { folder_id: folderId } : projectId === undefined ? {} : { project_id: projectId }),
-        options,
-        ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
-        rack_position: rackPosition,
-        rack_algorithm: rackAlgorithm,
+        ...printRunBody({
+          printerId,
+          plan,
+          printChoices,
+          copies,
+          plate,
+          projectId,
+          folderId,
+          options,
+          printSequence,
+          supports,
+          primeTower,
+          filamentProfiles,
+          rackPosition,
+          rackAlgorithm,
+        }),
         // One per press: the same choices printed again are a new print, while
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),

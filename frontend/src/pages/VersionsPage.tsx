@@ -334,7 +334,7 @@ function VersionRow({
         pressed={selected}
         onPressedChange={() => onSelect()}
         data-version-select={version.commit}
-        className="block h-auto w-full rounded-lg px-2 py-1.5 text-left font-normal whitespace-normal data-[state=on]:bg-transparent hover:bg-ui-muted/60"
+        className="block h-auto w-full rounded-lg px-2 py-1.5 text-left font-normal whitespace-normal data-[state=on]:bg-transparent hover:bg-muted/60"
       >
         <span className="flex items-center gap-2">
           <span className="sb-num text-xs text-primary">{version.short}</span>

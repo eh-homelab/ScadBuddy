@@ -73,12 +73,32 @@ function withoutHeadMessage(stacktrace: string, message: string): string {
 }
 
 /**
- * What a log line may say of an error (#1814): its name only, never its message, which
- * can quote a connection string or a query. Every `console.warn` of a caught error goes
- * through this, so the rule lives in one place.
+ * A short code that names a failure and quotes nothing: a SQLSTATE, an errno name, a
+ * Node `ERR_*` code. Those last run to 28 characters (`ERR_SCRIPT_EXECUTION_TIMEOUT`),
+ * so the cap is 32, not an errno's 16.
+ */
+const ERROR_CODE = /^[A-Z0-9_]{1,32}$/
+
+function isHttpStatus(status: unknown): status is number {
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+}
+
+/**
+ * What a log line may say of an error (#1814): its name, never its message, which can
+ * quote a connection string or a query. The name is joined by the error's `code` when
+ * that is a short code (a postgres.js `57P01`, a socket's `ECONNREFUSED`) and its
+ * `status` when that is an HTTP status (a ToolError's backend answer): neither can
+ * carry a secret, and without them every database failure reads the same. Every
+ * `console.warn` of a caught error goes through this, so the rule lives in one place.
  */
 export function errorName(err: unknown): string {
-  return err instanceof Error ? err.name : typeof err
+  if (!(err instanceof Error)) return typeof err
+  const { code, status } = err as { code?: unknown; status?: unknown }
+  return [
+    err.name,
+    ...(typeof code === 'string' && ERROR_CODE.test(code) ? [code] : []),
+    ...(isHttpStatus(status) ? [String(status)] : []),
+  ].join(' ')
 }
 
 /** The V8 frame lines of a Node stack, with the head's `message` cut out first; nothing else. */

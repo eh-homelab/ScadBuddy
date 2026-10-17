@@ -25,7 +25,8 @@ class LibraryFolderView(BaseModel):
     depth: int = 0
     file_count: int | None = None
     #: The Bambuddy project this folder is linked to: the project lists the files directly
-    #: in it, so a move out of it takes a file out of the project (#2670).
+    #: in it, so a move out of it takes a file out of the project (#2670), and a batch
+    #: print can take that file list (#2724).
     project_id: int | None = None
     project_name: str | None = None
 

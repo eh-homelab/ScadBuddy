@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 interface Props {
   open: boolean

@@ -231,6 +231,12 @@ class PrintRunStore:
     async def get(self, run_id: str) -> PrintRun | None:
         return await asyncio.to_thread(self._get, run_id)
 
+    async def get_many(self, run_ids: list[str]) -> dict[str, PrintRun]:
+        """The runs of ``run_ids`` still kept, by id, in one read (#2718 review)."""
+        if not run_ids:
+            return {}
+        return await asyncio.to_thread(self._get_many, run_ids)
+
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         """The output's newest run, for as long as retention keeps it (#1049): the one
         place a run that failed before it queued anything is recorded."""
@@ -372,6 +378,14 @@ class PrintRunStore:
                 f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
             ).fetchone()
         return PrintRun.model_validate(row) if row else None
+
+    def _get_many(self, run_ids: list[str]) -> dict[str, PrintRun]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = ANY(%s)", (run_ids,)
+            ).fetchall()
+        runs = [PrintRun.model_validate(row) for row in rows]
+        return {run.id: run for run in runs}
 
     def _insert(
         self,

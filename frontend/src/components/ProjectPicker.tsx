@@ -23,7 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 /**
  * Chooses the Bambuddy project this print is filed under (#79), or, where the parent
@@ -459,7 +459,7 @@ export function ProjectPicker({
       )}
 
       {creating && (
-        <div className="mt-1 grid basis-full gap-3 rounded-lg border bg-ui-muted/40 p-3">
+        <div className="mt-1 grid basis-full gap-3 rounded-lg border bg-muted/40 p-3">
           <div className="grid gap-1.5">
             <Label htmlFor="new-project-name">Name</Label>
             <Input

@@ -51,18 +51,22 @@ from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
+    Inventory,
     QueueFilaments,
+    SlotNeed,
     SpoolOption,
     across_plates,
     asked_plates,
+    build_options,
     check,
     every_plate,
+    family,
     gather_plate_options,
     plates_named,
     queue_filaments,
     read_inventory,
 )
-from scadbuddy.bambuddy.filaments3mf import SlicedProfile, diameter, model_key
+from scadbuddy.bambuddy.filaments3mf import SlicedProfile, diameter, model_key, same_family
 from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
     last_bed_type,
@@ -109,7 +113,13 @@ from scadbuddy.bambuddy.supports import (
     support_overrides,
     wanted_settings,
 )
-from scadbuddy.bambuddy.trays import colour_word, tray_colours, with_trays
+from scadbuddy.bambuddy.trays import (
+    colour_word,
+    tray_colours,
+    tray_material_colour,
+    tray_of_spool_id,
+    with_trays,
+)
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
@@ -652,14 +662,19 @@ async def resolve_plates(
 
 
 async def _slot_errors(
-    client: BambuddyClient, source: PrintSource, request: PrintRunRequest, prepared: PreparedRun
+    client: BambuddyClient,
+    source: PrintSource,
+    request: PrintRunRequest,
+    prepared: PreparedRun,
+    *,
+    inventory: Inventory | None = None,
 ) -> list[str]:
     """The run's slot refusals for ``request``, judged before anything is uploaded for it
     (#1050): read from a copy Bambuddy already has, which has the same slots as the one
     the run prints, as :func:`filament_options` reads them. An output's slots and a
     library file's are read from the file itself (#2720, #2550); with neither and no copy
     there is nothing to read without an upload, and the run still judges the slots
-    after its own."""
+    after its own. ``inventory`` is the check's own read, when it made one (#2722)."""
     if source.is_sliced or prepared.catalogue is None:
         # Nothing resolves a preset for a sliced file (#2671); Bambuddy maps its slots.
         return []
@@ -673,6 +688,7 @@ async def _slot_errors(
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
+        inventory=inventory,
         known=known_slots(source),
     )
     per_plate = [
@@ -712,7 +728,9 @@ async def check_print(
     run's own refusals (:class:`RunRefusalError`) and slot refusals become ``errors``: a
     failed read of Bambuddy, the slot reads included, fails the check, as it would fail
     the run. With no printer chosen or configured there is nothing to judge, and the
-    run says why."""
+    run says why. For a plan with slots that includes the inventory read (#2722): a
+    failed spool or assignment read fails the check, where the rack preview alone used
+    to swallow it and preview nothing, since the run would fail on the same read."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
@@ -726,6 +744,9 @@ async def check_print(
         # and there is no nozzle plan, slots or rack side to judge before it.
         return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     laid_out = await source.states_nozzles(client)
+    # One read of the inventory for the plan, the rack, the slot refusals and the spool
+    # warnings (#2722); none for a plan with no slots, whose slot refusals read their own.
+    inventory = await read_inventory(client) if request.filament_plan.slots else None
     nozzle_plan = (
         await plan_for(
             client,
@@ -734,6 +755,7 @@ async def check_print(
             request.filament_plan,
             request.choices.nozzles,
             request.choices.sides,
+            inventory=inventory,
         )
         if laid_out
         else None
@@ -747,6 +769,7 @@ async def check_print(
         rack=rack,
         laid_out=laid_out,
         nozzle_plan=nozzle_plan,
+        inventory=inventory,
     )
     # A refused manual pick still previews the rack, so the dialog can offer another,
     # and is said once: as the error, not again as a rack-manual-partial warning.
@@ -758,7 +781,7 @@ async def check_print(
     else:
         errors = []
     # The run's 422 after its upload (#1050): every slot refusal, joined as it joins them.
-    slot_errors = await _slot_errors(client, source, request, prepared)
+    slot_errors = await _slot_errors(client, source, request, prepared, inventory=inventory)
     if slot_errors:
         errors.append(" ".join(slot_errors))
     # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
@@ -790,6 +813,18 @@ async def check_print(
                 plate_unlisted_warning(
                     request.choices.bed_type, prepared.printer_model, prepared.printer_name
                 )
+            ),
+            *(
+                plan_warnings(
+                    request.filament_plan,
+                    inventory,
+                    printer_id=prepared.printer_id,
+                    printer_name=prepared.printer_name,
+                    status=prepared.printer_status,
+                    nozzle_plan=nozzle_plan,
+                )
+                if inventory is not None
+                else []
             ),
             # #717: what the run will say of a profile it cannot apply.
             *(await profile_overrides(client, process, request.filament_profiles, read=read))[1],
@@ -827,8 +862,10 @@ async def _sequence_clearance(
     sequence = request.print_sequence or source.print_settings.get("print_sequence")
     if sequence != "by object":
         return None, []
-    # The resolved printer's, as the plate warnings are (#3024 review); a run accepted
-    # before the model was kept is judged as before.
+    # The resolved printer's, as the plate warnings are (#3024 review). Only a printer
+    # Bambuddy reports no model for is judged as the configured model. Reached only from
+    # check_print, which always has a fresh PreparedRun, so no run from an older history
+    # (with no printer model) gets here (#3783, #3877 review).
     clearance = clearance_for(prepared.printer_model or PRINTER_MODEL)
     try:
         # The source's own read, which the nozzle check made already (#2976).
@@ -845,6 +882,94 @@ async def _sequence_clearance(
         return None, []
     # One count only for one plate: the dialog says "this plate" (#2976).
     return len(per_plate[0][1]) if len(per_plate) == 1 else None, warnings
+
+
+def plan_warnings(
+    plan: FilamentPlan,
+    inventory: Inventory,
+    *,
+    printer_id: int,
+    printer_name: str | None,
+    status: PrinterStatus | None,
+    nozzle_plan: NozzlePlan | None = None,
+) -> list[FilamentWarning]:
+    """What the chosen spools themselves say, for Checks (#2722): a spool not loaded in
+    this printer, in the picker's own words, and a plan that mixes material families.
+    Mixing is planned for (each family gets a hotend of its own), so it is a warning,
+    never a refusal; but a TPU among PLA is more often a slip than a choice. A tray
+    chosen as itself is loaded by definition, and counts by its own material. A spool
+    the inventory no longer has (gone, or archived) says nothing here: the run refuses
+    it by name.
+
+    The picker still says ``not-loaded`` under the slot. Checks saying it too is on
+    purpose: Checks is the list read before Print, so do not dedupe either away.
+
+    Every slot of ``plan`` counts toward the mix: the dialog's plan holds only the
+    chosen plate's slots, or every plate's for "all plates" (``useFilamentPlan``, pinned
+    by its "a plate change seeds only slots new to it" test).
+
+    The warning says each family prints from a nozzle of its own only when
+    ``nozzle_plan`` puts them so; with no plan, or one that shares a side between
+    families (a hand-picked side can), it says only that they mix (#2733 review)."""
+    spools, assignments = inventory
+    # A tray chosen as itself, by slot: its material from the printer's status (None
+    # when the status is not known). The one place a slot is told to be a tray, so the
+    # not-loaded check and the families below cannot disagree on it (#2733 review).
+    trays = {
+        slot.slot_id: tray_material_colour(slot.spool_id, status)
+        for slot in plan.slots
+        if tray_of_spool_id(slot.spool_id) is not None
+    }
+    chosen = [slot for slot in plan.slots if slot.slot_id not in trays]
+    # No file: only the spools are judged here, so there are no grams or slots of a file.
+    options = build_options(
+        library_file_id=None,
+        spools=list(spools),
+        assignments=list(assignments),
+        requirements=[SlotNeed(slot_id=slot.slot_id) for slot in chosen],
+    ).model_copy(update={"printer_id": printer_id, "printer_name": printer_name})
+    found = [
+        warning
+        for warning in check(options, FilamentPlan(slots=chosen))
+        if warning.kind == "not-loaded"
+    ]
+    by_id = {option.spool_id: option for option in options.spools}
+    families: list[str] = []
+    families_on: dict[str | None, set[str]] = {}
+    for slot in plan.slots:
+        if slot.slot_id in trays:
+            tray = trays[slot.slot_id]
+            material = tray[0] if tray else None
+        else:
+            option = by_id.get(slot.spool_id)
+            material = option.material if option else None
+        named_family = family(material) if material else None
+        # Only a known family counts, toward the mix and the sides alike: a slot whose
+        # material cannot be read (an unknown spool, a tray with no status) is left out
+        # of both, so it never makes a plan "mixed" nor stops "a nozzle of its own".
+        if not named_family:
+            continue
+        if named_family not in families:
+            families.append(named_family)
+        side = nozzle_plan.side_of_slot(slot.slot_id) if nozzle_plan is not None else None
+        families_on.setdefault(side, set()).add(named_family)
+    if len(families) > 1:
+        mix = f"This print mixes {', '.join(families[:-1])} and {families[-1]}."
+        # "A nozzle of its own" holds for the H2C's two nozzles, the one PRINTER_MODEL
+        # resolves for (resolver.py), and only where the plan puts each family on its
+        # own side: none unplaced, no side shared.
+        separate = None not in families_on and all(len(on) == 1 for on in families_on.values())
+        found.append(
+            FilamentWarning(
+                kind="mixed-materials",
+                message=(
+                    f"{mix} Each prints from a nozzle of its own; check that is what you meant."
+                    if separate
+                    else f"{mix} Check that is what you meant."
+                ),
+            )
+        )
+    return found
 
 
 def _rack_option(candidate: RackCandidate) -> RackOption:
@@ -877,6 +1002,7 @@ async def rack_preview(
     rack: RackUsage | None,
     laid_out: bool,
     nozzle_plan: NozzlePlan | None = None,
+    inventory: Inventory | None = None,
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
     the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
@@ -884,7 +1010,9 @@ async def rack_preview(
     (``laid_out``, :func:`~scadbuddy.bambuddy.extruders.rack_volume_type`). Every chosen
     spool counts toward the material test, since the slice may put any of them on the
     rack side, unless ScadBuddy's nozzle plan (#2166) says which do: then only those
-    on the rack side count. Advisory: a failure previews nothing."""
+    on the rack side count. Advisory: a failure previews nothing. ``inventory`` is the
+    check's own read, reused so a check reads the spools once (#2936); without it the
+    spools are read here."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     rack_letter = side_of(RACK_SIDE)
@@ -894,8 +1022,9 @@ async def rack_preview(
         if nozzle_plan is None or nozzle_plan.side_of_slot(slot.slot_id) in (None, rack_letter)
     ]
     try:
-        inventory = {spool.id: spool for spool in await client.spools()}
-        chosen = [inventory.get(slot.spool_id) for slot in slots]
+        spools = inventory[0] if inventory is not None else await client.spools()
+        by_id = {spool.id: spool for spool in spools}
+        chosen = [by_id.get(slot.spool_id) for slot in slots]
         known = [spool for spool in chosen if spool is not None]
         first = known[0].rgba if known else None
         group = RackGroup(
@@ -1087,7 +1216,10 @@ async def prepare_run(
         plate_warnings.append(
             FilamentWarning(
                 kind="sliced-plate-missing",
-                message=f"This file holds no {plates_named(missing)}, {instead}.",
+                message=(
+                    f"This file holds no {plates_named(missing)}, {instead}."
+                    " Held for a manual start."
+                ),
             )
         )
     elif missing:
@@ -1685,8 +1817,11 @@ def _mounted_diameters(status: PrinterStatus | None) -> set[str]:
     }
 
 
-HELD_SLICED_KINDS = frozenset({"sliced-other-model", "sliced-nozzle-missing"})
-"""Sliced-file warnings that hold the print for a manual start (#2954)."""
+HELD_SLICED_KINDS = frozenset(
+    {"sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked"}
+)
+"""Sliced-file warnings that hold the print for a manual start (#2954): another plate
+than the one asked for, or a file whose fit could not be checked, too (#3436)."""
 
 
 def sliced_warnings(
@@ -1698,14 +1833,37 @@ def sliced_warnings(
     """What to set right before a sliced file prints on ``printer`` (#2671): sliced for
     another model, or for a nozzle diameter the printer does not have. Never a refusal:
     it is queued as it is, held for a manual start (:data:`HELD_SLICED_KINDS`), and the
-    user swaps the nozzle, or picks another printer, before starting it. Only a known
-    mismatch warns, and an unread profile, or a printer that reports no model, says
-    nothing; a printer that reports no nozzles is said to leave the nozzle unchecked."""
+    user swaps the nozzle, or picks another printer, before starting it. A profile that
+    could not be read is held too, as nothing in it was checked (#3436); a printer that
+    reports no model says nothing of the model, and one that reports no nozzles is said
+    to leave the nozzle unchecked. Another model of the same G-code family (the X1 and
+    P1 series) is said, not held: Bambuddy dispatches its G-code across them (#2956)."""
     if profile is None:
-        return []
+        return [
+            FilamentWarning(
+                kind="sliced-unchecked",
+                message=(
+                    "ScadBuddy could not read this sliced file's settings, so its printer"
+                    " model and nozzle were not checked. Held for a manual start: check"
+                    " them before you start the print."
+                ),
+            )
+        ]
     warnings: list[FilamentWarning] = []
     wanted, have = model_key(profile.printer_model), model_key(printer.model)
-    if wanted is not None and have is not None and wanted != have:
+    if same_family(wanted, have):
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-same-family",
+                message=(
+                    # Both by their short name: Bambuddy may hold an SSDP code ("C12"), and
+                    # the file a Studio name ("Bambu Lab X1 Carbon") (#3495 review).
+                    f"Sliced for a {wanted}; {printer.name} is a {have},"
+                    " whose G-code family takes it."
+                ),
+            )
+        )
+    elif wanted is not None and have is not None and wanted != have:
         warnings.append(
             FilamentWarning(
                 kind="sliced-other-model",

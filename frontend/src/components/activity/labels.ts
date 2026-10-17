@@ -23,3 +23,9 @@ export function sinceTime(token: string, now = Date.now()): string {
   const option = SINCE_OPTIONS.find((o) => o.value === token)
   return option ? new Date(now - option.hours * 3600_000).toISOString() : ''
 }
+
+/**
+ * #3747 — how many chips a filter group shows until its "Show more": every kind there
+ * is, and every subject seen in the window, buried the list under its own filters.
+ */
+export const CHIPS_SHOWN = 10

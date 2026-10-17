@@ -239,6 +239,8 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   })
   const kekOrUndefined = kek.ok ? kek.kek : undefined
 
+  // --- The single-credential routes (#255): the first credential by priority.
+
   // Deprecated (#2768): every answer from the single-credential routes says so, a guard's
   // 403 included (so registered before the guards), and names the routes that replace
   // them. RFC 9745's form: a Structured Field Date, `@` and the Unix seconds of when.
@@ -263,8 +265,6 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     await next()
   })
   const limit = jsonBodyLimit(BODY_MAX)
-
-  // --- The single-credential routes (#255): the first credential by priority.
 
   app.get(base, (c) => withStore(c, async (repo) => c.json(view(await repo.get(), kek))))
 

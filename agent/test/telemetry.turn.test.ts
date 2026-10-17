@@ -28,7 +28,7 @@ const segment = (n: number) =>
 const success = { kind: 'result', subtype: 'success', costUsd: 0.02, turns: 2 } as const
 
 function turn(parent = ROOT_CONTEXT): TurnTrace {
-  return new TurnTrace({ sessionId: 's-1', turnId: 't-1', parent, tierOf: () => 'outward' })
+  return new TurnTrace({ sessionId: 's-1', turnId: 't-1', parent, tierOf: () => 'outward', before: { costUsd: 0, turns: 0 } })
 }
 
 /** A decision span as ApprovalService.settle makes one, and the traceparent the row stores. */

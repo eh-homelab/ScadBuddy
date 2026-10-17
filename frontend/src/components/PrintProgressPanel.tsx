@@ -1,7 +1,7 @@
 import { CircleAlertIcon } from 'lucide-react'
 import type { CopyProgress, OutputPlate, PrintProgress } from '../api/types'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 import { plateLabel } from '../lib/plate'
 

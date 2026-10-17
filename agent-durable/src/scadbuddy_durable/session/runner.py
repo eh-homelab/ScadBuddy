@@ -111,7 +111,9 @@ NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", 
 
 
 def _url_problem(value: str) -> str:
-    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme.
+    Only for a value it refused: an accepted URL would read as "no host". Not asserted:
+    a misuse should not fail a worker's segment (#3765); tests/test_subagents.py pins it."""
     try:
         parts = urllib.parse.urlsplit(value)
     except ValueError:
@@ -731,6 +733,8 @@ class ScadBuddyRunner:
                     len(error_text(err).encode()),
                 )
                 if _BUDGET_REACHED.match(str(err)):
+                    # Ahead of credentials_fault on purpose (#3569): a cap is never the
+                    # credential's fault, so a capped segment must not go on to the next.
                     # The cap raised rather than returned: today the plugin returns it,
                     # but a raised one is the same cap, charged and ended the same way
                     # as the returned one above, never a failure (#3356).

@@ -236,6 +236,18 @@ class BambuddyUploadStore:
         what a print may queue rather than slice the same again (#2671)."""
         return await asyncio.to_thread(self._slices_of, output_id, library_file_id, preset_key)
 
+    async def forget_slice(self, output_id: str, sliced_id: int) -> None:
+        """Forget a recorded slice whose file Bambuddy no longer has, or whose id now
+        holds another file (#2955): neither is ever reused, so its row only costs a
+        later reprint a read."""
+        await asyncio.to_thread(self._forget_slice, output_id, sliced_id)
+
+    async def forget_gone_slice(self, sliced_id: int) -> None:
+        """Forget every recorded slice in library file ``sliced_id``, which Bambuddy no
+        longer has (#3495 review): no subject can reuse a file that is gone, so the
+        next reprint is not left to find that out again."""
+        await asyncio.to_thread(self._forget_gone_slice, sliced_id)
+
     async def record_preview(self, preview: PreviewSlice) -> None:
         """Record one of the print dialog's background slices (#2169)."""
         await asyncio.to_thread(self._record_preview, preview)
@@ -758,6 +770,21 @@ class BambuddyUploadStore:
             )
             for row in rows
         ]
+
+    def _forget_slice(self, output_id: str, sliced_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM output_bambuddy_slices"
+                " WHERE output_id = %s AND sliced_library_file_id = %s",
+                (output_id, sliced_id),
+            )
+
+    def _forget_gone_slice(self, sliced_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM output_bambuddy_slices WHERE sliced_library_file_id = %s",
+                (sliced_id,),
+            )
 
     def _record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         with self._pool.connection() as conn:

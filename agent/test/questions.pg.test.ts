@@ -148,6 +148,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       .toBe(2)
     await expect.poll(async () => (await m.get(session.id, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
 
+    // A spy, not a trigger: the two answers must meet between their own commits, and only
+    // a hook inside the transaction can hold the first there for the second.
     const service = m.questions as unknown as { statusRefresh: (tx: unknown, sessionId: string) => Promise<ServerEvent[]> }
     const refresh = service.statusRefresh.bind(service)
     let arrived = 0
@@ -575,10 +577,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
-    const service = m.questions as unknown as { statusRefresh: () => Promise<ServerEvent[]> }
-    vi.spyOn(service, 'statusRefresh').mockRejectedValueOnce(new Error('status write failed'))
-
-    await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    // The session's own status write fails, in Postgres (#3256 review): what users see,
+    // not a private method's name.
+    await db.sql.unsafe(
+      `CREATE FUNCTION fail_status_write() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN RAISE EXCEPTION 'status write failed'; END $$`,
+    )
+    await db.sql.unsafe(
+      `CREATE TRIGGER fail_status_write BEFORE UPDATE OF status ON ai_sessions FOR EACH ROW
+       WHEN (OLD.status = 'waiting_input' AND NEW.status <> 'waiting_input') EXECUTE FUNCTION fail_status_write()`,
+    )
+    try {
+      await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    } finally {
+      await db.sql.unsafe('DROP TRIGGER fail_status_write ON ai_sessions')
+      await db.sql.unsafe('DROP FUNCTION fail_status_write()')
+    }
     expect(await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`).toEqual([{ outcome: null }])
     expect((await m.get(session.id, browser)).status).toBe('waiting_input')
     expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'question'`).toEqual([])

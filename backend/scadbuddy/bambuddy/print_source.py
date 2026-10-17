@@ -358,18 +358,18 @@ class PrintPipeline:
     async def recorded_slice(
         self: _Fetching, client: BambuddyClient, library_file_id: int, preset_key: str
     ) -> int | None:
-        if self.uploads is None:
+        uploads = self.uploads
+        if uploads is None:
             return None
-        recorded = await self.uploads.slices_of(
-            self.subject.run_subject, library_file_id, preset_key
-        )
+        recorded = await uploads.slices_of(self.subject.run_subject, library_file_id, preset_key)
         # Bambuddy hands a deleted file's id to the next file, so an id alone could
         # queue another model's G-code (#2691 review): a slice is reused only while the
         # file at its id has the hash it was recorded with. One recorded with none
         # (its read failed, or it predates the check) is never reused.
         known = [sliced for sliced in recorded if sliced.file_hash is not None]
-        # Only the newest few: each is a GET, one after another, and rows of slices
-        # Bambuddy deleted since are never pruned (#2955).
+        # Only the newest few: each is a GET, one after another. A row whose file is
+        # gone, or whose id now holds another file, is forgotten as it is found
+        # (#2955), so the next reprint does not read it again.
         for sliced in known[:MAX_RECORDED_SLICES]:
             try:
                 file = await client.library_file(sliced.id)
@@ -380,6 +380,8 @@ class PrintPipeline:
                     "a recorded slice is not reused",
                     extra={"library_file_id": sliced.id, "status": error.status},
                 )
+                if error.status == status.HTTP_404_NOT_FOUND:
+                    await _forget_slice(uploads, self.subject.run_subject, sliced.id)
                 continue
             if is_sliced(file.file_type) and file.file_hash == sliced.file_hash:
                 return sliced.id
@@ -387,6 +389,7 @@ class PrintPipeline:
                 "a recorded slice's id now holds another file; it is not reused",
                 extra={"library_file_id": sliced.id},
             )
+            await _forget_slice(uploads, self.subject.run_subject, sliced.id)
         return None
 
     async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:
@@ -932,3 +935,16 @@ class LibrarySource(PrintPipeline):
                     )
                     return None
         return bytes(data)
+
+
+async def _forget_slice(uploads: BambuddyUploadStore, output_id: str, sliced_id: int) -> None:
+    """Forget a recorded slice not to reuse, best effort: it only spares a later reprint
+    the read, so a failure never fails this plan (#3495 review)."""
+    try:
+        await uploads.forget_slice(output_id, sliced_id)
+    except Exception:
+        logger.warning(
+            "could not forget a recorded slice",
+            extra={"library_file_id": sliced_id},
+            exc_info=True,
+        )

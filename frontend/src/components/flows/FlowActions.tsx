@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { FlowDefinition, FlowSummary } from '../../api/types'
 import { Button } from '@/components/ui/button'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { Confirm } from './Confirm'
 
 type Pending = 'archive' | 'delete' | null

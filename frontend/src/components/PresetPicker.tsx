@@ -24,7 +24,7 @@ import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useFillable } from '../agent/useFillable'
 import { Hint } from './Hint'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -696,6 +696,9 @@ export function PresetPicker({
           {selected.description && (
             // #1074 — a preset the template ships is one of its files: its relative images
             // are the template's too. A saved one of mine has no folder to resolve them in.
+            // No revision in the base: these are the template's current presets, checked
+            // against its current files (#355), so its current files are the right ones.
+            // Presets listed per revision would pass the viewed one here (#3246).
             <Markdown text={selected.description} base={selected.origin === 'template' ? { slug } : undefined} />
           )}
         </div>

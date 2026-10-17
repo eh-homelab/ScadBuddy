@@ -37,7 +37,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 type Props = {
   open: boolean
@@ -670,7 +670,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       // The save's key is kept only when its save may have started (no answer, or a start
       // the server may hold): then the same key follows it. A definite failure is recorded
       // under its key and would be answered again as it is, so the next press gets a new
-      // one; the finished job is kept, since nothing of it was saved.
+      // one; the finished job is kept, since nothing of it was saved. The start's key is
+      // renewed for the same reason: a failed or cancelled arrange job is recorded under
+      // it, so Try again under the old key would be answered with that same failure (#3659).
+      // When the finished job is kept, no start is sent and the new key goes unused.
       if (attempt.current && !mayHaveRun(cause)) {
         attempt.current.key = newRequestId()
         attempt.current.arrangeKey = newRequestId()
@@ -704,7 +707,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       <div className="flex flex-col gap-3">
         {unusable.length > 0 && (
-          <p role="status" className="text-[12px] text-muted">
+          <p role="status" className="text-[12px] text-subtle">
             {backfillNote(unusable.map(refOf))}
           </p>
         )}

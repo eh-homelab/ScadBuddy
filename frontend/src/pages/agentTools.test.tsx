@@ -88,7 +88,7 @@ describe('catalogue filters through navigate (#276)', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toEqual(['Keychain Template', 'Name Keychain'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 8')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 9')
   })
 
   it('answers with the route the page settles on, even when asked between its two commits (#761)', async () => {
@@ -227,6 +227,19 @@ describe('settings tools', () => {
     const pipeline = await bridge.call('set_field', { field: 'pipeline_id', value: '1' })
     expect(!pipeline.ok && pipeline.error.code).toBe('invalid_args')
     expect(JSON.stringify(form)).not.toContain('pipeline_id')
+  })
+
+  it("unfolds a folded section to show the agent's edit (#3414)", async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['preview']))
+    try {
+      await seeded()
+      expect(screen.getByLabelText('Show dimensions in')).not.toBeVisible()
+      await bridge.call('set_field', { field: 'display_unit', value: 'in' })
+      await waitFor(() => expect(screen.getByLabelText('Show dimensions in')).toBeVisible())
+      expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
+    } finally {
+      localStorage.clear()
+    }
   })
 
   it('tests the stored connection, and refuses while the form is unsaved', async () => {

@@ -292,7 +292,7 @@ function ModelCard({
                     type="button"
                     aria-label={`Filter by ${tag}`}
                     onClick={() => onTag(tag)}
-                    className="cursor-pointer hover:bg-ui-accent hover:text-accent-foreground"
+                    className="cursor-pointer hover:bg-accent hover:text-accent-foreground"
                   >
                     {tag}
                   </button>

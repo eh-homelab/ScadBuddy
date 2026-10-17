@@ -429,7 +429,13 @@ def test_a_built_in_that_fails_to_sync_does_not_stop_the_boot(
         "// keychain v2\n"
     )
     assert (paths.builtins / "tag" / "model.scad").read_text(encoding="utf-8") == "// tag v1\n"
-    failures = [record for record in caplog.records if record.exc_info]
+    # The catalogue's own failures only: the worker that boots alongside logs its own
+    # warning with a traceback when Temporal has no deployment for it yet (#3814).
+    failures = [
+        record
+        for record in caplog.records
+        if record.exc_info and record.name == "scadbuddy.library.catalogue"
+    ]
     assert [getattr(record, "slug", None) for record in failures] == ["tag"]
 
 

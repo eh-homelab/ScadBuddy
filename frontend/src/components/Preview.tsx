@@ -28,7 +28,7 @@ import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
 import { ErrorBoundary } from './ErrorBoundary'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -196,6 +196,10 @@ export function Preview({
         plates: number
         /** #2381 — each plate's box, in the render's coordinates; none for one plate. */
         plateBoxes: BoundingBox[]
+        /** #2914 — the plate this mesh is alone, or null for every plate together. */
+        plate: number | null
+        /** The job whose render this is: the last one stays on screen while the next runs. */
+        jobId: string
       }
     | undefined
   >()
@@ -214,6 +218,8 @@ export function Preview({
     chosen && job && chosen.jobId === job.id && plateIndices.includes(chosen.plate) ? chosen.plate : null
   // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
   const [plateFailed, setPlateFailed] = useState<{ jobId: string; plate: number }>()
+  // Another job's is hidden by its id already; dropped too, so none outlives its job.
+  if (plateFailed && plateFailed.jobId !== job?.id) setPlateFailed(undefined)
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url && alone !== null) {
@@ -228,6 +234,8 @@ export function Preview({
         diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
         plates: 1,
         plateBoxes: [],
+        plate: alone,
+        jobId: job.id,
       })
     } else if (job?.status === 'done' && job.preview_url) {
       setShown({
@@ -241,6 +249,8 @@ export function Preview({
         diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
         plates: Math.max(job.plates?.length ?? 0, 1),
         plateBoxes: (job.plates ?? []).map((plate) => plate.bbox_mm),
+        plate: null,
+        jobId: job.id,
       })
     }
   }, [job, alone])
@@ -302,9 +312,12 @@ export function Preview({
         onError={() => {
           if (!shown) return
           useLoader.clear(GLTFLoader, shown.url)
-          if (alone !== null && job) {
+          // The mesh on screen is what failed: for one render after a pick it is still
+          // every plate together, which is no plate's fault (#3036 review).
+          // A plate mesh another job left on screen is not this job's plate either.
+          if (shown.plate !== null && job && shown.jobId === job.id) {
             // One plate's mesh: every plate together still loads, so go back to it.
-            setPlateFailed({ jobId: job.id, plate: alone })
+            setPlateFailed({ jobId: job.id, plate: shown.plate })
             setChosen(undefined)
             return
           }
@@ -951,7 +964,7 @@ function PlateOutline({
       <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
         <span
           data-testid="plate-label"
-          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-muted select-none"
+          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-subtle select-none"
         >
           Plate {number}
         </span>

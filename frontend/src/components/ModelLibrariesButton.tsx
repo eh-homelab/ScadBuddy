@@ -11,7 +11,7 @@ import type {
   ModelLibrary,
   ModelSummary,
 } from '../api/types'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { LibraryBigIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'

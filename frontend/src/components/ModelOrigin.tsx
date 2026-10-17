@@ -14,7 +14,7 @@ export function ModelOrigin({ url, className = '' }: { url: string | null | unde
         href={origin}
         target="_blank"
         rel="noreferrer"
-        className="text-muted underline decoration-line-strong underline-offset-2 hover:text-ink"
+        className="text-subtle underline decoration-line-strong underline-offset-2 hover:text-ink"
       >
         {hostOf(origin)}
       </a>

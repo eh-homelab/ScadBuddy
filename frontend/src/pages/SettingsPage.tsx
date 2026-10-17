@@ -48,7 +48,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { ChevronRightIcon } from 'lucide-react'
 import { ChoiceSelect, SwitchField, TipProvider } from '../components/settings/form'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { NEW_TAB } from '../lib/embed'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -225,7 +225,7 @@ function isProblem(value: unknown): value is Problem {
 
 export function SettingsPage() {
   return (
-    <SettingsCollapseProvider>
+    <SettingsCollapseProvider known={FOLD_IDS}>
       <TipProvider>
         <SettingsSections />
       </TipProvider>
@@ -244,6 +244,9 @@ const ASSISTANT_GROUPS = [
   { id: 'assistant-plugins', title: 'Plugins & memory' },
   { id: 'assistant-audit', title: 'Audit log' },
 ] as const
+
+/** Every fold the page can render, kept in the stored folded list (#3415). */
+const FOLD_IDS: readonly string[] = [...SECTION_IDS, ...ASSISTANT_GROUPS.map((group) => group.id)]
 
 const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
   ASSISTANT_GROUPS.find((group) => group.id === id)?.title ?? id
@@ -558,6 +561,8 @@ function SettingsSections() {
           )
         }
         setField(field, next)
+        // A folded section's field is hidden: unfold it first, so the edit is seen (#3414).
+        reveal(form[field])
         touchAfterRender(() => document.getElementById(form[field]))
         await committed(() => live.current()[field] === next)
         return { field, value: next, saved: false, note: "The user saves each section with its own Save button." }
@@ -751,7 +756,6 @@ function SettingsSections() {
                   event.preventDefault()
                   reveal(section.id)
                   goToSection(section.id, { inPlace: dirty })
-
                 }}
                 // shadcn's tabs look (#3671): the section in view is the active tab. Links,
                 // not tabs: each moves to its section in this one page.
@@ -1527,7 +1531,7 @@ function SettingsSections() {
                 <table className="w-full text-left text-xs" aria-label="Deployment values">
                   <tbody className="divide-y">
                     {(settings.bootstrap ?? []).map((entry) => (
-                      <tr key={entry.name} className="align-top transition-colors hover:bg-ui-muted/50">
+                      <tr key={entry.name} className="align-top transition-colors hover:bg-muted/50">
                         <th scope="row" className="sb-num w-2/5 px-3 py-2 font-medium [overflow-wrap:anywhere]">
                           {entry.env_var}
                         </th>
@@ -1583,7 +1587,7 @@ function Advanced({ label, invalid, children }: { label: string; invalid: boolea
   }
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg ring-1 ring-foreground/10">
-      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
+      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground">
         <ChevronRightIcon aria-hidden="true" className={cn('size-4 shrink-0 transition-transform', open && 'rotate-90')} />
         {label}
       </CollapsibleTrigger>
@@ -1599,7 +1603,7 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
   const [open, setOpen] = useState(false)
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg text-xs ring-1 ring-foreground/10">
-      <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
+      <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-muted-foreground hover:bg-muted/50 hover:text-foreground">
         <ChevronRightIcon aria-hidden="true" className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-90')} />
         What Bambuddy answered
       </CollapsibleTrigger>

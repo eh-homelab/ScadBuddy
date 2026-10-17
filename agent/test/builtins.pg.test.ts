@@ -93,6 +93,9 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect((await call('Grep', { pattern: 'hello' })).text).toBe('Found 1 file\na.txt')
     expect((await call('Grep', { pattern: 'hello', output_mode: 'content', '-n': true })).text).toBe('a.txt:1:hello\na.txt:3:hello again')
     expect((await call('Grep', { pattern: 'hello', output_mode: 'count' })).text).toBe('a.txt:2\n\nFound 2 total occurrences across 1 file.')
+    // ripgrep matches line by line: ^ and $ anchor at every line, not only the file's ends.
+    expect((await call('Grep', { pattern: '^world', output_mode: 'content' })).text).toBe('a.txt:2:world')
+    expect((await call('Grep', { pattern: 'again$', output_mode: 'content' })).text).toBe('a.txt:3:hello again')
     expect(await call('Edit', { file_path: '/workspace/a.txt', old_string: 'world', new_string: 'there' })).toMatchObject({
       text: 'The file /workspace/a.txt has been updated successfully.',
       isError: false,

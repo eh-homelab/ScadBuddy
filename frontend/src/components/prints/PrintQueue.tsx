@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError } from '../../api/client'
+import { api, ApiError, BAMBUDDY_NOT_CONFIGURED } from '../../api/client'
 import type { ArchiveStats, QueueItem } from '../../api/types'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
@@ -14,7 +14,6 @@ export const QUEUE_POLL_MS = 30_000
 export const QUEUE_SHOWN = 8
 
 /** Bambuddy's not-configured refusal, which NowPrinting above already shows. */
-const NOT_CONFIGURED = 'https://scadbuddy.dev/problems/bambuddy-not-configured'
 
 /** Bambuddy's queue order, items with no position last, then by id so two such keep a
  * stable order: subtracting two missing positions was Infinity - Infinity, NaN (#2919). */
@@ -49,7 +48,7 @@ export function PrintQueue() {
         })
         .catch((cause: unknown) => {
           if (!live) return
-          setUnconfigured(cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED)
+          setUnconfigured(cause instanceof ApiError && cause.problem.type === BAMBUDDY_NOT_CONFIGURED)
           setError(cause instanceof ApiError ? cause.detail : "Bambuddy's queue could not be read.")
         })
     }

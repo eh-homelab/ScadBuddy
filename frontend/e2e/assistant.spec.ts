@@ -345,7 +345,7 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(dialog).toBeVisible()
   })
 
-  // #3675 — the activity drawer is a Radix Sheet, not ui/Dialog: the same #798/#1897
+  // #3675 — the activity drawer is a Radix Sheet, not ui/dialog: the same #798/#1897
   // behaviour on another mechanism (pointer events off outside a Radix modal, and its
   // content remounting when it turns non-modal beside the panel).
   test('opens from its button while the activity drawer is open', async ({ page }) => {
@@ -506,5 +506,45 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
       expect(box.x + box.width, await button.innerText()).toBeLessThanOrEqual(edge.x + edge.width + 0.5)
     }
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(768)
+  })
+
+  // #2380, #2443 (#2962 review) — laid out, not only classed: in the 380 px panel the
+  // chat's title keeps its floor rather than squeezing to "q…", and the composer's
+  // actions wrap inside the panel with "Read replies aloud" whole.
+  test('keeps the chat title readable and the composer actions inside the panel', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await composer.fill('Make the name bigger and send two to Bambuddy')
+    await composer.press('Enter')
+
+    const header = panel.getByTestId('active-session-header')
+    const title = panel.getByTestId('active-session-title')
+    await expect(title).toBeVisible()
+    const row = (await header.boundingBox())!
+    const box = (await title.boundingBox())!
+    const padding = await header.evaluate((el) => {
+      const style = el.ownerDocument.defaultView!.getComputedStyle(el)
+      return parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+    })
+    // 12rem, or the whole row when the row is narrower; less the row's padding.
+    expect(box.width).toBeGreaterThanOrEqual(Math.min(192, row.width - padding) - 0.5)
+
+    const edge = (await panel.boundingBox())!
+    const actions = panel.getByTestId('composer-actions')
+    let measured = 0
+    for (const child of await actions.locator(':scope > *').all()) {
+      // A child with nothing rendered (an empty slot) has no box.
+      const b = await child.boundingBox()
+      if (!b) continue
+      measured += 1
+      expect(b.x + b.width).toBeLessThanOrEqual(edge.x + edge.width + 0.5)
+    }
+    // Not vacuous: the actions rendered something to measure.
+    expect(measured).toBeGreaterThan(0)
+    const speak = panel.getByText('Read replies aloud')
+    await expect(speak).toBeVisible()
+    expect(await speak.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   })
 })

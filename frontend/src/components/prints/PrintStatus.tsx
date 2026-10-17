@@ -6,7 +6,7 @@ const TONE: Record<string, string> = {
   completed: 'border-ok/40 bg-ok/10 text-ok',
   failed: 'border-warn/40 bg-warn/10 text-warn',
   cancelled: 'text-muted-foreground',
-  printing: 'border-primary/30 bg-ui-muted',
+  printing: 'border-primary/30 bg-muted',
   [DELETED_STATUS]: 'border-dashed text-muted-foreground',
 }
 

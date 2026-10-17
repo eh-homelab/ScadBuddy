@@ -1157,6 +1157,39 @@ describe('ArrangeDialog', () => {
     expect(again![2]).toBe(failed![2])
   })
 
+  it('starts a new arrange under a new key on Try again after the job failed (#3659)', async () => {
+    const created_at = '2026-09-28T12:00:00Z'
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json(
+          { id: 'arrange-fail', slug: 'name-keychain', status: 'pending', created_at },
+          { status: 202 },
+        ),
+      ),
+      http.get('/api/v1/jobs/arrange-fail', () =>
+        HttpResponse.json({
+          id: 'arrange-fail',
+          slug: 'name-keychain',
+          status: 'failed',
+          created_at,
+          error: "group 'big' does not fit on one plate",
+        }),
+      ),
+    )
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(arrange).toHaveBeenCalledTimes(2))
+    const [failed, again] = arrange.mock.calls
+    expect(failed![2]).toBeTruthy()
+    expect(again![2]).toBeTruthy()
+    expect(again![2]).not.toBe(failed![2])
+  })
+
   it('offers no Try again for a request the server refused as it is', async () => {
     vi.spyOn(api, 'createOutput').mockRejectedValueOnce(
       new ApiError({ type: 'about:blank', title: 'Unprocessable', status: 422, detail: 'no such template' }),

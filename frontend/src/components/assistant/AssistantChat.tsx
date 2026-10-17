@@ -98,6 +98,11 @@ interface Props {
   /** #931 — a session a page asked to open; selected once, then `onOpenHandled` clears it. */
   openRequest?: OpenRequest | null
   onOpenHandled?: () => void
+  /**
+   * #3164 — whether this tab came back from a reload (`panelMemory`'s `reloaded`), read by
+   * the shell before it saves the panel as open. Without it the chat opens as a new tab.
+   */
+  reloaded?: boolean
 }
 
 export interface OpenRequest {
@@ -158,7 +163,15 @@ function readSessionMode(): SessionMode | '' {
   }
 }
 
-export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest, onOpenHandled }: Props) {
+export function AssistantChat({
+  factory,
+  onClose,
+  focusKey,
+  embedded = false,
+  openRequest,
+  onOpenHandled,
+  reloaded = false,
+}: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
@@ -242,7 +255,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const voiceNoteId = useId()
   const archivedNoteId = useId()
   const filterId = useId()
-  /** #1885 — a refused Unarchive, shown for that chat only. */
+  /** #1885 — a refused Archive (#3738) or Unarchive, shown for that chat only. */
   const [archiveError, setArchiveError] = useState<{ id: string; message: string } | null>(null)
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
@@ -418,18 +431,23 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [openRequest, select, onOpenHandled])
 
   // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
-  // under way, rather than a blank new chat beside a turn that is still spending.
+  // under way, rather than a blank new chat beside a turn that is still spending. Only a
+  // reloaded tab (#3164): a new one opens on a new chat. So does a panel remounted on the
+  // same page: it unmounts only when the assistant is off, which forgets the chat (#2372,
+  // #3871 review).
   const restored = useRef(false)
   useEffect(() => {
-    if (restored.current || state.order.length === 0) return
+    if (restored.current || !state.listed) return
     restored.current = true
     if (state.activeId || state.awaitingStart || openRequest) {
       rememberSession(state.activeId)
       return
     }
-    const id = sessionToRestore(rememberedSession(), state.order, state.sessions)
+    const id = reloaded ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
     if (id) select(id)
-  }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select])
+    // A remembered chat that is no longer listed, with nothing under way to show instead.
+    else rememberSession(null)
+  }, [state.listed, state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select, reloaded])
   // After the restore, so it does not forget the chat before reading it.
   useEffect(() => {
     if (restored.current) rememberSession(state.activeId)
@@ -515,6 +533,18 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
+  // #3738 — the open chat's Archive and Unarchive: a refusal is shown for that chat only.
+  // True once the agent took it.
+  const setArchived = async (id: string, archived: boolean): Promise<boolean> => {
+    setArchiveError(null)
+    try {
+      await updateSession(id, { archived })
+      return true
+    } catch (caught) {
+      setArchiveError({ id, message: caught instanceof Error ? caught.message : String(caught) })
+      return false
+    }
+  }
   // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
   const cancelOffer = async (id: string) => {
     try {
@@ -592,7 +622,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
         {/* #1885 — the chats, or the archived ones. */}
         <CollapsibleContent asChild>
-          <nav aria-label="Sessions" className="border-b border-border bg-ui-muted/40">
+          <nav aria-label="Sessions" className="border-b border-border bg-muted/40">
             <Tabs
               value={pickerView}
               onValueChange={(view) => setPickerView(view === 'archived' ? 'archived' : 'chats')}
@@ -724,6 +754,20 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               Fork
             </Button>
           </Tip>
+          {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
+              went unfound. Offered as there, to the owner, while no turn runs or waits (`isBusy`). */}
+          {owned && !busy && !archived && (
+            <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
+              <Button
+                variant="ghost"
+                size="sm"
+                data-agent-user-only=""
+                onClick={() => void setArchived(active.id, true)}
+              >
+                Archive
+              </Button>
+            </Tip>
+          )}
           {/* Disclosures of the panels below the header (#931, #2329). */}
           <Tip content="What this session's tool calls created, changed or deleted">
             <Button
@@ -771,6 +815,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               </Button>
             </div>
           )}
+          {!archived && archiveError?.id === active.id && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not archived: {archiveError.message}
+            </p>
+          )}
           {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
               The chat was not forked: {forkError.message}
@@ -805,7 +854,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         <section
           id={touchedId}
           aria-label="What this session touched"
-          className="shrink-0 border-b border-border bg-ui-muted/40"
+          className="shrink-0 border-b border-border bg-muted/40"
         >
           {/* Read again when the status moves or a tool call finishes, so a running turn's
               changes show as they land. Keyed per session, so a switch reads once. */}
@@ -819,7 +868,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       )}
 
       {active && filesOpen && (
-        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-border bg-ui-muted/40">
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-border bg-muted/40">
           {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
           <SessionFiles
             key={active.id}
@@ -981,11 +1030,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 variant="outline"
                 data-agent-user-only=""
                 onClick={() => {
-                  setArchiveError(null)
                   unarchiving.current = true
-                  updateSession(active.id, { archived: false }).catch((caught: unknown) => {
-                    unarchiving.current = false
-                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) })
+                  void setArchived(active.id, false).then((done) => {
+                    if (!done) unarchiving.current = false
                   })
                 }}
               >

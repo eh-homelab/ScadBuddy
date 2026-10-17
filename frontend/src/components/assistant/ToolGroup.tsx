@@ -224,7 +224,7 @@ export function ToolGroup({
       aria-label={many ? `${calls.length} steps` : undefined}
     >
       {many && (
-        <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left outline-none hover:bg-ui-muted focus-visible:ring-3 focus-visible:ring-ring/50">
+        <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50">
           <ChevronRightIcon
             aria-hidden="true"
             className={`size-3 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none ${open ? 'rotate-90' : ''}`}

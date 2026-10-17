@@ -18,7 +18,12 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.workflows.housekeeping import ACTIVITY_PATCH, ACTIVITY_SWEEP, SWEEPS
+from scadbuddy.workflows.housekeeping import (
+    ACTIVITY_PATCH,
+    ACTIVITY_SWEEP,
+    GIT_SWEEP,
+    SWEEPS,
+)
 from tests.conftest import PgPool
 from tests.test_activity_agent_ingest import AgentTables, agent_tables  # noqa: F401
 from tests.test_activity_render import make_job
@@ -68,8 +73,11 @@ def age(pg_pool: PgPool, id: str, interval: str) -> None:
         )
 
 
-def test_sweep_is_last_and_patched() -> None:
-    assert SWEEPS[-1] == ACTIVITY_SWEEP == "housekeeping_activity"
+def test_sweep_keeps_its_place_and_is_patched() -> None:
+    """Added after the git sweep, behind its patch: a later sweep goes after it, never
+    before, or a replay of a run that had it would schedule another activity there."""
+    assert ACTIVITY_SWEEP == "housekeeping_activity"
+    assert SWEEPS.index(ACTIVITY_SWEEP) == SWEEPS.index(GIT_SWEEP) + 1
     assert ACTIVITY_PATCH == "housekeeping-activity"
 
 

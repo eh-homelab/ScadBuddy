@@ -293,6 +293,14 @@ export const GALLERY_SLUG = 'creme-coaster'
 /** #425 — templates with their own interface: one that mounts, one that throws. */
 export const UI_DEMO_SLUG = 'ui-demo'
 export const UI_BROKEN_SLUG = 'ui-broken'
+/**
+ * #3777 — a template with a pipeline but no `migrate`, and a page-slot interface: its
+ * saved preset is a version behind, so applying it fails to migrate and the page slot
+ * shows the inputs read-only (RawInputs, capped).
+ */
+export const UNMIGRATED_SLUG = 'ui-unmigrated'
+/** The mock templates with a pipeline that defines no `migrate` (the agent's migrate 422s). */
+export const PIPELINE_WITHOUT_MIGRATE: ReadonlySet<string> = new Set([UNMIGRATED_SLUG])
 /** The commit `ui-demo`'s record is at. */
 export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
 /**
@@ -464,6 +472,25 @@ const modelsSeed: ModelSummary[] = [
     version: commit('7d6c5b4a3f2e'),
     ui_version: commit('6c5b4a3f2e7d'),
     ui: { module: 'ui/index.js', slot: 'page', api: 1 },
+  },
+  {
+    slug: UNMIGRATED_SLUG,
+    name: 'Unmigrated Inputs',
+    description: 'A template whose saved inputs cannot be brought up to its version.',
+    // No tags, the oldest date and a name that sorts last, so the catalogue's lists only
+    // gain it at the end.
+    tags: [],
+    updated_at: '2026-08-01T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'mine',
+    version: commit('5b4a3f2e7d6c'),
+    ui_version: commit('4a3f2e7d6c5b'),
+    ui: { module: 'ui/index.js', slot: 'page', api: 1 },
+    inputs_version: 1,
   },
 ]
 
@@ -641,6 +668,19 @@ export const presets: Record<string, ParamPreset[]> = {
       tags: [],
     },
   ],
+  // #3777 — saved at version 0 of a template now at 1, with an error long enough to wrap.
+  [UNMIGRATED_SLUG]: [
+    {
+      id: 'c1b2c3d4e5f60718293a4b5c6d7e8f90',
+      name: 'Old',
+      origin: 'mine',
+      params: { name: 'Old' },
+      inputs: { params: { name: 'Old' }, v: 0 },
+      description: '',
+      tags: [],
+      updated_at: '2026-08-11T10:00:00Z',
+    },
+  ],
 }
 
 export const schemas: Record<string, CustomizerSchema> = {
@@ -651,6 +691,7 @@ export const schemas: Record<string, CustomizerSchema> = {
   [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
   [UI_DEMO_SLUG]: keychainSchema,
   [UI_BROKEN_SLUG]: keychainSchema,
+  [UNMIGRATED_SLUG]: keychainSchema,
   [MAZE_SLUG]: mazeSchema,
   [DOLLHOUSE_SLUG]: dollhouseSchema,
 }

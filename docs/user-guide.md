@@ -385,6 +385,29 @@ rendered (and an STL, which is wrapped in one) is also replated for the printer
 placement, and only its settings state the choices. A file nothing can be stated into
 (a 3MF from another slicer) is sliced as it is, taken as Standard flow.
 
+A folder linked to a Bambuddy project is marked "project" in the folder tree, and is
+that project's file list (#2724): **Select all in folder** ticks every listed printable
+file (sliced ones too, under **Advanced**) for **Print N files**. Browsing by project
+(`/library?project=<id>`) opens a project's folder directly.
+
+**Print N files** (#2672) prints every ticked printable file, sliced or not, in one
+stepped dialog. Each step is the print dialog for one file, titled "File 2 of 5 — name",
+with **Back**, **Skip** and **Next**, and a strip above it to jump to any file (a jump
+keeps the step's choices, as Next does). The next
+file opens on the last one's printer, and on its spools, nozzles, quality and options
+when its slots (number, material and colour) are the same; otherwise it opens on its own.
+A file whose check finds something its print would refuse is flagged (⚠) in the strip,
+not held. One with only warnings, which is all a sliced file's mismatches ever are, is
+marked (!) and queues. The last step is the review: each file's printer, plate, spools, time and filament,
+with **Edit** (back to its step) and **Remove**. **Queue all** starts each file's own
+print, exactly as Print on it would, and reports each: one refused does not stop the
+rest, and a skipped file is not queued. An unsliced file's slice starts in the background
+while its step is open, as in the single dialog, and its print queues that slice. The
+batch and the step in view are kept by ScadBuddy (the page's `?batch=` link), so a reload
+resumes it; **Cancel** forgets it. A batch with a file still being checked is kept on
+Cancel, so its **Queue all** follows that file's print rather than starting it twice; the
+Library page offers it again with **Resume it**.
+
 Choices are remembered per library file, the way an output's are remembered per
 model. There's no ScadBuddy progress panel or History entry for a library print —
 Bambuddy's queue and archives are the record — so once it's queued, the dialog

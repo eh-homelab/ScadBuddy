@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Final
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
@@ -39,6 +39,7 @@ from scadbuddy.api import (
     print_attachments,
     telemetry,
 )
+from scadbuddy.api.accepting import install_accepting_handler, note_preference
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
@@ -53,6 +54,8 @@ from scadbuddy.api.limits import (
 )
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
@@ -61,6 +64,7 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -112,6 +116,7 @@ from scadbuddy.workflows.flow_triggers import FlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
+    ATTACHMENTS_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_SWEEP,
@@ -142,6 +147,10 @@ API_PREFIX = "/api/v1"
 EXCLUDED_URLS: Final = ",".join(
     f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
 )
+
+#: How long a batch print nobody touches is kept (#2718 review): long past any print
+#: it started, which Bambuddy's queue and the print runs keep on their own.
+BATCH_TTL = timedelta(days=7)
 
 logger = logging.getLogger(__name__)
 
@@ -499,7 +508,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        await _heartbeating(_sweep_claims_logged(state))
+        await _heartbeating(_sweep_claims_and_batches_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -532,6 +541,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
 
+    @activity.defn(name=ATTACHMENTS_SWEEP)
+    async def sweep_print_attachments() -> None:
+        await _heartbeating(_sweep_print_attachments_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -545,7 +558,24 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
+        sweep_print_attachments,
     ]
+
+
+async def _sweep_print_attachments_logged(state: AppState) -> None:
+    """#3047: the attachments of archives deleted in Bambuddy."""
+    store = state.components.get(PRINT_ATTACHMENTS)
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            gone = await sweep_gone_archives(client, store)
+        except Exception:
+            logger.exception("could not sweep the attachments of deleted archives")
+            raise
+        if gone:
+            logger.info("forgot the attachments of deleted archives", extra={"count": gone})
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _sweep_activity_logged(state: AppState) -> None:
@@ -590,12 +620,28 @@ async def _prune_jobs_logged(state: AppState) -> None:
         raise
 
 
-async def _sweep_claims_logged(state: AppState) -> None:
+async def _sweep_claims_and_batches_logged(state: AppState) -> None:
+    """The claims sweep, which also forgets batch prints left untouched for `BATCH_TTL`:
+    both are a delete on the prune cadence (`PRUNE_SWEEPS`), so the batch prune rides
+    this activity rather than adding a sweep a replica on an older build could not run
+    (#2718 review). Its failure is logged as the batch prune's own."""
+    # Each its own: one failing never starves the other, as the flow sweeps.
+    failed: Exception | None = None
     try:
         await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
-    except Exception:
+    except Exception as err:
         logger.exception("could not sweep operation claims")
-        raise
+        failed = err
+    try:
+        # #2718 review: a batch print closed without Cancel or Done stays otherwise.
+        pruned = await state.components.get(PRINT_BATCHES).prune(BATCH_TTL)
+        if pruned:
+            logger.info("forgot batch prints left untouched", extra={"count": pruned})
+    except Exception as err:
+        logger.exception("could not prune batch prints")
+        failed = failed or err
+    if failed is not None:
+        raise failed
 
 
 async def _sweep_flow_runs_logged(state: AppState) -> None:
@@ -1115,7 +1161,7 @@ async def _end_lost_runs_until(
     store: PrintRunStore,
     operations: OperationStore,
     stop: asyncio.Event,
-    where: Mapping[str, str] | None = None,
+    where: Mapping[str, str],
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
@@ -1352,10 +1398,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
         # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
         telemetry={"auto_configure": False},
+        # #2794: whether a request follows a 202 itself, for `run_operation`.
+        dependencies=[Depends(note_preference)],
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
+    install_accepting_handler(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
     # A commit made for the agent is authored as the agent (#252).

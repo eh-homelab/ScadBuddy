@@ -6,7 +6,7 @@ afterEach(() => {
 })
 
 describe('activeDialog', () => {
-  it('scopes to a ui/Dialog beside the assistant, though it is not aria-modal there (#798)', () => {
+  it('scopes to a ui/dialog beside the assistant, though it is not aria-modal there (#798)', () => {
     document.body.innerHTML = `
       <button>Generate</button>
       <div role="dialog" aria-label="Print" data-modal=""><button>Print it</button></div>`

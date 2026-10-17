@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import { trackingDuplicates } from '../lib/problems'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { Trash2Icon } from 'lucide-react'
 import {
   AlertDialog,

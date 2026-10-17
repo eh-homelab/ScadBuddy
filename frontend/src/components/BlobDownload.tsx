@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 /**
  * The name a `Content-Disposition` gives the file: `filename*` (RFC 5987) before

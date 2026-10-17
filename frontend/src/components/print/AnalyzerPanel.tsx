@@ -44,8 +44,8 @@ import { SuppressForm } from './SuppressForm'
 /** A severity's badge (`Badge`), in the callout colours `PrintVerdict` uses. */
 const TONE: Record<AnalyzerSeverity, string> = {
   error: 'border-destructive/40 bg-destructive/10 text-destructive',
-  warning: 'border-accent/50 bg-accent/10 text-accent',
-  info: 'border-border bg-ui-muted text-muted-foreground',
+  warning: 'border-primary/50 bg-primary/10 text-primary',
+  info: 'border-border bg-muted text-muted-foreground',
   hidden: 'border-border bg-transparent text-muted-foreground',
 }
 
@@ -59,7 +59,7 @@ function SourceList({ sources }: { sources: AnalyzerSource[] }) {
       {sources.map((source, index) => {
         const href = safeHttpUrl(source.url)
         return (
-          <li key={`${source.url}-${index}`} className="text-muted">
+          <li key={`${source.url}-${index}`} className="text-subtle">
             {href ? (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -117,12 +117,12 @@ function DiagnosticItem({ diagnostic, scopes, decisions, target, request, onChan
         <Badge variant="outline" className={cn('h-auto rounded-md px-1.5 text-[11px]', TONE[diagnostic.severity])}>
           {SEVERITY_LABEL[diagnostic.severity]}
         </Badge>
-        <code className="sb-num text-[12px] text-muted">{diagnostic.id}</code>
+        <code className="sb-num text-[12px] text-subtle">{diagnostic.id}</code>
         <span className="text-[13px] text-ink">{diagnostic.title}</span>
       </div>
       <p className="mt-1 text-[12.5px] text-ink">{diagnostic.message}</p>
       {diagnostic.location && (
-        <p className="mt-0.5 text-[12px] text-muted">
+        <p className="mt-0.5 text-[12px] text-subtle">
           Where: {describeLocation(diagnostic.location)}
         </p>
       )}

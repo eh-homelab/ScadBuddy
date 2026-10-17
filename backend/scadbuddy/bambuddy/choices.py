@@ -138,6 +138,9 @@ async def choices_for(
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
     cache: Path,
+    # Required, so a caller chooses the file name's key rather than falling back to the
+    # bare hash without saying so (#3816 review): None only when there is no KEK.
+    catalogue_key: bytes | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
@@ -150,7 +153,7 @@ async def choices_for(
     a few wasted reads on a rare path, for not waiting on the file every time. The
     rack's state is recorded by the second wave, so a failed catalogue read raises after
     it is written, not before (#2907)."""
-    presets = asyncio.ensure_future(cached_catalogue(client, cache))
+    presets = asyncio.ensure_future(cached_catalogue(client, cache, name_key=catalogue_key))
     try:
         return await _choices(
             client,
@@ -265,6 +268,9 @@ async def choices_for_output(
     *,
     printer_id: int | None,
     cache: Path,
+    # Required, so a caller chooses the file name's key rather than falling back to the
+    # bare hash without saying so (#3816 review): None only when there is no KEK.
+    catalogue_key: bytes | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     return await choices_for(
@@ -274,6 +280,7 @@ async def choices_for_output(
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,
         cache=cache,
+        catalogue_key=catalogue_key,
         rack=rack,
     )
 

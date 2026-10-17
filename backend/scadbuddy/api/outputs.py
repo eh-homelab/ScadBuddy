@@ -780,8 +780,11 @@ async def backfill_output(
             fetcher,
             fonts,
             activity,
+            # It cannot answer its caller a 202 to follow: a slow start keeps the
+            # default deadline, and its 503 re-send, whatever the caller preferred.
+            respond_async=False,
             # #2280: as the render route's, so a re-send still accepting is one claim.
-            idempotency_key,
+            idempotency_key=idempotency_key,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).
@@ -802,6 +805,8 @@ async def backfill_output(
             f"output {output_id} cannot be rendered again from {meta.slug}@{version[:12]}:"
             f" {error.detail}",
         ) from None
+    # Asked with respond_async=False, the render never answers a 202 to follow.
+    assert not isinstance(accepted, JSONResponse)
     await asyncio.to_thread(outputs.start_backfill, output_id, accepted.job_id)
     job = await asyncio.to_thread(require_job, render, accepted.job_id)
     return _job_status(job, None)

@@ -109,6 +109,10 @@ GIT_PATCH = "housekeeping-maintain-models-git"
 ACTIVITY_SWEEP = "housekeeping_activity"
 #: The `workflow.patched` id that adds `ACTIVITY_SWEEP` to a run.
 ACTIVITY_PATCH = "housekeeping-activity"
+#: #3047: forget the attachments of archives deleted in Bambuddy. Behind its own patch,
+#: and after `ACTIVITY_SWEEP`, so a run without the patch is today's run exactly.
+ATTACHMENTS_SWEEP = "housekeeping_sweep_print_attachments"
+ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -123,6 +127,7 @@ SWEEPS = (
     LOST_SLICES_SWEEP,
     GIT_SWEEP,
     ACTIVITY_SWEEP,
+    ATTACHMENTS_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -154,6 +159,8 @@ PREVIEWS_TIMEOUT = timedelta(minutes=5)
 GIT_TIMEOUT = timedelta(minutes=12)
 #: The activity sweep is a repair pass over four tables and one delete.
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
+#: One Bambuddy archive read per print with attachments, and a delete per gone one.
+ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -170,6 +177,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return GIT_TIMEOUT
     if sweep == ACTIVITY_SWEEP:
         return ACTIVITY_TIMEOUT
+    if sweep == ATTACHMENTS_SWEEP:
+        return ATTACHMENTS_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -198,6 +207,8 @@ class Housekeeping:
             if sweep == GIT_SWEEP and not workflow.patched(GIT_PATCH):
                 continue
             if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
+                continue
+            if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

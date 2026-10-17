@@ -158,7 +158,7 @@ export function ParameterPanel({
           // the phone-width rule (#362) that nothing pushes the panel wider than the screen.
           className={`min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block! ${growsWithPage ? 'short:flex-none phone:flex-none' : ''}`}>
           {globalGroup && (
-            <div className="border-b bg-ui-muted/40">
+            <div className="border-b bg-muted/40">
               <ul className="divide-y">{globalGroup.params.map(row)}</ul>
             </div>
           )}

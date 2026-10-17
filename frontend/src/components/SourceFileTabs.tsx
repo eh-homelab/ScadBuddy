@@ -5,7 +5,7 @@ import { sourceFilePath } from '../lib/deeplink'
 import { MAX_SOURCE_FILES, newSourceFileProblem, sourceFileName } from '../lib/sourceFiles'
 import { useAsync } from '../lib/useAsync'
 import { Hint } from './Hint'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
@@ -103,7 +103,7 @@ export function SourceFileTabs({ slug, current, canEdit, children }: Props) {
             className={cn(
               buttonVariants({ variant: 'ghost', size: 'xs' }),
               'shrink-0 font-mono',
-              file === current ? 'bg-ui-muted text-foreground' : 'text-muted-foreground',
+              file === current ? 'bg-muted text-foreground' : 'text-muted-foreground',
             )}
           >
             {file}

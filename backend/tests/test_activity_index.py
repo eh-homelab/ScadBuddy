@@ -4,9 +4,10 @@ import threading
 import time
 
 import pytest
-from psycopg import Connection, errors
+from psycopg import Connection, errors, sql
 
-from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.activity import index as activity_index
+from scadbuddy.activity.index import ActivityFilter, ActivityIndex, Count, subject_key
 from scadbuddy.activity.models import ActivityRow
 from scadbuddy.api.realtime import topics_of, valid_topic
 from scadbuddy.core.events import (
@@ -128,6 +129,19 @@ async def test_first_attribution_wins(pg_pool: PgPool) -> None:
 
 
 @pytest.mark.requires_postgres
+async def test_an_attribution_that_changes_nothing_announces_nothing(pg_pool: PgPool) -> None:
+    """#3566: a client that keeps following a finished Update attributes it each time;
+    only a write that fills something in publishes an ActivityEvent."""
+    events = Events()
+    index = ActivityIndex(pg_pool, events=events)
+    for _ in range(3):
+        await index.attribute("render:j4", principal="token:a", session=None, via_tool=None)
+    assert len(events.published) == 1
+    await index.attribute("render:j4", principal="token:a", session="s", via_tool=None)
+    assert len(events.published) == 2
+
+
+@pytest.mark.requires_postgres
 async def test_upsert_with_attribution_publishes_principal(pg_pool: PgPool) -> None:
     from scadbuddy.activity.index import Attribution
 
@@ -226,3 +240,76 @@ def test_writers_of_one_activity_row_never_deadlock_on_the_event_log(
         "scadbuddy_events_dropped_total", {"reason": "error"}
     )
     assert not dropped
+
+
+OUTPUT = "0e15fec1df28413c97dbc54ac91aed2f"
+
+
+@pytest.mark.requires_postgres
+async def test_one_subject_under_either_spelling_is_one_chip_that_finds_every_row(
+    pg_pool: PgPool,
+) -> None:
+    """#3856: a library file's print run writes ``library-<id>`` and its print subject
+    ``library:<id>``; an output's run its bare id and its subject ``output:<id>``. The
+    facet counts each subject once, under its ``kind:id`` key, and that key (or either
+    spelling) filters every row of it."""
+    index = ActivityIndex(pg_pool, events=None)
+    spellings = [
+        ("a", "library-296"),
+        ("b", "library:296"),
+        ("c", OUTPUT),
+        ("d", f"output:{OUTPUT}"),
+        ("e", "keychain"),
+    ]
+    with pg_pool.connection() as conn:
+        for job, subject in spellings:
+            index.upsert_in(conn, row(id=f"render:{job}", source_id=job, subject=subject))
+
+    counts = await index.counts(since=None)
+    assert sorted(counts.subjects, key=lambda c: c.value) == [
+        Count("keychain", 1),
+        Count("library:296", 2),
+        Count(f"output:{OUTPUT}", 2),
+    ]
+
+    async def found(subject: str) -> list[str]:
+        rows, _ = await index.list(ActivityFilter(subject=subject), cursor=None, limit=50)
+        return sorted(r.id for r in rows)
+
+    assert await found("library:296") == ["render:a", "render:b"]
+    assert await found("library-296") == ["render:a", "render:b"]
+    assert await found(f"output:{OUTPUT}") == ["render:c", "render:d"]
+    assert await found(OUTPUT) == ["render:c", "render:d"]
+    assert await found("keychain") == ["render:e"]
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    ("written", "key"),
+    [
+        ("library-296", "library:296"),
+        ("library:296", "library:296"),
+        (OUTPUT, f"output:{OUTPUT}"),
+        (f"output:{OUTPUT}", f"output:{OUTPUT}"),
+        ("keychain", "keychain"),
+        ("library-", "library-"),
+        ("library-29x", "library-29x"),
+        (OUTPUT.upper(), OUTPUT.upper()),
+        (OUTPUT[:-1], OUTPUT[:-1]),
+        ("archive:12", "archive:12"),
+    ],
+)
+def test_the_filter_reads_a_subject_as_the_facet_counts_it(
+    pg_pool: PgPool, written: str, key: str
+) -> None:
+    """The filter's key (Python) and the facet's (SQL) are one mapping (#3856): a chip
+    that counted rows under a key finds exactly those rows."""
+    assert subject_key(written) == key
+    with pg_pool.connection() as conn:
+        got = conn.execute(
+            sql.SQL("SELECT {} AS key FROM (SELECT %s::text AS subject) AS s").format(
+                activity_index._SUBJECT_KEY
+            ),
+            [written],
+        ).fetchone()
+    assert got is not None and got["key"] == key

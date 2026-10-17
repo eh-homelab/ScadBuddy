@@ -13,7 +13,7 @@ import { statusLabel } from '../components/prints/status'
 import { PrintPicker } from '../components/PrintPicker'
 import { SendDialog } from '../components/SendDialog'
 import { PageLoading } from '../components/PageState'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -280,7 +280,7 @@ export function HistoryPage() {
             <img
               src={api.outputThumbnailUrl(previewFor.id)}
               alt={`Preview of ${previewFor.name ?? shortId(previewFor.id)}`}
-              className="mx-auto max-h-[70vh] w-auto rounded-lg bg-ui-muted"
+              className="mx-auto max-h-[70vh] w-auto rounded-lg bg-muted"
             />
           )}
         </DialogContent>
@@ -574,7 +574,7 @@ function OutputRow({
             type="button"
             onClick={onPreview}
             aria-label={`Preview ${label}`}
-            className="shrink-0 rounded-lg border bg-ui-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="shrink-0 rounded-lg border bg-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             <img src={api.outputThumbnailUrl(output.id)} alt="" className="h-16 w-16 rounded-lg object-contain" />
           </button>

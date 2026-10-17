@@ -65,7 +65,7 @@ export function ArchivedSessions({ onOpen, onUnarchive, unarchived }: Props) {
     <ScrollArea className="[&>[data-slot=scroll-area-viewport]]:max-h-56">
     <ul aria-label="Archived chats" className="flex flex-col gap-0.5 p-1.5">
       {sessions.map((s) => (
-        <li key={s.id} className="rounded-md px-2.5 py-1.5 hover:bg-ui-muted">
+        <li key={s.id} className="rounded-md px-2.5 py-1.5 hover:bg-muted">
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
             <Tip content={s.title}>
               <span className="min-w-0 flex-1 basis-40 truncate text-[13px]">{s.title}</span>
