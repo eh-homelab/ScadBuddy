@@ -251,7 +251,8 @@ class SessionEvents:
         # its subscriber was cancelled, is written but does not end this one. A turn
         # carried over by continue-as-new sent its prompt in an earlier run, so it tells
         # an earlier turn's end by its time instead (#2123), and so does a retry, which
-        # resumes from durable_offset and may be past its prompt already (#4019).
+        # resumes from durable_offset past its prompt or before it (#4019): either way
+        # _before skips an earlier turn's end.
         own = not args.prompted or (args.since is not None and activity.info().attempt > 1)
         beater = asyncio.create_task(beat())
         try:
@@ -285,5 +286,6 @@ class StreamEndedError(Exception):
 
 
 async def _running(workflow_id: str) -> bool:
+    # A describe that fails raises, and is retried: it is never taken for a closed workflow.
     described = await activity.client().get_workflow_handle(workflow_id).describe()
     return described.status == WorkflowExecutionStatus.RUNNING

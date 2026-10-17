@@ -493,6 +493,11 @@ async def test_a_listed_tier_that_is_not_a_tier_overrides_the_manifests_with_out
     assert risks == {read.name: "outward"}
 
 
+def test_the_streams_topic_is_the_plugins() -> None:
+    """The private TOPIC the stream tests publish on: a pin bump that changes it fails here."""
+    assert TOPIC == "claude"
+
+
 def test_risk_tiers_are_the_agents() -> None:
     """#3144: `RISK_TIERS` copies the agent's `RiskTier`; both are pinned to one file."""
     fixture = (
