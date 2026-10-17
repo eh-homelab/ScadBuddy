@@ -25,6 +25,7 @@ from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
+    S3_PREFIX_NOT_READY,
     STORE_READINESS_LOCK,
     ModelPrintChoices,
     RenderStoreSettings,
@@ -520,6 +521,21 @@ def test_clearing_an_s3_field_while_on_the_s3_store_is_refused(store: SettingsSt
     with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
         store.save(SettingsPatch(store_s3_secret_access_key=""))
     assert store.load().store_s3_bucket == "sb"
+
+
+def test_a_blank_s3_prefix_while_on_the_s3_store_is_refused(store: SettingsStore) -> None:
+    """`build_backend` refuses a blank prefix at start, so Settings must not save one:
+    "/" is blank once its outer slashes are stripped."""
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3"))
+    with pytest.raises(StoreNotReadyError, match=S3_PREFIX_NOT_READY):
+        store.save(SettingsPatch(store_s3_prefix="/"))
+    assert store.load().store_s3_prefix == "prod"
+    store.save(SettingsPatch(store_backend="local"))
+    store.save(SettingsPatch(store_s3_prefix=""))
+    with pytest.raises(StoreNotReadyError, match=S3_PREFIX_NOT_READY):
+        store.save(SettingsPatch(store_backend="s3"))
+    assert store.load().store_backend == "local"
 
 
 @pytest.mark.parametrize(("saved", "read"), [("p/", "p"), ("/a/b/", "a/b"), ("/", "")])

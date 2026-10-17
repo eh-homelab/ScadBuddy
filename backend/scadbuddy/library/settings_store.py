@@ -177,12 +177,14 @@ class RackAlgorithmSupersededError(Exception):
 
 class StoreNotReadyError(ValueError):
     """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
-    `store_backend = s3` without the endpoint, bucket and both keys."""
+    `store_backend = s3` without the endpoint, bucket, both keys and a prefix."""
 
 
 S3_NOT_READY = (
     "the S3 store needs its endpoint, bucket, access key id and secret access key saved first"
 )
+#: A blank prefix (or "/", blank once its outer slashes go): `build_backend` refuses it.
+S3_PREFIX_NOT_READY = "the S3 store needs a prefix saved first"
 BAMBUDDY_NOT_READY = (
     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
 )
@@ -207,6 +209,17 @@ def _s3_settings(value: Callable[[str], Any]) -> S3Settings | None:
     if not all(s3[name] for name in ("endpoint", "bucket", "access_key_id", "secret_access_key")):
         return None
     return S3Settings.model_validate(s3)
+
+
+def _s3_not_ready(value: Callable[[str], Any]) -> str | None:
+    """Why the S3 store would not start on each ``store_s3_*`` field's ``value``, or
+    ``None``: as `build_backend` decides it, so the prefix counts, without its outer
+    slashes."""
+    if _s3_settings(value) is None:
+        return S3_NOT_READY
+    if not (value("store_s3_prefix") or "").strip("/"):
+        return S3_PREFIX_NOT_READY
+    return None
 
 
 class BambuddyIds(BaseModel):
@@ -763,8 +776,9 @@ class SettingsStore:
                 raise StoreNotReadyError(BAMBUDDY_NOT_READY)
         if changes.get("store_backend") == "s3":
             current = self.load()
-            if _s3_settings(lambda name: changes.get(name, getattr(current, name))) is None:
-                raise StoreNotReadyError(S3_NOT_READY)
+            problem = _s3_not_ready(lambda name: changes.get(name, getattr(current, name)))
+            if problem is not None:
+                raise StoreNotReadyError(problem)
         with self._pool.connection() as conn, conn.transaction():
             if (changes.keys() | set(reset)) & STORE_READINESS:
                 self._check_store_ready(conn, changes, reset)
@@ -830,8 +844,8 @@ class SettingsStore:
             not merged("bambuddy_url") or merged("library_folder_id") is None
         ):
             raise StoreNotReadyError(BAMBUDDY_NOT_READY)
-        if backend == "s3" and _s3_settings(merged) is None:
-            raise StoreNotReadyError(S3_NOT_READY)
+        if backend == "s3" and (problem := _s3_not_ready(merged)) is not None:
+            raise StoreNotReadyError(problem)
 
     def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
         """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""

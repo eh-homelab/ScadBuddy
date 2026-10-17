@@ -23,6 +23,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
     BAMBUDDY_NOT_READY,
     S3_NOT_READY,
+    S3_PREFIX_NOT_READY,
     RenderStoreSettings,
     StoreNotReadyError,
     load_render_store_settings,
@@ -174,7 +175,7 @@ async def check_backends(
         if name == "s3" and current.s3 is None:
             raise StoreNotReadyError(S3_NOT_READY)
         if name == "s3" and current.s3 is not None and not current.s3.prefix:
-            raise StoreNotReadyError("the S3 store needs a prefix saved first")
+            raise StoreNotReadyError(S3_PREFIX_NOT_READY)
         if name == "bambuddy" and (not current.bambuddy_url or current.library_folder_id is None):
             raise StoreNotReadyError(BAMBUDDY_NOT_READY)
     settings = RenderSettingsSource(pool, defaults)
