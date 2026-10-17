@@ -67,6 +67,7 @@ import { LIBRARY_ROOT, folderIdOf, folderSegments, libraryPath, libraryPathOf } 
 import { nameParts, shortName } from '../lib/libraryNames'
 import { folderAndDescendants, folderLabel } from '../lib/libraryTransfer'
 import { NARROW_QUERY, useMediaQuery } from '../lib/useMediaQuery'
+import { scrollPaneTo } from './settings/sectionNav'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
@@ -301,12 +302,26 @@ export function LibraryPage() {
   function selectFolder(id: number | null) {
     const path = libraryPath(tree ?? [], id)
     if (path !== location.pathname || location.search !== '') navigate(path)
+    setRevealed((n) => n + 1)
   }
 
   /** #3650 — a project's page in the project view; `null` lists every project. */
   function selectProject(id: number | null) {
     navigate(id === null ? `${LIBRARY_ROOT}?by=project` : `${LIBRARY_ROOT}?project=${id}`)
+    setRevealed((n) => n + 1)
   }
+
+  // #3957 — a folder or project chosen low in a long tree (or a subfolder far down the
+  // listing) left the pane scrolled past the top of the files. Once the choice has
+  // rendered, the pane scrolls back to the content column, if its top is out of view.
+  const pane = useRef<HTMLDivElement>(null)
+  const content = useRef<HTMLElement>(null)
+  const [revealed, setRevealed] = useState(0)
+  useEffect(() => {
+    if (revealed === 0 || !pane.current || !content.current) return
+    if (content.current.getBoundingClientRect().top >= pane.current.getBoundingClientRect().top) return
+    scrollPaneTo(pane.current, null, content.current)
+  }, [revealed])
 
   /** #3650 — the toggle between the folder tree and the project list. */
   function browse(by: 'folder' | 'project') {
@@ -655,7 +670,7 @@ export function LibraryPage() {
   )
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div ref={pane} data-testid="library-pane" className="h-full overflow-y-auto">
       <div className={cn('mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6', (deleted || done) && 'pb-44')}>
         <nav aria-label="Library" className="w-full space-y-3 md:w-60 md:shrink-0">
           <ToggleGroup
@@ -727,7 +742,7 @@ export function LibraryPage() {
           )}
         </nav>
 
-        <section className="min-w-0 flex-1 space-y-4">
+        <section ref={content} data-testid="library-content" className="min-w-0 flex-1 space-y-4">
           <SearchBox query={query} onSearch={setQuery} />
           <header className="flex flex-wrap items-center gap-x-2 gap-y-2">
             <h1 className="mr-1 text-lg font-semibold tracking-tight">Library</h1>
