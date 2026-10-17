@@ -36,7 +36,9 @@ describe('resending (mswjs/interceptors#862)', () => {
   it('never resends a request aborted during the pause before its resend', async () => {
     const controller = new AbortController()
     const intercepted = vi.fn().mockImplementation(() => {
-      setTimeout(() => controller.abort(), 0) // a task queued before the pause's own
+      // A task queued before the pause's own, so the abort lands inside it. Were the
+      // pause to stop being a task, this would abort after the resend and prove nothing.
+      setTimeout(() => controller.abort(), 0)
       return Promise.reject(refused())
     })
     await expect(resending(intercepted, vi.fn(), 3)('http://test/g', { signal: controller.signal })).rejects.toThrow(
