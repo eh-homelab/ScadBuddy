@@ -53,9 +53,12 @@ def _accepted(send: Callable[[dict[str, str]], Response]) -> Response:
     the 503 means "send it again"."""
     key = press()
     resend_until = time.monotonic() + 60
-    # Only a 503 is read as JSON, so any other answer fails on its own text.
-    while (answer := send(key)).status_code == 503 and (
-        answer.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM
+    # Only a problem-JSON 503 is read as JSON, so any other answer (a proxy's HTML page
+    # included) fails on its own text.
+    while (
+        (answer := send(key)).status_code == 503
+        and answer.headers.get("content-type", "").startswith("application/problem+json")
+        and answer.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM
     ):
         assert time.monotonic() < resend_until, answer.text
     return answer
