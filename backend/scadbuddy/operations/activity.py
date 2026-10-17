@@ -36,7 +36,8 @@ def _subject_text(subject: str) -> str:
     for prefix in _ID_PREFIXES:
         if subject.startswith(prefix):
             rest = subject.removeprefix(prefix)
-            return f"#{rest}" if rest.isdigit() else rest  # an OpenSCAD library by name
+            # An OpenSCAD library by name, unless all digits: that reads as a file's id.
+            return f"#{rest}" if rest.isdigit() else rest
     return subject
 
 

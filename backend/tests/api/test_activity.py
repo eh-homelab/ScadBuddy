@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex, Count
 from scadbuddy.api.activity import _subject_labels
+from scadbuddy.library.outputs import OutputNotFoundError
 from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
 from tests.api.test_send import make_output
 from tests.support.operations import press
@@ -168,6 +169,22 @@ def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> Non
     labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
     assert labels == {}
     assert sorted(asked) == ["d" * 32, "e" * 32]
+
+
+def test_subjects_with_no_slug_never_read_the_catalogue() -> None:
+    """#3856: the Activity page refetches facets often; with only library, project and
+    gone output subjects there is no model to name."""
+
+    def unused(*_: object) -> list[str]:
+        raise AssertionError("the catalogue was read")
+
+    def gone(output_id: str) -> tuple[str | None, str]:
+        raise OutputNotFoundError(output_id)
+
+    catalogue = SimpleNamespace(slugs=unused, list_models=unused)
+    subjects = [Count(v, 1) for v in ("library:12", "project:5", "output:" + "a" * 32)]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=gone))  # type: ignore[arg-type]
+    assert labels == {}
 
 
 def test_a_failing_catalogue_leaves_the_facets_their_output_names() -> None:

@@ -1247,7 +1247,8 @@ def project_subject(body: ProjectRequest) -> str:
 
     The create keeps this subject once the project has an id, so its chip is apart
     from the ``project:<id>`` one its later links share: the record says what was
-    asked for, and the id is not known until Bambuddy answers."""
+    asked for, and the id is not known until Bambuddy answers. Two creates of one name
+    share a chip, as two asks for the same thing would."""
     if body.project_id is not None:
         return f"project:{body.project_id}"
     if body.name:

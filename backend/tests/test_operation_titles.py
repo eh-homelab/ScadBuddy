@@ -19,6 +19,8 @@ from scadbuddy.operations.activity import row_of
         ("library_file_move", "library-files", "Library file move (several files)"),
         ("library_folder_update", "library-folder:3", "Library folder update #3"),
         ("library_install", "library:BOSL2", "Library install BOSL2"),
+        # All digits reads as a Bambuddy file's id, whichever it is (labels.ts says so).
+        ("library_install", "library:123", "Library install #123"),
         ("print", "output:abc", "Print output:abc"),
     ],
 )

@@ -234,7 +234,9 @@ class OutputStore:
         #: flight across a forget still knows not to store what it found.
         self._cover_epoch = 0
         self._covers_lock = threading.Lock()
-        #: Outputs `name_and_slug` found gone, each until it looks again.
+        #: Outputs `name_and_slug` found gone, each until it looks again. Facets read it
+        #: from worker threads unlocked: each access is one dict operation, which the GIL
+        #: makes atomic, and a lost entry costs only one more glob.
         self._gone: dict[str, float] = {}
         #: Called with a model's id when one of its outputs is saved or deleted --
         #: which moves the catalogue's fallback cover, and with it whether the

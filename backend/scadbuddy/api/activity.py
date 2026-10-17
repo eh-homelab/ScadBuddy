@@ -291,13 +291,24 @@ def _subject_labels(
             continue  # deleted (even mid-read), or its meta unreadable: the chip keeps its id
     wanted = values | {slug for _, slug in metas.values()}
     names: dict[str, str] = {}
-    try:
-        slugs = [slug for slug in catalogue.slugs() if slug in wanted]
-        names = {record.slug: record.name for record in catalogue.list_models(slugs)}
-    except Exception:  # the facets are the activity index's; a name is only a nicety
-        logger.warning("activity facets: no model names from the catalogue", exc_info=True)
+    # A slug holds no ':' (every other subject does, or is no model's): with none among
+    # them there is nothing to ask the catalogue, and the page refetches facets often.
+    if any(":" not in value for value in wanted):
+        try:
+            slugs = [slug for slug in catalogue.slugs() if slug in wanted]
+            names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+        except Exception:  # the facets are the activity index's; a name is only a nicety
+            logger.warning("activity facets: no model names from the catalogue", exc_info=True)
     # An output's model is looked up only to name the output; it is no chip of its own.
     labels = {value: name for value, name in names.items() if value in values}
+    return labels | _output_labels(metas, names)
+
+
+def _output_labels(
+    metas: Mapping[str, tuple[str | None, str]], names: Mapping[str, str]
+) -> dict[str, str]:
+    """Each output's own name, else its model's."""
+    labels: dict[str, str] = {}
     for value, (own, slug) in metas.items():
         name = own or names.get(slug)
         if name:
