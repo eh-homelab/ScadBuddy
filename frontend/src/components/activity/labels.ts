@@ -22,6 +22,9 @@ export function subjectLabel(subject: { value: string; label?: string | null }):
   const [prefix, id] = subject.value.split(/:(.*)/s)
   if (id) {
     // A Bambuddy file is `library:<id>`; an OpenSCAD library's checkout is `library:<name>`.
+    // An all-digit library name would read as a file; the two share the prefix with the
+    // print records, so a split would rename those too. The server's label, when it has
+    // one, says which it is.
     if (prefix === 'library') return /^\d+$/.test(id) ? `Library file ${id}` : `Library ${id}`
     if (prefix === 'library-folder') return `Library folder ${id}`
     if (prefix === 'project') return `Project ${id}`
