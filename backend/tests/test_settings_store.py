@@ -22,7 +22,7 @@ from psycopg_pool import PoolTimeout
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import APPLIES, Settings
 from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
     S3_PREFIX_NOT_READY,
@@ -536,6 +536,30 @@ def test_a_blank_s3_prefix_while_on_the_s3_store_is_refused(store: SettingsStore
     with pytest.raises(StoreNotReadyError, match=S3_PREFIX_NOT_READY):
         store.save(SettingsPatch(store_backend="s3"))
     assert store.load().store_backend == "local"
+
+
+def test_native_library_is_refused_on_the_local_store(store: SettingsStore) -> None:
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+        store.save(SettingsPatch(library_backend="native"))
+    assert store.load().library_backend == "bambuddy"
+
+
+def test_native_library_saves_on_s3(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3"))
+    assert store.save(SettingsPatch(library_backend="native")).library_backend == "native"
+
+
+def test_back_to_local_is_refused_while_the_library_is_native(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3", library_backend="native"))
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+        store.save(SettingsPatch(store_backend="local"))
+    assert store.load().store_backend == "s3"
+
+
+def test_library_backend_applies_on_restart() -> None:
+    assert APPLIES["library_backend"] == "restart"
 
 
 @pytest.mark.parametrize(("saved", "read"), [("p/", "p"), ("/a/b/", "a/b"), ("/", "")])

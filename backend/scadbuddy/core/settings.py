@@ -49,6 +49,7 @@ from scadbuddy.core.config import (
     READ_MAX_PAINT_DIGITS_CEILING,
     READ_MAX_VISITS_CEILING,
     Config,
+    LibraryBackend,
     StoreBackend,
 )
 from scadbuddy.core.proxies import Network, parse_cidr_list
@@ -145,6 +146,9 @@ class Settings(BaseSettings):
     # Settings wins. Render workers read them from there (spec §9).
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     store_backend: StoreBackend = "local"
+    # SCADBUDDY_LIBRARY_BACKEND: whose library the print routes serve (`native` needs a
+    # content store: `store_backend` s3 or bambuddy).
+    library_backend: LibraryBackend = "bambuddy"
     # SCADBUDDY_STORE_S3_*: the S3 store (`store_backend` s3), seeded like the render key
     # and read by render workers from the stored values. The endpoint is Garage, MinIO or
     # any S3-compatible service; path-style addressing (`store_s3_path_style`) unless the
@@ -656,6 +660,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # Read at start, by the API and by every render worker (spec 2026-09-27 §6.2, §9):
         # the store each process opens, its caps, and the key workers fetch with.
         "store_backend": "restart",
+        "library_backend": "restart",
         "bambuddy_render_api_key": "restart",
         "store_s3_endpoint": "restart",
         "store_s3_region": "restart",

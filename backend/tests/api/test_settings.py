@@ -48,6 +48,7 @@ DEFAULTS: dict[str, object] = {
     "has_render_api_key": False,
     "render_key_fallback": False,
     "store_backend": "local",
+    "library_backend": "bambuddy",
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
@@ -483,6 +484,15 @@ def test_choosing_the_bambuddy_store_without_an_inbox_is_refused(client: TestCli
     response = client.put("/api/v1/settings", json={"store_backend": "bambuddy"})
     assert response.status_code == 422
     assert "library folder" in response.json()["detail"]
+
+
+def test_settings_view_names_the_library_backend(client: TestClient) -> None:
+    assert client.get("/api/v1/settings").json()["library_backend"] == "bambuddy"
+
+
+def test_a_native_library_on_local_is_422(client: TestClient) -> None:
+    r = client.put("/api/v1/settings", json={"library_backend": "native"})
+    assert r.status_code == 422 and "store_backend to s3 or bambuddy" in r.json()["detail"]
 
 
 @pytest.mark.parametrize("cleared", ["bambuddy_url", "library_folder_id"])

@@ -90,6 +90,10 @@ DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
 #: only with one render worker sharing the API's volume; `bambuddy` is Bambuddy's library;
 #: `s3` is an S3-compatible bucket (spec 2026-10-16 §4).
 StoreBackend = Literal["local", "bambuddy", "s3"]
+#: Whose library `/print/library/*` serves (spec 2026-10-17 §4.5): Bambuddy's, or
+#: ScadBuddy's own over the blob store (`native`, which needs a `store_backend` that is
+#: not `local`).
+LibraryBackend = Literal["bambuddy", "native"]
 DEFAULT_STORE_MAX_TOTAL_BYTES = 50 * 1024**3
 DEFAULT_STORE_MAX_COUNT = 200_000
 #: A worker's local copy of pieces it fetched or rendered; least recently used goes first.
