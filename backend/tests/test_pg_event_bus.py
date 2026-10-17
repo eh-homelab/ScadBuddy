@@ -376,13 +376,17 @@ async def test_a_dropped_listener_resyncs_its_subscribers_and_events_keep_flowin
     assert isinstance(marker, BusResync)
     assert marker.kind == "bus.resync"
     assert marker.last_event_id == before.id
+    # #1039: what was heard before the gap no longer vouches for what followed it.
+    assert bus.last_event_id == before.id and bus.live_event_id is None
     assert bus.listener.backend_pid not in (None, dropped)
     assert _sample(bus.metrics, "scadbuddy_events_resyncs_total") == 1
     # The first connect sent none, and the publisher's own listener saw no gap.
     assert _sample(publisher.metrics, "scadbuddy_events_resyncs_total") == 0
 
-    publisher.publish(_model("after"))
+    after = _model("after")
+    publisher.publish(after)
     assert _slugs([await _next(subscription)]) == ["after"]
+    assert bus.live_event_id == after.id
     # What the marker names is where to replay from.
     seq = await bus.position(before.id)
     assert seq is not None

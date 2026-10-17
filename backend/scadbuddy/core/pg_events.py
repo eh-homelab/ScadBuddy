@@ -338,6 +338,9 @@ class PgNotifyEventBus:
         self.local = InProcessEventBus(queue_size=queue_size)
         #: The last event heard before now; what a ``bus.resync`` names.
         self.last_event_id: str | None = None
+        #: The last event heard since the listener last (re)connected, or None: every
+        #: event after it reaches this process's subscriptions (#1039's ``last``).
+        self.live_event_id: str | None = None
         self._pool: AsyncConnectionPool[AsyncConnection[TupleRow]] = AsyncConnectionPool(
             conninfo,
             min_size=1,
@@ -584,6 +587,7 @@ class PgNotifyEventBus:
             logger.warning("ignored an undecodable event payload", extra={"bytes": len(payload)})
             return
         self.last_event_id = event.id
+        self.live_event_id = event.id
         self.metrics.events_received.inc()
         self.local.publish(event)
 
@@ -591,6 +595,8 @@ class PgNotifyEventBus:
         self._listening.set()
         if not reconnected:
             return
+        # What was heard before the gap says nothing about what followed it.
+        self.live_event_id = None
         logger.warning(
             "the event listener reconnected; subscribers are told to resync",
             extra={"last_event_id": self.last_event_id},

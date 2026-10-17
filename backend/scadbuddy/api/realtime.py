@@ -45,12 +45,14 @@ everything before it in the log is reflected in the read.
 
 ``subscribed`` carries ``last``, the last event this process had heard once the
 topics were followed; anything after it reaches the client as an ``event`` frame. A
-client whose read saw ``last`` itself has missed nothing. Otherwise it sends
+client whose read saw ``last`` itself has missed nothing. After the bus's listener
+reconnects, ``last`` is left out until it hears a fresh event: a NOTIFY sent during the
+gap was never heard, so the client must ``check``. Otherwise it sends
 ``check`` with the ids its read saw, and the server replays the log after the
 earliest of them and answers ``changed`` with the topics an event since touched. An
 unknown or pruned id, a gap, more events than `CHECK_MAX_EVENTS`, a topic this socket
-does not follow, or a bus with no log answers every topic: the client re-reads, as it
-did before.
+does not follow, a log that cannot be read, or a bus with no log answers every topic:
+the client re-reads, as it did before.
 
 Security
 --------
@@ -324,9 +326,17 @@ async def _ping(send: Send) -> None:
 
 def last_heard(events: object) -> str | None:
     """The id of the last event this process heard, or None: none yet, or a bus with no
-    log to check a cursor against (the in-process one)."""
+    log to check a cursor against (the in-process one). A read's cursor."""
     last = getattr(events, "last_event_id", None)
     return last if isinstance(last, str) and hasattr(events, "replay") else None
+
+
+def live_since(events: object) -> str | None:
+    """`last_heard`, but only when every event after it reaches this process's
+    subscriptions: None after the listener reconnects until it hears a fresh event,
+    since a NOTIFY sent during the gap was never heard here. ``subscribed``'s ``last``."""
+    live = getattr(events, "live_event_id", None)
+    return live if isinstance(live, str) and last_heard(events) is not None else None
 
 
 async def changed_topics(events: object, since: list[str], topics: list[str]) -> list[str]:
@@ -375,7 +385,12 @@ async def _check(frame: dict[str, Any], topics: set[str], events: object, send: 
     requested = list(dict.fromkeys(requested))
     # Only a followed topic's later events reach the client, so only one may be cleared.
     followed = [topic for topic in requested if topic in topics]
-    changed = set(await changed_topics(events, since, followed)) if followed else set()
+    try:
+        changed = set(await changed_topics(events, since, followed)) if followed else set()
+    except Exception:
+        # The log could not be read: the client reads again, as without a cursor.
+        logger.warning("could not check a realtime cursor", exc_info=True)
+        changed = set(followed)
     changed.update(topic for topic in requested if topic not in topics)
     await send(
         {"type": "changed", "id": check_id, "topics": [t for t in requested if t in changed]}
@@ -433,7 +448,7 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send, events: obje
         if accepted:
             ack: dict[str, Any] = {"type": "subscribed", "topics": accepted}
             # Read with the topics already followed: any event after it is sent (#1039).
-            last = last_heard(events)
+            last = live_since(events)
             if last is not None:
                 ack["last"] = last
             await send(ack)

@@ -464,11 +464,12 @@ class LoggedBus(InProcessEventBus):
         super().__init__()
         self.log: list[Event] = []
         self.last_event_id: str | None = None
+        self.live_event_id: str | None = None
         self.pruned = 0
 
     def publish(self, event: Event) -> None:
         self.log.append(event)
-        self.last_event_id = event.id
+        self.last_event_id = self.live_event_id = event.id
         super().publish(event)
 
     async def position(self, event_id: str) -> int | None:
@@ -562,6 +563,40 @@ def test_a_check_that_cannot_tell_names_every_topic(
         else:
             monkeypatch.setattr(realtime, "CHECK_MAX_EVENTS", 1)
         assert check(ws, since, *topics) == expected
+
+
+def test_after_a_reconnect_subscribed_leaves_out_last_until_a_fresh_event(
+    client: TestClient, logged: LoggedBus
+) -> None:
+    """A NOTIFY sent while the listener was down was never heard here: a read stamped
+    before the gap must ``check`` rather than take ``last`` at its word."""
+    logged.publish(SettingsChanged(section="connection"))
+    logged.live_event_id = None  # what `PgNotifyEventBus._connected` does on a reconnect
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["settings"]})
+        assert "last" not in ws.receive_json()
+    fresh = SettingsChanged(section="connection")
+    logged.publish(fresh)
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["settings"]})
+        assert ws.receive_json()["last"] == fresh.id
+
+
+def test_a_check_the_log_cannot_answer_names_every_topic(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+
+    async def down(_after: int, *, limit: int = 100) -> Replay:
+        raise OSError("the database went away")
+
+    monkeypatch.setattr(logged, "replay", down)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings")
+        assert check(ws, [seen.id], "settings") == ["settings"]
+        # The socket stays open.
+        assert check(ws, [seen.id], "settings") == ["settings"]
 
 
 def test_a_malformed_check_is_answered_with_an_error(client: TestClient, logged: LoggedBus) -> None:

@@ -361,9 +361,15 @@ test.describe('real backend', () => {
     })
     let confirmed = false
     let news = false
+    let checks = 0
+    let answers = 0
     page.on('websocket', (socket) => {
+      socket.on('framesent', ({ payload }) => {
+        if ((JSON.parse(String(payload)) as { type: string }).type === 'check') checks += 1
+      })
       socket.on('framereceived', ({ payload }) => {
         const frame = JSON.parse(String(payload)) as { type: string; topics?: string[] }
+        if (frame.type === 'changed') answers += 1
         if (!frame.topics?.includes('models')) return
         if (frame.type === 'subscribed') confirmed = true
         if (frame.type === 'event') news = true
@@ -372,8 +378,11 @@ test.describe('real backend', () => {
     await page.goto('/')
     await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible()
     await expect.poll(() => confirmed).toBe(true)
-    // Room for a check's answer and the read it would start.
-    await page.waitForTimeout(1_500)
+    // Every check answered (a slow one would read after a fixed wait), then room for the
+    // read an answer would start.
+    await page.waitForTimeout(500)
+    await expect.poll(() => answers, { timeout: 10_000 }).toBe(checks)
+    await page.waitForTimeout(1_000)
     expect(news, 'a model changed meanwhile, so a second read was due').toBe(false)
     expect(reads).toBe(1)
   })
