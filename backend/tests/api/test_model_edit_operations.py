@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from scadbuddy.api import model_files
 from scadbuddy.api import models as models_api
@@ -44,6 +45,17 @@ def _model(client: TestClient, name: str) -> tuple[str, str]:
     created = client.post("/api/v1/models", json={"name": name, "source": SOURCE}, headers=press())
     assert created.status_code == 201, created.text
     return created.json()["slug"], created.json()["version"]
+
+
+def _accepted(send: Callable[[dict[str, str]], Response]) -> Response:
+    """``send``'s answer once accepted: sent again with the same key while it is still
+    being accepted (#3926), since on a loaded runner a short deadline passes first and
+    the 503 means "send it again"."""
+    key = press()
+    resend_until = time.monotonic() + 60
+    while (answer := send(key)).json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM:
+        assert time.monotonic() < resend_until, answer.text
+    return answer
 
 
 def test_a_repeated_source_save_makes_one_revision(client: TestClient, app: FastAPI) -> None:
@@ -196,8 +208,10 @@ def test_a_slow_save_answers_202_and_its_operation_ends_with_the_model(
         return await save(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_save_source", slowly)
-    started = client.put(
-        f"/api/v1/models/{slug}/source", json={"source": "cube(4);\n"}, headers=press()
+    started = _accepted(
+        lambda key: client.put(
+            f"/api/v1/models/{slug}/source", json={"source": "cube(4);\n"}, headers=key
+        )
     )
     assert started.status_code == 202, started.text
     op = follow_operation(client, started.json())
@@ -234,16 +248,24 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
     monkeypatch.setattr(models_api, "_save_source", held)
     try:
         if route == "put":
-            started = client.put(
-                f"/api/v1/models/{slug}/source",
-                json={"source": "cube(6);\n", "base": version},
-                headers=press(),
+            started = _accepted(
+                lambda key: client.put(
+                    f"/api/v1/models/{slug}/source",
+                    json={"source": "cube(6);\n", "base": version},
+                    headers=key,
+                )
             )
         else:
-            started = client.post(
-                f"/api/v1/models/{slug}/source/patch",
-                json={"base": version, "edits": [{"search": "10", "replace": "6"}], "force": True},
-                headers=press(),
+            started = _accepted(
+                lambda key: client.post(
+                    f"/api/v1/models/{slug}/source/patch",
+                    json={
+                        "base": version,
+                        "edits": [{"search": "10", "replace": "6"}],
+                        "force": True,
+                    },
+                    headers=key,
+                )
             )
         assert started.status_code == 202, started.text
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
@@ -273,19 +295,13 @@ def test_a_stale_base_a_sibling_write_finds_in_its_run_carries_current(
 
     monkeypatch.setattr(model_files, "file_put_run", held)
     try:
-        # Sent again with the same key while it is still being accepted (#3926): on a
-        # loaded runner the 1 s deadline passes first, and 503 says "send it again".
-        key = press()
-        resend_until = time.monotonic() + 60
-        while True:
-            started = client.put(
+        started = _accepted(
+            lambda key: client.put(
                 f"/api/v1/models/{slug}/files/parts.scad",
                 json={"content": "module bar() {}\n", "base": version},
                 headers=key,
             )
-            if started.json().get("type") != operations_api.STILL_ACCEPTING_PROBLEM:
-                break
-            assert time.monotonic() < resend_until, started.text
+        )
         assert started.status_code == 202, started.text
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
     finally:
