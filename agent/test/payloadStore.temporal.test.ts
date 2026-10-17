@@ -36,7 +36,7 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
     if (root) rmSync(root, { recursive: true, force: true })
   })
 
-  it('reads a query result, a workflow input and a result stored by reference', async () => {
+  it('reads a query result, a workflow input, a result and an activity input stored by reference', async () => {
     const subject = `session-${randomUUID()}`
     const dataConverter = subjectDataConverter(new MemoryKeys(), new FilePayloadStore(root))
     const client = new Client({ connection: env.connection, namespace: 'default', dataConverter })
@@ -46,6 +46,7 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
       taskQueue,
       workflowsPath: fileURLToPath(new URL('./support/codecWorkflows.ts', import.meta.url)),
       dataConverter,
+      activities: { lengthOf: async (text: string) => text.length },
     })
     const words = 'a long conversation '.repeat(Math.ceil((OFFLOAD_BYTES * 2) / 20))
     await worker.runUntil(async () => {
@@ -53,6 +54,8 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
       expect(await handle.query<string>('held_text')).toBe(words)
       await handle.signal('finish')
       expect(await handle.result()).toBe(`${words} (done)`)
+      // An activity's input over OFFLOAD_BYTES: the agent-tools worker's own walk.
+      expect(await client.workflow.execute('toolInput', { workflowId: `session-${randomUUID()}`, taskQueue, args: [words] })).toBe(words.length)
     })
     expect(readdirSync(join(root, subject)).length).toBeGreaterThan(0)
   })

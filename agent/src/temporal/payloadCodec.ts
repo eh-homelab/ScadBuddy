@@ -314,6 +314,8 @@ export class SubjectPayloadCodec implements PayloadCodec {
   async decode(payloads: Payload[]): Promise<Payload[]> {
     const out: Payload[] = []
     for (let p of payloads) {
+      // With subjectDataConverter's driver the SDK resolves references before this
+      // runs (#3739); this is for a codec used on its own (the vectors, forget-subject).
       const ref = referenceOf(p)
       if (ref) {
         if (!this.#store) throw new SealError(`a payload of ${ref.subject} is stored by reference, and no store is set`)
@@ -352,13 +354,15 @@ function storeDriver(store: PayloadStore): StorageDriver {
     name: STORE_DRIVER,
     type: 'scadbuddy.file',
     store: () => Promise.reject(new SealError('the codec stores payloads, not External Storage')),
-    retrieve: (_context, claims) =>
-      Promise.all(
-        claims.map(async ({ claimData }) => {
-          const ref = claimOf(claimData)
-          return storedPayload(ref, await store.get(ref.subject, ref.digest))
-        }),
-      ),
+    // One file at a time: a page's claims are each 128 KiB or more, and none waits on another.
+    retrieve: async (_context, claims) => {
+      const out: Payload[] = []
+      for (const { claimData } of claims) {
+        const ref = claimOf(claimData)
+        out.push(storedPayload(ref, await store.get(ref.subject, ref.digest)))
+      }
+      return out
+    },
   }
 }
 

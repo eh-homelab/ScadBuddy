@@ -18,7 +18,7 @@ export async function holdText(text: string): Promise<string> {
   return `${text} (done)`
 }
 
-const { failWith } = proxyActivities<{ failWith(text: string): Promise<void> }>({
+const { failWith, lengthOf } = proxyActivities<{ failWith(text: string): Promise<void>; lengthOf(text: string): Promise<number> }>({
   startToCloseTimeout: '1 minute',
   retry: { maximumAttempts: 1 },
 })
@@ -31,4 +31,9 @@ export async function failingTool(text: string): Promise<string> {
     const cause = (err as Error).cause
     return `caught: ${cause instanceof Error ? cause.message : ''}`
   }
+}
+
+/** Hands its words to a tool, as a turn hands a large tool input over (#3739). */
+export async function toolInput(text: string): Promise<number> {
+  return await lengthOf(text)
 }
