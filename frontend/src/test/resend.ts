@@ -15,8 +15,9 @@ export function resending(
   tries = 3,
 ): typeof fetch {
   return async (input, init) => {
-    // As fetch does: init.signal overrides the Request's own, an explicit null included.
-    const signal = init && 'signal' in init ? init.signal : input instanceof Request ? input.signal : undefined
+    // As fetch does: init.signal overrides the Request's own, an explicit null included;
+    // an undefined member is absent (WebIDL), so the Request's own stands.
+    const signal = init?.signal !== undefined ? init.signal : input instanceof Request ? input.signal : undefined
     const url = input instanceof Request ? input.url : String(input)
     for (let attempt = 1; ; attempt++) {
       try {

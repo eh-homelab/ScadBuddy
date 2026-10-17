@@ -18,7 +18,7 @@ describe('resending (mswjs/interceptors#862)', () => {
     const log = vi.fn()
     await expect(resending(intercepted, log, 3)('http://test/b')).rejects.toThrow('fetch failed')
     expect(intercepted).toHaveBeenCalledTimes(3)
-    expect(log.mock.calls.map(([line]) => (line as string).split(' ')[1])).toEqual(['resending', 'gave'])
+    expect(log.mock.calls).toEqual([[expect.stringContaining('resending')], [expect.stringContaining('gave up')]])
   })
 
   it("never resends an aborted request, whether init's signal or the Request's own", async () => {
@@ -38,6 +38,13 @@ describe('resending (mswjs/interceptors#862)', () => {
     const intercepted = vi.fn().mockRejectedValueOnce(refused()).mockResolvedValue(new Response('ok'))
     await expect(resending(intercepted, vi.fn(), 3)(request, { signal: null })).resolves.toBeInstanceOf(Response)
     expect(intercepted).toHaveBeenCalledTimes(2)
+  })
+
+  it("keeps the Request's own signal when init's is undefined, as fetch does", async () => {
+    const request = new Request('http://test/f', { signal: AbortSignal.abort() })
+    const intercepted = vi.fn().mockRejectedValue(refused())
+    await expect(resending(intercepted, vi.fn(), 3)(request, { signal: undefined })).rejects.toThrow('fetch failed')
+    expect(intercepted).toHaveBeenCalledOnce()
   })
 
   it('passes any other failure straight through', async () => {
