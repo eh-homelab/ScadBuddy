@@ -116,6 +116,9 @@ test('keeps three lines of unmigrated inputs visible in a short window', async (
 test('keeps the unmigrated inputs inside their alert where 30vh holds them', async ({ page }) => {
   const { saved, alert } = await openUnmigrated(page, 420)
   const box = (await alert.boundingBox())!
+  // The precondition first (#3893 review): the alert is at its 30vh cap, so an overflow
+  // below is the textarea's, not a cap that moved.
+  expect(box.height).toBeCloseTo(0.3 * 420, 0)
   const area = (await saved.boundingBox())!
   expect(area.y + area.height).toBeLessThanOrEqual(box.y + box.height + 0.5)
 })

@@ -379,14 +379,14 @@ def test_a_duplicate_made_between_the_check_and_the_run_refuses_the_delete(
     refuse = models_api.refuse_delete
     calls = 0
 
-    def duplicated_after_the_check(*args: Any) -> None:
+    def duplicated_after_the_check(*args: Any, **kwargs: Any) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            refuse(*args)
+            refuse(*args, **kwargs)
             _state(app).catalogue.duplicate("base", "copy", "Copy")
             return
-        refuse(*args)
+        refuse(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "refuse_delete", duplicated_after_the_check)
     key = {"Idempotency-Key": uuid.uuid4().hex}

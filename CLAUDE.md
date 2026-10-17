@@ -99,6 +99,10 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the bundle
 ```
 
+CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Playwright
+in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
+`frontend-e2e-split` checks that the three selections add up to the whole `--list` and
+that each shard ran what it selected, as `backend-pytest-split` does.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint

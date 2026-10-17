@@ -242,12 +242,12 @@ def _joined(append: str | None, note: str | None) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-# What the plugin raises when a segment answered BUDGET_EXHAUSTED (``_fail`` with
-# ``f"Claude run failed: {seg.error}"``; temporalio-claude-agent-sdk b1cf3848, the pin in
-# pyproject.toml: temporalio/claude_agent_sdk/_workflow.py:845; check it on every bump):
-# that message exactly, with no cause. A failure
-# that only quotes the constant, amid other text or in a cause, is the session's content
-# and ends the turn failed (#3353).
+# What the plugin raises when a segment answered BUDGET_EXHAUSTED: that message exactly,
+# with no cause. A failure that only quotes the constant, amid other text or in a cause,
+# is the session's content and ends the turn failed (#3353). On every pin bump of
+# temporalio-claude-agent-sdk (pyproject.toml), grep its temporalio/claude_agent_sdk/
+# _workflow.py for ``_fail(f"Claude run failed: {seg.error}")`` and check the words still
+# match; that is the anchor, and line 845 is only where it sat at b1cf3848 (#3915).
 _BUDGET_FAILURE = f"Claude run failed: {BUDGET_EXHAUSTED}"
 
 

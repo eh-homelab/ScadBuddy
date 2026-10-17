@@ -109,6 +109,28 @@ class _HeldPresets:
         return self._answer()
 
 
+def _count_shields(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Awaitable[None]]:
+    """A wait until ``n`` opens are waiting on the shared first read (#3809 review). An open
+    awaits the shield the moment it makes it, so counting shields counts waiting opens,
+    with no guess at how long that takes."""
+    shields = 0
+    real = asyncio.shield
+
+    def counting(arg: Awaitable[catalogue._Catalogue]) -> asyncio.Future[catalogue._Catalogue]:
+        nonlocal shields
+        shields += 1
+        return real(arg)
+
+    monkeypatch.setattr(asyncio, "shield", counting)
+
+    async def until(n: int) -> None:
+        async with asyncio.timeout(5):
+            while shields < n:
+                await asyncio.sleep(0)
+
+    return until
+
+
 def _preset_routes() -> tuple[respx.Route, respx.Route]:
     return (
         respx.get(f"{API}/slicer/presets").mock(return_value=_ok("slicer-presets-h2c.json")),
@@ -426,20 +448,17 @@ async def test_a_failed_catalogue_read_is_not_kept(
 
 @respx.mock
 async def test_opens_with_nothing_kept_share_one_read(
-    bambuddy: BambuddyClient, tmp_path: Path
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#2906: with no catalogue kept yet (a fresh volume, a new key), opens at once
     each read /slicer/presets (~6 s, 1 MB). They now wait on one read."""
     held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
     respx.get(f"{API}/slicer/presets").mock(side_effect=held)
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    waiting = _count_shields(monkeypatch)
 
     opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(3)]
-    async with asyncio.timeout(5):
-        await held.asked.wait()
-        # Every open has reached its read, or the one read, by now.
-        for _ in range(20):
-            await asyncio.sleep(0.01)
+    await waiting(3)
     held.release.set()
     async with asyncio.timeout(5):
         first, *rest = await asyncio.gather(*opens)
@@ -451,25 +470,23 @@ async def test_opens_with_nothing_kept_share_one_read(
 
 @respx.mock
 async def test_an_open_given_up_on_does_not_cancel_the_read_the_others_wait_on(
-    bambuddy: BambuddyClient, tmp_path: Path
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#2906: choices_for cancels its catalogue read when another read fails first;
     that must not take the shared read from the opens still waiting on it."""
     held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
     respx.get(f"{API}/slicer/presets").mock(side_effect=held)
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    waiting = _count_shields(monkeypatch)
 
     given_up = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
-    waiting = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
-    async with asyncio.timeout(5):
-        await held.asked.wait()
-        for _ in range(20):
-            await asyncio.sleep(0.01)
+    still = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    await waiting(2)
     given_up.cancel()
     held.release.set()
 
     async with asyncio.timeout(5):
-        assert (await waiting).process
+        assert (await still).process
     assert given_up.cancelled()
     assert held.started == 1
     # Kept for the next open, though the one that started the read gave up on it.
@@ -478,17 +495,15 @@ async def test_an_open_given_up_on_does_not_cancel_the_read_the_others_wait_on(
 
 @respx.mock
 async def test_a_shared_read_that_fails_fails_every_open_and_is_not_kept(
-    bambuddy: BambuddyClient, tmp_path: Path
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     held = _HeldPresets(lambda: httpx.Response(500))
     presets = respx.get(f"{API}/slicer/presets").mock(side_effect=held)
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    waiting = _count_shields(monkeypatch)
 
     opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(2)]
-    async with asyncio.timeout(5):
-        await held.asked.wait()
-        for _ in range(20):
-            await asyncio.sleep(0.01)
+    await waiting(2)
     held.release.set()
     async with asyncio.timeout(5):
         outcomes = await asyncio.gather(*opens, return_exceptions=True)
@@ -499,6 +514,39 @@ async def test_a_shared_read_that_fails_fails_every_open_and_is_not_kept(
     # The next open reads again.
     presets.mock(side_effect=None, return_value=_ok("slicer-presets-h2c.json"))
     assert (await cached_catalogue(bambuddy, tmp_path)).process
+
+
+@respx.mock
+async def test_a_first_read_started_after_another_kept_the_file_reads_that_file(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3809 review: an open whose load missed just before another read kept the file
+    starts a read of its own; that read takes the kept file rather than ask again."""
+    presets, _ = _preset_routes()
+    await cached_catalogue(bambuddy, tmp_path)
+    path = next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir())
+
+    assert (await catalogue._first_read(bambuddy.config, path)).process
+    assert presets.call_count == 1
+
+
+@respx.mock
+async def test_shutdown_stops_a_first_read_too(bambuddy: BambuddyClient, tmp_path: Path) -> None:
+    """#3809 review: a first read still running at shutdown is cancelled and awaited, as
+    the refreshes are, so its client closes."""
+    held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
+    respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    opening = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    async with asyncio.timeout(5):
+        await held.asked.wait()
+    (reading,) = catalogue._reading.values()
+
+    await catalogue.stop_refreshes()
+
+    assert reading.cancelled()
+    opening.cancel()
+    await asyncio.gather(opening, return_exceptions=True)
 
 
 @respx.mock

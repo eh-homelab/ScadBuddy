@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -167,6 +167,70 @@ describe('LibraryPage', () => {
 
     renderPage(<LibraryPage />, { route: `/library?batch=${batch.id}` })
     expect(await screen.findByRole('dialog', { name: /^File 2 of 2 — / })).toBeInTheDocument()
+  })
+
+  it("prints a project's file list as one batch, from the folder linked to it (#2724)", async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const folder = await screen.findByTestId('library-folder-14')
+    // The visible name alone (#2879); the count and the project are its description.
+    expect(folder).toHaveAccessibleName('Raegan')
+    expect(folder).toHaveAccessibleDescription('3 files, project Reagan Keychain')
+    await user.click(folder)
+    await screen.findByTestId('library-file-140')
+    expect(screen.getByTestId('library-project')).toHaveTextContent('Select all in folder, then Print')
+    // Without Advanced the sliced file is not listed, so not selected either.
+    await user.click(screen.getByTestId('library-select-all'))
+    expect(screen.getByTestId('library-select-all')).toBeDisabled()
+    await user.click(screen.getByTestId('library-print-selected'))
+    expect(await screen.findByRole('dialog', { name: /^File 1 of 2 — keychain-reagan\.3mf$/ })).toBeInTheDocument()
+    expect(screen.getByTestId('batch-strip')).toHaveTextContent('keychain-reagan-2.3mf')
+  })
+
+  it('selects every listed printable file, sliced ones too under Advanced (#2724)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library?project=1' })
+    await screen.findByTestId('library-file-140')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await screen.findByTestId('library-file-142')
+    // It says what it adds: this folder's unticked files (#2757 review).
+    expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (3)')
+    await user.click(screen.getByTestId('library-select-all'))
+    expect(screen.getByTestId('library-print-selected')).toHaveTextContent('Print 3 files')
+    expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (0)')
+  })
+
+  it('selects nothing a search hides: Select all and its hint wait for the folder (#2757 review)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/Raegan' })
+    await screen.findByTestId('library-file-140')
+    expect(screen.getByTestId('library-select-all')).toBeEnabled()
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), 'bag clip')
+    await screen.findByTestId('library-search-summary')
+    expect(screen.getByTestId('library-select-all')).toBeDisabled()
+    expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (0)')
+    expect(screen.queryByTestId('library-project')).toBeNull()
+  })
+
+  it('adds each file once, however fast Select all in folder is pressed (#2757 review)', async () => {
+    renderPage(<LibraryPage />, { route: '/library?project=1' })
+    await screen.findByTestId('library-file-140')
+    const button = screen.getByTestId('library-select-all')
+    // Both presses before a render: the second sees the first one's files as unticked.
+    act(() => {
+      button.click()
+      button.click()
+    })
+    expect(await screen.findByTestId('library-print-selected')).toHaveTextContent('Print 2 files')
+  })
+
+  it("names the project on the tree's marker, and gives no Select all hint in an empty project folder (#3112, #3113)", async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const spares = await screen.findByTestId('library-folder-15')
+    expect(within(spares).getByTitle('Project Reagan Keychain')).toHaveTextContent('project')
+    await user.click(spares)
+    await waitFor(() => expect(screen.getByTestId('library-select-all')).toBeDisabled())
+    expect(screen.queryByTestId('library-project')).toBeNull()
+    await user.click(screen.getByTestId('library-folder-14'))
+    await screen.findByTestId('library-file-140')
+    expect(screen.getByTestId('library-project')).toHaveTextContent('Select all in folder, then Print')
   })
 
   it('says a ticked sliced file is left out of Arrange (#2286)', async () => {
@@ -477,6 +541,35 @@ describe('LibraryPage', () => {
     await user.click(screen.getByTestId('library-folder-root'))
 
     expect(await screen.findByTestId('library-file-89')).toBeInTheDocument()
+  })
+
+  it('scrolls the files back into view when a folder low in a long tree is chosen (#3957)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const pane = screen.getByTestId('library-pane')
+    const content = screen.getByTestId('library-content')
+    // Scrolled 800 px down the tree: the content column's top is 800 px above the pane's.
+    pane.scrollTop = 800
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 600))
+    vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, -800, 700, 400))
+
+    await user.click(screen.getByTestId('library-folder-1'))
+
+    await waitFor(() => expect(pane.scrollTop).toBe(0))
+  })
+
+  it('leaves the pane where it is when the files are already in view (#3957)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const pane = screen.getByTestId('library-pane')
+    pane.scrollTop = 40
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 600))
+    vi.spyOn(screen.getByTestId('library-content'), 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 10, 700, 400))
+
+    await user.click(screen.getByTestId('library-folder-1'))
+    await screen.findByTestId('library-file-67')
+
+    expect(pane.scrollTop).toBe(40)
   })
 
   it('says when the library cannot be read', async () => {

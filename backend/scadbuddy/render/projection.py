@@ -419,6 +419,21 @@ class JobProjection:
                 return None
             return self._release(conn, row, error=error)
 
+    def drop_claims(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
+        """Cancel an unfinished row whatever claims it holds (#2387: its model is being
+        deleted). Returns the cancelled job, or None when it had already settled."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE render_jobs SET state = 'cancelled', claims = 0, finished_at = %s,"
+                " error = %s WHERE id = %s AND slug = %s AND state IN ('pending', 'running')"
+                " RETURNING *",
+                (now(), error, job_id, slug),
+            ).fetchone()
+            if row is None:
+                return None
+            self._announce(conn, row["id"], row["slug"], "job.superseded")
+        return _job(row)
+
     def fail_legacy_running(self) -> list[Job]:
         """At start-up: fail the rows a pre-Temporal release's queue left running (no
         workflow), which nothing will finish. Its pending rows are `fail_legacy`'s."""
@@ -528,6 +543,17 @@ class JobProjection:
     def list_jobs(self) -> list[Job]:
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM render_jobs ORDER BY created_at, id").fetchall()
+        return [_job(row) for row in rows]
+
+    def unfinished(self, slug: str) -> list[Job]:
+        """Every pending or running job of ``slug``: a render, or an arrange of its
+        outputs (#2387: what deleting the model cancels)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('pending', 'running')"
+                " ORDER BY created_at, id",
+                (slug,),
+            ).fetchall()
         return [_job(row) for row in rows]
 
     def has_unfinished(self, slug: str) -> bool:

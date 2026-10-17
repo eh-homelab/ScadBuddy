@@ -279,6 +279,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     expect(after).toMatchObject({ claimed: true })
     expect(after?.hop_claimed_at).not.toBeNull()
     expect(await escalations.moveDue()).toBe(0)
+    // The parent's retry while the claim is held is told the deny is in flight (#3910).
+    const retry = await refused(escalations.respond({ principal: OWNER, session: parent }, id, 'deny', {}))
+    expect([retry.status, retry.message]).toEqual([409, expect.stringContaining('a deny for that call is already in flight')])
+    // Once the lease is over, the sweep hands the entry to the person.
+    await db.sql`
+      UPDATE ai_pending_input SET hop_claimed_at = now() - make_interval(secs => ${CLAIM_LEASE_S + 1})
+      WHERE request_id = ${id}`
+    expect(await escalations.moveDue()).toBe(1)
+    expect((await row(id))?.hop).toBe('person')
   })
 
   it('a deny that does not land puts the deadline back and drops its claim (review #3018)', async () => {

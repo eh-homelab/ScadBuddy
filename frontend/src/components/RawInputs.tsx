@@ -29,6 +29,8 @@ export function RawInputs({ inputs, error, rows = 12, capped = false }: Props) {
       <p className={capped ? 'min-h-0 overflow-auto' : undefined}>
         These saved inputs could not be brought up to this template version: {error}
       </p>
+      {/* The floor's `1rem + 2px` is the Textarea's own `py-2` and `border`
+          (ui/textarea.tsx): change it with them, or three lines no longer fit (#3893 review). */}
       <Textarea
         readOnly
         rows={rows}

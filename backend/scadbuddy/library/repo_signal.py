@@ -85,7 +85,8 @@ class ModelsHeadFollower:
         mount holds up this channel, never the event loop.
 
         The cache is forgotten even when the walk raises (#3375), so a failed revalidation
-        never leaves stale revisions cached; it is not when the refresh is cancelled."""
+        never leaves stale revisions cached. A cancelled refresh forgets once its walk has
+        ended, never while it still runs (#3587)."""
         # Not cancellable: a listener cancelled at shutdown leaves the walk running on
         # the default executor until it ends, and the loop's close joins it.
         started = time.monotonic()
@@ -97,7 +98,7 @@ class ModelsHeadFollower:
             except asyncio.CancelledError:
                 # The walk outlives the cancelled listener; whatever it raises then is
                 # retrieved here, not reported as never retrieved at shutdown.
-                walk.add_done_callback(_settled)
+                walk.add_done_callback(lambda done: self._settled(done, model_ids))
                 raise
             except TimeoutError:
                 stalled = True
@@ -112,11 +113,11 @@ class ModelsHeadFollower:
                 try:
                     await walk
                 except asyncio.CancelledError:
-                    walk.add_done_callback(_settled)
+                    walk.add_done_callback(lambda done: self._settled(done, model_ids))
                     raise
         except asyncio.CancelledError:
             # The walk is still running: a read between a forget now and its end would
-            # cache the state from before it again, so nothing is forgotten (#3496).
+            # cache the state from before it again, so it forgets when it ends (#3587).
             raise
         except BaseException:
             # Even when the walk failed (#3375): `head` stays where it was, but what is
@@ -132,6 +133,12 @@ class ModelsHeadFollower:
             # the same refresh, so one stuck mount is not counted twice (#3375).
             extra={"models": _count(model_ids), "seconds": took, "stalled": stalled},
         )
+
+    def _settled(self, walk: asyncio.Future[None], model_ids: list[str] | None) -> None:
+        """An orphaned walk has ended: retrieve its outcome, and forget what it revalidated
+        for, as a refresh that was not cancelled would have (#3587)."""
+        _settled(walk)
+        self._forget(model_ids)
 
     def _forget(self, model_ids: list[str] | None) -> None:
         if self.catalogue is not None:

@@ -357,6 +357,20 @@ export class TurnTrace implements GateTrace {
     call.ended = false
   }
 
+  /**
+   * What a turn that lost its claim spent and could not add to its session (manager.ts
+   * chargeLostTurn): kept on the open segment, so the spend that never reached
+   * `cost_usd` can be found and summed, not only read off a log line (#3888 review).
+   * That is the segment finish() ends with the outcome and `scadbuddy.cost_usd`: the root
+   * `agent.turn`, or an `agent.turn.resume` when the turn parked and its root has ended
+   * (an ended span drops an attribute). Sum it by attribute, across both span names
+   * (#3928 review).
+   */
+  unrecordedSpend(usd: number): void {
+    if (this.#finished) return
+    this.#openSegment().span.setAttribute('scadbuddy.unrecorded_cost_usd', usd)
+  }
+
   /** The turn failed with `err`: its class goes on the open segment if the outcome is `failed`, never its message. */
   fail(err: unknown): void {
     this.#failure ??= { err }

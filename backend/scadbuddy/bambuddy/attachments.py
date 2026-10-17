@@ -22,7 +22,7 @@ import asyncio
 import logging
 import re
 import weakref
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import IO, Literal
 
 from fastapi import status
@@ -54,6 +54,18 @@ ATTACHMENT_LOCK_CLASS = 0x5342_5041
 
 class TooManyAttachmentsError(Exception):
     """The print already keeps ``MAX_ATTACHMENTS``."""
+
+
+class AlreadyPromotedError(Exception):
+    """The template's gallery has a copy of the attachment already."""
+
+
+class PromoteInProgressError(Exception):
+    """Another promote of the attachment to the template holds a live claim."""
+
+
+class AttachmentGoneError(Exception):
+    """The attachment's row is gone."""
 
 
 class Attachment(BaseModel):
@@ -103,9 +115,30 @@ class AttachmentStore:
     ) -> Attachment | None:
         return await asyncio.to_thread(self._set_caption, archive_id, attachment_id, caption)
 
-    async def promoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
-        """Note that ``slug``'s gallery has a copy."""
-        await asyncio.to_thread(self._promoted, archive_id, attachment_id, slug)
+    async def claim_promote(
+        self, archive_id: int, attachment_id: int, slug: str, token: str, lease: timedelta
+    ) -> None:
+        """Claim the copy of the attachment to ``slug``'s gallery for ``token``'s run.
+
+        Taken under the row's lock, so of two promotes only one copies (#3785 review).
+        Raises `AlreadyPromotedError` once the copy has landed, `PromoteInProgressError`
+        while another run's claim is younger than ``lease``, and `AttachmentGoneError`
+        when the row is gone. A claim older than ``lease`` is taken over: its run was
+        killed mid-copy and never let it go. A claim that is already ``token``'s is taken
+        back at once: the same operation, retried."""
+        await asyncio.to_thread(self._claim_promote, archive_id, attachment_id, slug, token, lease)
+
+    async def promote_landed(
+        self, archive_id: int, attachment_id: int, slug: str, token: str
+    ) -> None:
+        """The copy is in ``slug``'s gallery: mark it, and let ``token``'s claim go."""
+        await asyncio.to_thread(self._promote_landed, archive_id, attachment_id, slug, token)
+
+    async def release_promote(
+        self, archive_id: int, attachment_id: int, slug: str, token: str
+    ) -> None:
+        """The copy did not land: let ``token``'s claim go, and only that one."""
+        await asyncio.to_thread(self._release_promote, archive_id, attachment_id, slug, token)
 
     async def remove(self, attachment_id: int) -> None:
         await asyncio.to_thread(self._remove, attachment_id)
@@ -184,12 +217,52 @@ class AttachmentStore:
             ).fetchone()
         return Attachment.model_validate(dict(row)) if row is not None else None
 
-    def _promoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
+    def _claim_promote(
+        self, archive_id: int, attachment_id: int, slug: str, token: str, lease: timedelta
+    ) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            # The lease is read in SQL, so the claim's time is never parsed out of jsonb.
+            row = conn.execute(
+                "SELECT %(slug)s = ANY(promoted_to) AS promoted,"
+                " promoting -> %(slug)s ->> 'token' AS holder,"
+                " (promoting -> %(slug)s ->> 'at')::timestamptz > now() - %(lease)s AS live"
+                " FROM print_attachments WHERE archive_id = %(archive)s AND id = %(id)s"
+                " FOR UPDATE",
+                {"slug": slug, "lease": lease, "archive": archive_id, "id": attachment_id},
+            ).fetchone()
+            if row is None:
+                raise AttachmentGoneError
+            if row["promoted"]:
+                raise AlreadyPromotedError
+            if row["live"] and row["holder"] != token:
+                raise PromoteInProgressError
+            conn.execute(
+                "UPDATE print_attachments SET promoting = promoting || jsonb_build_object("
+                "%s::text, jsonb_build_object('token', %s::text, 'at', now()))"
+                " WHERE archive_id = %s AND id = %s",
+                (slug, token, archive_id, attachment_id),
+            )
+
+    def _promote_landed(self, archive_id: int, attachment_id: int, slug: str, token: str) -> None:
+        with self._pool.connection() as conn:
+            # Marked even when another run has taken the claim over: the copy is there.
+            conn.execute(
+                "UPDATE print_attachments SET"
+                " promoted_to = CASE WHEN %(slug)s = ANY(promoted_to) THEN promoted_to"
+                " ELSE array_append(promoted_to, %(slug)s) END,"
+                " promoting = CASE WHEN promoting -> %(slug)s ->> 'token' = %(token)s"
+                " THEN promoting - %(slug)s ELSE promoting END"
+                " WHERE archive_id = %(archive)s AND id = %(id)s",
+                {"slug": slug, "token": token, "archive": archive_id, "id": attachment_id},
+            )
+
+    def _release_promote(self, archive_id: int, attachment_id: int, slug: str, token: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE print_attachments SET promoted_to = array_append(promoted_to, %s)"
-                " WHERE archive_id = %s AND id = %s AND NOT (%s = ANY(promoted_to))",
-                (slug, archive_id, attachment_id, slug),
+                "UPDATE print_attachments SET promoting = promoting - %(slug)s"
+                " WHERE archive_id = %(archive)s AND id = %(id)s"
+                " AND promoting -> %(slug)s ->> 'token' = %(token)s",
+                {"slug": slug, "token": token, "archive": archive_id, "id": attachment_id},
             )
 
     def _remove(self, attachment_id: int) -> None:
@@ -212,23 +285,41 @@ class AttachmentStore:
 
 
 async def sweep_gone_archives(client: BambuddyClient, store: AttachmentStore) -> int:
-    """#3047: forget the attachments of each archive Bambuddy no longer has. The photos
-    went with the archive; a promoted copy is the template's own now, and stays. Only
-    Bambuddy's own "Archive not found" is "gone" (`BambuddyClient.archive_deleted`):
-    any other answer, a 404 that is not Bambuddy's included, stops the sweep, which the
-    next tick runs again, so a wrong URL or an outage never forgets anything. Returns
-    how many archives it forgot."""
+    """#3047: forget the attachments of each archive Bambuddy no longer has: how many
+    archives it forgot.
+
+    Only the rows go. The archive photos went with the archive; each copy in the
+    project's ``Media/`` folder (every video, and each photo's copy) is a library file,
+    which deleting the archive leaves in Bambuddy's library, and it stays there,
+    untracked. A promoted copy is the template's own now, and stays too.
+
+    Only Bambuddy's own "Archive not found" is "gone" (`BambuddyClient.archive_deleted`).
+    Any other answer, a 404 that is not Bambuddy's included, forgets nothing for that
+    archive: it is logged, the sweep goes on to the next, and the first such error is
+    raised once every archive has been asked, so one archive that keeps failing neither
+    blocks the others nor passes unnoticed. A wrong URL or an outage forgets nothing."""
     gone = 0
+    failed: Exception | None = None
     for archive_id in await store.archive_ids():
-        if await client.archive_deleted(archive_id):
+        try:
+            deleted = await client.archive_deleted(archive_id)
+        except Exception as error:
+            logger.warning("could not tell whether archive %s is gone", archive_id, exc_info=True)
+            failed = failed or error
+            continue
+        if deleted:
             await store.forget_archive(archive_id)
             gone += 1
+    if failed is not None:
+        raise failed
     return gone
 
 
 #: One lock per project while its ``Media/`` is looked for and made, so two prints of a
-#: project attached at once make one folder, not two: their operations' subjects are
-#: per print. Held only while some upload needs it.
+#: project attached at once in this process make one folder: their operations' subjects
+#: are per print. It is per replica: two replicas can each make one, and `media_folder`
+#: then keeps using the lowest id, so attachments stay together and the other folder is
+#: left empty (#3046). Held only while some upload needs it.
 _MEDIA_LOCKS: weakref.WeakValueDictionary[tuple[str, int], asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )

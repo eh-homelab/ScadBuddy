@@ -32,3 +32,11 @@ export function trackingDuplicates(problem: Problem): string[] | undefined {
   if (!Array.isArray(slugs) || slugs.length === 0) return undefined
   return slugs.map(String)
 }
+
+/**
+ * A delete refused because a render of the model is queued or running (#2387), most
+ * often the preview its own page started: the `render_in_progress` problem extension.
+ */
+export function renderInProgress(problem: Problem): boolean {
+  return problem.render_in_progress === true
+}

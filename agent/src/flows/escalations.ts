@@ -230,10 +230,13 @@ export class Escalations {
         role: 'parent',
       })
     } catch (err) {
-      // Released only when the Update surely did not land: a refusal, or no workflow. One
-      // that timed out may have been accepted, and putting a passed deadline back would let
-      // the sweep hand the entry to the person while the deny lands (#2861). That claim is
-      // left for `CLAIM_LEASE_S` to end (#3518).
+      // Released only when the Update surely did not land: a refusal, or no workflow. Any
+      // DurableUnavailable keeps the claim until `CLAIM_LEASE_S` ends (#3518), a failure
+      // before the Update was sent (Temporal unreachable) included: the client cannot tell
+      // that from one that timed out after it was sent, which may have been accepted, and
+      // putting a passed deadline back would let the sweep hand the entry to the person
+      // while the deny lands (#2861). Meanwhile the parent's retry is DENY_IN_FLIGHT, and
+      // the entry reaches the person when the lease ends (#3908).
       if (!(err instanceof DurableUnavailable)) await release()
       throw err
     }

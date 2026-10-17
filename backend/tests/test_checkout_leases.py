@@ -83,12 +83,37 @@ async def test_a_crashed_holders_lease_expires(pg_pool: PgPool, tmp_path: Path) 
         assert api.leased(checkout) == []
 
 
-async def test_a_live_lease_is_renewed_past_its_ttl(pg_pool: PgPool, tmp_path: Path) -> None:
-    worker, api = _gate(pg_pool, tmp_path, ttl=0.6), _gate(pg_pool, tmp_path)
+async def test_a_live_lease_is_renewed_past_its_ttl(
+    pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checked as a renewal lands, not at a wall-clock time (#3855): a loaded runner can
+    stall a renewal past the TTL, so the row lapses until the next one. That stall is
+    made here, on the first renewal, so the check cannot pass on timing alone. It relies
+    on a renewal reviving a lapsed row: ``renew`` has no ``expires_at > now()`` guard. A
+    guard added there is a change to this test's premise, not a regression it catches
+    (#3931 review)."""
+    ttl = 1.5
+    leases = CheckoutLeases(pg_pool, tmp_path, ttl=ttl)
+    renew = leases.renew
+    renewed_at: list[float] = []
+
+    def stalled_then_renewed(token: Any) -> None:
+        if not renewed_at:
+            time.sleep(ttl * 1.4)
+        renew(token)
+        renewed_at.append(time.monotonic())
+
+    monkeypatch.setattr(leases, "renew", stalled_then_renewed)
+    worker, api = CheckoutGate(leases), _gate(pg_pool, tmp_path)
     checkout = _checkout(tmp_path)
+    started = time.monotonic()
 
     async with worker.rendering(JOB, [checkout]):
-        await asyncio.sleep(1.5)
+        # A renewal that landed two TTLs in: the lease taken at the start has been carried
+        # past its own expiry, and this one has just set a fresh TTL to be read within.
+        async with asyncio.timeout(30):
+            while not renewed_at or renewed_at[-1] < started + 2 * ttl:
+                await asyncio.sleep(0.01)
         assert await asyncio.to_thread(api.leased, checkout) == [JOB]
 
 

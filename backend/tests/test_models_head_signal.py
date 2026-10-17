@@ -245,11 +245,14 @@ def test_a_refresh_is_slow_past_its_listeners_liveness_interval(paths: DataPaths
     assert follower.slow_after == 7.5
 
 
+@pytest.mark.parametrize("fails", [True, False], ids=["walk-fails", "walk-succeeds"])
 async def test_a_cancelled_refresh_retrieves_its_walks_failure(
-    paths: DataPaths, caplog: pytest.LogCaptureFixture
+    paths: DataPaths, caplog: pytest.LogCaptureFixture, fails: bool
 ) -> None:
     """#2617 review: a listener cancelled mid-walk leaves the walk running; its failure
-    is retrieved then, not reported as never retrieved."""
+    is retrieved then, not reported as never retrieved. #3587: nothing is forgotten
+    while the walk runs, and what it revalidated for is forgotten once it ends, whether
+    it failed or not."""
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener()))
     follower.slow_after = 5.0
@@ -262,7 +265,8 @@ async def test_a_cancelled_refresh_retrieves_its_walks_failure(
         entered.set()
         release.wait(PROMPTLY)
         failing.set()
-        raise OSError("stale NFS file handle")
+        if fails:
+            raise OSError("stale NFS file handle")
 
     forgotten: list[list[str] | None] = []
 
@@ -283,21 +287,24 @@ async def test_a_cancelled_refresh_retrieves_its_walks_failure(
             with pytest.raises(asyncio.CancelledError):
                 await refreshing
             del refreshing
-            # The walk fails only now, after the cancel (#3377: an event, not a sleep).
+            # Cancelled mid-walk: nothing is forgotten while the walk still runs.
+            assert forgotten == []
+            # The walk ends only now, after the cancel (#3377: an event, not a sleep).
             release.set()
             assert await asyncio.to_thread(failing.wait, PROMPTLY)
-            await _until(
-                lambda: any(r.getMessage().startswith("a cancelled models") for r in caplog.records)
-            )
+            await _until(lambda: forgotten == [["keychain"]])
             gc.collect()
             await asyncio.sleep(0)
     finally:
         loop.set_exception_handler(None)
     assert [c["message"] for c in reported] == []
-    # #3496: cancelled mid-walk, nothing is forgotten while the walk still runs.
-    assert forgotten == []
-    [settled] = [r for r in caplog.records if r.getMessage().startswith("a cancelled models")]
-    assert settled.exc_info is not None and isinstance(settled.exc_info[1], OSError)
+    assert forgotten == [["keychain"]]
+    settled = [r for r in caplog.records if r.getMessage().startswith("a cancelled models")]
+    if fails:
+        assert len(settled) == 1
+        assert settled[0].exc_info is not None and isinstance(settled[0].exc_info[1], OSError)
+    else:
+        assert settled == []
 
 
 async def test_the_follower_refreshes_off_the_loop_and_moves_head_after(

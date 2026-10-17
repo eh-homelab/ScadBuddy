@@ -225,10 +225,11 @@ class TriggerStore:
         left by an edit while Temporal was away)."""
         return await self._call(self._admit, trigger_id, fire_key, rate_cap, checked, scheduled)
 
-    async def begin_start(self, trigger_id: str, fire_key: str) -> bool:
+    async def begin_start(self, trigger_id: str, fire_key: str) -> str | None:
         """Mark the admitted fire as starting its run, under the trigger's row lock (#3347):
-        False, and nothing may start, once it is `ADMITTED_DEAD` old. Marked, it counts
-        toward the rate cap however long its start then takes."""
+        None when it may start, else why nothing may: `deleted`, or `expired` once it is
+        `ADMITTED_DEAD` old. Marked, it counts toward the rate cap however long its start
+        then takes."""
         return await self._call(self._begin_start, trigger_id, fire_key)
 
     # -- implementation -------------------------------------------------------------
@@ -649,16 +650,19 @@ class TriggerStore:
             )
         return None
 
-    def _begin_start(self, trigger_id: str, fire_key: str) -> bool:
+    def _begin_start(self, trigger_id: str, fire_key: str) -> str | None:
         with self._pool.connection() as conn, conn.transaction():
             if self._locked_trigger(conn, trigger_id) is None:
-                return False
-            # The clock once the lock is held, not the transaction's start: an `_admit`
-            # that held it and found the fire dead must find this refused too.
+                return "deleted"
+            # The clock once the lock is held, not the transaction's start, so the fire is
+            # never younger here than an `_admit` before it saw it: one that `_admit` found
+            # dead (by `now()`, its own transaction's start, earlier still) is refused here
+            # too. The guarantee is one-way, which is the safe way: `_admit` can only see a
+            # fire younger than it is, and so count it.
             row = conn.execute(
                 "UPDATE flow_trigger_fires SET starting_at = clock_timestamp()"
                 " WHERE trigger_id = %s AND fire_key = %s AND outcome = 'admitted'"
                 " AND clock_timestamp() - fired_at < %s RETURNING 1",
                 (trigger_id, fire_key, ADMITTED_DEAD),
             ).fetchone()
-        return row is not None
+        return None if row is not None else "expired"

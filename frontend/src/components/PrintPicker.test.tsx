@@ -685,7 +685,9 @@ describe('PrintPicker', () => {
     // on it then does nothing (seen under load: the run was never sent).
     await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await screen.findByTestId('queued-items')
+    // The run itself, not the queued items it later shows: under load the slice and
+    // queue that follow can outlast a find (#3960).
+    await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toMatchObject({
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]) },
       choices: { tier: null, process_name: '0.24mm Standard @BBL H2C' },
@@ -2643,11 +2645,11 @@ describe('PrintPicker · Projects', () => {
   })
 
   it('files the print under the project the run chose when the project list could not be read (#1830)', async () => {
-    // The server remembers project 2 as the last one printed to.
-    await fetch('/api/v1/print/projects/last', {
+    // The server's default project is 2.
+    await fetch('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: 2 }),
+      body: JSON.stringify({ last_project_id: 2 }),
     })
     const runs = watch('POST', '/run')
     const { bodies } = watch('POST', '/project')

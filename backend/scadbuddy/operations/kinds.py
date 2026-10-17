@@ -132,6 +132,10 @@ class ThreadSteps:
 #: The run's steps, set by the run's activity (`workflows/operation_activities.py`);
 #: None outside one.
 THREAD_STEPS: ContextVar[ThreadSteps | None] = ContextVar("thread_steps", default=None)
+#: The operation a run belongs to (its workflow's id, the same on every attempt), set by
+#: the run's activity; None outside one. A run's claim is keyed by it, so the same
+#: operation's retry can take its own claim back.
+OPERATION_RUN: ContextVar[str | None] = ContextVar("operation_run", default=None)
 
 
 async def to_thread_to_end[T](fn: Callable[[], T], landed: Callable[[T], None] | None = None) -> T:

@@ -275,7 +275,13 @@ def _sweep(kept: Path) -> None:
 
 async def _first_read(config: BambuddyConfig, path: Path) -> _Catalogue:
     """The read every open with nothing kept waits on, with a client of its own: the
-    open that started it may answer, or be given up on, before it ends."""
+    open that started it may answer, or be given up on, before it ends.
+
+    An open's load can miss just before another read keeps the file and leaves
+    ``_reading``, so this looks again first and takes what was kept (#3809 review)."""
+    kept = await asyncio.to_thread(_load, path)
+    if kept is not None:
+        return kept[1]
     async with BambuddyClient(config) as client:
         catalogue = await _catalogue(client)
     try:
@@ -311,8 +317,9 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
 
 
 async def stop_refreshes() -> None:
-    """Cancel this process's background reads and wait for them, at shutdown (#3446)."""
-    tasks = list(_refreshing.values())
+    """Cancel this process's background reads and wait for them, at shutdown (#3446):
+    the refreshes and any first read still running, so each closes its client."""
+    tasks = [*_refreshing.values(), *_reading.values()]
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

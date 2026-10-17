@@ -48,7 +48,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
-import { chatToRestore, rememberSession, rememberedSession } from './panelMemory'
+import { rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
 import { SessionBackgroundTasks } from './SessionBackgroundTasks'
 import { SessionFiles } from './SessionFiles'
 import { RunsWaiting } from './RunsWaiting'
@@ -432,8 +432,9 @@ export function AssistantChat({
 
   // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
   // under way, rather than a blank new chat beside a turn that is still spending. Only a
-  // reloaded tab (#3164): a new one opens on a new chat, and a panel remounted in it keeps
-  // the chat it showed (`chatToRestore`).
+  // reloaded tab (#3164): a new one opens on a new chat. So does a panel remounted on the
+  // same page: it unmounts only when the assistant is off, which forgets the chat (#2372,
+  // #3871 review).
   const restored = useRef(false)
   useEffect(() => {
     if (restored.current || !state.listed) return
@@ -442,7 +443,7 @@ export function AssistantChat({
       rememberSession(state.activeId)
       return
     }
-    const id = chatToRestore(reloaded, rememberedSession(), state.order, state.sessions)
+    const id = reloaded ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
     if (id) select(id)
     // A remembered chat that is no longer listed, with nothing under way to show instead.
     else rememberSession(null)
@@ -530,6 +531,18 @@ export function AssistantChat({
       chat.patch(patchOf((await api.updateAiSession(id, edit)).session))
     } catch (caught) {
       throw reason(caught)
+    }
+  }
+  // #3738 — the open chat's Archive and Unarchive: a refusal is shown for that chat only.
+  // True once the agent took it.
+  const setArchived = async (id: string, archived: boolean): Promise<boolean> => {
+    setArchiveError(null)
+    try {
+      await updateSession(id, { archived })
+      return true
+    } catch (caught) {
+      setArchiveError({ id, message: caught instanceof Error ? caught.message : String(caught) })
+      return false
     }
   }
   // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
@@ -742,19 +755,14 @@ export function AssistantChat({
             </Button>
           </Tip>
           {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
-              went unfound. Offered as there, to the owner, while no turn runs or waits. */}
+              went unfound. Offered as there, to the owner, while no turn runs or waits (`isBusy`). */}
           {owned && !busy && !archived && (
             <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
               <Button
                 variant="ghost"
                 size="sm"
                 data-agent-user-only=""
-                onClick={() => {
-                  setArchiveError(null)
-                  updateSession(active.id, { archived: true }).catch((caught: unknown) =>
-                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) }),
-                  )
-                }}
+                onClick={() => void setArchived(active.id, true)}
               >
                 Archive
               </Button>
@@ -1022,11 +1030,9 @@ export function AssistantChat({
                 variant="outline"
                 data-agent-user-only=""
                 onClick={() => {
-                  setArchiveError(null)
                   unarchiving.current = true
-                  updateSession(active.id, { archived: false }).catch((caught: unknown) => {
-                    unarchiving.current = false
-                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) })
+                  void setArchived(active.id, false).then((done) => {
+                    if (!done) unarchiving.current = false
                   })
                 }}
               >

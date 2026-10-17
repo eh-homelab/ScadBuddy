@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tier } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
+import { CLAIM_LEASE_S, Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { SessionError } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
@@ -177,6 +177,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await escalations.deliver()).toBe(0)
     expect(await hop(archived)).toMatchObject({ hop: 'person' })
     expect(sent).toEqual([])
+  })
+
+  it('a skip leaves an entry a deny claimed meanwhile at the parent, and the lease hands it on (#3910)', async () => {
+    const id = await park()
+    // The owner's tiers are read after the waiting entries were selected: a deny that
+    // claims the entry then, as the parent's own deny would, races the skip that follows.
+    const racing = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send,
+      currentTiers: async () => {
+        await db.sql`UPDATE ai_pending_input SET hop_until = 'infinity', hop_claimed_at = now() WHERE request_id = ${id}`
+        return ['read']
+      },
+    })
+    expect(await racing.deliver()).toBe(0)
+    expect(await hop(id)).toMatchObject({ hop: 'parent' })
+    expect(sent).toEqual([])
+    // Once the claim's lease is over, the sweep hands it to the person.
+    await db.sql`
+      UPDATE ai_pending_input SET hop_claimed_at = now() - make_interval(secs => ${CLAIM_LEASE_S + 1})
+      WHERE request_id = ${id}`
+    expect(await escalations.moveDue()).toBe(1)
+    expect(await hop(id)).toMatchObject({ hop: 'person' })
   })
 
   it('a handed-off starter session, or a revoked token, is no parent', async () => {

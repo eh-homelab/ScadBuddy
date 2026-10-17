@@ -188,6 +188,10 @@ describe('errorName', () => {
     const terminated = Object.assign(new Error('terminating connection'), { name: 'PostgresError', code: '57P01' })
     expect(errorName(terminated)).toBe('PostgresError 57P01')
     expect(errorName(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }))).toBe('Error ECONNREFUSED')
+    // Node's own codes are longer than an errno's; the cap keeps them.
+    expect(errorName(Object.assign(new Error('x'), { code: 'ERR_SCRIPT_EXECUTION_TIMEOUT' }))).toBe(
+      'Error ERR_SCRIPT_EXECUTION_TIMEOUT',
+    )
     expect(errorName(new ToolError('Bambuddy did not answer', 502, 'upstream said postgres://u:p@h'))).toBe('ToolError 502')
     // A code that could quote something, and a status that is not one, are left out.
     expect(errorName(Object.assign(new Error('x'), { code: 'postgres://user:secret@db' }))).toBe('Error')

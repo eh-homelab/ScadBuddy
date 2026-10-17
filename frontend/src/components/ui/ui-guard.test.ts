@@ -30,6 +30,53 @@ describe('the shadcn components (src/components/ui)', () => {
   })
 })
 
+/**
+ * Every Tailwind 4 utility that takes a colour from the theme (`--color-*`), but `bg`:
+ * the one where `accent` and `muted`, shadcn's surfaces, belong.
+ */
+const COLOUR_UTILITIES = [
+  'text',
+  'decoration',
+  'border',
+  'border-(?:[xytrblse]|bs|be)',
+  'divide',
+  'outline',
+  'ring',
+  'ring-offset',
+  'inset-ring',
+  'shadow',
+  'inset-shadow',
+  'drop-shadow',
+  'text-shadow',
+  'accent',
+  'caret',
+  'fill',
+  'stroke',
+  'placeholder',
+  'from',
+  'via',
+  'to',
+  // Mask gradient stops: mask-linear-from-*, mask-radial-to-*, mask-t-from-* …
+  'mask(?:-[a-z]+)?-(?:from|to)',
+]
+
+/** `accent` or `muted` in one of them, with any opacity (`/70`, `/[0.7]`) and `!`. */
+const NOT_A_SURFACE = new RegExp(
+  `(?<![\\w-])(?:${COLOUR_UTILITIES.join('|')})-(?:accent|muted)(?:/(?:\\d+|\\[[^\\]]+\\]|\\([^)]+\\)))?!?(?![\\w-])`,
+  'g',
+)
+
+/** The same as an arbitrary value: `text-(--color-muted)`, `text-[var(--color-accent)]`. */
+const NOT_A_SURFACE_VALUE = new RegExp(
+  `(?<![\\w-])(?:${COLOUR_UTILITIES.join('|')})-(?:\\((?:[\\w-]+:)?|\\[(?:[\\w-]+:)?var\\()--color-(?:accent|muted)(?![\\w-])`,
+  'g',
+)
+
+/** What either pattern finds in `text`. */
+function found(text: string): string[] {
+  return [...(text.match(NOT_A_SURFACE) ?? []), ...(text.match(NOT_A_SURFACE_VALUE) ?? [])]
+}
+
 describe('the colour names', () => {
   it('keeps no ui-accent or ui-muted, the names shadcn’s surfaces had during the conversion', () => {
     expect(matches(/(?<![\w-])[\w:-]*ui-(?:accent|muted)(?![\w-])/g)).toEqual([])
@@ -39,9 +86,67 @@ describe('the colour names', () => {
     // `accent` was ScadBuddy's amber and `muted` its secondary text; both are shadcn's
     // surfaces now (index.css). The amber is `primary` and the secondary text `subtle`,
     // so a `text-muted` left over would be a surface colour used as text.
-    expect(
-      matches(/(?<![\w-])(?:text|border|ring|outline|decoration|fill|stroke|divide|placeholder|caret|from|via|to|shadow)-(?:accent|muted)(?:\/\d+)?(?![\w-])/g),
-    ).toEqual([])
+    expect([...matches(NOT_A_SURFACE), ...matches(NOT_A_SURFACE_VALUE)]).toEqual([])
+  })
+
+  it.each([
+    'text-muted',
+    'hover:text-accent',
+    'text-muted/70',
+    'text-muted/[0.7]',
+    'text-muted!',
+    '!text-muted',
+    'text-muted/(--x)',
+    'text-(--color-muted)',
+    'border-t-(color:--color-accent)',
+    'text-[var(--color-accent)]',
+    'ring-[color:var(--color-muted)]',
+    'border-muted',
+    'border-t-muted',
+    'border-x-accent',
+    'border-s-muted',
+    'border-bs-muted',
+    'divide-muted',
+    'outline-accent',
+    'ring-muted',
+    'ring-offset-accent',
+    'inset-ring-muted',
+    'shadow-muted/20',
+    'inset-shadow-accent',
+    'drop-shadow-muted',
+    'text-shadow-accent',
+    'decoration-muted',
+    'accent-muted',
+    'caret-accent',
+    'fill-muted',
+    'stroke-accent',
+    'placeholder-muted',
+    'from-accent',
+    'via-muted',
+    'to-accent',
+    'mask-linear-from-muted',
+    'mask-radial-to-accent',
+    'mask-t-from-muted',
+  ])('catches %s', (name) => {
+    expect(found(`<p className="x ${name} y">`)).toHaveLength(1)
+  })
+
+  it.each([
+    'bg-muted',
+    'hover:bg-muted/50',
+    'bg-accent',
+    'text-muted-foreground',
+    'text-accent-foreground',
+    'bg-sidebar-accent',
+    'text-subtle',
+    'text-primary',
+    'border-border',
+    'muted',
+    'bg-(--color-muted)',
+    'bg-[var(--color-accent)]',
+    'text-(--color-muted-foreground)',
+  ])('leaves %s alone', (name) => {
+    expect(found(`<p className="x ${name} y">`)).toEqual([])
   })
 })
 

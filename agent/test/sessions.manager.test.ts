@@ -28,6 +28,7 @@ import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 import { warmHarness } from './support/warm.js'
+import { resetTracing, testTracing, waitForSpan } from './support/tracing.js'
 
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
@@ -528,6 +529,81 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await running.done).toEqual({ kind: 'lost_claim' })
       await expect.poll(() => m.warm.size()).toBe(0)
       expect(lines.join('')).toContain('its spend of 0.02 USD was not recorded: connection refused')
+      await m.warm.close()
+    })
+
+    it("logs a charge refused on finish()'s lost path, and leaves the spend on the turn's span (#3888 review)", async () => {
+      const spans = testTracing()
+      await resetTracing()
+      const paths = await tempPaths()
+      const lines: string[] = []
+      const sql = new Proxy(db.sql, {
+        apply(target, self, args: unknown[]) {
+          const strings = args[0] as readonly string[] | undefined
+          if (Array.isArray(strings) && strings.join('').includes('SET cost_usd = cost_usd +')) {
+            return Promise.reject(new Error('connection refused'))
+          }
+          return Reflect.apply(target, self, args)
+        },
+      })
+      const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
+      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      // Its result is in and finish() has begun: another turn takes the session before
+      // its held check, so it goes the no-`held` way with a result to charge.
+      const cancelQuestions = m.questions.cancelPending.bind(m.questions)
+      vi.spyOn(m.questions, 'cancelPending').mockImplementationOnce(async (...args) => {
+        await db.sql`
+          UPDATE ai_sessions SET turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
+          WHERE id = ${session.id}`
+        return cancelQuestions(...args)
+      })
+      const running = await m.send(session.id, agentA, 'job')
+
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      expect(lines.join('')).toContain('its spend of 0.01 USD was not recorded: connection refused')
+      const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn' && s.attributes['scadbuddy.session_id'] === session.id)
+      expect(turn.attributes['scadbuddy.unrecorded_cost_usd']).toBeCloseTo(0.01)
+      await m.warm.close()
+    })
+
+    it("logs a charge refused on finish()'s release path, and leaves the spend on the turn's span (#3928 review)", async () => {
+      const spans = testTracing()
+      await resetTracing()
+      const paths = await tempPaths()
+      const lines: string[] = []
+      const sql = new Proxy(db.sql, {
+        apply(target, self, args: unknown[]) {
+          const strings = args[0] as readonly string[] | undefined
+          if (Array.isArray(strings) && strings.join('').includes('SET cost_usd = cost_usd +')) {
+            return Promise.reject(new Error('connection refused'))
+          }
+          return Reflect.apply(target, self, args)
+        },
+      })
+      const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
+      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      // Past finish()'s held check, before its release: the approvals cancel runs between
+      // the two, so another turn taking the session there sends it the no-`released` way.
+      const cancelApprovals = m.approvals.cancelPending.bind(m.approvals)
+      let taken = false
+      vi.spyOn(m.approvals, 'cancelPending').mockImplementation(async (...args) => {
+        // finish()'s own cancel, the one with the turn's ending as its reason.
+        if (!taken && args[1] === 'the turn ended') {
+          taken = true
+          await db.sql`
+            UPDATE ai_sessions SET turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
+            WHERE id = ${session.id}`
+        }
+        return cancelApprovals(...args)
+      })
+      const running = await m.send(session.id, agentA, 'job')
+
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      expect(lines.join('')).toContain('its spend of 0.01 USD was not recorded: connection refused')
+      const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn' && s.attributes['scadbuddy.session_id'] === session.id)
+      expect(turn.attributes['scadbuddy.unrecorded_cost_usd']).toBeCloseTo(0.01)
       await m.warm.close()
     })
 

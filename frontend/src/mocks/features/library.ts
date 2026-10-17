@@ -1,4 +1,5 @@
 import { HttpResponse, delay, http } from 'msw'
+import { BAMBUDDY_LIBRARY_FILES_MISSING } from '../../api/client'
 import type {
   LibraryFileName,
   AttachResult,
@@ -62,6 +63,10 @@ export const libraryFolders: LibraryFolderView[] = [
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
   // #2670 — a folder linked to a Bambuddy project: a move out of it takes a file out of the project.
   { id: 13, name: 'Lamp', parent_id: null, depth: 0, file_count: 1, project_id: 7, project_name: 'Desk lamp' },
+  // #2724 — the folder linked to a Bambuddy project: that project's file list.
+  { id: 14, name: 'Raegan', parent_id: null, depth: 0, file_count: 3, project_id: 1, project_name: 'Reagan Keychain' },
+  // #2757 review — Bambuddy links a project to several folders; this is the second.
+  { id: 15, name: 'Raegan spares', parent_id: null, depth: 0, file_count: 0, project_id: 1, project_name: 'Reagan Keychain' },
   // #2165 — a name repeated under another folder, as the live library has it.
   { id: 10, name: 'Spec', parent_id: null, depth: 0, file_count: 0 },
   { id: 11, name: 'MakerWorld', parent_id: 10, depth: 1, file_count: 0 },
@@ -109,6 +114,9 @@ export const libraryFiles: LibraryEntry[] = [
   entry(120, 'drawer-label.3mf', '3mf', 12),
   entry(121, 'alex-headphone-hook.3mf', '3mf', 12),
   entry(122, 'nas-share-bracket.3mf', '3mf', 12, { is_external: true }),
+  entry(140, 'keychain-reagan.3mf', '3mf', 14),
+  entry(141, 'keychain-reagan-2.3mf', '3mf', 14),
+  entry(142, 'keychain-reagan.gcode.3mf', 'gcode.3mf', 14),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
   // #2670 — the Desk lamp project's file.
   entry(130, 'lamp-shade.3mf', '3mf', 13),
@@ -189,12 +197,17 @@ export const handlers = [
   // #2349 — names by id; a file the mock library does not have is `name: null`.
   http.get(`${base}/print/library/names`, ({ request }) => {
     const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
-    return HttpResponse.json(
-      ids.map((id) => {
-        const file = listedFiles().find((row) => row.id === id)
-        return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
-      }) satisfies LibraryFileName[],
-    )
+    const names = ids.map((id) => {
+      const file = listedFiles().find((row) => row.id === id)
+      return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
+    }) satisfies LibraryFileName[]
+    // The route's rule: several files asked and none found reads as a misrouted Bambuddy.
+    if (names.length > 1 && names.every((file) => file.name === null)) {
+      return problem(502, 'Bambuddy has none of these library files', 'Bambuddy has none of these library files; is its URL right?', {
+        type: BAMBUDDY_LIBRARY_FILES_MISSING,
+      })
+    }
+    return HttpResponse.json(names)
   }),
 
   http.get(`${base}/print/library/search`, ({ request }) => {

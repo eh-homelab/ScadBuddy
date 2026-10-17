@@ -394,14 +394,19 @@ async def test_a_manifest_tier_that_is_not_a_tier_is_labelled_outward(
 ) -> None:
     """#3245: the manifest's own tiers were used as they were, so one that is not a tier
     reached the transcript's label."""
-    monkeypatch.setattr(
-        tools,
-        "_MANIFEST",
-        (
-            *MANIFEST,
-            tools.ManifestEntry("odd_tool", "odd", {"type": "object"}, "<b>admin</b>", None),
-        ),
+    # Through parse_manifest, as a worker reads it, so this covers parse plus label (#3916).
+    [odd] = tools.parse_manifest(
+        [
+            {
+                "name": "odd_tool",
+                "description": "odd",
+                "input_schema": {"type": "object"},
+                "tier": "<b>admin</b>",
+            }
+        ]
     )
+    monkeypatch.setattr(tools, "_MANIFEST", (*MANIFEST, odd))
+    caplog.clear()  # parse_manifest's own warning: the turn must add none of its own
     sid = await insert_session(agent_db)
     stream = [
         {"type": "prompt", "text": "go", "offset": 0},
@@ -428,17 +433,19 @@ async def test_a_manifest_tier_that_is_not_a_tier_is_labelled_outward(
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
-def test_a_manifest_tier_that_is_not_a_tier_is_said_once_and_parsed_outward(
+def test_a_manifest_tier_that_is_not_a_tier_is_said_once_and_kept(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """#3581: the manifest is the worker's for its life, so its bad tier is said at parse
-    time, naming the tool and never the value, and the worker still starts."""
+    time, naming the tool and never the value, and the worker still starts. The tier is
+    kept as given (#3882): follow_session labels it outward, and Settings can still raise
+    the tool (test_tool_overrides)."""
     entry = {"name": "odd_tool", "description": "odd", "input_schema": {"type": "object"}}
     with caplog.at_level(logging.WARNING):
         [odd, fine] = tools.parse_manifest(
             [{**entry, "tier": "<b>admin</b>"}, {**entry, "name": "fine", "tier": "write"}]
         )
-    assert (odd.tier, fine.tier) == ("outward", "write")
+    assert (odd.tier, fine.tier) == ("<b>admin</b>", "write")
     [warned] = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert "odd_tool" in warned.getMessage()
     assert "admin" not in warned.getMessage()

@@ -1,6 +1,8 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, onTestFinished } from 'vitest'
+import { BAMBUDDY_LIBRARY_FILES_MISSING, BAMBUDDY_UNAVAILABLE } from '../../api/client'
+import { problem } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LIBRARY_NAMES_PER_REQUEST, RememberedChoicesPanel } from './RememberedChoicesPanel'
@@ -74,6 +76,63 @@ describe('RememberedChoicesPanel · library files (#1754)', () => {
     expect(screen.queryByRole('link')).toBeNull()
   })
 
+  // #3900 review: only the route's own "none of these" reads as deleted. Any other 502
+  // (Bambuddy limiting requests, a gateway error) fails the lookup back to the ids.
+  it('falls back to the ids when a batch fails for another reason', async () => {
+    const count = LIBRARY_NAMES_PER_REQUEST + 2
+    const FIRST = 8000
+    server.use(
+      http.get('/api/v1/settings/remembered', () =>
+        HttpResponse.json({
+          model_print_choices: Object.fromEntries(
+            Array.from({ length: count }, (_, n) => [`library:${FIRST + n}`, { tier: 'fine' }]),
+          ),
+        }),
+      ),
+      http.get('/api/v1/print/library/names', ({ request }) => {
+        const ids = new URL(request.url).searchParams.getAll('ids').map(Number)
+        if (ids.length < LIBRARY_NAMES_PER_REQUEST) {
+          return problem(502, 'Bad Gateway', 'Bambuddy is limiting requests', { type: BAMBUDDY_UNAVAILABLE })
+        }
+        return HttpResponse.json(ids.map((id) => ({ id, name: `file-${id}.3mf`, folder_id: null })))
+      }),
+    )
+    const answered: number[] = []
+    const record = ({ request, response }: { request: Request; response: Response }) => {
+      if (request.url.includes(`ids=${FIRST}`) || request.url.includes(`ids=${FIRST + count - 1}`)) {
+        answered.push(response.status)
+      }
+    }
+    server.events.on('response:mocked', record)
+    onTestFinished(() => server.events.removeListener('response:mocked', record))
+    renderPage(<RememberedChoicesPanel targets={null} />)
+    await waitFor(() => expect(answered.sort()).toEqual([200, 502]))
+    expect(
+      await screen.findByRole('button', { name: `Forget printer and spools for Library file ${FIRST + count - 1}` }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/deleted file/)).toBeNull()
+  })
+
+  // The mock answers as the route does: several unknown files is its 502, so the rows
+  // show their ids rather than "deleted file" on every one.
+  it("shows the ids when Bambuddy has none of several files", async () => {
+    server.use(
+      http.get('/api/v1/settings/remembered', () =>
+        HttpResponse.json({ model_print_choices: { 'library:9998': { tier: 'fine' }, 'library:9999': { tier: 'draft' } } }),
+      ),
+    )
+    const answered: number[] = []
+    const record = ({ request, response }: { request: Request; response: Response }) => {
+      if (request.url.includes('ids=9998')) answered.push(response.status)
+    }
+    server.events.on('response:mocked', record)
+    onTestFinished(() => server.events.removeListener('response:mocked', record))
+    renderPage(<RememberedChoicesPanel targets={null} />)
+    await waitFor(() => expect(answered).toEqual([502]))
+    expect(await screen.findByRole('button', { name: 'Forget printer and spools for Library file 9999' })).toBeInTheDocument()
+    expect(screen.queryByText(/deleted file/)).toBeNull()
+  })
+
   it('asks for the names in requests the route takes, however many files there are', async () => {
     const count = LIBRARY_NAMES_PER_REQUEST + 20
     const FIRST = 5000
@@ -99,6 +158,35 @@ describe('RememberedChoicesPanel · library files (#1754)', () => {
     expect(screen.getByRole('link', { name: `file-${FIRST}.3mf` })).toBeInTheDocument()
     // Sent together, so in either order.
     expect(asked.map((ids) => ids.length).sort((a, b) => a - b)).toEqual([20, LIBRARY_NAMES_PER_REQUEST])
+  })
+
+  // #3427 follow-up: the route's "none of these" 502 is per request, so a last batch of
+  // deleted files beside a batch that named files is those files gone.
+  it('marks a batch Bambuddy has none of as deleted when another batch named files', async () => {
+    const count = LIBRARY_NAMES_PER_REQUEST + 2
+    const FIRST = 7000
+    server.use(
+      http.get('/api/v1/settings/remembered', () =>
+        HttpResponse.json({
+          model_print_choices: Object.fromEntries(
+            Array.from({ length: count }, (_, n) => [`library:${FIRST + n}`, { tier: 'fine' }]),
+          ),
+        }),
+      ),
+      http.get('/api/v1/print/library/names', ({ request }) => {
+        const ids = new URL(request.url).searchParams.getAll('ids').map(Number)
+        if (ids.length < LIBRARY_NAMES_PER_REQUEST) {
+          return problem(502, 'Bambuddy has none of these library files', undefined, { type: BAMBUDDY_LIBRARY_FILES_MISSING })
+        }
+        return HttpResponse.json(ids.map((id) => ({ id, name: `file-${id}.3mf`, folder_id: null })))
+      }),
+    )
+    renderPage(<RememberedChoicesPanel targets={null} />)
+    expect(await screen.findByRole('link', { name: `file-${FIRST}.3mf` })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: `Forget printer and spools for deleted file ${FIRST + count - 1}` }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/^Library file /)).toBeNull()
   })
 
   it('keeps the names on the other rows while a Forget asks again', async () => {

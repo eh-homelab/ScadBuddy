@@ -14,7 +14,6 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
-  LastProject,
   ModelProjectPut,
   ModelProjects,
   CatalogueLibrary,
@@ -148,8 +147,6 @@ const state = {
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback. */
-  lastProjectId: null as number | null,
   /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
   modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
@@ -314,7 +311,6 @@ export function resetMockState(): void {
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
-  state.lastProjectId = null
   state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
@@ -3402,7 +3398,7 @@ export const handlers = [
       1
     // #79 — the project's own library folder replaces the one from Settings for this
     // send, which is what puts the file on Bambuddy's project page.
-    const projectId = body.project_id ?? state.lastProjectId
+    const projectId = body.project_id ?? state.settings.last_project_id ?? null
     const folderId =
       projectId === null
         ? null
@@ -3474,7 +3470,7 @@ export const handlers = [
   http.get(`${base}/print/projects`, () =>
     HttpResponse.json({
       projects: state.projects,
-      last_project_id: state.lastProjectId,
+      last_project_id: state.settings.last_project_id ?? null,
     } satisfies ProjectChoices),
   ),
 
@@ -3519,13 +3515,6 @@ export const handlers = [
     state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
     await delay(150)
     return HttpResponse.json(saved)
-  }),
-
-  // #317 — the project both pickers open on.
-  http.put(`${base}/print/projects/last`, async ({ request }) => {
-    const body = (await request.json()) as LastProject
-    state.lastProjectId = body.project_id ?? null
-    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
   }),
 
   // #1660 — the project each model was last filed into, per preset.
@@ -3573,7 +3562,7 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
-    const projectId = body.project_id ?? state.lastProjectId
+    const projectId = body.project_id ?? state.settings.last_project_id ?? null
     if (projectId === null) {
       return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
     }
