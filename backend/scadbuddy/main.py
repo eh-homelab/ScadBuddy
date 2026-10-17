@@ -103,6 +103,7 @@ from scadbuddy.store.content import sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
@@ -139,6 +140,7 @@ from scadbuddy.workflows.previews import (
     ensure_preview_schedule,
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.store_migration import StoreMigration
 
 API_PREFIX = "/api/v1"
 
@@ -1072,6 +1074,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
+        migrate_activity(state.settings_store.pool, state.settings),
     ]
     try:
         while not stop.is_set():
@@ -1079,7 +1082,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire],
+                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire, StoreMigration],
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )

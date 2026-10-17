@@ -174,12 +174,13 @@ class BlobIndex:
         key: str,
         ref: BlobRef,
         *,
-        expected: str | None,
+        expected: str | BlobRef | None,
         slug: str | None,
         meta: dict[str, Any],
         reuse: bool = False,
     ) -> bool:
-        """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row).
+        """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row), a
+        sha256 or, as a `BlobRef`, that object on its backend.
         With ``reuse``, ``ref`` names an existing object (`_locked`)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
 
@@ -194,11 +195,17 @@ class BlobIndex:
                         (*values, key),
                     )
                 else:
+                    sha, at = (
+                        (expected.sha256, (expected.backend, expected.backend_id))
+                        if isinstance(expected, BlobRef)
+                        else (expected, (None, None))
+                    )
                     cursor = conn.execute(
                         "UPDATE store_blobs SET sha256 = %s, kind = %s, backend = %s,"
                         " backend_id = %s, size = %s, slug = %s, meta = %s, touched_at = now()"
-                        " WHERE key = %s AND sha256 = %s",
-                        (*values, key, expected),
+                        " WHERE key = %s AND sha256 = %s"
+                        " AND (%s::text IS NULL OR (backend = %s AND backend_id = %s))",
+                        (*values, key, sha, at[0], *at),
                     )
                 return cursor.rowcount == 1
 
@@ -284,6 +291,25 @@ class BlobIndex:
                 (list(kinds) if kinds is not None else None,) * 2 + (slug, slug, backend, backend),
             ).fetchall()
         return [_stat(row) for row in rows]
+
+    def oldest(self, backend: str, *, limit: int, skip: Sequence[str]) -> list[BlobStat]:
+        """Up to ``limit`` rows on ``backend``, least recently touched first, but ``skip``."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s"
+                " AND NOT key = ANY(%s) ORDER BY touched_at, key LIMIT %s",
+                (backend, list(skip), limit),
+            ).fetchall()
+        return [_stat(row) for row in rows]
+
+    def count(self, backend: str, *, skip: Sequence[str]) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM store_blobs WHERE backend = %s AND NOT key = ANY(%s)",
+                (backend, list(skip)),
+            ).fetchone()
+        assert row is not None
+        return int(row["n"])
 
     def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
         """Distinct stored objects and their bytes, in total and per kind."""
