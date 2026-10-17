@@ -11,7 +11,7 @@ import re
 import sys
 from pathlib import Path
 
-WANT = "image=mirror.gcr.io/moby/buildkit:"
+WANT = re.compile(r"^\s*driver-opts:\s*image=mirror\.gcr\.io/moby/buildkit:buildx-stable-1\s*$")
 root = Path(sys.argv[1])
 bad = []
 for path in sorted((root / ".github" / "workflows").glob("*.y*ml")):
@@ -29,9 +29,10 @@ for path in sorted((root / ".github" / "workflows").glob("*.y*ml")):
             not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > depth
         ):
             end += 1
-        if not any(WANT in step for step in lines[start:end]):
+        if not any(WANT.match(step) for step in lines[start:end]):
             bad.append(f"{path.relative_to(root)}:{at + 1}")
 for where in bad:
-    print(f"FAIL: {where}: setup-buildx-action without driver-opts {WANT}buildx-stable-1 (#3370)")
+    print(f"FAIL: {where}: setup-buildx-action without driver-opts:"
+          " image=mirror.gcr.io/moby/buildkit:buildx-stable-1 (#3370)")
 sys.exit(1 if bad else 0)
 PY

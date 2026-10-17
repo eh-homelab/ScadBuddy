@@ -22,6 +22,7 @@ jobs:
   bare:
     steps:
       - uses: docker/setup-buildx-action@v4
+        # image=mirror.gcr.io/moby/buildkit:buildx-stable-1 in a comment is no setting
       - with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
         run: echo the next step names it, not this one

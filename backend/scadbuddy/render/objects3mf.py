@@ -775,6 +775,8 @@ def _joined_paint(parts: list[ColourPart]) -> Paint | None:
     painted = [part.paint for part in parts if part.paint is not None]
     if not painted:
         return None
+    if any(paint.colours != painted[0].colours for paint in painted):
+        raise UnreadableObjectsError("painted parts of one colour name different filaments")
     codes: list[str] = []
     for part in parts:
         codes += part.paint.codes if part.paint is not None else [""] * len(part.mesh.faces)
