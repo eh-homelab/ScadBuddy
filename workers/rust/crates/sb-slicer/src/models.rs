@@ -3,24 +3,8 @@
 //! No `deny_unknown_fields` (Python may add fields), and every field is serialised
 //! because Python dumps every field.
 
-use std::collections::BTreeMap;
-
-use chrono::{DateTime, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize, Serializer};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TransferUrl {
-    pub url: String,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    /// Dumped as pydantic dumps a UTC datetime: `2026-10-16T12:00:00Z`.
-    #[serde(serialize_with = "utc_rfc3339")]
-    pub expires_at: DateTime<Utc>,
-}
-
-fn utc_rfc3339<S: Serializer>(value: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&value.to_rfc3339_opts(SecondsFormat::AutoSi, true))
-}
+pub use sb_transfer::TransferUrl;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -1,0 +1,170 @@
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::{get, put},
+};
+use chrono::{Duration, Utc};
+use sb_transfer::{Transfer, TransferError, TransferUrl};
+use sha2::{Digest, Sha256};
+
+#[derive(Default)]
+struct Seen {
+    requests: usize,
+    body: Vec<u8>,
+    length: Option<String>,
+    header: Option<String>,
+}
+
+type Shared = Arc<Mutex<Seen>>;
+
+async fn blob(State(s): State<Shared>) -> &'static str {
+    s.lock().unwrap().requests += 1;
+    "hello"
+}
+
+async fn gone(State(s): State<Shared>) -> StatusCode {
+    s.lock().unwrap().requests += 1;
+    StatusCode::NOT_FOUND
+}
+
+async fn locked(State(s): State<Shared>, h: HeaderMap) -> (StatusCode, &'static str) {
+    s.lock().unwrap().requests += 1;
+    if h.get("x-scadbuddy-transfer").map(|v| v.as_bytes()) == Some(b"tok") {
+        (StatusCode::OK, "hello")
+    } else {
+        (StatusCode::FORBIDDEN, "")
+    }
+}
+
+async fn sink(State(s): State<Shared>, h: HeaderMap, body: Bytes) -> StatusCode {
+    let mut seen = s.lock().unwrap();
+    seen.requests += 1;
+    seen.length = h
+        .get("content-length")
+        .map(|v| v.to_str().unwrap().to_owned());
+    seen.header = h
+        .get("x-scadbuddy-transfer")
+        .map(|v| v.to_str().unwrap().to_owned());
+    seen.body = body.to_vec();
+    StatusCode::OK
+}
+
+async fn serve() -> (String, Shared) {
+    let state: Shared = Arc::default();
+    let app = Router::new()
+        .route("/blob", get(blob))
+        .route("/gone", get(gone))
+        .route("/locked", get(locked))
+        .route(
+            "/sink",
+            put(sink).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, state)
+}
+
+fn url(base: &str, path: &str, headers: &[(&str, &str)]) -> TransferUrl {
+    TransferUrl {
+        url: format!("{base}{path}"),
+        headers: headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        expires_at: Utc::now() + Duration::minutes(5),
+    }
+}
+
+#[tokio::test]
+async fn get_streams_and_digests() {
+    let (base, _state) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let got = Transfer::new()
+        .get(&url(&base, "/blob", &[]), &dir.path().join("in"))
+        .await
+        .unwrap();
+    assert_eq!(
+        got.sha256,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    assert_eq!(got.size, 5);
+    assert_eq!(std::fs::read(dir.path().join("in")).unwrap(), b"hello");
+    assert!(!dir.path().join("in.part").exists());
+}
+
+#[tokio::test]
+async fn get_404_is_missing_and_403_is_refused() {
+    let (base, _state) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out");
+    let t = Transfer::new();
+    assert!(matches!(
+        t.get(&url(&base, "/gone", &[]), &dest).await,
+        Err(TransferError::Missing)
+    ));
+    assert!(matches!(
+        t.get(&url(&base, "/locked", &[]), &dest).await,
+        Err(TransferError::Refused(403))
+    ));
+    assert!(!dest.exists());
+    let ok = t
+        .get(
+            &url(&base, "/locked", &[("X-ScadBuddy-Transfer", "tok")]),
+            &dest,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.size, 5);
+}
+
+#[tokio::test]
+async fn expired_url_is_refused_before_any_request() {
+    let (base, state) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut u = url(&base, "/blob", &[]);
+    u.expires_at = Utc::now() - Duration::seconds(1);
+    let t = Transfer::new();
+    assert!(matches!(
+        t.get(&u, &dir.path().join("x")).await,
+        Err(TransferError::Expired)
+    ));
+    std::fs::write(dir.path().join("src"), b"x").unwrap();
+    assert!(matches!(
+        t.put(&u, &dir.path().join("src")).await,
+        Err(TransferError::Expired)
+    ));
+    assert_eq!(state.lock().unwrap().requests, 0);
+}
+
+#[tokio::test]
+async fn put_streams_the_file_and_reports_its_digest() {
+    let (base, state) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0u32..3 * 1024 * 1024)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    let src = dir.path().join("src");
+    std::fs::write(&src, &data).unwrap();
+    let got = Transfer::new()
+        .put(
+            &url(&base, "/sink", &[("X-ScadBuddy-Transfer", "tok")]),
+            &src,
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.size, data.len() as u64);
+    assert_eq!(got.sha256, format!("{:x}", Sha256::digest(&data)));
+    let seen = state.lock().unwrap();
+    assert!(seen.body == data);
+    assert_eq!(
+        seen.length.as_deref(),
+        Some(data.len().to_string().as_str())
+    );
+    assert_eq!(seen.header.as_deref(), Some("tok"));
+}
