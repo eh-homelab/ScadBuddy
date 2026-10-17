@@ -576,7 +576,9 @@ test.describe('the session switcher with a long title', () => {
 
     const right = await panel.evaluate((el) => el.getBoundingClientRect().right)
     for (const title of ['hello', LONG]) {
-      const box = (await sessions.getByRole('button', { name: `Actions for ${title}` }).boundingBox())!
+      const actions = sessions.getByRole('button', { name: `Actions for ${title}` })
+      await expect(actions).toBeVisible()
+      const box = (await actions.boundingBox())!
       expect(box.x + box.width, title).toBeLessThanOrEqual(right)
     }
     await sessions.getByRole('button', { name: `Actions for ${LONG}` }).click()
