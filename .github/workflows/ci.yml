@@ -957,8 +957,7 @@ jobs:
           cache-from: type=gha
 
       # The slicer worker's image (#3821): the Rust worker and the pinned Bambu
-      # Studio CLI. Its own `scope=slicer`, which build-image.yml's `slicer` job
-      # writes too, at mode=min: the repo's Actions cache is at its ceiling (#743).
+      # Studio CLI. Its own `scope=slicer`, which build-image.yml's `slicer` job writes.
       # The build already runs `scadbuddy-slicer --check-cli` as root; the two
       # runs below repeat it as the image's own user, the way the cluster runs it.
       - name: Build the slicer image
@@ -968,8 +967,9 @@ jobs:
           target: slicer
           load: true
           tags: scadbuddy-slicer:ci
+          # Read-only: the repo's Actions cache is at its ceiling (#743); build-image.yml's
+          # `slicer` job is the scope's only writer.
           cache-from: type=gha,scope=slicer
-          cache-to: type=gha,scope=slicer,mode=min
 
       - name: Slicer smoke
         run: |
