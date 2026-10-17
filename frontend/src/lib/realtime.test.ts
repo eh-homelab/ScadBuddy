@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CHECK_MS, RealtimeClient, type Confirmation, type RealtimeSignal } from './realtime'
+import { CHECK_MS, RealtimeClient, readAgain, type Confirmation, type RealtimeSignal } from './realtime'
+import { ReadScope } from './readCursor'
 
 /** A WebSocket the test drives: it opens, closes and delivers frames on command. */
 class FakeSocket {
@@ -304,5 +305,17 @@ describe('RealtimeClient', () => {
       last().close()
       await expect(dropped).resolves.toEqual(['models'])
     })
+  })
+})
+
+describe('readAgain (#1039)', () => {
+  it('re-reads once a read has hung for CHECK_MS, rather than waiting on it', async () => {
+    const hung = { scope: new ReadScope(), shown: new Promise<boolean>(() => {}) }
+    let answer: boolean | undefined
+    void readAgain(hung, 'models', { last: 'e1' }).then((again) => (answer = again))
+    await vi.advanceTimersByTimeAsync(CHECK_MS - 1)
+    expect(answer).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(answer).toBe(true)
   })
 })

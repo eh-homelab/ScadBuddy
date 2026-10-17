@@ -380,16 +380,17 @@ async def changed_topics(events: object, since: list[str], topics: list[str]) ->
     wanted = set(topics)
     changed: set[str] = set()
     seen = 0
+    limit = min(CHECK_PAGE, CHECK_MAX_EVENTS)
     while True:
-        page = await replay(after, limit=min(CHECK_PAGE, CHECK_MAX_EVENTS))
+        page = await replay(after, limit=limit)
         if page.gap:
             return topics
         for logged in page.events:
             changed.update(topic for topic in topics_of(logged.event) if topic in wanted)
             after = logged.seq
         seen += len(page.events)
-        if not page.events or changed == wanted:
-            break
+        if len(page.events) < limit or changed == wanted:
+            break  # a short page is the log's end
         if seen >= CHECK_MAX_EVENTS:
             return topics
     return [topic for topic in topics if topic in changed]

@@ -355,18 +355,28 @@ export function recordRead<T>(
 /**
  * #1039 — whether a subscription's confirmation means `read` must be made again: unless
  * it saw the server's last event, or the server says nothing since touched `topic`.
- * True whenever that cannot be told: no read, a failed one, or one without cursors.
+ * True whenever that cannot be told: no read, a failed one, one still unsettled after
+ * `CHECK_MS`, or one without cursors.
  */
 export async function readAgain(
   read: ReadRecord | undefined,
   topic: string,
   confirmation: Confirmation,
 ): Promise<boolean> {
-  if (!read || !(await read.shown)) return true
+  if (!read || !(await settledIn(read.shown, CHECK_MS))) return true
   const since = read.scope.cursors()
   if (!since) return true
   if (since.length === 1 && since[0] === confirmation.last) return false
   return (await getRealtime().check(since, [topic])).includes(topic)
+}
+
+/** `shown`, or false once `ms` pass without it: a hung read must not hold up its re-read. */
+function settledIn(shown: Promise<boolean>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms)
+  })
+  return Promise.race([shown, late]).finally(() => clearTimeout(timer))
 }
 
 let shared: RealtimeClient | undefined
