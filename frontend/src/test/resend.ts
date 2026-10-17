@@ -7,7 +7,8 @@
  *
  * It writes to `log` (stderr in the setup, rather than console.warn, which tests spy
  * on) on the first resend and on giving up: a line means the upstream escape still
- * happens, and this wrapper is still needed.
+ * happens, and this wrapper is still needed. With `tries` 1 there is no resend, so the
+ * only line is the one for giving up.
  */
 export function resending(
   intercepted: typeof fetch,
