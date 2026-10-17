@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from types import SimpleNamespace
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex, Count
+from scadbuddy.api import activity as activity_api
 from scadbuddy.api.activity import _subject_labels
+from scadbuddy.library.outputs import OutputNotFoundError
 from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
 from tests.api.test_send import make_output
 from tests.support.operations import press
@@ -168,6 +172,30 @@ def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> Non
     labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
     assert labels == {}
     assert sorted(asked) == ["d" * 32, "e" * 32]
+
+
+def test_an_output_found_gone_is_not_looked_for_again_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3856: the store's own "not found" leaves the chip unnamed, and the next facets
+    within GONE_OUTPUT_SECONDS skip its glob."""
+    monkeypatch.setattr(activity_api, "_gone_outputs", {})
+    asked: list[str] = []
+
+    def get(output_id: str) -> tuple[str | None, str]:
+        asked.append(output_id)
+        raise OutputNotFoundError(output_id)
+
+    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    subjects = [Count("output:" + "f" * 32, 1)]
+    outputs = SimpleNamespace(name_and_slug=get)
+    assert _subject_labels(subjects, catalogue, outputs) == {}  # type: ignore[arg-type]
+    assert _subject_labels(subjects, catalogue, outputs) == {}  # type: ignore[arg-type]
+    assert asked == ["f" * 32]
+    now = time.monotonic()
+    monkeypatch.setattr(time, "monotonic", lambda: now + activity_api.GONE_OUTPUT_SECONDS + 1)
+    _subject_labels(subjects, catalogue, outputs)  # type: ignore[arg-type]
+    assert asked == ["f" * 32] * 2
 
 
 def test_facets_without_agent_tables(client: TestClient) -> None:
