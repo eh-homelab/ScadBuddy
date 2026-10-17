@@ -1280,3 +1280,84 @@ def test_held_text_goes_out_in_order_before_the_next_other_event() -> None:
     held({"type": "text", "text": "c"})
     held.flush()
     assert [e.get("text", e["type"]) for e in out] == ["a", "tool_call", "c"]
+
+
+async def _health(conn: Conn) -> dict[str, tuple[str, Any, Any, str | None]]:
+    """Each gateway credential's status, cooldown_until, last_used_at and last_error,
+    by its base URL."""
+    cur = await conn.execute(
+        "SELECT base_url, status, cooldown_until, last_used_at, last_error FROM ai_credentials"
+    )
+    return {r[0]: (r[1], r[2], r[3], r[4]) for r in await cur.fetchall()}
+
+
+async def test_an_answering_credential_is_recorded_as_used(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2320: a durable segment stamps its credential's ``last_used_at`` as a classic turn
+    does (fallback.ts ``report`` with ``used``), so Settings shows when it last answered."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9", secret=TOKEN)
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=Recording())
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    status_, _, used, error = (await _health(agent_db))["http://127.0.0.1:9"]
+    assert (status_, error) == ("active", None)
+    assert used is not None
+
+
+async def test_a_rate_limited_credential_cools_down_and_the_next_is_used(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2320: the rate-limited key is recorded cooling down, as a classic turn records it
+    (credentials.ts ``record``, ``cooling_down``), so the next turn skips it instead of
+    running into the same limit; the key that answered is stamped used; the cooldown is
+    audited."""
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, _result_error("API Error: 429 rate limited", status=429))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    health = await _health(agent_db)
+    first, second = health["http://127.0.0.1:9"], health["http://127.0.0.1:10"]
+    assert first[0] == "cooling_down"
+    assert first[1] is not None
+    assert first[3] is not None and "429" in first[3]
+    assert second[0] == "active" and second[2] is not None
+    cur = await agent_db.execute(
+        "SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'credential'"
+    )
+    assert (await cur.fetchall()) == [("cooldown", "error", uuid.UUID(sid))]
+
+
+async def test_a_refused_credential_is_noted_but_never_disabled_unconfirmed(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """A classic turn disables a refused key only once its probe confirms the refusal
+    (fallback.ts); a durable segment has no probe, so it records the error and leaves
+    the key usable, never disabling one on an unconfirmed 401."""
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, _result_error("API Error: 401 invalid x-api-key", status=401))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    first = (await _health(agent_db))["http://127.0.0.1:9"]
+    assert first[0] == "active"
+    assert first[3] is not None and "401" in first[3]

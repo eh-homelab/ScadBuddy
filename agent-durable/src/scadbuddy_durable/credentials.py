@@ -1,10 +1,12 @@
 """The Claude credential, read as the agent reads it (spec 2026-10-01 §6.2).
 
 Ports agent/src/credentials.ts `credentialAad` and `openCredential`, the pool's
-"usable, in priority order" (`CredentialPool`, agent/src/harness/fallback.ts) and
-agent/src/harness/run.ts `credentialEnv`. The agent alone writes `ai_credentials`:
-health verdicts (cooldowns, disables) stay its job until 5c decides how a durable
-segment reports one.
+"usable, in priority order" (`CredentialPool`, agent/src/harness/fallback.ts),
+agent/src/harness/run.ts `credentialEnv`, and the health write a turn reports
+(`CredentialRepo.record`, #2320): a segment stamps the key it ran on as used, or
+records its rate limit or error, so classic and durable agree on a key's state. Only
+the agent writes a secret; this writes the health columns alone, and never disables a
+key (that waits on the agent's probe, which a durable segment does not run).
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast, get_args
 
 import psycopg
@@ -35,6 +38,9 @@ class Credential:
     kind: CredentialKind
     base_url: str | None
     secret: str = field(repr=False)
+    #: The row's epoch when it was read: a record against it is dropped once the key
+    #: was replaced (credentials.ts `record`, `AND epoch = …`).
+    epoch: int = 0
 
     @property
     def label(self) -> str:
@@ -59,6 +65,7 @@ def open_credential(
     kind: CredentialKind,
     base_url: str | None,
     envelope: Envelope,
+    epoch: int = 0,
 ) -> Credential:
     if kind not in get_args(CredentialKind):
         # Never guess where a secret goes: a kind a later agent migration adds is
@@ -69,7 +76,9 @@ def open_credential(
     secret = open_secret(kek, envelope, credential_aad(id, kind, base_url))
     if kind == "gateway" and base_url is None:
         raise SealError("gateway credential has no base_url")
-    return Credential(id=id, priority=priority, kind=kind, base_url=base_url, secret=secret)
+    return Credential(
+        id=id, priority=priority, kind=kind, base_url=base_url, secret=secret, epoch=epoch
+    )
 
 
 def credential_env(c: Credential) -> dict[str, str]:
@@ -90,13 +99,14 @@ async def usable_credentials(conn: psycopg.AsyncConnection[Any], kek: Kek) -> li
     its row. A row that fails any of those is skipped and logged by label.
     """
     cur = await conn.execute(
-        "SELECT id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id"
+        "SELECT id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, epoch"
         " FROM ai_credentials"
         " WHERE status = 'active' OR (status = 'cooling_down' AND cooldown_until <= now())"
         " ORDER BY priority"
     )
     usable: list[Credential] = []
-    for id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id in await cur.fetchall():
+    rows = await cur.fetchall()
+    for id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, epoch in rows:
         envelope = Envelope(
             secret_sealed=bytes(secret_sealed), dek_sealed=bytes(dek_sealed), kek_id=kek_id
         )
@@ -115,8 +125,129 @@ async def usable_credentials(conn: psycopg.AsyncConnection[Any], kek: Kek) -> li
                     kind=cast(CredentialKind, kind),
                     base_url=base_url,
                     envelope=envelope,
+                    epoch=epoch,
                 )
             )
         except SealError as err:
             log.warning("credential %d cannot be opened (%s); skipped", priority + 1, err)
     return usable
+
+
+#: credentialErrors.ts DEFAULT_COOLDOWN_MS and MAX_COOLDOWN_MS.
+DEFAULT_COOLDOWN = timedelta(seconds=60)
+MAX_COOLDOWN = timedelta(hours=24)
+#: What `last_error` keeps of a failure's text.
+ERROR_MAX = 500
+
+Health = Literal["used", "cooling_down", "error"]
+
+
+@dataclass(frozen=True)
+class Transition:
+    """The row's status before and after a record (credentials.ts `CredentialTransition`)."""
+
+    before: str
+    after: str
+    recovered: bool
+
+
+def cooldown_until(now: datetime, until: datetime | None = None) -> datetime:
+    """credentialErrors.ts `cooldownUntil`: ``until``, or the default, held between one
+    second and MAX_COOLDOWN from now."""
+    at = until or now + DEFAULT_COOLDOWN
+    return min(max(at, now + timedelta(seconds=1)), now + MAX_COOLDOWN)
+
+
+def redacted(text: str, secret: str) -> str:
+    """A failure's text for `last_error` and the audit: never the key, and bounded."""
+    if secret:
+        text = text.replace(secret, "[redacted]")
+    return text[:ERROR_MAX]
+
+
+_BEFORE = (
+    "SELECT id, status AS raw, CASE WHEN status = 'cooling_down'"
+    " AND cooldown_until <= now() THEN 'active' ELSE status END AS status"
+    " FROM ai_credentials WHERE id = %(id)s AND epoch = %(epoch)s FOR UPDATE"
+)
+_UPDATES: dict[Health, str] = {
+    "used": (
+        "UPDATE ai_credentials c SET last_used_at = now(),"
+        " status = CASE WHEN b.status = 'active' THEN 'active' ELSE c.status END,"
+        " cooldown_until = CASE WHEN b.status = 'active' THEN NULL ELSE c.cooldown_until END"
+    ),
+    "cooling_down": (
+        "UPDATE ai_credentials c SET"
+        " status = CASE WHEN c.status = 'disabled' THEN 'disabled' ELSE 'cooling_down' END,"
+        " cooldown_until = CASE WHEN c.status = 'disabled' THEN NULL"
+        " ELSE GREATEST(%(until)s::timestamptz,"
+        " CASE WHEN b.status = 'cooling_down' THEN c.cooldown_until END) END,"
+        " last_error = %(reason)s, last_error_at = now()"
+    ),
+    "error": "UPDATE ai_credentials c SET last_error = %(reason)s, last_error_at = now()",
+}
+
+
+async def record_health(
+    conn: psycopg.AsyncConnection[Any],
+    c: Credential,
+    health: Health,
+    *,
+    reason: str = "",
+    until: datetime | None = None,
+) -> Transition | None:
+    """credentials.ts `record` for what a segment reports: ``used`` (the endpoint
+    answered), ``cooling_down`` (a rate limit, until ``until``) or ``error`` (any other
+    failure the key met; ``transient`` there). None when the row is gone or its key was
+    replaced since it was read. A disabled key stays disabled."""
+    params = {
+        "id": c.id,
+        "epoch": c.epoch,
+        "reason": redacted(reason, c.secret),
+        "until": until or cooldown_until(datetime.now(UTC)),
+    }
+    cur = await conn.execute(
+        f"WITH b AS ({_BEFORE}) {_UPDATES[health]} FROM b WHERE c.id = b.id"
+        " RETURNING b.status, b.raw, c.status",
+        params,
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    was, raw, after = row
+    return Transition(
+        before=was, after=after, recovered=raw == "cooling_down" and after == "active"
+    )
+
+
+async def audit_health(
+    conn: psycopg.AsyncConnection[Any],
+    c: Credential,
+    change: Transition | None,
+    *,
+    reason: str = "",
+    until: datetime | None = None,
+    session_id: str | None = None,
+) -> None:
+    """The ``credential`` audit row CredentialPool.report writes when a key changes
+    state: ``recover`` or ``cooldown`` (``disable`` follows the agent's probe, which a
+    durable segment never runs)."""
+    if change is None:
+        return
+    if change.recovered:
+        action, outcome = "recover", "ok"
+        detail = f"{c.label} is usable again: its rate limit has passed"
+    elif change.after == "cooling_down" and until is not None:
+        action, outcome = "cooldown", "error"
+        detail = (
+            f"{c.label} is rate limited until {until.isoformat()}: {redacted(reason, c.secret)}"
+        )
+    else:
+        return
+    log.warning("credentials: %s: %s", action, detail)
+    await conn.execute(
+        "INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id,"
+        " principal_label, session_id, outcome, detail)"
+        " VALUES ('credential', %s, 'harness', 'system', 'scadbuddy', 'ScadBuddy', %s, %s, %s)",
+        (action, session_id, outcome, detail[:500]),
+    )
