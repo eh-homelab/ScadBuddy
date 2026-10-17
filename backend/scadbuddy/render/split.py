@@ -118,7 +118,8 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
                 process=False,
             )
             # Each corner was written once per face: shared again, so a lightly painted
-            # part's preview is not three times its vertices and keeps its smoothing.
+            # part's preview is not three times its vertices, and is shaded as an
+            # unpainted part's shared-vertex mesh is (smoothed across its edges too).
             mesh.merge_vertices()
             name = part.name if colour == own else f"{part.name} ({colour})"
             out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None))

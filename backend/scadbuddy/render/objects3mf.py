@@ -775,6 +775,8 @@ def _joined_paint(parts: list[ColourPart]) -> Paint | None:
     painted = [part.paint for part in parts if part.paint is not None]
     if not painted:
         return None
+    # A guard for a future caller: every painting this reader builds names its own
+    # `self.filaments` (`_painted`), so no file reaches this today.
     if any(paint.colours != painted[0].colours for paint in painted):
         raise UnreadableObjectsError("painted parts of one colour name different filaments")
     codes: list[str] = []
