@@ -6,9 +6,10 @@
  * so nothing was sent: `resending` sends it again, up to `tries` times, and MSW sees it.
  *
  * It writes to `log` (stderr in the setup, rather than console.warn, which tests spy
- * on) on the first resend and on giving up: a line means the upstream escape still
- * happens, and this wrapper is still needed. With `tries` 1 there is no resend, so the
- * only line is the one for giving up.
+ * on) on the first resend and on giving up after every try was refused: a line means the
+ * upstream escape still happens, and this wrapper is still needed. A resend that ends
+ * any other way (answered, failed otherwise, aborted) logs only its first line. With
+ * `tries` 1 there is no resend, so the only line is the one for giving up.
  */
 // Taken at load, before a test fakes the timers: a faked one would never fire.
 const realSetTimeout = globalThis.setTimeout
