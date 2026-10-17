@@ -57,6 +57,12 @@ async fn serve() -> (String, Shared) {
     let state: Shared = Arc::default();
     let app = Router::new()
         .route("/blob", get(blob))
+        .route("/boom", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+        .route("/full", put(|| async { StatusCode::INSUFFICIENT_STORAGE }))
+        .route(
+            "/hop",
+            get(|| async { (StatusCode::FOUND, [("location", "/blob")]) }),
+        )
         .route("/gone", get(gone))
         .route("/locked", get(locked))
         .route(
@@ -167,4 +173,62 @@ async fn put_streams_the_file_and_reports_its_digest() {
         Some(data.len().to_string().as_str())
     );
     assert_eq!(seen.header.as_deref(), Some("tok"));
+}
+
+#[tokio::test]
+async fn other_statuses_carry_their_code_and_redirects_are_not_followed() {
+    let (base, _state) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = Transfer::new();
+    assert!(matches!(
+        t.get(&url(&base, "/boom", &[]), &dir.path().join("a"))
+            .await,
+        Err(TransferError::Status(500))
+    ));
+    std::fs::write(dir.path().join("src"), b"x").unwrap();
+    assert!(matches!(
+        t.put(&url(&base, "/full", &[]), &dir.path().join("src"))
+            .await,
+        Err(TransferError::Status(507))
+    ));
+    assert!(matches!(
+        t.get(&url(&base, "/hop", &[]), &dir.path().join("b")).await,
+        Err(TransferError::Status(302))
+    ));
+}
+
+#[tokio::test]
+async fn a_body_cut_short_leaves_no_part_and_no_dest() {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+        sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n0123456789")
+            .await
+            .unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out");
+    let got = Transfer::new().get(&url(&base, "/x", &[]), &dest).await;
+    assert!(got.is_err());
+    assert!(!dest.exists());
+    assert!(!dir.path().join("out.part").exists());
+}
+
+#[test]
+fn debug_never_prints_the_signature_or_a_header_value() {
+    let u = url(
+        "https://store.example:9000",
+        "/bucket/key?X-Amz-Signature=sekret",
+        &[("X-ScadBuddy-Transfer", "tok-value")],
+    );
+    let shown = format!("{u:?}");
+    assert!(shown.contains("store.example"));
+    assert!(shown.contains("X-ScadBuddy-Transfer"));
+    for leaked in ["sekret", "X-Amz-Signature", "bucket/key", "tok-value"] {
+        assert!(!shown.contains(leaked), "{leaked} leaked: {shown}");
+    }
 }

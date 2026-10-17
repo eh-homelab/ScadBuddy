@@ -21,7 +21,7 @@ use sha::Hasher;
 
 const CHUNK: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferUrl {
     pub url: String,
     #[serde(default)]
@@ -29,6 +29,27 @@ pub struct TransferUrl {
     /// Dumped as pydantic dumps a UTC datetime: `2026-10-16T12:00:00Z`.
     #[serde(serialize_with = "utc_rfc3339")]
     pub expires_at: DateTime<Utc>,
+}
+
+/// Never prints the path, the query (a presigned signature) or a header value (the
+/// internal route's token).
+impl std::fmt::Debug for TransferUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let origin = match reqwest::Url::parse(&self.url) {
+            Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("?")),
+            Err(_) => "<redacted>".to_owned(),
+        };
+        let headers: BTreeMap<&str, &str> = self
+            .headers
+            .keys()
+            .map(|k| (k.as_str(), "<redacted>"))
+            .collect();
+        f.debug_struct("TransferUrl")
+            .field("origin", &origin)
+            .field("headers", &headers)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 fn utc_rfc3339<S: Serializer>(value: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
@@ -46,7 +67,12 @@ pub enum TransferError {
     Expired,
     Missing,
     Refused(u16),
-    Digest { expected: String, actual: String },
+    /// Any other non-2xx (a 3xx is not followed): 5xx and 429 are worth a retry.
+    Status(u16),
+    Digest {
+        expected: String,
+        actual: String,
+    },
     Io(std::io::Error),
     Http(String),
 }
@@ -57,6 +83,7 @@ impl std::fmt::Display for TransferError {
             Self::Expired => write!(f, "transfer url expired"),
             Self::Missing => write!(f, "object not found (404)"),
             Self::Refused(code) => write!(f, "transfer refused ({code})"),
+            Self::Status(code) => write!(f, "unexpected status {code}"),
             Self::Digest { expected, actual } => {
                 write!(f, "sha256 mismatch: expected {expected}, got {actual}")
             }
@@ -92,11 +119,14 @@ impl Default for Transfer {
 }
 
 impl Transfer {
-    /// rustls, no proxy from the environment, a 30 s connect timeout and no overall
-    /// timeout (bodies are large).
+    /// rustls (webpki and native roots), no proxy from the environment, no redirects (they
+    /// would carry the headers to another origin), a 30 s connect timeout, a 60 s idle read
+    /// timeout and no overall timeout (bodies are large).
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .read_timeout(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest client builds");
@@ -115,18 +145,11 @@ impl Transfer {
             .await?;
         check_status(resp.status())?;
 
-        let part = part_path(dest);
-        let result = write_body(resp, &part).await;
-        match result {
-            Ok(done) => {
-                tokio::fs::rename(&part, dest).await?;
-                Ok(done)
-            }
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&part).await;
-                Err(e)
-            }
-        }
+        let guard = PartGuard(Some(part_path(dest)));
+        let done = write_body(resp, guard.path()).await?;
+        tokio::fs::rename(guard.path(), dest).await?;
+        guard.disarm();
+        Ok(done)
     }
 
     /// Streams `src` as the PUT body with its `Content-Length`, sending `url.headers`.
@@ -154,6 +177,28 @@ impl Transfer {
         let hasher = std::mem::take(&mut *hasher.lock().expect("hasher lock"));
         let (sha256, size) = hasher.finish();
         Ok(Transferred { sha256, size })
+    }
+}
+
+/// Removes the `.part` file unless disarmed: on an error, a failed rename, or the future
+/// being dropped (an activity's cancellation).
+struct PartGuard(Option<PathBuf>);
+
+impl PartGuard {
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("armed")
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PartGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -191,7 +236,7 @@ fn check_status(status: StatusCode) -> Result<(), TransferError> {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             Err(TransferError::Refused(status.as_u16()))
         }
-        s => Err(TransferError::Http(format!("unexpected status {s}"))),
+        s => Err(TransferError::Status(s.as_u16())),
     }
 }
 
