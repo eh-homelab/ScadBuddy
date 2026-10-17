@@ -34,6 +34,8 @@ configure({
 // longer lands inside the first findByRole's 1 s wait in each file (#1485).
 getComputedStyle(document.documentElement)
 
+/** `fetch` as MSW patched it, put back once the file is done. */
+let mswFetch: typeof fetch | undefined
 beforeAll(() => {
   server.listen({ onUnhandledFrame: 'error' })
   // MSW intercepts at the socket, and a request can slip past it to the real network:
@@ -43,15 +45,20 @@ beforeAll(() => {
   // connection was refused, so nothing was sent: send it again, and MSW sees it.
   const intercepted = globalThis.fetch
   globalThis.fetch = async (input, init) => {
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
     for (let attempt = 1; ; attempt++) {
       try {
         return await intercepted(input instanceof Request ? input.clone() : input, init)
       } catch (error) {
         const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
-        if (!refused || init?.signal?.aborted || attempt === 3) throw error
+        if (!refused || signal?.aborted || attempt === 3) throw error
+        // On stderr rather than console.warn, which tests spy on: a line here means the
+        // upstream escape still happens, and this wrapper is still needed.
+        process.stderr.write(`vitest.setup: resending a request MSW let through (mswjs/interceptors#862)\n`)
       }
     }
   }
+  mswFetch = intercepted
 })
 afterEach(async () => {
   // Unmounted here, before the tick below, rather than in Testing Library's own hook,
@@ -74,7 +81,10 @@ afterEach(async () => {
   // `pointer-events: none`, and the next test could click nothing (#3671).
   document.body.style.pointerEvents = ''
 })
-afterAll(() => server.close())
+afterAll(() => {
+  if (mswFetch) globalThis.fetch = mswFetch
+  server.close()
+})
 
 if (!globalThis.matchMedia) {
   globalThis.matchMedia = ((query: string) => ({

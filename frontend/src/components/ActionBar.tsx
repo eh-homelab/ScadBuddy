@@ -222,10 +222,6 @@ export function ActionBar({
   const [dialogCreating, setDialogCreating] = useState(false)
   const creatingProject = pageCreating || dialogCreating
 
-  function chooseProject(next: number | null) {
-    setProjectId(next)
-  }
-
   /** #1660 — the remembered project, when Generate into `target` would file elsewhere. */
   function conflict(target: number | null): { remembered: number; chosen: number } | null {
     return remembered !== null && target !== null && target !== remembered ? { remembered, chosen: target } : null
@@ -397,7 +393,7 @@ export function ActionBar({
             : `The project list has not been read, so project ${project_id} cannot be checked. Nothing was saved.`,
         )
       }
-      if (project_id !== undefined) chooseProject(project_id)
+      if (project_id !== undefined) setProjectId(project_id)
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
       const generated = await generate(target)
       if (!generated) return null
@@ -481,7 +477,7 @@ export function ActionBar({
       testId="customize-project-select"
       inline
       value={projectId}
-      onChange={chooseProject}
+      onChange={setProjectId}
       list={projects}
       onProject={setProject}
       // #666 — locked while Generate files, so the project on screen is where it went.
@@ -686,7 +682,7 @@ export function ActionBar({
                 variant="outline"
                 onClick={() => {
                   setConfirming(null)
-                  chooseProject(confirming.remembered)
+                  setProjectId(confirming.remembered)
                   void generate(confirming.remembered).catch(() => undefined)
                 }}
                 data-testid="generate-use-remembered"
@@ -742,7 +738,7 @@ export function ActionBar({
         printSettings={model?.print_settings}
         project={{
           value: projectId,
-          onChange: chooseProject,
+          onChange: setProjectId,
           list: projects,
           disabled: generating || creatingProject,
           onCreating: setDialogCreating,

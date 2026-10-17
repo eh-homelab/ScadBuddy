@@ -32,7 +32,7 @@ interface RunInput {
   /**
    * #79 — the Bambuddy project this print is filed under; `null` is "No project".
    * `undefined` while the project list is unknown leaves the field out, so the server
-   * applies the remembered `last_project_id` rather than an explicit "No project" (#1045).
+   * applies the default project (`last_project_id`) rather than an explicit "No project" (#1045).
    */
   projectId: number | null | undefined
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
