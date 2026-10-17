@@ -347,6 +347,110 @@ CMD ["python", "-m", "scadbuddy_durable"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/healthz', timeout=4).status == 200 else 1)"]
 
+# ── slicer-build / slicer: the `slicer` queue's worker (#3821) ────────────────
+# The Rust worker (workers/rust/bins/scadbuddy-slicer) and the Bambu Studio CLI it
+# runs, published as ghcr.io/eh-homelab/scadbuddy-slicer (spec 2026-10-16 §7). No
+# volume, no credentials: its whole configuration is its environment (README.md,
+# "Slicer worker").
+#
+# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.99.1);
+# bump the two together. The Temporal Core SDK's build runs protoc.
+FROM rust:1.99.1-bookworm AS slicer-build
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+COPY workers/rust /src
+WORKDIR /src
+RUN cargo build --release --locked -p scadbuddy-slicer
+
+# Ubuntu 24.04, not debian:bookworm-slim: the AppImage is Bambu Studio's
+# ubuntu24.04 build and needs GLIBC_2.38 and GLIBCXX_3.4.32, which bookworm
+# (glibc 2.36) lacks: `ldd /opt/bambu-studio/bin/bambu-studio` there reports
+# "version `GLIBC_2.38' not found" (measured 2026-10-17 on bookworm-slim). Pinned
+# by tag and index digest, as `base` is, so the glibc the CLI was checked
+# against cannot move under a build. The worker built on bookworm (glibc 2.36)
+# runs on 24.04's 2.39.
+#
+# Bambu Studio is pinned by version and the AppImage's sha256, bumped
+# deliberately as OPENSCAD_VERSION is: change BAMBU_STUDIO_VERSION, the release
+# asset's name and the sha256 together. The sha256 was measured with
+# `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
+# lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
+# Upstream publishes no arm64 AppImage, so any other TARGETARCH fails here.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer
+
+ARG TARGETARCH
+ARG BAMBU_STUDIO_VERSION=02.08.02.61
+ARG BAMBU_STUDIO_ASSET=BambuStudio_ubuntu24.04-v02.08.02.61-20260820225108.AppImage
+ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320d723740c81a7fd
+
+# The CLI's runtime libraries. The AppImage bundles only ffmpeg's (in bin/, which
+# AppRun puts on LD_LIBRARY_PATH); the rest are the binary's NEEDED entries
+# (`readelf -d bin/bambu-studio`). Of the starting list (libgl1 libglu1-mesa
+# libgtk-3-0t64 libwebkit2gtk-4.1-0 libgstreamer1.0-0
+# libgstreamer-plugins-base1.0-0 libegl1 libosmesa6), these six leave
+# `LD_LIBRARY_PATH=/opt/bambu-studio/bin ldd /opt/bambu-studio/bin/bambu-studio
+# | grep 'not found'` empty and slice a MakerWorld 3MF headless with its plate
+# thumbnail rendered. libegl1 is load-bearing although ldd does not name it:
+# with libEGL.so* removed the CLI exits 127. Dropped: libglu1-mesa (nothing
+# names libGLU) and libosmesa6 (the binary only dlopens libOSMesa, and the same
+# slice with libOSMesa.so* removed still wrote plate_1.png). Measured 2026-10-17
+# on this base. tini reaps what a killed slice leaves behind, as in `runtime`.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         ca-certificates curl tini \
+         libgl1 libgtk-3-0t64 libwebkit2gtk-4.1-0 libgstreamer1.0-0 \
+         libgstreamer-plugins-base1.0-0 libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Extracted, not run as an AppImage: --appimage-extract needs no FUSE. AppRun
+# sets LD_LIBRARY_PATH to the bundled bin/ and LC_ALL=C, then execs
+# bin/bambu-studio. `profiles` is the vendor profile tree the backend reads
+# (profiles/BBL/), linked where the worker's contract names it.
+WORKDIR /opt
+RUN case "$TARGETARCH" in \
+      amd64) sha="$BAMBU_STUDIO_SHA256_AMD64" ;; \
+      *) echo "ERROR: Bambu Studio publishes no AppImage for '${TARGETARCH}'." >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location --output bambu-studio.AppImage \
+         "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
+    && printf '%s  bambu-studio.AppImage\n' "$sha" > bambu-studio.sha256 \
+    && sha256sum --check --strict bambu-studio.sha256 \
+    && chmod +x bambu-studio.AppImage \
+    && ./bambu-studio.AppImage --appimage-extract > /dev/null \
+    && mv squashfs-root bambu-studio \
+    && ln -s resources/profiles bambu-studio/profiles \
+    && test -d bambu-studio/profiles/BBL \
+    && rm bambu-studio.AppImage bambu-studio.sha256
+
+COPY --from=slicer-build /src/target/release/scadbuddy-slicer /usr/local/bin/
+
+# --help runs headless (no DISPLAY, no xvfb: the CLI path starts no GUI). HOME is
+# /tmp so whatever the CLI writes under ~ lands in the one writable directory,
+# which a read-only root filesystem with an emptyDir /tmp keeps working.
+ENV BAMBU_STUDIO_VERSION=${BAMBU_STUDIO_VERSION} \
+    HOME=/tmp
+RUN scadbuddy-slicer --check-cli
+
+RUN groupadd --gid 10001 slicer \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin slicer
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+WORKDIR /tmp
+# Numeric, as the other stages: Kubernetes' runAsNonRoot cannot check a name (DL3066).
+USER 10001:10001
+# /healthz and /metrics (sb-temporal, METRICS_PORT).
+EXPOSE 9090
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["scadbuddy-slicer"]
+
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
 # the browser by backend/scadbuddy/library/lsp.py. Upstream publishes prebuilt

@@ -1195,6 +1195,31 @@ see the subagents bullet for what the second needs.
 - The new GHCR package needs the one-time **public** visibility step
   described above.
 
+### Slicer worker (#3821)
+
+The `slicer` task queue's worker (spec
+`docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §7) runs on
+`ghcr.io/eh-homelab/scadbuddy-slicer` (the Dockerfile's `--target slicer`, published
+by the `slicer` job in `build-image.yml` with the same tags). It is the Rust worker
+`scadbuddy-slicer` with the Bambu Studio CLI v02.08.02.61, pinned by the AppImage's
+sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own.
+
+- Its whole configuration is five variables: `SCADBUDDY_TEMPORAL_ADDRESS` (required),
+  `SCADBUDDY_TEMPORAL_NAMESPACE` (default `default`),
+  `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` (default `slicer`),
+  `SCADBUDDY_SLICER_CONCURRENCY` (slices at once; default half the cores, at least
+  one) and the standard `OTEL_*`.
+- It mounts no volume and holds no credentials: no Postgres, no store keys, no
+  Bambuddy client. Each slice reads and writes its files through short-lived
+  transfer URLs in the activity's payload, so the pod must reach the API's internal
+  URL (`SCADBUDDY_API_INTERNAL_URL`, the API's Service) and, when `store_backend` is
+  `s3`, the bucket's endpoint.
+- It serves `/healthz` and `/metrics` on `9090`.
+- It runs as uid 10001 with `HOME=/tmp` and writes only under `/tmp`, so mount an
+  `emptyDir` there and keep the root filesystem read-only.
+- The new GHCR package needs the one-time **public** visibility step
+  described above.
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:

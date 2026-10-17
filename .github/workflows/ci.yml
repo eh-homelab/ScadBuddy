@@ -869,8 +869,9 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     # Build, lint, mypy, the container smoke and the real-backend e2e; the backend
-    # suite is `backend-pytest` (#1167).
-    timeout-minutes: 30
+    # suite is `backend-pytest` (#1167). The slicer image (#3821) adds a Rust
+    # release build and the Bambu Studio AppImage when its cache misses.
+    timeout-minutes: 45
     # For the backend tests that need Postgres: every one that builds the app
     # (the settings live there, #401), the render queue's store, the `render_jobs`
     # projection the Temporal path writes (#424) and the other `requires_postgres`
@@ -954,6 +955,29 @@ jobs:
           tags: scadbuddy:ci
           # Read-only: the `test` build above already wrote every shared layer.
           cache-from: type=gha
+
+      # The slicer worker's image (#3821): the Rust worker and the pinned Bambu
+      # Studio CLI. Its own `scope=slicer`, which build-image.yml's `slicer` job
+      # writes too, at mode=min: the repo's Actions cache is at its ceiling (#743).
+      # The build already runs `scadbuddy-slicer --check-cli` as root; the two
+      # runs below repeat it as the image's own user, the way the cluster runs it.
+      - name: Build the slicer image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slicer
+          load: true
+          tags: scadbuddy-slicer:ci
+          cache-from: type=gha,scope=slicer
+          cache-to: type=gha,scope=slicer,mode=min
+
+      - name: Slicer smoke
+        run: |
+          set -euo pipefail
+          docker run --rm scadbuddy-slicer:ci scadbuddy-slicer --check-cli
+          count="$(docker run --rm scadbuddy-slicer:ci /opt/bambu-studio/AppRun --help 2>&1 | grep -c -- '--slice')"
+          echo "AppRun --help names --slice on ${count} line(s)"
+          test "$count" -ge 1
 
       # The container's OWN healthcheck is the assertion, not a curl we write
       # here: that way CI exercises the same probe Kubernetes will, and a

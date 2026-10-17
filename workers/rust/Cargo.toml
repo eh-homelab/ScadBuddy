@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sb-slicer", "crates/sb-temporal", "crates/sb-transfer"]
+members = ["bins/scadbuddy-slicer", "crates/sb-slicer", "crates/sb-temporal", "crates/sb-transfer"]
 
 [workspace.package]
 edition = "2024"
