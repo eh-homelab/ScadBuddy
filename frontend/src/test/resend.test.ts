@@ -33,6 +33,18 @@ describe('resending (mswjs/interceptors#862)', () => {
     }
   })
 
+  it('never resends a request aborted during the pause before its resend', async () => {
+    const controller = new AbortController()
+    const intercepted = vi.fn().mockImplementation(() => {
+      setTimeout(() => controller.abort(), 0) // a task queued before the pause's own
+      return Promise.reject(refused())
+    })
+    await expect(resending(intercepted, vi.fn(), 3)('http://test/g', { signal: controller.signal })).rejects.toThrow(
+      'fetch failed',
+    )
+    expect(intercepted).toHaveBeenCalledOnce()
+  })
+
   it("treats init's explicit null signal as none, as fetch does", async () => {
     const request = new Request('http://test/e', { signal: AbortSignal.abort() })
     const intercepted = vi.fn().mockRejectedValueOnce(refused()).mockResolvedValue(new Response('ok'))

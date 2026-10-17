@@ -70,6 +70,7 @@ afterEach(async () => {
   document.body.style.pointerEvents = ''
 })
 afterAll(() => {
+  // MSW's fetch back first, so `server.close()` then finds its own and restores the real one.
   if (mswFetch) globalThis.fetch = mswFetch
   server.close()
 })

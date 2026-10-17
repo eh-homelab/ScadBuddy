@@ -25,6 +25,7 @@ export function resending(
     const url = input instanceof Request ? input.url : String(input)
     for (let attempt = 1; ; attempt++) {
       try {
+        // A clone each try, so a refused try's consumed body leaves the next one its own.
         return await intercepted(input instanceof Request ? input.clone() : input, init)
       } catch (error) {
         const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
