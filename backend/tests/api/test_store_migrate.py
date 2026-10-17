@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -36,10 +37,15 @@ def _until(check: Callable[[], bool], timeout: float = 30.0) -> None:
         time.sleep(0.1)
 
 
-def test_post_starts_once_and_get_reports_progress(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+def _rows(pg_conninfo: str, sql: str) -> None:
+    with store_pool(pg_conninfo) as pool, pool.connection() as conn:
+        conn.execute(sql)
+
+
+def test_post_starts_once_and_get_reports_the_rows(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
 ) -> None:
-    calls: list[tuple[str, str, int, list[str]]] = []
+    calls: list[tuple[str, str, int, datetime]] = []
     release = threading.Event()
 
     def build(name: str, *_: Any) -> _Backend:
@@ -51,19 +57,25 @@ def test_post_starts_once_and_get_reports_progress(
         target: _Backend,
         *,
         limit: int,
+        started: datetime,
         heartbeat: Callable[[str], None],
-        skip: Collection[str] = (),
     ) -> MigrationBatch:
-        calls.append((source.backend, target.backend, limit, sorted(skip)))
-        if len(calls) == 1:
-            return MigrationBatch(moved=2, remaining=3, failed=["k"])
+        calls.append((source.backend, target.backend, limit, started))
         while not release.is_set():
             heartbeat("waiting")
             await asyncio.sleep(0.05)
-        return MigrationBatch(moved=3, remaining=0, failed=[])
+        return MigrationBatch(moved=0, remaining=0, failed=[])
 
     monkeypatch.setattr(migrate, "build_backend", build)
     monkeypatch.setattr(migrate, "migrate_batch", batch)
+    _rows(
+        pg_conninfo,
+        "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size,"
+        " migrated_backend, migrated_backend_id, migrated_error, migrated_error_at) VALUES"
+        " ('todo', 'a', 'piece', 'bambuddy', '1', 1, NULL, NULL, NULL, NULL),"
+        " ('done', 'b', 'piece', 'bambuddy', '2', 1, 's3', 't/piece/b', NULL, NULL),"
+        " ('bad', 'c', 'piece', 'bambuddy', '3', 1, NULL, NULL, 'BlobMissingError: gone', now())",
+    )
 
     assert client.get("/api/v1/store/migrate").status_code == 404
     body = {"source": "bambuddy", "target": "s3", "batch": 7}
@@ -77,31 +89,42 @@ def test_post_starts_once_and_get_reports_progress(
     def status() -> dict[str, Any]:
         answer = client.get("/api/v1/store/migrate", params={"source": "bambuddy", "target": "s3"})
         assert answer.status_code == 200, answer.text
-        body: dict[str, Any] = answer.json()
-        return body
+        got: dict[str, Any] = answer.json()
+        return got
 
-    _until(lambda: status()["failed"] == ["k"])
-    # The counts are the table's: no row is on Bambuddy here.
-    assert status() == {
+    _until(lambda: bool(calls))
+    expected = {
         "source": "bambuddy",
         "target": "s3",
-        "remaining": 0,
-        "copied": 0,
-        "failed": ["k"],
+        "remaining": 1,
+        "copied": 1,
+        "failed": [{"key": "bad", "error": "BlobMissingError: gone"}],
+        "failed_count": 1,
         "running": True,
     }
+    assert status() == expected
     release.set()
     _until(lambda: not status()["running"])
-    # Closed, its result still names what it could not copy.
-    assert status()["failed"] == ["k"]
+    # Closed, the rows still say what failed.
+    assert status() == {**expected, "running": False}
+    # One execution: the second POST joined the first.
+    assert [call[:3] for call in calls] == [("bambuddy", "s3", 7)]
     assert (
         client.get(
             "/api/v1/store/migrate", params={"source": "s3", "target": "bambuddy"}
         ).status_code
         == 404
     )
-    # One execution: the second POST joined the first, which skipped what failed.
-    assert calls == [("bambuddy", "s3", 7, []), ("bambuddy", "s3", 7, ["k"])]
+
+
+def test_a_migration_to_the_saved_backend_is_refused(client: TestClient, pg_conninfo: str) -> None:
+    _rows(
+        pg_conninfo,
+        "INSERT INTO settings (name, value) VALUES ('store_backend', '\"s3\"')"
+        " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+    )
+    answer = client.post("/api/v1/store/migrate", json={"source": "bambuddy", "target": "s3"})
+    assert answer.status_code == 409, answer.text
 
 
 @pytest.mark.parametrize(

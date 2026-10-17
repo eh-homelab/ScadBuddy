@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Self
 
 from pydantic import BaseModel, model_validator
@@ -23,15 +24,20 @@ class StoreMigrationParams(BaseModel):
         return self
 
 
-class StoreMigrationProgress(BaseModel):
-    moved: int = 0
-    remaining: int = 0
-    failed: list[str] = []
+class StoreMigrationInput(StoreMigrationParams):
+    """A run's input. What it carries across continue-as-new is bounded: two counters
+    and its start. Which rows failed, and why, is on the rows (`migrated_error`)."""
+
+    #: The first run's start, by the database's clock (`BlobIndex.now`): a row whose
+    #: copy failed before it is tried again.
+    started: datetime
+    batches_done: int = 0
+    copied: int = 0
 
 
 class StoreMigrationResult(BaseModel):
-    moved: int
-    failed: list[str]
+    batches_done: int
+    copied: int
 
 
 def migration_id(source: StoreBackend, target: StoreBackend) -> str:

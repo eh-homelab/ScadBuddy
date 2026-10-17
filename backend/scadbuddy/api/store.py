@@ -8,12 +8,13 @@ import asyncio
 from fastapi import APIRouter, HTTPException, status
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ValidationError
-from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.config import StoreBackend
+from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.store.content import StoreUsage
 from scadbuddy.store.factory import store_usage
@@ -21,6 +22,7 @@ from scadbuddy.store.index import BlobIndex
 from scadbuddy.workflows.commands import execution_gone
 from scadbuddy.workflows.store_migration import StoreMigration
 from scadbuddy.workflows.store_migration_models import (
+    StoreMigrationInput,
     StoreMigrationParams,
     migration_id,
 )
@@ -48,18 +50,27 @@ async def get_store_usage(state: StateDep) -> StoreUsage:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Migrate the blob store",
     description=(
-        "Move every recorded blob from `source` to `target`, `batch` at a time. A second"
-        " request while one runs joins it. Save the target's settings first."
+        "Copy every recorded blob from `source` to `target`, `batch` at a time; each row"
+        " switches to its copy when ScadBuddy next starts with `store_backend` set to"
+        " `target`. A second request while one runs joins it; one after it ended retries"
+        " what failed. Save the target's settings first. 409 once `store_backend` is"
+        " already `target`."
     ),
+    responses={status.HTTP_409_CONFLICT: {"description": "`store_backend` is already `target`."}},
 )
 async def migrate_store(
     params: StoreMigrationParams, state: StateDep, ops: OperationsDep
 ) -> StoreMigrationStarted:
+    pool = state.settings_store.pool
+    saved = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
+    if saved.store_backend == params.target:
+        # The copy is for before the flip; after it, the start-up switch has run.
+        raise HTTPException(status.HTTP_409_CONFLICT, f"store_backend is already {params.target}")
+    started = await asyncio.to_thread(BlobIndex(pool).now)
     # No update to answer, so not `start_command`: a plain start that joins a running one.
     handle = await ops.client.start_workflow(
         StoreMigration.run,
-        # Both: with fewer payloads than parameters the worker decodes them untyped.
-        args=[params, None],
+        StoreMigrationInput(**params.model_dump(), started=started),
         id=migration_id(params.source, params.target),
         task_queue=state.settings.temporal_task_queue_library,
         id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
@@ -68,15 +79,25 @@ async def migrate_store(
     return StoreMigrationStarted(workflow_id=handle.id)
 
 
+#: The most failed rows `GET /store/migrate` lists; `failed_count` counts them all.
+MAX_FAILED = 200
+
+
+class FailedCopy(BaseModel):
+    key: str
+    error: str
+
+
 class StoreMigrationStatus(BaseModel):
     source: StoreBackend
     target: StoreBackend
-    #: Rows on `source` not yet copied to `target`, and those copied (switched at the
-    #: next start on `target`).
+    #: Rows on `source` still to copy to `target`, but those whose copy failed.
     remaining: int
+    #: Rows copied: each switches to its copy at the next start on `target`.
     copied: int
-    #: The latest run's keys it could not copy.
-    failed: list[str]
+    #: Rows whose copy failed, and why (at most `MAX_FAILED`); a new run retries them.
+    failed: list[FailedCopy]
+    failed_count: int
     running: bool
 
 
@@ -85,8 +106,8 @@ class StoreMigrationStatus(BaseModel):
     response_model=StoreMigrationStatus,
     summary="Blob store migration progress",
     description=(
-        "The pair's rows still to copy and copied, and its latest run's failed keys;"
-        " 404 when no run for the pair ever started."
+        "The pair's rows still to copy, copied and failed (with why), and whether its"
+        " migration runs; 404 when none ever ran for the pair."
     ),
 )
 async def get_store_migration(
@@ -99,30 +120,24 @@ async def get_store_migration(
         StoreMigrationParams(source=source, target=target)
     except ValidationError as error:
         raise RequestValidationError(error.errors()) from error
-    handle = ops.client.get_workflow_handle_for(StoreMigration.run, migration_id(source, target))
+    handle = ops.client.get_workflow_handle(migration_id(source, target))
     try:
         described = await handle.describe()
     except RPCError as error:
         if execution_gone(error):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no store migration ran") from error
         raise
-    running = described.status == WorkflowExecutionStatus.RUNNING
-    if running:
-        failed = (await handle.query(StoreMigration.progress)).failed
-    else:
-        try:
-            failed = (await handle.result()).failed
-        except WorkflowFailureError:
-            # Failed or ended before its result (an unready backend, a terminate).
-            failed = []
-    remaining, copied = await asyncio.to_thread(
-        BlobIndex(state.settings_store.pool).migration_counts, source, target
+    index = BlobIndex(state.settings_store.pool)
+    remaining, failed_count, copied = await asyncio.to_thread(
+        index.migration_counts, source, target
     )
+    failed = await asyncio.to_thread(index.migration_failures, source, target, limit=MAX_FAILED)
     return StoreMigrationStatus(
         source=source,
         target=target,
         remaining=remaining,
         copied=copied,
-        failed=failed,
-        running=running,
+        failed=[FailedCopy(key=key, error=error) for key, error in failed],
+        failed_count=failed_count,
+        running=described.status == WorkflowExecutionStatus.RUNNING,
     )
