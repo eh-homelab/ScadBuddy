@@ -418,8 +418,11 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'list_print_projects',
-    description: "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
-      'the user changes, in Settings.' +
+    description:
+      "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
+      'the user changes, in Settings; also `folders`, the library folders of no project a print or ' +
+      'file_output_in_project_folder may go to instead (`folder_id`), each with its `path`; and `sort`, how ' +
+      'the picker orders them. get_default_print_project says where some content goes by default.' +
       PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
@@ -428,10 +431,40 @@ export const printTools: Tool[] = [
     bambuddyScope: ['Manage Projects'],
     routes: ['GET /api/v1/print/projects'],
     handler: async (args, { backend }) => {
-      const { last_project_id, projects } = await ok(backend.GET('/api/v1/print/projects'), 'list projects')
+      const { last_project_id, projects, folders, sort } = await ok(
+        backend.GET('/api/v1/print/projects'),
+        'list projects',
+      )
       const { items, ...rest } = page(projects ?? [], args, (p) => String(p.id), 'list_print_projects')
-      return json({ last_project_id, projects: items, ...rest })
+      return json({ last_project_id, sort, projects: items, folders: folders ?? [], ...rest })
     },
+  }),
+
+  defineTool({
+    name: 'get_default_print_project',
+    description:
+      'Where a print (or Arrange, or Generate) of some outputs and library files is filed by default: the one ' +
+      'project they are all in already (`reason: "content"`), else the Settings default (`"settings"`), else ' +
+      'the project the last send went to (`"last"`), else none. Pass it to print_output as `project_id` to file ' +
+      'the print as the print dialog would.',
+    input: z.object({
+      output_ids: z.array(outputId).max(100).optional(),
+      library_file_ids: z.array(libraryFileId).max(100).optional(),
+    }),
+    risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Projects', 'Manage Library'],
+    routes: ['GET /api/v1/print/projects/default'],
+    handler: async ({ output_ids, library_file_ids }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/projects/default', {
+            params: { query: { output_id: output_ids, library_file_id: library_file_ids } },
+          }),
+          'read the default project',
+        ),
+      ),
   }),
 
   defineTool({
@@ -832,6 +865,8 @@ export const printTools: Tool[] = [
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
       'project: omit it for the default project (`last_project_id`), or pass null for "No project". ' +
+      '`folder_id` (from list_print_projects\' `folders`) puts the 3MF in a library folder of no project ' +
+      'instead; it cannot be sent with a `project_id`. ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
@@ -853,7 +888,8 @@ export const printTools: Tool[] = [
         .catchall(presetRef)
         .optional()
         .describe('A filament preset per slot id, in place of the spool\'s own'),
-      project_id: nullable(z.number().int()).describe('Omit for the remembered project; null for "No project"'),
+      project_id: nullable(z.number().int()).describe('Omit for the default project; null for "No project"'),
+      folder_id: z.number().int().optional().describe('A library folder of no project, in place of a project'),
       options: printOptions,
       print_sequence: z
         .enum(['by layer', 'by object'])
@@ -1003,6 +1039,8 @@ export const printTools: Tool[] = [
         },
         // Omitted stays omitted (the remembered project); null is "No project" (#317).
         ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
+        // #3651 — a library folder in place of a project; the backend refuses both.
+        ...(args.folder_id === undefined ? {} : { folder_id: args.folder_id }),
         options: args.options,
         // The same for a library file as for an output (#907, #1756).
         ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
@@ -1104,22 +1142,32 @@ export const printTools: Tool[] = [
     name: 'file_output_in_project_folder',
     description:
       "Upload an output's editable 3MF into a Bambuddy project's library folder, as Generate does with a " +
-      'project chosen. Idempotent: the same project again reuses the file already there (`created: false`), ' +
-      'and a later print on the same printer reuses it too.',
-    input: z.object({ output_id: outputId, project_id: z.number().int() }),
+      'project chosen, or into a library folder of no project (`folder_id`, from list_print_projects\' ' +
+      '`folders`) in its place: name one. Idempotent: the same destination again reuses the file already ' +
+      'there (`created: false`), and a later print on the same printer reuses it too.',
+    input: z
+      .object({ output_id: outputId, project_id: z.number().int().optional(), folder_id: z.number().int().optional() })
+      .refine((o) => (o.project_id === undefined) !== (o.folder_id === undefined), {
+        message: 'name one: project_id or folder_id',
+      }),
     risk: 'outward',
     bambuddyScope: ['Manage Library', 'Manage Projects'],
     routes: ['POST /api/v1/outputs/{output_id}/project-file'],
-    summarize: ({ output_id, project_id }) =>
-      `Upload output ${output_id}'s 3MF into Bambuddy project ${project_id}'s folder`,
-    handler: async ({ output_id, project_id }, ctx) =>
+    summarize: ({ output_id, project_id, folder_id }) =>
+      project_id !== undefined
+        ? `Upload output ${output_id}'s 3MF into Bambuddy project ${project_id}'s folder`
+        : `Upload output ${output_id}'s 3MF into Bambuddy library folder ${folder_id ?? ''}`,
+    handler: async ({ output_id, project_id, folder_id }, ctx) =>
       json(
-        await command(ctx, `file ${output_id} in project ${project_id}`, (headers) =>
-          ctx.backend.POST('/api/v1/outputs/{output_id}/project-file', {
-            params: { path: { output_id } },
-            body: { project_id },
-            headers,
-          }),
+        await command(
+          ctx,
+          project_id !== undefined ? `file ${output_id} in project ${project_id}` : `file ${output_id} in folder ${folder_id ?? ''}`,
+          (headers) =>
+            ctx.backend.POST('/api/v1/outputs/{output_id}/project-file', {
+              params: { path: { output_id } },
+              body: project_id !== undefined ? { project_id } : { folder_id },
+              headers,
+            }),
         ),
       ),
   }),

@@ -13,11 +13,15 @@ import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
+import { useAnalysis } from '../lib/useAnalysis'
+import { usePrintCheck } from '../lib/usePrintCheck'
+import type * as AnalysisModule from '../lib/useAnalysis'
+import type * as PrintCheckModule from '../lib/usePrintCheck'
 import { startTracing } from '../lib/tracing'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
-import { chooseProject } from '../test/projectPicker'
+import { chooseProject, openPicker } from '../test/projectPicker'
 import { choose, optionNames } from '../test/select'
 
 /** #3669 — the option text for the value a native select took, in the shadcn select that replaced it. */
@@ -77,6 +81,17 @@ vi.mock('./print/PlateScene', () => ({
     <div data-testid="plate-scene" data-url={url} data-colors={JSON.stringify([...colors])} />
   ),
 }))
+
+// #3768 review — the real hooks, spied on, so a test can read the request each render
+// asked for (null: nothing is read) without waiting out a debounce.
+vi.mock('../lib/usePrintCheck', async (importOriginal) => {
+  const actual = await importOriginal<typeof PrintCheckModule>()
+  return { ...actual, usePrintCheck: vi.fn(actual.usePrintCheck) }
+})
+vi.mock('../lib/useAnalysis', async (importOriginal) => {
+  const actual = await importOriginal<typeof AnalysisModule>()
+  return { ...actual, useAnalysis: vi.fn(actual.useAnalysis) }
+})
 
 const output = fixtures.outputs[0] as Output
 
@@ -2657,6 +2672,10 @@ describe('PrintPicker · Projects', () => {
       http.get('/api/v1/print/projects', () =>
         HttpResponse.json({ detail: 'Bambuddy unreachable' }, { status: 502 }),
       ),
+      // #3651 — the default is read from Bambuddy too.
+      http.get('/api/v1/print/projects/default', () =>
+        HttpResponse.json({ detail: 'Bambuddy unreachable' }, { status: 502 }),
+      ),
       http.get('/api/v1/print/outputs/:id/progress', () =>
         HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
       ),
@@ -2668,7 +2687,7 @@ describe('PrintPicker · Projects', () => {
     await waitFor(() => expect(print).toBeEnabled())
     await user.click(print)
 
-    // #1045: with the list unknown the run leaves the project to the server…
+    // #1045: with the default unknown the run leaves the project to the server…
     await waitFor(() => expect(runs.bodies).toHaveLength(1))
     expect(runs.bodies[0]).not.toHaveProperty('project_id')
     // …and the print is filed under the project the run says it used.
@@ -2794,15 +2813,16 @@ describe('PrintPicker · Projects', () => {
   it('sends the last project in Simple mode, with no project from the page (#772 review)', async () => {
     const { bodies } = watch('POST', '/run')
     server.use(
-      http.get('/api/v1/print/projects', () =>
-        HttpResponse.json({ projects: [...fixtures.projectViews], last_project_id: 2 }),
-      ),
+      http.get('/api/v1/print/projects/default', async () => {
+        await delay(150)
+        return HttpResponse.json({ project_id: 2, reason: 'settings' })
+      }),
     )
     const { user } = renderPicker()
     await loaded()
     expect(screen.queryByTestId('project-select')).toBeNull()
 
-    // Print is held until the project list has seeded the project.
+    // Print is held until the default (#3651) has seeded the project.
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -3376,10 +3396,15 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await loaded()
     const plates = await screen.findByTestId('plate-choice')
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).not.toBeNull()
+    expect(vi.mocked(useAnalysis).mock.lastCall?.[1]).not.toBeNull()
 
     await user.click(within(plates).getByTestId('plates-none'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('No plate chosen. Choose at least one to print.')
     expect(screen.getByTestId('run-print')).toBeDisabled()
+    // #3762 review: no plate is checked or judged for a print that names none.
+    expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toBeNull()
+    expect(vi.mocked(useAnalysis).mock.lastCall?.[1]).toBeNull()
 
     await user.click(within(plates).getByTestId('plates-all'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('All 2 plates')
@@ -3724,12 +3749,50 @@ describe('PrintPicker · A library file (#313)', () => {
     expect(screen.getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
   })
 
-  it('files a Simple-mode print under the last project printed to, with no picker shown (#768)', async () => {
+  it('opens on the one project all of its content is in, asking about every piece it names (#3651)', async () => {
+    const asked: URLSearchParams[] = []
     server.use(
-      http.get('/api/v1/print/projects', () =>
-        HttpResponse.json({ projects: fixtures.projectViews, last_project_id: 2 }),
-      ),
+      http.get('/api/v1/print/projects/default', ({ request }) => {
+        asked.push(new URL(request.url).searchParams)
+        return HttpResponse.json({ project_id: 1, reason: 'content' })
+      }),
     )
+    const run = vi.spyOn(api, 'runLibraryPrint')
+    const { user } = renderPage(
+      <PrintPicker open source={LIBRARY} content={{ libraryFileIds: [89, 67] }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+
+    expect(await screen.findByTestId('print-filed-under')).toHaveTextContent('Filed under: Reagan Keychain')
+    expect(asked[0]?.getAll('library_file_id')).toEqual(['89', '67'])
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(run).toHaveBeenCalledWith(
+      89,
+      expect.objectContaining({ project_id: 1 }),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    )
+  })
+
+  it('prints into a library folder chosen in place of a project (#3651)', async () => {
+    const run = vi.spyOn(api, 'runLibraryPrint')
+    const { user } = renderPage(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    const list = await openPicker(user, await screen.findByTestId('project-select'))
+    await user.click(within(list).getByTestId('folder-option-1'))
+
+    expect(screen.getByTestId('project-select')).toHaveTextContent('Folder: MakerWorld')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    const body = run.mock.calls[0]?.[1]
+    expect(body).toMatchObject({ folder_id: 1 })
+    expect(body).not.toHaveProperty('project_id')
+  })
+
+  it('files a Simple-mode print under the default project, with no picker shown (#768)', async () => {
+    await api.putSettings({ last_project_id: 2 })
     const run = vi.spyOn(api, 'runLibraryPrint')
     const { user } = renderPage(
       <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />,

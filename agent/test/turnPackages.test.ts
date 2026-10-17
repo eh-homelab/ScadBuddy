@@ -1,5 +1,5 @@
 import type { BackgroundTasks } from '../src/background/service.js'
-import { mkdir, mkdtemp, readdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -11,6 +11,7 @@ import { buildHarnessOptions } from '../src/harness/run.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
 import { builtinNote, turnServers } from '../src/temporal/turnServers.js'
+import { BUILTIN_SERVER } from '../src/builtins/server.js'
 import type { SessionFiles } from '../src/workspace/store.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
@@ -287,18 +288,41 @@ describe('plugin packages in a durable turn', () => {
     }
     const signal = new AbortController().signal
     const good = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
-    // Shared, its http server is forwarded, and its URL and token are secrets.
-    const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
-    expect(handed).toEqual([['notes']])
-    expect(listed.servers.map((x) => x.name)).toContain('plugin_notes_api')
-    expect(listed.secrets).toEqual(expect.arrayContaining([URL, 'notes-token-0123456789']))
-    // Failed to share: never handed to the forwarder, so no server, URL or token.
-    handed.length = 0
-    const failed = await turnServers({ packages: { load, root: undefined, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
-    expect(handed).toEqual([[]])
-    expect(failed.servers.map((x) => x.name)).not.toContain('plugin_notes_api')
-    expect(failed.secrets).not.toContain(URL)
-    expect(failed.secrets).not.toContain('notes-token-0123456789')
+    try {
+      // Shared, its http server is forwarded, and its URL and token are secrets.
+      const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
+      expect(handed).toEqual([['notes']])
+      expect(listed.servers.map((x) => x.name)).toContain('plugin_notes_api')
+      expect(listed.secrets).toEqual(expect.arrayContaining([URL, 'notes-token-0123456789']))
+      // Failed to share: never handed to the forwarder, so no server, URL or token.
+      handed.length = 0
+      const failed = await turnServers({ packages: { load, root: undefined, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
+      expect(handed).toEqual([[]])
+      expect(failed.servers.map((x) => x.name)).not.toContain('plugin_notes_api')
+      expect(failed.secrets).not.toContain(URL)
+      expect(failed.secrets).not.toContain('notes-token-0123456789')
+      // A call, not a listing, with no payload volume: nothing a listing could not offer
+      // is built or forwarded, whatever the call names (#3072).
+      handed.length = 0
+      const call = await turnServers({ packages: { load, root: undefined, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: false })
+      expect(handed).toEqual([[]])
+      expect(call.servers.map((x) => x.name)).not.toContain('plugin_notes_api')
+      expect(call.secrets).not.toContain(URL)
+      expect(call.secrets).not.toContain('notes-token-0123456789')
+      // Nor the built-ins it names: a listing with no payload volume offers none (#3522).
+      const named = { ...pkg, builtinTools: ['Read', 'WebFetch'] }
+      const loadNamed = async (): Promise<PackagesForRun> => ({ ...(await load()), builtinTools: named.builtinTools, loaded: [named] })
+      const builtins = { files: {} as SessionFiles, nested: () => ({ ask: async () => '', search: async () => ({ text: '' }) }) }
+      const bare = await turnServers({ packages: { load: loadNamed, root: undefined, localRoot: good, forward }, builtins })({
+        session: 's',
+        owner: OWNER,
+        signal,
+        listing: false,
+      })
+      expect(bare.servers.map((x) => x.name)).not.toContain(BUILTIN_SERVER)
+    } finally {
+      await rm(good, { recursive: true, force: true })
+    }
   })
 
   it('reads a null command as none, as the segment runner does (#2563)', async () => {

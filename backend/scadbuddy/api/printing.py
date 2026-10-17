@@ -62,6 +62,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
+from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
@@ -1219,18 +1220,58 @@ async def get_progress(
     return progress
 
 
-@router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")
-async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
-    """Every Bambuddy project, with the library folder that belongs to it (#79).
+@router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects and folders")
+async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectChoices:
+    """Every Bambuddy project, with the library folder that belongs to it (#79), and
+    every library folder of no project, a destination of its own (#3651).
 
-    Also the default project (``last_project_id``), which only Settings changes (#3188).
-    ScadBuddy models no relationship between a model and a project: which prints
-    belong to a project is on the project's own page, and keeping a second answer
-    here would be a copy that goes stale.
+    Also the default project (``last_project_id``), which only Settings changes (#3188),
+    the picker's sort, and when each destination was last touched. ScadBuddy models no
+    relationship between a model and a project: which prints belong to a project is on
+    the project's own page, and keeping a second answer here would be a copy that goes
+    stale.
     """
     settings = store.load()
+    touches = await uploads.destination_touches()
     async with client_for(settings) as client:
-        return await describe_projects(client, last_project_id=settings.last_project_id)
+        return await describe_projects(
+            client,
+            last_project_id=settings.last_project_id,
+            sort=settings.destination_sort,
+            touches=touches,
+            inbox_id=settings.library_folder_id,
+        )
+
+
+#: The most content one default asks about: a batch of library files, or an arrange's.
+MAX_DEFAULT_CONTENT = 100
+
+
+@router.get(
+    "/projects/default",
+    response_model=DefaultDestination,
+    summary="Where some content is filed by default",
+)
+async def get_default_project(
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    output_id: Annotated[list[str] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
+    library_file_id: Annotated[list[int] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
+) -> DefaultDestination:
+    """The project a print or Generate of these outputs and library files opens on
+    (#3651): the one project they are all in already, else the Settings default, else
+    the project the last send went to, else none. ``reason`` says which."""
+    metas = [require_output(outputs, one) for one in dict.fromkeys(output_id or [])]
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await default_destination(
+            client,
+            uploads,
+            settings,
+            outputs=metas,
+            library_file_ids=list(dict.fromkeys(library_file_id or [])),
+        )
 
 
 @router.post(

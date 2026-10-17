@@ -1,8 +1,9 @@
-import { ChevronsUpDownIcon, PlusIcon } from 'lucide-react'
+import { ChevronsUpDownIcon, FolderIcon, FolderKanbanIcon, PlusIcon } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
-import type { ProjectRequest, ProjectView } from '../api/types'
+import type { DestinationSort, FolderView, ProjectRequest, ProjectView } from '../api/types'
+import { timeAgo } from '../lib/format'
 import { fuzzyScore } from '../lib/fuzzy'
 import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
 import { Button } from '@/components/ui/button'
@@ -25,23 +26,27 @@ import { cn } from '@/lib/utils'
 import { Spinner } from './ui/spinner'
 
 /**
- * Chooses the Bambuddy project this print is filed under (#79).
+ * Chooses the Bambuddy project this print is filed under (#79), or, where the parent
+ * offers them, a library folder of no project instead (#3651).
  *
  * A project here is *two* Bambuddy objects, and that is the whole reason this control
  * exists rather than a folder dropdown: the project row carries the timeline and the BOM,
  * but it is the **library folder linked to it** that makes Bambuddy's project page list
  * any files at all. ScadBuddy always pairs them — creating a project creates its folder,
  * and linking a project that has none creates one — so a project chosen here is somewhere
- * the 3MF can actually land.
+ * the 3MF can actually land. A folder of no project is a plain place in the library: the
+ * file lands there and is filed under no project.
  *
- * #3651 — a searchable list (fuzzy: typos and letters in order match), most recently
- * chosen first or by name, each project shown with its path and folder.
+ * #3651 — a searchable list (fuzzy: typos and letters in order match), each row labelled
+ * Project or Folder and shown with its path, sorted like a file explorer: by when it was
+ * last touched (printed, filed or chosen here, or written to in Bambuddy; the default),
+ * modified, or by name. Settings sets the order it opens on; the list can re-sort.
  *
  * The control fetches its own list, unless the parent passes one from
  * {@link useProjectList} (#317: the Customize page's picker and the print dialog's share
  * one list rather than each fetching it), so the parent needs to know nothing but the
- * chosen id: it passes that as `project_id` on the run, and the backend resolves the
- * folder from it. Attaching the resulting queue entries and archives
+ * chosen id: it passes that as `project_id` (or `folder_id`) on the run, and the backend
+ * resolves the folder from it. Attaching the resulting queue entries and archives
  * is deliberately *not* here — neither id exists when a print starts (#89).
  */
 
@@ -56,68 +61,58 @@ function detail(project: ProjectView): string {
   return parts.join(' · ')
 }
 
+function folderDetail(folder: FolderView): string {
+  const files = folder.file_count ?? 0
+  return `${files} ${files === 1 ? 'file' : 'files'}`
+}
+
 function optionLabel(project: ProjectView, path: string): string {
   return `${path} · ${detail(project)}`
 }
 
-/** #3651 — how the list is ordered: most recently chosen first (the default), or by name. */
-type Sort = 'recent' | 'name'
-const SORT_KEY = 'scadbuddy.project-picker.sort'
-const RECENT_KEY = 'scadbuddy.project-picker.recent'
-const RECENT_MAX = 20
+/** #3651 — a row of the list: a project, or a library folder of no project. */
+type Row =
+  | { kind: 'project'; id: number; path: string; project: ProjectView }
+  | { kind: 'folder'; id: number; path: string; folder: FolderView }
 
-function readStored<T>(key: string, fallback: T, valid: (value: unknown) => value is T): T {
-  try {
-    const raw = window.localStorage.getItem(key)
-    if (raw === null) return fallback
-    const value: unknown = JSON.parse(raw)
-    return valid(value) ? value : fallback
-  } catch {
-    return fallback
-  }
-}
-
-function writeStored(key: string, value: unknown) {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    // A private window or blocked storage: the order is a convenience, kept for this visit.
-  }
-}
-
-const isSort = (value: unknown): value is Sort => value === 'recent' || value === 'name'
-const isIds = (value: unknown): value is number[] =>
-  Array.isArray(value) && value.every((id) => typeof id === 'number')
-
-/** The projects this browser chose most recently, newest first. */
-function recentIds(): number[] {
-  return readStored(RECENT_KEY, [], isIds)
-}
-
-function touch(projectId: number) {
-  writeStored(RECENT_KEY, [projectId, ...recentIds().filter((id) => id !== projectId)].slice(0, RECENT_MAX))
-}
+const SORTS: { value: DestinationSort; label: string }[] = [
+  { value: 'touched', label: 'Last touched' },
+  { value: 'modified', label: 'Modified' },
+  { value: 'name', label: 'Name' },
+]
+const isSort = (value: unknown): value is DestinationSort => SORTS.some((sort) => sort.value === value)
 
 /**
- * Most recently touched first: this browser's choices, then the default project
- * (`last_project_id`, set in Settings), then the rest by name.
+ * #3651 — what this page chose since it loaded, by row, so a choice moves to the top of
+ * "Last touched" at once. The server's `touched_at` catches up once something is filed
+ * there (or the Customize page remembers the project).
  */
-function ordered(
-  projects: ProjectView[],
-  paths: Map<number, string>,
-  sort: Sort,
-  lastProjectId: number | null,
-): ProjectView[] {
-  const byName = [...projects].sort((a, b) =>
-    (paths.get(a.id) ?? a.name).localeCompare(paths.get(b.id) ?? b.name, undefined, { sensitivity: 'base' }),
-  )
+const chosenAt = new Map<string, number>()
+
+function markChosen(kind: Row['kind'], id: number) {
+  chosenAt.set(`${kind}:${id}`, Date.now())
+}
+
+function stamp(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const at = Date.parse(iso)
+  return Number.isNaN(at) ? null : at
+}
+
+function rowStamp(row: Row, sort: DestinationSort): number | null {
+  const item = row.kind === 'project' ? row.project : row.folder
+  if (sort === 'modified') return stamp(item.modified_at)
+  const local = chosenAt.get(`${row.kind}:${row.id}`) ?? null
+  const server = stamp(item.touched_at)
+  return local === null ? server : server === null ? local : Math.max(local, server)
+}
+
+/** Newest first, rows with no date after the rest, ties by path; or by path alone. */
+function ordered(rows: Row[], sort: DestinationSort): Row[] {
+  const byName = [...rows].sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' }))
   if (sort === 'name') return byName
-  const rank = [...recentIds(), ...(lastProjectId === null ? [] : [lastProjectId])]
-  const at = (id: number) => {
-    const index = rank.indexOf(id)
-    return index === -1 ? Number.POSITIVE_INFINITY : index
-  }
-  return byName.sort((a, b) => at(a.id) - at(b.id))
+  const at = (row: Row) => rowStamp(row, sort) ?? Number.NEGATIVE_INFINITY
+  return byName.sort((a, b) => at(b) - at(a))
 }
 
 /** The Select's value for "no parent": Radix keeps '' for "nothing chosen". */
@@ -127,6 +122,12 @@ interface Props {
   /** The project in view. The parent owns it because the run request carries it. */
   value: number | null
   onChange: (projectId: number | null) => void
+  /**
+   * #3651 — offers the library folders of no project too. `value` is the folder chosen;
+   * a choice calls `onChange` with its id (the parent clears its project), and choosing
+   * a project or No project calls it with `null` first.
+   */
+  folder?: { value: number | null; onChange: (folderId: number | null) => void }
   /**
    * The project the last send went to, reported once the list has loaded, so the parent
    * can seed `value` from it without ever handling a `ProjectChoices`.
@@ -162,6 +163,7 @@ interface Props {
 export function ProjectPicker({
   value,
   onChange,
+  folder,
   onLoaded,
   list,
   onProject,
@@ -185,13 +187,13 @@ export function ProjectPicker({
   const [saving, setSaving] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const error = createError ?? listError
-  /** #3651 — the list's popover, and how it is sorted (remembered in this browser). */
+  /**
+   * #3651 — the list's popover, and how it is sorted: as Settings says until the list is
+   * re-sorted here, which holds for as long as the picker is on the page.
+   */
   const [open, setOpen] = useState(false)
-  const [sort, setSortState] = useState<Sort>(() => readStored(SORT_KEY, 'recent', isSort))
-  const setSort = (next: Sort) => {
-    setSortState(next)
-    writeStored(SORT_KEY, next)
-  }
+  const [sortChosen, setSortChosen] = useState<DestinationSort | null>(null)
+  const sort = sortChosen ?? choices?.sort ?? 'touched'
 
   const reportProject = useRef(onProject)
   useEffect(() => {
@@ -204,14 +206,25 @@ export function ProjectPicker({
   })
 
   const projects = useMemo(() => choices?.projects ?? [], [choices])
+  const folders = useMemo(() => (folder ? (choices?.folders ?? []) : []), [choices, folder])
   const paths = useMemo(() => breadcrumbs(projects), [projects])
-  const current = projects.find((project) => project.id === value)
-  const lastProjectId = choices?.last_project_id ?? null
-  // Ordered as the popover opens, so a choice does not reshuffle the list under the pointer.
-  const shown = useMemo(
-    () => (open ? ordered(projects, paths, sort, lastProjectId) : []),
-    [open, projects, paths, sort, lastProjectId],
+  const folderId = folder?.value ?? null
+  const current = folderId === null ? projects.find((project) => project.id === value) : undefined
+  const currentFolder = folderId === null ? undefined : folders.find((entry) => entry.id === folderId)
+  const rows = useMemo<Row[]>(
+    () => [
+      ...projects.map((project): Row => ({
+        kind: 'project',
+        id: project.id,
+        path: paths.get(project.id) ?? project.name,
+        project,
+      })),
+      ...folders.map((entry): Row => ({ kind: 'folder', id: entry.id, path: entry.path, folder: entry })),
+    ],
+    [projects, folders, paths],
   )
+  // Ordered as the popover opens, so a choice does not reshuffle the list under the pointer.
+  const shown = useMemo(() => (open ? ordered(rows, sort) : []), [open, rows, sort])
   const suggested = projects.find((project) => project.id === suggestedParent)
 
   useEffect(() => {
@@ -224,7 +237,8 @@ export function ProjectPicker({
    * list (`rereadFor`). The re-read only refreshes the list: `value` is the parent's, and
    * the default project (`last_project_id`) is unchanged by a choice (#3188).
    */
-  const missing = choices !== null && value !== null && current === undefined ? value : null
+  const missing =
+    choices !== null && folderId === null && value !== null && current === undefined ? value : null
   useEffect(() => {
     if (missing !== null) rereadFor(missing)
   }, [missing, rereadFor])
@@ -250,7 +264,8 @@ export function ProjectPicker({
       setDescription('')
       setColour('')
       setParentId(null)
-      touch(created.id)
+      markChosen('project', created.id)
+      folder?.onChange(null)
       onChange(created.id)
     } catch (cause) {
       setCreateError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
@@ -263,8 +278,16 @@ export function ProjectPicker({
   function choose(projectId: number | null) {
     setOpen(false)
     setCreating(false)
-    if (projectId !== null) touch(projectId)
+    if (projectId !== null) markChosen('project', projectId)
+    folder?.onChange(null)
     onChange(projectId)
+  }
+
+  function chooseFolder(chosen: number) {
+    setOpen(false)
+    setCreating(false)
+    markChosen('folder', chosen)
+    folder?.onChange(chosen)
   }
 
   function startCreating() {
@@ -287,23 +310,35 @@ export function ProjectPicker({
 
   const triggerText = creating
     ? 'New project…'
-    : current
-      ? optionLabel(current, paths.get(current.id) ?? current.name)
+    : folderId !== null
+      ? currentFolder
+        ? `Folder: ${currentFolder.path} · ${folderDetail(currentFolder)}`
+        : `Folder ${folderId}`
+      : current
+        ? optionLabel(current, paths.get(current.id) ?? current.name)
+        : value === null
+          ? 'No project'
+          : `Project ${value}`
+  const dataValue = creating
+    ? 'new'
+    : folderId !== null
+      ? `folder-${folderId}`
       : value === null
-        ? 'No project'
-        : `Project ${value}`
+        ? ''
+        : String(value)
+  const noun = folder ? 'projects and folders' : 'projects'
 
   return (
     <div className={inline ? 'flex flex-wrap items-center gap-2' : 'grid gap-1.5'}>
       <Label htmlFor={id} className={inline ? 'text-xs font-normal text-muted-foreground' : undefined}>
-        Project
+        {folder ? 'Project or folder' : 'Project'}
       </Label>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <Button
             id={id}
             data-testid={testId}
-            data-value={creating ? 'new' : value === null ? '' : String(value)}
+            data-value={dataValue}
             variant="outline"
             size={inline ? 'sm' : 'default'}
             role="combobox"
@@ -311,17 +346,18 @@ export function ProjectPicker({
             disabled={disabled || saving}
             className={cn('justify-between gap-2 font-normal', inline ? 'w-auto max-w-64' : 'w-full')}
           >
-            <span className="min-w-0 truncate">{triggerText}</span>
+            {folderId !== null ? <FolderIcon className="opacity-60" /> : current && <FolderKanbanIcon className="opacity-60" />}
+            <span className="min-w-0 flex-1 truncate text-left">{triggerText}</span>
             <ChevronsUpDownIcon className="opacity-50" />
           </Button>
         </PopoverTrigger>
         <PopoverContent
           align="start"
-          className="w-[min(24rem,calc(100vw-2rem))] gap-0 p-0"
+          className="w-[min(26rem,calc(100vw-2rem))] gap-0 p-0"
           data-testid={`${testId}-list`}
         >
           <Command filter={(_value, search, keywords) => fuzzyScore((keywords ?? []).join(' '), search)}>
-            <CommandInput placeholder="Search projects…" aria-label="Search projects" />
+            <CommandInput placeholder={`Search ${noun}…`} aria-label={`Search ${noun}`} />
             <div className="flex items-center justify-between gap-2 border-b px-2 py-1.5">
               <span className="text-xs text-muted-foreground" id={`${id}-sort`}>
                 Sort
@@ -333,46 +369,66 @@ export function ProjectPicker({
                 value={sort}
                 aria-labelledby={`${id}-sort`}
                 onValueChange={(next) => {
-                  if (isSort(next)) setSort(next)
+                  if (isSort(next)) setSortChosen(next)
                 }}
               >
-                <ToggleGroupItem value="recent" className="px-2 text-xs">
-                  Recent
-                </ToggleGroupItem>
-                <ToggleGroupItem value="name" className="px-2 text-xs">
-                  Name
-                </ToggleGroupItem>
+                {SORTS.map((option) => (
+                  <ToggleGroupItem key={option.value} value={option.value} className="px-2 text-xs">
+                    {option.label}
+                  </ToggleGroupItem>
+                ))}
               </ToggleGroup>
             </div>
             <CommandList>
-              <CommandEmpty>No project matches.</CommandEmpty>
+              <CommandEmpty>{folder ? 'No project or folder matches.' : 'No project matches.'}</CommandEmpty>
               <CommandGroup>
                 <CommandItem
                   value="none"
-                  keywords={['No project', 'none']}
+                  keywords={['No project', 'none', 'inbox']}
                   data-testid="project-option-none"
-                  data-checked={!creating && value === null}
+                  data-checked={!creating && folderId === null && value === null}
                   onSelect={() => choose(null)}
                 >
                   No project
                 </CommandItem>
               </CommandGroup>
-              <CommandGroup heading="Projects">
-                {shown.map((project) => {
-                  const path = paths.get(project.id) ?? project.name
+              <CommandGroup heading={folder ? 'Projects and folders' : 'Projects'}>
+                {shown.map((row) => {
+                  const when = sort === 'name' ? null : rowStamp(row, sort)
+                  const checked =
+                    !creating &&
+                    (row.kind === 'folder' ? folderId === row.id : folderId === null && value === row.id)
                   return (
                     <CommandItem
-                      key={project.id}
-                      value={`project-${project.id}`}
-                      keywords={[path, project.folder_name ?? '']}
-                      data-testid={`project-option-${project.id}`}
-                      data-checked={!creating && value === project.id}
-                      onSelect={() => choose(project.id)}
+                      key={`${row.kind}-${row.id}`}
+                      value={`${row.kind}-${row.id}`}
+                      keywords={
+                        row.kind === 'project'
+                          ? [row.path, row.project.folder_name ?? '', 'project']
+                          : [row.path, 'folder']
+                      }
+                      data-testid={row.kind === 'project' ? `project-option-${row.id}` : `folder-option-${row.id}`}
+                      data-checked={checked}
+                      onSelect={() => (row.kind === 'project' ? choose(row.id) : chooseFolder(row.id))}
                     >
-                      <span className="flex min-w-0 flex-col">
-                        <span className="truncate">{path}</span>
-                        <span className="truncate text-xs text-muted-foreground">{detail(project)}</span>
+                      {row.kind === 'project' ? (
+                        <FolderKanbanIcon aria-hidden className="text-primary" />
+                      ) : (
+                        <FolderIcon aria-hidden />
+                      )}
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="truncate">{row.path}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {row.kind === 'project'
+                            ? `Project · ${detail(row.project)}`
+                            : `Folder · ${folderDetail(row.folder)}`}
+                        </span>
                       </span>
+                      {when !== null && (
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {timeAgo(new Date(when).toISOString())}
+                        </span>
+                      )}
                     </CommandItem>
                   )
                 })}

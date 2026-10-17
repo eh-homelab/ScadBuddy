@@ -267,9 +267,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // A listing shares each package first: one that fails to share (or to be stripped
       // of its http servers) is not loaded, so its servers are not offered either (#2563).
       let offered = loaded.loaded
+      // Read once: the listing and a call decide on the same root (#3523).
+      const { root, localRoot } = deps.packages!
       if (context.listing) {
         shared = []
-        const root = deps.packages!.root
         const failed = new Set<string>()
         for (const pkg of loaded.loaded) {
           if (root === undefined) {
@@ -280,7 +281,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
+            const turnPackage = await sharePackage(pkg, root, localRoot)
             const dark = unparkableBuiltins(turnPackage, provided)
             if (dark.length) {
               problems.push(
@@ -296,10 +297,14 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           }
         }
         offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
+      } else if (root === undefined) {
+        // With no payload volume a listing shares nothing, so a call builds nothing
+        // either, whatever it names (#3072).
+        offered = []
       }
-      // A call (not a listing) builds every loaded package's servers, a failed share's
-      // included: the listing is the guard, since a call can only name a tool the listing
-      // offered, and it offered none of a package that failed to share (#2620).
+      // Otherwise a call (not a listing) builds every loaded package's servers: a share
+      // that threw is known only by sharing again, so for that one the listing is the
+      // guard, since a call can only name a tool the listing offered (#2620).
       servers.push(...localPackageServers(offered, problems))
       const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
       const builtins = deps.builtins

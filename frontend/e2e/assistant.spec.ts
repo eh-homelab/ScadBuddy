@@ -548,3 +548,45 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
     expect(await speak.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   })
 })
+
+// A long chat title pushed every row's "…" (and so Done and Archive) off the panel:
+// Radix's ScrollArea wrapped the list in a `display: table` div as wide as that title.
+test.describe('the session switcher with a long title', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
+
+  test("keeps every row's actions in the panel, and the header offers Done and Archive", async ({ page }) => {
+    const LONG = 'Import the coaster from MakerWorld, make the rim thicker and send two copies in the blue and white spools'
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    await panel.getByRole('button', { name: 'Fork', exact: true }).click()
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+    await sessions.getByRole('button', { name: 'Actions for Tune the gridfinity bin (fork)' }).click()
+    await page.getByRole('menuitem', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
+    await sessions.getByRole('textbox', { name: 'Chat title' }).fill(LONG)
+    await sessions.getByRole('textbox', { name: 'Chat title' }).press('Enter')
+    // A short chat of its own beside it: the long title widened every row, not only its own.
+    await panel.getByRole('button', { name: 'New chat' }).click()
+    await panel.getByRole('textbox', { name: 'Message the assistant' }).fill('hello')
+    await panel.getByRole('textbox', { name: 'Message the assistant' }).press('Enter')
+    await panel.getByRole('button', { name: 'Sessions (3)' }).click()
+
+    const right = await panel.evaluate((el) => el.getBoundingClientRect().right)
+    for (const title of ['hello', LONG]) {
+      const box = (await sessions.getByRole('button', { name: `Actions for ${title}` }).boundingBox())!
+      expect(box.x + box.width, title).toBeLessThanOrEqual(right)
+    }
+    await sessions.getByRole('button', { name: `Actions for ${LONG}` }).click()
+    for (const name of [`Mark ${LONG} done`, `Archive ${LONG}`]) await expect(page.getByRole('menuitem', { name })).toBeVisible()
+    await page.keyboard.press('Escape')
+
+    // The idle long chat, opened: its header offers both without the "…".
+    await sessions.getByRole('button', { name: new RegExp(`^${LONG}`) }).click()
+    const header = panel.getByTestId('active-session-header')
+    await expect(header.getByRole('button', { name: 'Done', exact: true })).toBeVisible()
+    await expect(header.getByRole('button', { name: 'Archive', exact: true })).toBeVisible()
+  })
+})

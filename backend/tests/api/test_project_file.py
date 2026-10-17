@@ -539,6 +539,40 @@ def test_filing_needs_a_project(client: TestClient, model: str) -> None:
     output_id = make_output(client, model)
     response = client.post(f"/api/v1/outputs/{output_id}/project-file", json={}, headers=press())
     assert response.status_code == 422
+    both = client.post(
+        f"/api/v1/outputs/{output_id}/project-file",
+        json={"project_id": PROJECT, "folder_id": 30},
+        headers=press(),
+    )
+    assert both.status_code == 422
+
+
+@respx.mock
+def test_generate_files_into_a_library_folder_of_no_project(client: TestClient, model: str) -> None:
+    """#3651 — the folder is used as it is: no project is read or made for it."""
+    configure(client)
+    output_id = make_output(client, model)
+    respx.get(f"{API}/library/files", params={"folder_id": "30"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    uploaded = uploads(41)
+    by_project = respx.get(url__regex=rf"{API}/library/folders/by-project/\d+").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get(f"{API}/library/folders").mock(
+        return_value=httpx.Response(200, json=[{"id": 30, "name": "Home", "children": []}])
+    )
+
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/project-file", json={"folder_id": 30}, headers=press()
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["project_id"], body["folder_id"], body["library_file_id"]) == (None, 30, 41)
+    assert body["bambuddy_url"] == f"{BASE}/files"
+    assert uploaded.calls.last.request.url.params["folder_id"] == "30"
+    assert not by_project.called
 
 
 def test_the_stem_spells_out_what_changed_and_nothing_a_print_file_name_refuses() -> None:
@@ -642,6 +676,10 @@ def test_a_run_that_names_no_project_uses_the_remembered_one(
     output_id = make_output(client, model)
     remember_project(client, PROJECT)
     project_folder_routes()
+    # The remembered project is used only while Bambuddy still has it (#3651 review).
+    respx.get(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json=[{"id": PROJECT, "name": "Kids", "status": "active"}])
+    )
     uploaded = uploads(41)
     run_routes()
     slice_routes()
@@ -652,6 +690,29 @@ def test_a_run_that_names_no_project_uses_the_remembered_one(
     assert ran.status_code == 200, ran.text
     assert (ran.json()["project_id"], ran.json()["folder_id"]) == (PROJECT, FOLDER)
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
+
+
+@respx.mock
+def test_generate_refuses_a_folder_the_picker_does_not_offer(
+    client: TestClient, model: str
+) -> None:
+    """#3651 review — a project's own folder is that project, never a folder of none."""
+    configure(client)
+    output_id = make_output(client, model)
+    uploaded = uploads(41)
+    respx.get(f"{API}/library/folders").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": FOLDER, "name": "Kids' room", "project_id": PROJECT, "children": []}]
+        )
+    )
+
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/project-file", json={"folder_id": FOLDER}, headers=press()
+    )
+
+    assert response.status_code == 422, response.text
+    assert "not a library folder" in response.text
+    assert not uploaded.called
 
 
 def test_attaching_with_an_explicit_no_project_files_nothing(

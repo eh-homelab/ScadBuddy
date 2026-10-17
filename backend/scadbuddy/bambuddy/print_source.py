@@ -177,6 +177,7 @@ class PrintSource(Protocol):
         nozzle_size: str,
         plan: FilamentPlan,
         project_id: int | None,
+        folder_id: int | None = None,
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
@@ -413,6 +414,7 @@ class PrintPipeline:
         nozzle_size: str,
         plan: FilamentPlan,
         project_id: int | None,
+        folder_id: int | None = None,
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
@@ -423,7 +425,9 @@ class PrintPipeline:
         # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload,
         # because the copy is looked up by (folder, target): a project gets a copy of its
         # own, and one another project printed from is neither moved nor deleted (#316).
-        folder_id = await folder_for(client, project_id) if project_id is not None else None
+        # A library folder chosen instead of a project (#3651) is used as it is.
+        if project_id is not None:
+            folder_id = await folder_for(client, project_id)
         fetched = await PrintPipeline._fetch(self, client)
         if self.origin_id is not None and (
             fetched.payload is None or (not fetched.stated and folder_id is None)

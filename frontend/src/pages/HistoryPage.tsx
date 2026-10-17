@@ -259,6 +259,8 @@ export function HistoryPage() {
         open={printFor !== undefined}
         source={printFor ? { kind: 'output', output: printFor } : undefined}
         queue={queueing}
+        // #3651 — an arranged output opens on the project its sources are all in.
+        content={printFor && saved?.output.id === printFor.id ? saved.from : undefined}
         onClose={() => {
           setPrintFor(undefined)
           // A Queue lasts as long as its dialog: the next one opened is a Print unless asked.

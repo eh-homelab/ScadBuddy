@@ -107,7 +107,7 @@ async def start_preview(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "This file is sliced already, so there is nothing to slice: it prints as it is.",
         )
-    request = request.model_copy(update={"project_id": None})
+    request = request.model_copy(update={"project_id": None, "folder_id": None})
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
     # It slices to show the toolpath: no earlier slice is looked up (#2691 review).
     planned = await plan_run(

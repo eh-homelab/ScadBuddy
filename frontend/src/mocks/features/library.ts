@@ -524,7 +524,7 @@ function startLibraryRun(fileId: number, body: PrintRunRequest): PrintRun {
     copies: body.copies ?? 1,
     warnings: [],
     project_id: body.project_id ?? null,
-    folder_id: null,
+    folder_id: body.folder_id ?? null,
     bambuddy_url: `${mockSettings().bambuddy_url}/queue`,
   } satisfies PrintRunResult
   // #742: a 202 with a run, like an output's; this one has already finished.
@@ -687,6 +687,11 @@ function listedFiles(): LibraryEntry[] {
       folder_id: moved.has(file.id) ? moved.get(file.id)! : file.folder_id,
       filename: renamed.get(file.id) ?? file.filename,
     }))
+}
+
+// #3651 — the default destination reads which folder a file is in.
+export function mockLibraryFileFolder(fileId: number): number | null {
+  return listedFiles().find((file) => file.id === fileId)?.folder_id ?? null
 }
 
 export function reset(): void {

@@ -53,6 +53,25 @@ def _segment(value: Any) -> str:
     return quote(text, safe="")
 
 
+def _chosen_plates(request: dict[str, Any]) -> int:
+    """How many distinct plates a print's `plate_ids` chose, 1 when it names none.
+
+    Anything but a non-empty list of whole plate numbers is refused, so the call is
+    outside its grant (a person decides it) rather than a TypeError. That is stricter
+    than the print route, whose lax parsing also takes `["3"]`, `[true]` or `[2.0]`: such a call
+    asks a person, never passes a grant on a count it could not read."""
+    plate_ids = request.get("plate_ids")
+    if plate_ids is None:
+        return 1
+    if (
+        not isinstance(plate_ids, list)
+        or not plate_ids
+        or not all(isinstance(p, int) and not isinstance(p, bool) and p >= 1 for p in plate_ids)
+    ):
+        raise ValueError("plate_ids is not a list of plate numbers")
+    return len(set(plate_ids))
+
+
 def _quantity(options: Any) -> int | None:
     value = options.get("quantity") if isinstance(options, dict) else None
     return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -102,7 +121,7 @@ class FlowGrants:
             printer = options.get("printer_id")
         all_plates = bool(request.get("all_plates"))
         # Several chosen plates (#3652) each print, as every plate of an all-plates one.
-        chosen = len(set(request.get("plate_ids") or [])) or 1
+        chosen = _chosen_plates(request)
         plates: int | None
         if source.get("output_id") is not None:
             output = await self._get(f"/api/v1/outputs/{_segment(source['output_id'])}")

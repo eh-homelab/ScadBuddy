@@ -575,6 +575,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const sql = new Proxy(db.sql, {
         apply(target, self, args: unknown[]) {
           const strings = args[0] as readonly string[] | undefined
+          // chargeLostTurn's statement only: the release UPDATE also adds cost_usd but sets
+          // status first, so it does not match and runs, returning no row. Reordering that
+          // SET list would make this refuse the release too and break the test's premise.
           if (Array.isArray(strings) && strings.join('').includes('SET cost_usd = cost_usd +')) {
             return Promise.reject(new Error('connection refused'))
           }
@@ -589,7 +592,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const cancelApprovals = m.approvals.cancelPending.bind(m.approvals)
       let taken = false
       vi.spyOn(m.approvals, 'cancelPending').mockImplementation(async (...args) => {
-        // finish()'s own cancel, the one with the turn's ending as its reason.
+        // finish()'s own cancel, the one with the turn's ending as its reason. revokeUnused
+        // shares that reason but is not spied; if finish()'s reason text changes this never
+        // fires, and the test fails on lost_claim rather than on the charge.
         if (!taken && args[1] === 'the turn ended') {
           taken = true
           await db.sql`
