@@ -51,6 +51,7 @@ from scadbuddy.core.settings import (
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
+    DestinationSort,
     DisplayUnit,
     ModelPrintChoices,
     ModelProject,
@@ -126,6 +127,8 @@ class SettingsView(BaseModel):
     #: The principals whose activity the assistant follows; ``None``: ``["browser"]``.
     activity_follow: list[str] | None = None
     last_project_id: int | None = None
+    #: How the destination picker opens sorted (#3651).
+    destination_sort: DestinationSort = "touched"
     #: The domains an asset may be fetched from (#844), with their subdomains.
     asset_fetch_domains: list[str] = Field(default_factory=list)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
@@ -354,6 +357,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         activity_repair_window_seconds=stored.activity_repair_window_seconds,
         activity_follow=stored.activity_follow,
         last_project_id=stored.last_project_id,
+        destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         sources=snapshot.sources,

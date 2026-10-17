@@ -51,6 +51,7 @@ import type {
   ProjectFile,
   ProjectRequest,
   ProjectView,
+  FolderView,
   SendResult,
   Settings,
   SourceCheck,
@@ -147,6 +148,8 @@ const state = {
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
   projects: [...fixtures.projectViews] as ProjectView[],
+  /** #3651 — the library folders of no project the destination picker offers. */
+  folders: fixtures.destinationFolders.map((f) => ({ ...f })) as FolderView[],
   /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
   modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
@@ -316,6 +319,7 @@ export function resetMockState(): void {
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
+  state.folders = fixtures.destinationFolders.map((f) => ({ ...f }))
   state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
@@ -488,6 +492,31 @@ export function addMockOutput(output: Output): void {
 /** #1864 — the output a library file is a copy of, or undefined for a file ScadBuddy did not make. */
 export function mockLibraryOutput(fileId: number): string | undefined {
   return state.libraryOutputs.get(fileId)
+}
+
+/** #3651 — what `features/destinations.ts` decides a default destination from. */
+export function mockDestinationState(): {
+  projects: readonly ProjectView[]
+  outputs: readonly Output[]
+  lastProjectId: number | null
+  inboxId: number | null
+} {
+  return {
+    projects: state.projects,
+    outputs: state.outputs,
+    lastProjectId: state.settings.last_project_id ?? null,
+    inboxId: state.settings.library_folder_id ?? null,
+  }
+}
+
+/** #3651 — a print, filing or choice touches its project or folder, for the picker's order. */
+function touchDestination(projectId: number | null, folderId: number | null): void {
+  const now = new Date().toISOString()
+  if (projectId !== null) {
+    state.projects = state.projects.map((p) => (p.id === projectId ? { ...p, touched_at: now } : p))
+  } else if (folderId !== null) {
+    state.folders = state.folders.map((f) => (f.id === folderId ? { ...f, touched_at: now } : f))
+  }
 }
 
 /** The body of the last `POST /outputs/arrange`, or null when none was sent. */
@@ -3417,11 +3446,12 @@ export const handlers = [
       1
     // #79 — the project's own library folder replaces the one from Settings for this
     // send, which is what puts the file on Bambuddy's project page.
-    const projectId = body.project_id ?? state.settings.last_project_id ?? null
+    // #3651 — a library folder in place of a project is used as it is, under no project.
+    const projectId = body.folder_id != null ? null : (body.project_id ?? state.settings.last_project_id ?? null)
     const folderId =
-      projectId === null
-        ? null
-        : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
+      body.folder_id ??
+      (projectId === null ? null : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null))
+    touchDestination(projectId, body.folder_id ?? null)
     const libraryFileId = copyIn(output, folderId)
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
@@ -3489,9 +3519,12 @@ export const handlers = [
   http.get(`${base}/print/projects`, () =>
     HttpResponse.json({
       projects: state.projects,
+      folders: state.folders,
       last_project_id: state.settings.last_project_id ?? null,
+      sort: state.settings.destination_sort ?? 'touched',
     } satisfies ProjectChoices),
   ),
+
 
   http.post(`${base}/print/projects`, async ({ request }) => {
     const body = (await request.json()) as ProjectRequest
@@ -3555,7 +3588,26 @@ export const handlers = [
   http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    const body = (await request.json()) as { project_id: number }
+    const body = (await request.json()) as { project_id?: number | null; folder_id?: number | null }
+    // #3651 — into a library folder of no project, used as it is.
+    if (body.folder_id != null) {
+      const folder = state.folders.find((f) => f.id === body.folder_id)
+      if (!folder) return problem(404, 'Not Found', `no folder ${body.folder_id}`)
+      const before = output.library_files?.length ?? 0
+      const libraryFileId = copyIn(output, folder.id)
+      const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
+      touchDestination(null, folder.id)
+      await delay(100)
+      return HttpResponse.json({
+        project_id: null,
+        folder_id: folder.id,
+        library_file_id: libraryFileId,
+        filename: `${output.slug}.3mf`,
+        created: after > before,
+        bambuddy_url: `${state.settings.bambuddy_url}/files`,
+        edit_url: null,
+      } satisfies ProjectFile)
+    }
     const project = state.projects.find((p) => p.id === body.project_id)
     if (!project) return problem(404, 'Not Found', `no project ${body.project_id}`)
     const folderId = project.folder_id ?? nextNumber()
@@ -3564,6 +3616,7 @@ export const handlers = [
     )
     const before = output.library_files?.length ?? 0
     const libraryFileId = copyIn(output, folderId)
+    touchDestination(project.id, null)
     const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
     await delay(100)
     return HttpResponse.json({

@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -99,6 +99,7 @@ from scadbuddy.bambuddy.print_source import (
     OutputSource,
     PrintSource,
 )
+from scadbuddy.bambuddy.projects import require_destination_folder
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -194,6 +195,9 @@ class PrintRunRequest(BaseModel):
     #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
     #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
+    #: A library folder of no project to put the 3MF in (#3651), in place of a project:
+    #: sent, the print is filed under no project. Refused together with ``project_id``.
+    folder_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
     #: alongside it.
@@ -237,6 +241,12 @@ class PrintRunRequest(BaseModel):
     def _plates_in_order(cls, ids: list[int] | None) -> list[int] | None:
         # Each once and in plate order, so the same plates are the same run's key.
         return None if ids is None else sorted(set(ids))
+
+    @model_validator(mode="after")
+    def _one_destination(self) -> Self:
+        if self.folder_id is not None and self.project_id is not None:
+            raise ValueError("choose a project or a library folder, not both")
+        return self
 
     @model_validator(mode="after")
     def _one_plate_is_plate_id(self) -> PrintRunRequest:
@@ -452,10 +462,27 @@ class ChoosesProject(Protocol):
 
 def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
     """The request's ``project_id`` when it sent one, ``null`` included ("No project");
-    the default project (``last_project_id``) only when it left the field out (#317)."""
+    when it left the field out, none if it chose a library folder instead (#3651), else
+    the default project (``last_project_id``, #317), which only Settings changes (#3188)."""
     if "project_id" in request.model_fields_set:
         return request.project_id
+    if getattr(request, "folder_id", None) is not None:
+        return None
     return settings.last_project_id
+
+
+async def resolve_project(
+    client: BambuddyClient, request: ChoosesProject, settings: StoredSettings
+) -> int | None:
+    """:func:`chosen_project`, with a project left out resolved only to one Bambuddy still
+    has, as ``destinations.default_destination`` does: a default project that was deleted
+    falls through to none rather than failing the print on its folder (#3651 review). A
+    project the request names is used as sent."""
+    project_id = chosen_project(request, settings)
+    if project_id is None or "project_id" in request.model_fields_set:
+        return project_id
+    known = {project.id for project in await client.projects()}
+    return project_id if project_id in known else None
 
 
 async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
@@ -1186,6 +1213,8 @@ async def prepare_run(
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
+    if request.folder_id is not None:
+        await require_destination_folder(client, request.folder_id, settings.library_folder_id)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()
     plate_ids = laid_out if asked is None else asked
@@ -1450,7 +1479,7 @@ async def plan_run(
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
-    project_id = chosen_project(request, settings)
+    project_id = await resolve_project(client, request, settings)
     # ScadBuddy plans each filament's nozzle (#2166) and states it in the 3MF.
     # One read of the inventory for the plan and every plate's options (#480).
     inventory = await read_inventory(client)
@@ -1477,6 +1506,7 @@ async def plan_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
+        folder_id=request.folder_id,
         # Only the sides the plan uses, or else the sides with the nozzle, are offered
         # to the slicer (#834, #2181), and each side states the flow chosen for it (#484).
         nozzle_stats=(
@@ -1672,7 +1702,7 @@ async def _plan_sliced(
     for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
     it as soon as the printer is idle, before anyone read the warning."""
     printer_id = prepared.printer_id
-    project_id = chosen_project(request, settings)
+    project_id = await resolve_project(client, request, settings)
     profile = source.sliced_profile
     nozzle_size = sliced_nozzle_size(profile, prepared, request)
     printed = await source.file_to_print(
@@ -1681,6 +1711,7 @@ async def _plan_sliced(
         nozzle_size=nozzle_size,
         plan=request.filament_plan,
         project_id=project_id,
+        folder_id=request.folder_id,
     )
     per_plate = await gather_plate_options(
         client,

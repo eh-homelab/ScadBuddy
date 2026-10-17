@@ -47,6 +47,11 @@ export interface Arranged {
    * model list could not be read: then no name is known, and a slug is not one (#2541).
    */
   filedUnder?: string
+  /**
+   * #3651 — what it was arranged from, so its print opens on the project they are all in.
+   * Set by the Arrange dialog.
+   */
+  from?: { outputIds: string[]; libraryFileIds: number[] }
 }
 
 /**

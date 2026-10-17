@@ -576,6 +576,9 @@ class Folder(BambuddyModel):
     project_name: str | None = None
     archive_id: int | None = None
     is_external: bool = False
+    #: When a file in it last changed (Bambuddy's ``latest_activity_at``): the picker's
+    #: "modified" order (#3651). Naive, in UTC, as Bambuddy writes it.
+    latest_activity_at: datetime | None = None
     children: list[Folder] = Field(default_factory=list)
 
     def walk(self) -> list[Folder]:
@@ -1064,6 +1067,9 @@ class Project(BambuddyModel):
     queue_count: int = 0
     total_items: int = 0
     completed_count: int = 0
+    #: Naive, in UTC, as Bambuddy writes it (#3651: a project with no folder yet sorts
+    #: by when it was made).
+    created_at: datetime | None = None
 
 
 class ProjectCreate(BambuddyModel):

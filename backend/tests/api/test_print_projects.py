@@ -208,3 +208,145 @@ def test_filing_an_output_with_no_project_says_so(client: TestClient, model: str
     response = client.post(f"/api/v1/print/outputs/{output_id}/project", json={}, headers=press())
     assert response.status_code == 409
     assert "no project" in response.json()["detail"]
+
+
+def _projects_and_folders() -> None:
+    """Project 7 owns folder 9; folder 30, "Home", is no project's."""
+    respx.get(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "name": "Reagan", "status": "active"}])
+    )
+    respx.get(f"{API}/library/folders").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 9, "name": "Reagan", "project_id": 7, "children": []},
+                {"id": 30, "name": "Home", "children": []},
+            ],
+        )
+    )
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_print_into_a_library_folder_uploads_there_under_no_project(
+    client: TestClient, model: str
+) -> None:
+    """#3651 — a folder of no project is a destination of its own: no project is
+    looked up, nothing is filed under one, and the folder is touched for the picker."""
+    configure(client, library_folder_id=2)
+    output_id = make_output(client, model)
+    uploaded = upload_route()
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    by_project = respx.get(url__regex=rf"{API}/library/folders/by-project/\d+").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    _projects_and_folders()
+
+    body = run_print(client, output_id, json=run_request(folder_id=30)).json()
+
+    assert (body["project_id"], body["folder_id"]) == (None, 30)
+    assert uploaded.calls.last.request.url.params["folder_id"] == "30"
+    assert json.loads(queued.calls.last.request.content).get("project_id") is None
+    assert not by_project.called
+    listed = client.get("/api/v1/print/projects").json()
+    assert [(row["id"], row["path"]) for row in listed["folders"]] == [(30, "Home")]
+    assert listed["folders"][0]["touched_at"] is not None
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.parametrize("folder_id", [2, 9, 404])
+@pytest.mark.parametrize("null_project", [False, True])
+def test_a_folder_the_picker_does_not_offer_is_refused(
+    client: TestClient, model: str, folder_id: int, null_project: bool
+) -> None:
+    """#3651 review — the inbox (2), a project's folder (9) and a folder that is gone
+    are not destinations: the run is refused before anything is uploaded, also when
+    the body sends ``project_id: null`` beside the folder."""
+    configure(client, library_folder_id=2)
+    output_id = make_output(client, model)
+    uploaded = upload_route()
+    run_routes()
+    _projects_and_folders()
+    request = run_request(folder_id=folder_id)
+    if null_project:
+        request["project_id"] = None
+
+    response = run_print(client, output_id, json=request)
+
+    assert response.status_code == 422, response.text
+    assert "not a library folder" in response.text
+    assert not uploaded.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_deleted_settings_default_falls_through_rather_than_failing_the_print(
+    client: TestClient, model: str
+) -> None:
+    """#3651 review — a run that leaves the project out, with a Settings default that
+    Bambuddy no longer has, files under no project (the inbox) instead of failing on
+    the deleted project's folder."""
+    configure(client, library_folder_id=2)
+    output_id = make_output(client, model)
+    uploaded = upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    _projects_and_folders()
+    deleted = respx.get(f"{API}/projects/99").mock(return_value=httpx.Response(404))
+    saved = client.put("/api/v1/settings", json={"last_project_id": 99})
+    assert saved.status_code == 200, saved.text
+
+    body = run_print(client, output_id, json=run_request()).json()
+
+    assert body["project_id"] is None
+    assert uploaded.calls.last.request.url.params["folder_id"] == "2"
+    assert not deleted.called
+
+
+@pytest.mark.requires_postgres
+def test_a_project_and_a_folder_together_are_refused(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7, folder_id=30)
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_the_default_is_the_project_the_content_is_in_else_the_settings_one(
+    client: TestClient, model: str
+) -> None:
+    """#3651 — a library file in project 7's folder opens on 7; one in "Home", on the
+    project Settings names (#3188), else on none."""
+    configure(client)
+    _projects_and_folders()
+    for file_id, folder_id in ((61, 9), (62, 30)):
+        respx.get(f"{API}/library/files/{file_id}").mock(
+            return_value=httpx.Response(
+                200, json={"id": file_id, "filename": "a.3mf", "folder_id": folder_id}
+            )
+        )
+
+    def default(*file_ids: int) -> dict[str, Any]:
+        response = client.get(
+            "/api/v1/print/projects/default", params={"library_file_id": list(file_ids)}
+        )
+        assert response.status_code == 200, response.text
+        answer: dict[str, Any] = response.json()
+        return answer
+
+    assert default(61) == {"project_id": 7, "reason": "content"}
+    assert default(61, 62) == {"project_id": None, "reason": "none"}
+    assert default(62) == {"project_id": None, "reason": "none"}
+    saved = client.put("/api/v1/settings", json={"last_project_id": 7, "destination_sort": "name"})
+    assert saved.status_code == 200, saved.text
+    assert (saved.json()["last_project_id"], saved.json()["destination_sort"]) == (7, "name")
+    assert default(62) == {"project_id": 7, "reason": "settings"}
+    listed = client.get("/api/v1/print/projects").json()
+    assert (listed["last_project_id"], listed["sort"]) == (7, "name")

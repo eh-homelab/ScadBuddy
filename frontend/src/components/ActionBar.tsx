@@ -160,6 +160,11 @@ export function ActionBar({
    */
   const [projectId, setProjectId] = useState<number | null>(null)
   const [project, setProject] = useState<ProjectView | null>(null)
+  /**
+   * #3651 — a library folder of no project chosen instead of a project: Generate files
+   * the 3MF there. Not remembered per model, as a project is: a folder holds no prints.
+   */
+  const [folderId, setFolderId] = useState<number | null>(null)
   /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
   const projects = useProjectList()
   const listed = projects.choices?.projects
@@ -190,21 +195,27 @@ export function ActionBar({
    * not "last filed" anywhere.
    */
   const remembered = rememberedFor(preset?.id ?? null)
-  /** Where the picker opens: the pair's project, else the model's own with no preset. */
-  const opensOn = remembered ?? (preset ? rememberedFor(null) : null)
+  /**
+   * Where the picker opens: the pair's project, else the model's own with no preset (the
+   * project its content is in, #3651), else the project Settings names as the default.
+   */
+  const settingsDefault = stillListed(projects.choices?.last_project_id ?? null)
+  const opensOn = remembered ?? (preset ? rememberedFor(null) : null) ?? settingsDefault
   /** What the model is called in the confirmation: the preset in use, else the model. */
   const subject = preset?.name ?? model?.name ?? slug
   // #1660 — opening a model or loading a preset moves the picker to its project, or with
-  // none remembered to no project: `last_project_id` is another model's (the 2026-10-11
-  // QA report filed an apple into a keychain project). Once per change, so a pick made
-  // since stays.
+  // none remembered to the Settings default, else no project: `last_project_id` is another
+  // model's (the 2026-10-11 QA report filed an apple into a keychain project). Once per
+  // change, so a pick made since stays. After the list, which names the default.
   const preselectKeyFor = (presetId: string | null, target: number | null) =>
     `${slug}\n${presetId ?? ''}\n${target ?? ''}`
-  const preselectKey = loadedProjects ? preselectKeyFor(preset?.id ?? null, opensOn) : null
+  const preselectKey =
+    loadedProjects && !projects.loading ? preselectKeyFor(preset?.id ?? null, opensOn) : null
   const [preselected, setPreselected] = useState<string | null>(null)
   if (preselectKey !== null && preselectKey !== preselected) {
     setPreselected(preselectKey)
     setProjectId(opensOn)
+    setFolderId(null)
   }
   const latestPresetId = useLatest(preset?.id ?? null)
   const latestSlug = useLatest(slug)
@@ -224,7 +235,15 @@ export function ActionBar({
 
   function chooseProject(next: number | null) {
     setProjectId(next)
+    setFolderId(null)
   }
+
+  /** #3651 — a folder in place of a project; `null` is a project chosen instead. */
+  function chooseFolder(next: number | null) {
+    setFolderId(next)
+    if (next !== null) setProjectId(null)
+  }
+  const folderChoice = { value: folderId, onChange: chooseFolder }
 
   /** #1660 — the remembered project, when Generate into `target` would file elsewhere. */
   function conflict(target: number | null): { remembered: number; chosen: number } | null {
@@ -236,8 +255,12 @@ export function ActionBar({
    * the output is saved whether or not Bambuddy takes the file. A filed output's project
    * becomes the one remembered for this model and preset (#1660).
    */
-  async function fileIntoProject(created: Output, target: number | null): Promise<ProjectFile | null> {
-    if (target === null) return null
+  async function fileIntoProject(
+    created: Output,
+    target: number | null,
+    folder: number | null,
+  ): Promise<ProjectFile | null> {
+    if (target === null) return folder === null ? null : fileIntoFolder(created, folder)
     const name = target === projectId && project ? project.name : projectName(target)
     try {
       const file = await api.fileIntoProject(created.id, target)
@@ -254,6 +277,21 @@ export function ActionBar({
           modelProjects.setData({ slug, ...next }, { supersede: true })
         })
         .catch(() => undefined)
+      return file
+    } catch (cause) {
+      setFileError(
+        `Saved, but not filed in ${name}: ${cause instanceof ApiError ? cause.detail : 'Bambuddy did not answer.'}`,
+      )
+      return null
+    }
+  }
+
+  /** #3651 — the same into a library folder of no project; nothing is remembered for it. */
+  async function fileIntoFolder(created: Output, folder: number): Promise<ProjectFile | null> {
+    const name = projects.choices?.folders?.find((entry) => entry.id === folder)?.path ?? `folder ${folder}`
+    try {
+      const file = await api.fileIntoFolder(created.id, folder)
+      setFiled({ outputId: created.id, name, file })
       return file
     } catch (cause) {
       setFileError(
@@ -287,6 +325,8 @@ export function ActionBar({
    */
   async function generate(
     target: number | null = projectId,
+    // #3651 — the folder it files into when `target` is no project.
+    folder: number | null = folderId,
   ): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
     if (!job) return null
     const controller = new AbortController()
@@ -323,7 +363,7 @@ export function ActionBar({
           }
           span.setAttribute('scadbuddy.output_id', created.id)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
-          const filed = await within(() => fileIntoProject(created, target))
+          const filed = await within(() => fileIntoProject(created, target, folder))
           setAnnouncement(
             `Generated ${created.name ?? created.id.slice(0, 8)}. Download 3MF, Send to Bambuddy or Print it.`,
           )
@@ -356,6 +396,7 @@ export function ActionBar({
     sendOpen,
     printOpen,
     projectId,
+    folderId,
     conflict,
     subject,
     projectPath,
@@ -399,7 +440,8 @@ export function ActionBar({
       }
       if (project_id !== undefined) chooseProject(project_id)
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
-      const generated = await generate(target)
+      // A project the agent named (or its "no project") is no folder.
+      const generated = await generate(target, project_id === undefined ? live.current.folderId : null)
       if (!generated) return null
       const { output: created, filed, extra: savedExtra } = generated
       // Shown, or already left behind by a UI-state change made while it saved (#848).
@@ -482,6 +524,7 @@ export function ActionBar({
       inline
       value={projectId}
       onChange={chooseProject}
+      folder={folderChoice}
       list={projects}
       onProject={setProject}
       // #666 — locked while Generate files, so the project on screen is where it went.
@@ -743,6 +786,7 @@ export function ActionBar({
         project={{
           value: projectId,
           onChange: chooseProject,
+          folder: folderChoice,
           list: projects,
           disabled: generating || creatingProject,
           onCreating: setDialogCreating,
