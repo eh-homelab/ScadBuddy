@@ -842,6 +842,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   note is re-dated only when what backs it was re-checked.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
+- Every `docker/setup-buildx-action` step sets `driver-opts:
+  image=mirror.gcr.io/moby/buildkit:buildx-stable-1` (#3370): Docker Hub refuses some
+  anonymous pulls from hosted runners, which failed jobs before any test ran. A new
+  buildx step needs it too. The tag floats with buildx's own default; nothing would
+  bump a digest pinned there.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
