@@ -4,7 +4,9 @@
 //! exception messages, status descriptions and attributes that carry a URL or a peer.
 //! Code still never puts a parameter value, a typed file name, a transfer URL or CLI
 //! stderr in a span attribute, a log field or a metric label; the scrub is the backstop
-//! for what the SDK and the tracing bridge record on their own.
+//! for what the SDK and the tracing bridge record on their own. The scrub cannot see a
+//! tracing event's formatted message (it becomes the span event's name), so no call site
+//! may interpolate a value into a log message; values go in fields, which it can drop.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -36,12 +38,15 @@ const DROPPED: &[&str] = &[
     "http.host",
     "http.server_name",
     "http.user_agent",
+    "http.status_text",
     "user_agent.original",
     "server.address",
     "client.address",
     "client.port",
     "net.peer.ip",
     "net.peer.port",
+    "net.sock.peer.addr",
+    "net.sock.peer.port",
     "network.peer.address",
     "network.peer.port",
 ];
@@ -81,22 +86,31 @@ pub fn init_tracing() -> anyhow::Result<Option<SdkTracerProvider>> {
     Ok(Some(provider))
 }
 
-/// gRPC unless `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_PROTOCOL`
-/// names another protocol (the exporter's own default with both transports built in is
-/// HTTP, so gRPC is chosen here). The endpoint and headers are the exporter's own
-/// `OTEL_EXPORTER_OTLP_*` reading.
+/// How spans leave: `http/protobuf` unless `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` (or else
+/// `OTEL_EXPORTER_OTLP_PROTOCOL`) says `grpc`, the default every ScadBuddy service has
+/// (tracing spec 2026-10-01 §3; the deployment points `OTEL_EXPORTER_OTLP_ENDPOINT` at
+/// the collector's 4318 with no protocol variable).
+#[derive(Debug, PartialEq, Eq)]
+enum Transport {
+    Http,
+    Grpc,
+}
+
+fn transport(env: &impl Fn(&str) -> Option<String>) -> Transport {
+    let named =
+        env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL").or_else(|| env("OTEL_EXPORTER_OTLP_PROTOCOL"));
+    match named {
+        Some(p) if p.eq_ignore_ascii_case("grpc") => Transport::Grpc,
+        _ => Transport::Http,
+    }
+}
+
+/// The endpoint and headers are the exporter's own `OTEL_EXPORTER_OTLP_*` reading.
 fn span_exporter() -> anyhow::Result<opentelemetry_otlp::SpanExporter> {
-    let named = [
-        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
-        "OTEL_EXPORTER_OTLP_PROTOCOL",
-    ]
-    .iter()
-    .any(|k| env_var(k).is_some());
     let builder = opentelemetry_otlp::SpanExporter::builder();
-    Ok(if named {
-        builder.build()?
-    } else {
-        builder.with_tonic().build()?
+    Ok(match transport(&env_var) {
+        Transport::Http => builder.with_http().build()?,
+        Transport::Grpc => builder.with_tonic().build()?,
     })
 }
 
@@ -159,17 +173,37 @@ impl<E: SpanExporter> SpanExporter for Scrub<E> {
     }
 }
 
+/// As `trace_scrub.py` `scrub`: an error's description becomes the exception's type (or
+/// `error`), and attributes are dropped from the span, its events and its links.
 fn scrub(mut span: SpanData) -> SpanData {
-    if let Status::Error { .. } = span.status {
-        span.status = Status::Error {
-            description: Cow::Borrowed(""),
-        };
-    }
-    keep(&mut span.attributes);
     for event in span.events.events.iter_mut() {
         keep(&mut event.attributes);
     }
+    for link in span.links.links.iter_mut() {
+        keep(&mut link.attributes);
+    }
+    keep(&mut span.attributes);
+    if let Status::Error { description } = &span.status
+        && !description.is_empty()
+    {
+        let kind = exception_type(&span.events.events).unwrap_or_else(|| "error".to_owned());
+        span.status = Status::Error {
+            description: Cow::Owned(kind),
+        };
+    }
     span
+}
+
+fn exception_type(events: &[opentelemetry::trace::Event]) -> Option<String> {
+    events
+        .iter()
+        .filter(|e| e.name == "exception")
+        .flat_map(|e| e.attributes.iter())
+        .find(|kv| kv.key.as_str() == "exception.type")
+        .and_then(|kv| match &kv.value {
+            opentelemetry::Value::String(s) => Some(s.as_str().to_owned()),
+            _ => None,
+        })
 }
 
 fn keep(attributes: &mut Vec<KeyValue>) {
@@ -187,7 +221,7 @@ mod tests {
     use std::time::SystemTime;
 
     use opentelemetry::InstrumentationScope;
-    use opentelemetry::trace::{Event, SpanContext, SpanId, SpanKind};
+    use opentelemetry::trace::{Event, Link, SpanContext, SpanId, SpanKind};
     use opentelemetry_sdk::trace::{SpanEvents, SpanLinks};
 
     use super::*;
@@ -228,6 +262,26 @@ mod tests {
     }
 
     #[test]
+    fn spans_leave_over_http_unless_grpc_is_named() {
+        assert_eq!(transport(&env(&[])), Transport::Http);
+        assert_eq!(
+            transport(&env(&[("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")])),
+            Transport::Grpc
+        );
+        assert_eq!(
+            transport(&env(&[("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")])),
+            Transport::Http
+        );
+        assert_eq!(
+            transport(&env(&[
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+                ("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc"),
+            ])),
+            Transport::Grpc
+        );
+    }
+
+    #[test]
     fn service_name_defaults_to_the_slicer() {
         assert_eq!(service_name(&env(&[])), "scadbuddy-slicer");
         assert_eq!(
@@ -236,20 +290,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scrub_drops_messages_descriptions_and_urls() {
-        let mut events = SpanEvents::default();
-        events.events = vec![Event::new(
-            "exception",
-            SystemTime::now(),
-            vec![
-                KeyValue::new("exception.type", "SlicerError"),
-                KeyValue::new("exception.message", "stderr: /tmp/My Secret Box.3mf"),
-                KeyValue::new("error", "got 'secret'"),
-            ],
-            0,
-        )];
-        let span = SpanData {
+    fn span(
+        attributes: Vec<KeyValue>,
+        events: Vec<Event>,
+        links: Vec<Link>,
+        status: Status,
+    ) -> SpanData {
+        let mut span_events = SpanEvents::default();
+        span_events.events = events;
+        let mut span_links = SpanLinks::default();
+        span_links.links = links;
+        SpanData {
             span_context: SpanContext::empty_context(),
             parent_span_id: SpanId::INVALID,
             parent_span_is_remote: false,
@@ -257,26 +308,73 @@ mod tests {
             name: "RunActivity:slice_plate".into(),
             start_time: SystemTime::now(),
             end_time: SystemTime::now(),
-            attributes: vec![
+            attributes,
+            dropped_attributes_count: 0,
+            events: span_events,
+            links: span_links,
+            status,
+            instrumentation_scope: InstrumentationScope::builder("scadbuddy").build(),
+        }
+    }
+
+    fn keys(kvs: &[KeyValue]) -> Vec<String> {
+        kvs.iter().map(|kv| kv.key.to_string()).collect()
+    }
+
+    fn exception(attributes: Vec<KeyValue>) -> Event {
+        Event::new("exception", SystemTime::now(), attributes, 0)
+    }
+
+    #[test]
+    fn scrub_drops_messages_and_urls_from_spans_and_events() {
+        let out = scrub(span(
+            vec![
                 KeyValue::new("temporalWorkflowID", "wf-1"),
                 KeyValue::new("url.full", "https://s3/bucket/key?X-Amz-Signature=secret"),
                 KeyValue::new("http.request.header.x-scadbuddy-transfer", "token"),
+                KeyValue::new("http.status_text", "Not Found: My Secret Box.3mf"),
+                KeyValue::new("net.sock.peer.addr", "10.0.0.7"),
+                KeyValue::new("net.sock.peer.port", 51234),
             ],
-            dropped_attributes_count: 0,
-            events,
-            links: SpanLinks::default(),
-            status: Status::error("slicer exited 1: /tmp/My Secret Box.3mf"),
-            instrumentation_scope: InstrumentationScope::builder("scadbuddy").build(),
-        };
-        let out = scrub(span);
-        let keys = |kvs: &[KeyValue]| kvs.iter().map(|kv| kv.key.to_string()).collect::<Vec<_>>();
+            vec![exception(vec![
+                KeyValue::new("exception.type", "SlicerError"),
+                KeyValue::new("exception.message", "stderr: /tmp/My Secret Box.3mf"),
+                KeyValue::new("error", "got 'secret'"),
+            ])],
+            vec![],
+            Status::Unset,
+        ));
         assert_eq!(keys(&out.attributes), ["temporalWorkflowID"]);
         assert_eq!(keys(&out.events.events[0].attributes), ["exception.type"]);
-        assert_eq!(
-            out.status,
-            Status::Error {
-                description: Cow::Borrowed("")
-            }
-        );
+        assert_eq!(out.status, Status::Unset);
+    }
+
+    #[test]
+    fn scrub_drops_attributes_from_links() {
+        let mut link = Link::with_context(SpanContext::empty_context());
+        link.attributes = vec![
+            KeyValue::new("kind", "follows"),
+            KeyValue::new("url.full", "https://s3/bucket/key?X-Amz-Signature=secret"),
+        ];
+        let out = scrub(span(vec![], vec![], vec![link], Status::Unset));
+        assert_eq!(keys(&out.links.links[0].attributes), ["kind"]);
+    }
+
+    #[test]
+    fn an_error_status_is_described_by_its_exception_type_or_error() {
+        let typed = scrub(span(
+            vec![],
+            vec![exception(vec![
+                KeyValue::new("exception.type", "SlicerError"),
+                KeyValue::new("exception.message", "/tmp/My Secret Box.3mf"),
+            ])],
+            vec![],
+            Status::error("slicer exited 1: /tmp/My Secret Box.3mf"),
+        ));
+        assert_eq!(typed.status, Status::error("SlicerError"));
+        let untyped = scrub(span(vec![], vec![], vec![], Status::error("got 'secret'")));
+        assert_eq!(untyped.status, Status::error("error"));
+        let bare = scrub(span(vec![], vec![], vec![], Status::error("")));
+        assert_eq!(bare.status, Status::error(""));
     }
 }
