@@ -1112,6 +1112,27 @@ def _legacy(projection: JobProjection, kind: Literal["render", "arrange"] = "ren
     return legacy_row(projection, job)
 
 
+async def test_deleting_its_model_cancels_a_legacy_row_whatever_claims_it_holds(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2387: a delete does not wait out a legacy row other presses still claim."""
+    old = _legacy(projection)
+    with projection.pool.connection() as conn:
+        conn.execute("UPDATE render_jobs SET claims = 3 WHERE id = %s", (old.id,))
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        cancelled = _spy_cancel(monkeypatch, client)
+        await service.cancel_renders_of(SLUG)
+        await service.aclose()
+
+    assert cancelled == [workflow_id_for(old.id)]
+    dropped = await asyncio.to_thread(projection.read, old.id)
+    assert dropped.state == "cancelled"
+    assert not await asyncio.to_thread(projection.has_unfinished, SLUG)
+
+
 def test_an_arrange_the_api_settles_is_counted_as_arrange(
     make_service: ServiceFactory, projection: JobProjection
 ) -> None:

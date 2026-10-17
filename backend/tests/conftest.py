@@ -358,6 +358,7 @@ import os
 import pathlib
 import shutil
 import sys
+import time
 
 args = sys.argv[1:]
 # Test settings sit beside the binary: the backend passes openscad no FAKE_* variable.
@@ -421,6 +422,14 @@ if out is not None and out.endswith(".3mf"):
         raise SystemExit(1)
     for line in settings.get("FAKE_STDERR", []):
         print(line, file=sys.stderr)
+    hold = settings.get("FAKE_HOLD")
+    if hold:
+        # A render that runs until the test lets it go (or 60 s pass).
+        pathlib.Path(hold["started"]).touch()
+        for _ in range(1200):
+            if pathlib.Path(hold["release"]).exists():
+                break
+            time.sleep(0.05)
     if "FAKE_3MF" in settings:
         shutil.copyfile(settings["FAKE_3MF"], out)
     raise SystemExit(0)
