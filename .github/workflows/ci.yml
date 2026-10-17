@@ -332,6 +332,13 @@ jobs:
       - name: Test the codec copy check
         run: .github/scripts/lint-codec-copies.test.sh
 
+      # Every buildx step pulls BuildKit from Google's Docker Hub mirror (#3370).
+      - name: Check that buildx pulls BuildKit from the mirror
+        run: .github/scripts/lint-buildx-mirror.sh
+
+      - name: Test the buildx mirror check
+        run: .github/scripts/lint-buildx-mirror.test.sh
+
       # The Claude Code hook (.claude/settings.json) that bumps a plugin's
       # version on its first change in a branch, then lints it (#896).
       - name: Test the plugin edit hook
@@ -1428,10 +1435,10 @@ jobs:
           echo "pipelines=${pipelines}" >>"$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
+        if: ${{ steps.select.outputs.count != '0' }}
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
-        if: ${{ steps.select.outputs.count != '0' }}
 
       # Read-only cache. The entries it hits were written by an EARLIER run's
       # `image` job (mode=max exports every `base` layer): this job does not
