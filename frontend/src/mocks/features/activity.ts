@@ -90,7 +90,7 @@ function defaultFacets(): ActivityFacets {
       { value: 'token:t1', count: 1 },
     ],
     tools: [{ value: 'import_model', count: 1 }],
-    subjects: [{ value: 'box', count: 1 }],
+    subjects: [{ value: 'box', count: 1, label: 'Box' }],
   }
 }
 

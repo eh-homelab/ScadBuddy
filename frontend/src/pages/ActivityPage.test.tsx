@@ -135,6 +135,29 @@ describe("ActivityPage", () => {
     expect(within(group).getAllByRole("radio")).toHaveLength(CHIPS_SHOWN + 1);
   });
 
+  it("names a subject chip, and filters by its reference (#3856)", async () => {
+    const facets = await (await fetch("/api/v1/activity/facets")).json();
+    setActivityFacets({
+      ...facets,
+      subjects: [
+        { value: "keychain", count: 4, label: "Name Keychain" },
+        { value: "library:89", count: 3 },
+        { value: "project:7", count: 2 },
+        { value: `output:${"a".repeat(32)}`, count: 1 },
+      ],
+    });
+    const { user } = render();
+    const group = await screen.findByLabelText("Subject");
+    const names = await waitFor(() => {
+      const radios = within(group).getAllByRole("radio");
+      expect(radios).toHaveLength(4);
+      return radios.map((r) => r.textContent);
+    });
+    expect(names).toEqual(["Name Keychain4", "Library file 893", "Project 72", "Output aaaaaaaa1"]);
+    await user.click(within(group).getByRole("radio", { name: /^Library file 89/ }));
+    expect(screen.getByTestId("location").textContent).toContain("subject=library%3A89");
+  });
+
   it("filters by status and keeps it in the URL", async () => {
     const { user } = render();
     await user.click(await screen.findByRole("button", { name: "Failed" }));

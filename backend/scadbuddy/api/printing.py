@@ -1274,6 +1274,29 @@ async def get_default_project(
         )
 
 
+#: A new project's subject keeps this much of its name (#3856): enough to tell it apart.
+PROJECT_NAME_SUBJECT_CHARS = 200
+
+
+def project_subject(body: ProjectRequest) -> str:
+    """The project linked, or the name of the one created: one chip per project on the
+    Activity page, not one for them all (#3856). The name is prefixed, so one that reads
+    like a model's slug or ``library:89`` never shares that subject's chip.
+
+    The name is what a person typed, and it is shown to everyone who reads the
+    operations record or the Activity facets, as the project itself is in Bambuddy.
+
+    The create keeps this subject once the project has an id, so its chip is apart
+    from the ``project:<id>`` one its later links share: the record says what was
+    asked for, and the id is not known until Bambuddy answers. Two creates of one name
+    share a chip, as two asks for the same thing would."""
+    if body.project_id is not None:
+        return f"project:{body.project_id}"
+    if body.name:
+        return f"project-name:{body.name[:PROJECT_NAME_SUBJECT_CHARS]}"
+    return "project"
+
+
 @router.post(
     "/projects",
     response_model=ProjectView,
@@ -1297,7 +1320,7 @@ async def post_project(
         ops,
         response,
         kind=ops.kinds["create_project"],
-        subject="project",
+        subject=project_subject(body),
         request=body,
         idempotency_key=idempotency_key,
     )
