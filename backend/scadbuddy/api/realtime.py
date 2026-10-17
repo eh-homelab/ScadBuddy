@@ -444,11 +444,7 @@ class _Checks:
 
 
 async def _read(
-    websocket: WebSocket,
-    topics: set[str],
-    send: Send,
-    events: object = None,
-    checks: _Checks | None = None,
+    websocket: WebSocket, topics: set[str], send: Send, events: object, checks: _Checks
 ) -> None:
     limit = RateLimit(RATE_BURST, RATE_PER_SECOND, time.monotonic)
     while True:
@@ -474,10 +470,7 @@ async def _read(
         if kind == "pong":
             continue
         if kind == "check" and isinstance(frame, dict):
-            if checks is None:
-                await send({"type": "error", "message": "this socket answers no checks"})
-            else:
-                await checks.submit(frame)
+            await checks.submit(frame)
             continue
         requested = frame.get("topics") if isinstance(frame, dict) else None
         if kind not in ("subscribe", "unsubscribe") or not isinstance(requested, list):
