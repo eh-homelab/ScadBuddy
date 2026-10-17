@@ -738,6 +738,9 @@ workers restart.
     `asyncio.to_thread`: an activity that starts with one waits for a free thread
     while the loop runs on. For a hang it does not catch,
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
+    The renders dashboard's "Worker event loops" panel charts the render and print
+    workers. `scadbuddy-projects` has no scrape target, so its stalls show only in
+    its log.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.

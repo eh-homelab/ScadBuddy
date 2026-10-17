@@ -81,9 +81,10 @@ class LoopWatch:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        # Not joined: a join through `asyncio.to_thread` waits for the very pool whose
+        # stall this reports. The thread is a daemon, and it returns within one
+        # `interval` of the event.
         self._stopping.set()
-        if self._thread is not None:
-            await asyncio.to_thread(self._thread.join)
 
     def _watch(self, loop: asyncio.AbstractEventLoop, loop_thread: int) -> None:
         while True:
@@ -96,8 +97,11 @@ class LoopWatch:
 
             def beat(posted: float = posted, ran: threading.Event = ran) -> None:
                 self.metrics.event_loop_lag.observe(time.monotonic() - posted)
-                ran.set()
+                # Before `ran`: `_check_probe` runs on the watch thread once `ran` is
+                # set, and the next beat is posted after it returns, so the two never
+                # touch `_probe` at once. Swapping these lines would let them race.
                 self._hand_probe(loop)
+                ran.set()
 
             try:
                 loop.call_soon_threadsafe(beat)
