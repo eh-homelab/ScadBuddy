@@ -6,8 +6,9 @@
 # failed jobs before any test ran. This fails naming each step that does not.
 # It reads `driver-opts: image=…` on one line, or an `image=…` line inside a
 # `driver-opts: |` block (one option per line, as the action reads them; its
-# indicators and a trailing comment are fine); a quoted value is flagged, so
-# write it one of those ways.
+# indicators and a trailing comment are fine). A folded `>` block joins its
+# options onto one line, and a quoted value is not read either: both are
+# flagged, so write it one of the two ways above.
 set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 python3 - "$root" <<'PY'
