@@ -276,3 +276,13 @@ async def test_sweep_unrecorded_removes_old_unrecorded_objects_only(s3: S3Settin
         assert "Contents" in await client.list_objects_v2(Bucket=s3.bucket, Prefix="t/stray")
     finally:
         await backend.aclose()
+
+
+async def test_a_slice_blob_round_trips(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    try:
+        key = await backend.upload("slice", b"gcode", name="plate.3mf", scope=SCOPE)
+        assert key == f"t/slice/{hashlib.sha256(b'gcode').hexdigest()}"
+        assert b"".join([c async for c in backend.download(key)]) == b"gcode"
+    finally:
+        await backend.aclose()
