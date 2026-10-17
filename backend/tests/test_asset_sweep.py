@@ -157,11 +157,11 @@ class _Bambuddy(BambuddyContentBackend):
 
 
 @pytest.mark.parametrize("on_bambuddy", [False, True])
-async def test_the_blob_sweep_reconciles_unrecorded_work_files_on_bambuddy_only(
+async def test_the_blob_sweep_reconciles_unrecorded_uploads_on_a_sweeper_only(
     monkeypatch: pytest.MonkeyPatch, on_bambuddy: bool
 ) -> None:
     """#701: on Bambuddy the sweep also deletes the Work/ files no row names that are
-    older than `job_ttl`; another backend has no such files to find."""
+    older than `job_ttl`; a backend that is no `UnrecordedSweeper` is not asked."""
 
     async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
         return []
