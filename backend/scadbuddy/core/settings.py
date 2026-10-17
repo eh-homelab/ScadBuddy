@@ -188,6 +188,13 @@ class Settings(BaseSettings):
     # stored setting: it decides who the server believes about who it is talking to.
     trusted_proxies: str = ""
 
+    @field_validator("store_s3_prefix")
+    @classmethod
+    def _bare_prefix(cls, prefix: str) -> str:
+        # Keys are `<prefix>/<kind>/<sha>`: "p/" would make `p//piece/<sha>`. An empty
+        # prefix stays empty, and a start on S3 refuses it (`store.backends`).
+        return prefix.strip("/")
+
     @field_validator("trusted_proxies")
     @classmethod
     def _trusted_proxies_are_cidrs(cls, value: str) -> str:

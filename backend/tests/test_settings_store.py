@@ -522,6 +522,16 @@ def test_clearing_an_s3_field_while_on_the_s3_store_is_refused(store: SettingsSt
     assert store.load().store_s3_bucket == "sb"
 
 
+@pytest.mark.parametrize(("saved", "read"), [("p/", "p"), ("/a/b/", "a/b"), ("/", "")])
+def test_the_s3_prefix_is_saved_without_its_outer_slashes(
+    store: SettingsStore, saved: str, read: str
+) -> None:
+    """Keys are `<prefix>/<kind>/<sha>`: a trailing slash made `p//piece/<sha>`. An
+    empty one is the blank prefix a start refuses (`build_backend`)."""
+    store.save(SettingsPatch(store_s3_prefix=saved))
+    assert store.load().store_s3_prefix == read
+
+
 def test_render_store_settings_carry_s3(store: SettingsStore, settings: Settings) -> None:
     store.save(S3_PATCH)
     store.save(SettingsPatch(store_backend="s3", store_s3_path_style=False))
