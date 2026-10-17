@@ -66,6 +66,17 @@ const NOT_A_SURFACE = new RegExp(
   'g',
 )
 
+/** The same as an arbitrary value: `text-(--color-muted)`, `text-[var(--color-accent)]`. */
+const NOT_A_SURFACE_VALUE = new RegExp(
+  `(?<![\\w-])(?:${COLOUR_UTILITIES.join('|')})-(?:\\((?:[\\w-]+:)?|\\[(?:[\\w-]+:)?var\\()--color-(?:accent|muted)(?![\\w-])`,
+  'g',
+)
+
+/** What either pattern finds in `text`. */
+function found(text: string): string[] {
+  return [...(text.match(NOT_A_SURFACE) ?? []), ...(text.match(NOT_A_SURFACE_VALUE) ?? [])]
+}
+
 describe('the colour names', () => {
   it('keeps no ui-accent or ui-muted, the names shadcn’s surfaces had during the conversion', () => {
     expect(matches(/(?<![\w-])[\w:-]*ui-(?:accent|muted)(?![\w-])/g)).toEqual([])
@@ -75,7 +86,7 @@ describe('the colour names', () => {
     // `accent` was ScadBuddy's amber and `muted` its secondary text; both are shadcn's
     // surfaces now (index.css). The amber is `primary` and the secondary text `subtle`,
     // so a `text-muted` left over would be a surface colour used as text.
-    expect(matches(NOT_A_SURFACE)).toEqual([])
+    expect([...matches(NOT_A_SURFACE), ...matches(NOT_A_SURFACE_VALUE)]).toEqual([])
   })
 
   it.each([
@@ -84,6 +95,12 @@ describe('the colour names', () => {
     'text-muted/70',
     'text-muted/[0.7]',
     'text-muted!',
+    '!text-muted',
+    'text-muted/(--x)',
+    'text-(--color-muted)',
+    'border-t-(color:--color-accent)',
+    'text-[var(--color-accent)]',
+    'ring-[color:var(--color-muted)]',
     'border-muted',
     'border-t-muted',
     'border-x-accent',
@@ -111,7 +128,7 @@ describe('the colour names', () => {
     'mask-radial-to-accent',
     'mask-t-from-muted',
   ])('catches %s', (name) => {
-    expect(`<p className="x ${name} y">`.match(NOT_A_SURFACE)).toEqual([name.replace(/^\w+:/, '')])
+    expect(found(`<p className="x ${name} y">`)).toHaveLength(1)
   })
 
   it.each([
@@ -125,8 +142,11 @@ describe('the colour names', () => {
     'text-primary',
     'border-border',
     'muted',
+    'bg-(--color-muted)',
+    'bg-[var(--color-accent)]',
+    'text-(--color-muted-foreground)',
   ])('leaves %s alone', (name) => {
-    expect(`<p className="x ${name} y">`.match(NOT_A_SURFACE)).toBeNull()
+    expect(found(`<p className="x ${name} y">`)).toEqual([])
   })
 })
 
