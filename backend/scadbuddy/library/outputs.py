@@ -234,10 +234,10 @@ class OutputStore:
         #: flight across a forget still knows not to store what it found.
         self._cover_epoch = 0
         self._covers_lock = threading.Lock()
-        #: Outputs `name_and_slug` found gone, each until it looks again. Facets read it
-        #: from worker threads unlocked: each access is one dict operation, which the GIL
-        #: makes atomic, and a lost entry costs only one more glob.
+        #: Outputs `name_and_slug` found gone, each until it looks again; facets read it
+        #: from worker threads.
         self._gone: dict[str, float] = {}
+        self._gone_lock = threading.Lock()
         #: Called with a model's id when one of its outputs is saved or deleted --
         #: which moves the catalogue's fallback cover, and with it whether the
         #: default-render preview is needed. Must not raise.
@@ -279,14 +279,17 @@ class OutputStore:
         """The output's own name and its model, from ``meta.json`` alone: `get` without
         the last-print read, for a caller that only labels it (#3856). One found gone
         is not looked for again for `GONE_OUTPUT_SECONDS`."""
-        if self._gone.get(output_id, 0.0) > time.monotonic():
+        with self._gone_lock:
+            gone = self._gone.get(output_id, 0.0) > time.monotonic()
+        if gone:
             raise OutputNotFoundError(output_id)
         try:
             directory = self._find_dir(output_id)
         except OutputNotFoundError:
-            if len(self._gone) >= _GONE_OUTPUTS_KEPT:
-                self._gone.clear()
-            self._gone[output_id] = time.monotonic() + GONE_OUTPUT_SECONDS
+            with self._gone_lock:
+                if len(self._gone) >= _GONE_OUTPUTS_KEPT:
+                    self._gone.clear()
+                self._gone[output_id] = time.monotonic() + GONE_OUTPUT_SECONDS
             raise
         meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
         return meta.name, meta.slug

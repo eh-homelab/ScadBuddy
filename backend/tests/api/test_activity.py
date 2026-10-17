@@ -187,6 +187,16 @@ def test_subjects_with_no_slug_never_read_the_catalogue() -> None:
     assert labels == {}
 
 
+def test_a_built_in_model_alone_is_still_named() -> None:
+    """A built-in's id holds a ':' (`builtin:<slug>`), yet it is a model to name."""
+    record = SimpleNamespace(slug="builtin:box", name="Box")
+    catalogue = SimpleNamespace(slugs=lambda: ["builtin:box"], list_models=lambda slugs: [record])
+    outputs = SimpleNamespace(name_and_slug=lambda output_id: (None, "builtin:box"))
+    subjects = [Count("builtin:box", 2), Count("output:" + "a" * 32, 1)]
+    labels = _subject_labels(subjects, catalogue, outputs)  # type: ignore[arg-type]
+    assert labels == {"builtin:box": "Box", "output:" + "a" * 32: "Box"}
+
+
 def test_a_failing_catalogue_leaves_the_facets_their_output_names() -> None:
     """#3856: the facets are the activity index's; a catalogue that fails costs only the
     model names, not the filter bar."""

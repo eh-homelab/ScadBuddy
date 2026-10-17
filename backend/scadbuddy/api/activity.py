@@ -32,6 +32,7 @@ from scadbuddy.activity.kinds import KindRegistry
 from scadbuddy.activity.models import STATUSES, ActivityRow, ActivityStatus, Facet, FacetType
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import CatalogueDep, OutputsDep
+from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
@@ -291,9 +292,10 @@ def _subject_labels(
             continue  # deleted (even mid-read), or its meta unreadable: the chip keeps its id
     wanted = values | {slug for _, slug in metas.values()}
     names: dict[str, str] = {}
-    # A slug holds no ':' (every other subject does, or is no model's): with none among
-    # them there is nothing to ask the catalogue, and the page refetches facets often.
-    if any(":" not in value for value in wanted):
+    # A model's id is a bare slug or a built-in's `builtin:<slug>`; every other subject
+    # holds a ':' of its own. With no model among them there is nothing to ask the
+    # catalogue, and the page refetches facets often.
+    if any(":" not in value or is_builtin(value) for value in wanted):
         try:
             slugs = [slug for slug in catalogue.slugs() if slug in wanted]
             names = {record.slug: record.name for record in catalogue.list_models(slugs)}

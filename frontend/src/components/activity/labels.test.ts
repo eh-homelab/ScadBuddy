@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { subjectLabel } from './labels'
+import { SUBJECT_NAME_CHARS, subjectLabel } from './labels'
 
 describe('subjectLabel (#3856)', () => {
   it("prefers the server's name for the subject", () => {
@@ -21,5 +22,12 @@ describe('subjectLabel (#3856)', () => {
     ['library:', 'library:'],
   ])('reads %s as %s', (value, label) => {
     expect(subjectLabel({ value, label: null })).toBe(label)
+  })
+})
+
+describe('the name clip (#3856)', () => {
+  it("is the backend title's, so a chip and its row's title show as much", () => {
+    const backend = readFileSync(`${import.meta.dirname}/../../../../backend/scadbuddy/operations/activity.py`, 'utf8')
+    expect(Number(/^TITLE_NAME_CHARS = (\d+)$/m.exec(backend)?.[1])).toBe(SUBJECT_NAME_CHARS)
   })
 })

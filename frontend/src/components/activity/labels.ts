@@ -13,7 +13,7 @@ export function principalLabel(principal: string | null, _facets?: ActivityFacet
 }
 
 /** How much of a project's name a chip shows; a title (backend `TITLE_NAME_CHARS`) as much. */
-const SUBJECT_NAME_CHARS = 40
+export const SUBJECT_NAME_CHARS = 40
 
 /**
  * #3856 — how a subject chip reads: the name the server found for it, else its raw
