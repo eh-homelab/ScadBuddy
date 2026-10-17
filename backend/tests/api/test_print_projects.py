@@ -258,18 +258,23 @@ def test_a_print_into_a_library_folder_uploads_there_under_no_project(
 @pytest.mark.requires_postgres
 @respx.mock
 @pytest.mark.parametrize("folder_id", [2, 9, 404])
+@pytest.mark.parametrize("null_project", [False, True])
 def test_a_folder_the_picker_does_not_offer_is_refused(
-    client: TestClient, model: str, folder_id: int
+    client: TestClient, model: str, folder_id: int, null_project: bool
 ) -> None:
     """#3651 review — the inbox (2), a project's folder (9) and a folder that is gone
-    are not destinations: the run is refused before anything is uploaded."""
+    are not destinations: the run is refused before anything is uploaded, also when
+    the body sends ``project_id: null`` beside the folder."""
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
     uploaded = upload_route()
     run_routes()
     _projects_and_folders()
+    request = run_request(folder_id=folder_id)
+    if null_project:
+        request["project_id"] = None
 
-    response = run_print(client, output_id, json=run_request(folder_id=folder_id))
+    response = run_print(client, output_id, json=request)
 
     assert response.status_code == 422, response.text
     assert "not a library folder" in response.text

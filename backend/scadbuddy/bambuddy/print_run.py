@@ -1210,7 +1210,7 @@ async def prepare_run(
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
-    if request.folder_id is not None and "project_id" not in request.model_fields_set:
+    if request.folder_id is not None:
         await require_destination_folder(client, request.folder_id, settings.library_folder_id)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()
