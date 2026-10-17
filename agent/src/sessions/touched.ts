@@ -385,6 +385,12 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
+  // The blob store's backend migration: one row per pair, whatever the run later copies.
+  store_migrate: (input) => {
+    const source = str(input.source)
+    const target = str(input.target)
+    return source && target ? setting(`store_migration:${source}:${target}`) : []
+  },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>

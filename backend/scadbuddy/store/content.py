@@ -385,6 +385,10 @@ class ContentStore:
                 )
 
     async def _download(self, ref: BlobRef) -> AsyncGenerator[bytes]:
+        # Spec 2026-10-16 §4.3: a row the migration has not moved yet is a miss here.
+        if ref.backend != self.name:
+            self._count("get", "missing")
+            raise BlobMissingError(f"{ref.backend}:{ref.backend_id} is not on {self.name}")
         digest = hashlib.sha256()
         try:
             # Closed with this generator: a consumer that stops early (and closes it)

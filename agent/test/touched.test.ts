@@ -48,6 +48,12 @@ describe('the extractor registry', () => {
 })
 
 describe('extractors', () => {
+  it('records a store migration as a modified setting of its pair', () => {
+    expect(touches('store_migrate', { source: 'bambuddy', target: 's3' }, { workflow_id: 'w' }, 'outward')).toEqual([
+      { type: 'setting', id: 'store_migration:bambuddy:s3', action: 'modified' },
+    ])
+  })
+
   it('records a revision with its parent and new commit', () => {
     expect(touches('update_source', { slug: 'box', base: C1, source: '' }, { slug: 'box', version: C2 })).toEqual([
       { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 },

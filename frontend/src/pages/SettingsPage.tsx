@@ -44,6 +44,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { ChevronRightIcon } from 'lucide-react'
@@ -84,7 +85,12 @@ function ofLimit(used: string, limit: number, format: (n: number) => string): st
   return limit > 0 ? `${used} of ${format(limit)}` : `${used} (no limit)`
 }
 
-const SECRETS = ['bambuddy_api_key', 'bambuddy_render_api_key', 'google_fonts_api_key'] as const
+const SECRETS = [
+  'bambuddy_api_key',
+  'bambuddy_render_api_key',
+  'google_fonts_api_key',
+  'store_s3_secret_access_key',
+] as const
 type Secret = (typeof SECRETS)[number]
 
 function isSecret(name: FieldName): name is Secret {
@@ -98,7 +104,20 @@ const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
   printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
   // #426 — the blob store beside the inbox folder it needs.
-  projects: ['library_folder_id', 'last_project_id', 'destination_sort', 'store_backend'],
+  projects: [
+    'library_folder_id',
+    'last_project_id',
+    'destination_sort',
+    'store_backend',
+    // The S3 store's, under the Blob store choice.
+    'store_s3_endpoint',
+    'store_s3_region',
+    'store_s3_bucket',
+    'store_s3_prefix',
+    'store_s3_access_key_id',
+    'store_s3_secret_access_key',
+    'store_s3_path_style',
+  ],
   preview: ['display_unit', 'default_plate'],
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
 }
@@ -178,6 +197,7 @@ type Problem = { problem: string }
 function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
   if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
   if (name === 'display_unit' || name === 'destination_sort') return raw
+  if (name === 'store_s3_path_style') return raw === 'true'
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
@@ -348,7 +368,16 @@ function SettingsSections() {
   // it, so what the choice shows and what that save sends always agree.
   const savedBambuddyUrl = settings ? baseline(settings, 'bambuddy_url') !== '' : false
   const bambuddyStoreReady = savedBambuddyUrl && value('library_folder_id') !== ''
-  const chosenBackend = bambuddyStoreReady ? value('store_backend') : 'local'
+  // The S3 store needs its SAVED endpoint, bucket and both keys, as the server does.
+  const savedS3 = (name: FieldName) => (settings ? baseline(settings, name) !== '' : false)
+  const s3Ready =
+    savedS3('store_s3_endpoint') &&
+    savedS3('store_s3_bucket') &&
+    savedS3('store_s3_access_key_id') &&
+    Boolean(settings?.has_store_s3_secret_access_key)
+  const chosen = value('store_backend')
+  const chosenBackend =
+    chosen === 's3' ? (s3Ready ? 's3' : 'local') : bambuddyStoreReady && chosen === 'bambuddy' ? 'bambuddy' : 'local'
 
   const changed = (name: FieldName): boolean => {
     if (!settings) return false
@@ -1210,6 +1239,11 @@ function SettingsSections() {
                       label: 'Bambuddy library (any number of render workers)',
                       disabled: !bambuddyStoreReady,
                     },
+                    {
+                      value: 's3',
+                      label: 'S3-compatible object store (any number of render workers)',
+                      disabled: !s3Ready,
+                    },
                   ]}
                 />
                 {!bambuddyStoreReady && (
@@ -1219,7 +1253,87 @@ function SettingsSections() {
                       : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
                   </p>
                 )}
+                {!s3Ready && (
+                  <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-s3-hint">
+                    The S3 store needs its endpoint, bucket and keys saved first.
+                  </p>
+                )}
               </FieldRow>
+
+              <div role="group" aria-labelledby="store-s3-heading" className="space-y-4">
+                <p id="store-s3-heading" className="text-sm font-medium">
+                  S3 store
+                </p>
+                {(
+                  [
+                    ['store_s3_endpoint', 'Endpoint', 'The service’s URL, e.g. https://s3.us-east-1.amazonaws.com or a MinIO or Garage address.'],
+                    ['store_s3_region', 'Region', 'The region requests are signed for; most self-hosted services take any.'],
+                    ['store_s3_bucket', 'Bucket', 'An existing bucket. ScadBuddy does not create it.'],
+                    ['store_s3_prefix', 'Prefix', 'Every object goes under this key prefix in the bucket.'],
+                    ['store_s3_access_key_id', 'Access key id', undefined],
+                  ] as const
+                ).map(([name, label, help]) => {
+                  const id = `setting-${name}`
+                  return (
+                    <FieldRow key={name} id={id} label={label} badge={badge(name)} error={errors[name]} help={help}>
+                      <Input
+                        id={id}
+                        value={value(name)}
+                        autoComplete="off"
+                        onChange={(event) => setField(name, event.target.value)}
+                      />
+                    </FieldRow>
+                  )
+                })}
+                <FieldRow
+                  id="setting-store_s3_secret_access_key"
+                  label="Secret access key"
+                  badge={badge('store_s3_secret_access_key')}
+                  error={errors.store_s3_secret_access_key}
+                  help="Sealed at rest, and never shown again once saved."
+                >
+                  <div className="flex gap-2">
+                    <Input
+                      id="setting-store_s3_secret_access_key"
+                      type="password"
+                      value={value('store_s3_secret_access_key')}
+                      autoComplete="off"
+                      onChange={(event) => setField('store_s3_secret_access_key', event.target.value)}
+                      placeholder={
+                        clearing.includes('store_s3_secret_access_key')
+                          ? 'Cleared when you save.'
+                          : settings.has_store_s3_secret_access_key
+                            ? 'A key is stored. Paste a new one to replace it.'
+                            : 'Paste the key'
+                      }
+                      className="sb-num"
+                    />
+                    {settings.has_store_s3_secret_access_key && (
+                      <Button
+                        variant="outline"
+                        disabled={clearing.includes('store_s3_secret_access_key')}
+                        onClick={() => clearSecret('store_s3_secret_access_key')}
+                        {...USER_ONLY}
+                      >
+                        Remove key
+                      </Button>
+                    )}
+                  </div>
+                </FieldRow>
+                <FieldRow
+                  id="setting-store_s3_path_style"
+                  label="Path-style addressing"
+                  badge={badge('store_s3_path_style')}
+                  error={errors.store_s3_path_style}
+                  help="The bucket in the path rather than the hostname. Most self-hosted services need it on."
+                >
+                  <Switch
+                    id="setting-store_s3_path_style"
+                    checked={value('store_s3_path_style') === 'true'}
+                    onCheckedChange={(checked) => setField('store_s3_path_style', String(checked))}
+                  />
+                </FieldRow>
+              </div>
 
               {storeUsage && (
                 <Card size="sm">
@@ -1227,7 +1341,13 @@ function SettingsSections() {
                   <p className="text-sm font-medium">Blob store usage</p>
                   <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" data-testid="store-usage">
                     <dt className="text-muted-foreground">Where</dt>
-                    <dd>{storeUsage.backend === 'bambuddy' ? 'Bambuddy library' : 'This server’s volume'}</dd>
+                    <dd>
+                      {storeUsage.backend === 'bambuddy'
+                        ? 'Bambuddy library'
+                        : storeUsage.backend === 's3'
+                          ? 'S3 object store'
+                          : 'This server’s volume'}
+                    </dd>
                     <dt className="text-muted-foreground">Files</dt>
                     <dd className="sb-num">{ofLimit(String(storeUsage.count), storeUsage.max_count, String)}</dd>
                     <dt className="text-muted-foreground">Size</dt>

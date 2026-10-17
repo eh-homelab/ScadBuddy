@@ -33,6 +33,7 @@ import json
 import logging
 import time
 import types
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
@@ -96,6 +97,16 @@ RETENTION_MAX_SECONDS = 3650 * 86400.0
 #: which the environment's value does not override.
 SettingSource = Literal["stored", "env", "default", "cleared"]
 
+#: The S3 store's settings (spec 2026-10-16 §4.2), all read at start.
+S3_FIELDS = (
+    "store_s3_endpoint",
+    "store_s3_region",
+    "store_s3_bucket",
+    "store_s3_prefix",
+    "store_s3_access_key_id",
+    "store_s3_secret_access_key",
+    "store_s3_path_style",
+)
 #: The fields a render worker reads (spec §9): the store and the key it uses. The full
 #: key only when no render key is stored, as the fallback.
 RENDER_FIELDS = (
@@ -104,6 +115,7 @@ RENDER_FIELDS = (
     "bambuddy_render_api_key",
     "bambuddy_api_key",
     "library_folder_id",
+    *S3_FIELDS,
 )
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
@@ -153,7 +165,7 @@ RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
 RACK_ALGORITHM_VERSIONS = "printer_rack_algorithm_versions"
 
 #: The settings `StoreNotReadyError` is decided from.
-STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
+STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id", *S3_FIELDS})
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
 STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
 
@@ -164,7 +176,50 @@ class RackAlgorithmSupersededError(Exception):
 
 
 class StoreNotReadyError(ValueError):
-    """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs."""
+    """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
+    `store_backend = s3` without the endpoint, bucket, both keys and a prefix."""
+
+
+S3_NOT_READY = (
+    "the S3 store needs its endpoint, bucket, access key id and secret access key saved first"
+)
+#: A blank prefix (or "/", blank once its outer slashes go): `build_backend` refuses it.
+S3_PREFIX_NOT_READY = "the S3 store needs a prefix saved first"
+BAMBUDDY_NOT_READY = (
+    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
+)
+
+
+class S3Settings(BaseModel):
+    """What the S3 store connects with (spec 2026-10-16 §4)."""
+
+    endpoint: str
+    region: str = "us-east-1"
+    bucket: str
+    prefix: str
+    access_key_id: str
+    secret_access_key: str = Field(repr=False)
+    path_style: bool = True
+
+
+def _s3_settings(value: Callable[[str], Any]) -> S3Settings | None:
+    """The S3 settings from each ``store_s3_*`` field's ``value``, or ``None`` while the
+    endpoint, the bucket or either key is unset."""
+    s3 = {name.removeprefix("store_s3_"): value(name) for name in S3_FIELDS}
+    if not all(s3[name] for name in ("endpoint", "bucket", "access_key_id", "secret_access_key")):
+        return None
+    return S3Settings.model_validate(s3)
+
+
+def _s3_not_ready(value: Callable[[str], Any]) -> str | None:
+    """Why the S3 store would not start on each ``store_s3_*`` field's ``value``, or
+    ``None``: as `build_backend` decides it, so the prefix counts, without its outer
+    slashes."""
+    if _s3_settings(value) is None:
+        return S3_NOT_READY
+    if not (value("store_s3_prefix") or "").strip("/"):
+        return S3_PREFIX_NOT_READY
+    return None
 
 
 class BambuddyIds(BaseModel):
@@ -234,6 +289,15 @@ class StoredSettings(BambuddyIds):
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     #: Where blobs live. Read at process start by the API and every worker.
     store_backend: StoreBackend = "local"
+    #: The S3 store's connection (:data:`S3_FIELDS`); the secret is sealed as the
+    #: Bambuddy keys are.
+    store_s3_endpoint: str | None = None
+    store_s3_region: str = "us-east-1"
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str = "scadbuddy"
+    store_s3_access_key_id: str | None = None
+    store_s3_secret_access_key: str | None = Field(default=None, repr=False)
+    store_s3_path_style: bool = True
     public_url: str | None = None
     #: The printer model the preview's plate falls back to when no printer is chosen
     #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
@@ -390,6 +454,10 @@ class StoredSettings(BambuddyIds):
             return self.bambuddy_render_api_key, False
         return self.bambuddy_api_key, self.bambuddy_api_key is not None
 
+    def s3_settings(self) -> S3Settings | None:
+        """The S3 store's connection, or ``None`` until it has all it needs."""
+        return _s3_settings(functools.partial(getattr, self))
+
 
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it; ``reset`` names
@@ -473,6 +541,14 @@ class SettingsPatch(BaseModel):
     #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
     #: change applies at the next one; a reset puts one back on the deployment's value.
     store_backend: StoreBackend | None = None
+    #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
+    store_s3_endpoint: str | None = None
+    store_s3_region: str | None = None
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str | None = None
+    store_s3_access_key_id: str | None = None
+    store_s3_secret_access_key: str | None = None
+    store_s3_path_style: bool | None = None
     store_max_total_bytes: int | None = None
     store_max_count: int | None = None
     worker_cache_max_bytes: int | None = None
@@ -697,10 +773,12 @@ class SettingsStore:
             url = changes.get("bambuddy_url", current.bambuddy_url)
             inbox = changes.get("library_folder_id", current.library_folder_id)
             if not url or inbox is None:
-                raise StoreNotReadyError(
-                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                    " saved first"
-                )
+                raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+        if changes.get("store_backend") == "s3":
+            current = self.load()
+            problem = _s3_not_ready(lambda name: changes.get(name, getattr(current, name)))
+            if problem is not None:
+                raise StoreNotReadyError(problem)
         with self._pool.connection() as conn, conn.transaction():
             if (changes.keys() | set(reset)) & STORE_READINESS:
                 self._check_store_ready(conn, changes, reset)
@@ -736,7 +814,9 @@ class SettingsStore:
         rows = conn.execute(
             "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(STORE_READINESS),)
         ).fetchall()
-        stored = {row["name"]: row["value"] for row in rows}
+        # Opened, so a sealed secret counts as the value it holds; one this process
+        # cannot open follows the environment, as `snapshot` reads it.
+        stored = _opened(self._kek, {row["name"]: row["value"] for row in rows})
 
         def deployment(name: str) -> Any:
             # The environment's value, else the default. The inbox is not env-seeded,
@@ -763,10 +843,9 @@ class SettingsStore:
         if backend == "bambuddy" and (
             not merged("bambuddy_url") or merged("library_folder_id") is None
         ):
-            raise StoreNotReadyError(
-                "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                " saved first"
-            )
+            raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+        if backend == "s3" and (problem := _s3_not_ready(merged)) is not None:
+            raise StoreNotReadyError(problem)
 
     def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
         """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""
@@ -1067,6 +1146,7 @@ class RenderStoreSettings(BaseModel):
     #: True when `api_key` is the full key because no render key is stored.
     key_is_fallback: bool = False
     library_folder_id: int | None = None
+    s3: S3Settings | None = None
 
 
 def load_render_store_settings(
@@ -1094,4 +1174,5 @@ def load_render_store_settings(
         api_key=key,
         key_is_fallback=fallback,
         library_folder_id=stored.library_folder_id,
+        s3=stored.s3_settings(),
     )

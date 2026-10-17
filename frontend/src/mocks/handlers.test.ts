@@ -955,6 +955,34 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect((await put({ library_folder_id: null })).status).toBe(422)
   })
 
+  it('refuses the S3 store without its endpoint, bucket and keys, as the backend does', async () => {
+    const put = (body: Record<string, unknown>) =>
+      fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const bare = await put({ store_backend: 's3' })
+    expect(bare.status).toBe(422)
+    expect(((await bare.json()) as { detail: string }).detail).toBe(
+      'the S3 store needs its endpoint, bucket, access key id and secret access key saved first',
+    )
+    const fields = {
+      store_s3_endpoint: 'https://s3.example.test',
+      store_s3_bucket: 'renders',
+      store_s3_access_key_id: 'AKIA',
+    }
+    expect((await put({ store_backend: 's3', ...fields })).status).toBe(422)
+    expect((await api.getSettings()).store_backend).toBe('local')
+    const saved = await put({ store_backend: 's3', ...fields, store_s3_secret_access_key: 'shh' })
+    expect(saved.status).toBe(200)
+    const settings = (await saved.json()) as Record<string, unknown>
+    expect(settings.has_store_s3_secret_access_key).toBe(true)
+    expect(settings).not.toHaveProperty('store_s3_secret_access_key')
+    // With the store on S3, clearing the secret alone is refused too.
+    expect((await put({ store_s3_secret_access_key: '' })).status).toBe(422)
+  })
+
   it('refuses an upload over the limit with a 413 naming it', async () => {
     const saved = (await api.getSettings()).media_upload_max_bytes
     try {

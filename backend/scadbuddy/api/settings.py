@@ -111,6 +111,13 @@ class SettingsView(BaseModel):
     #: no render key is. The Settings page shows a persistent warning.
     render_key_fallback: bool = False
     store_backend: StoreBackend = "local"
+    store_s3_endpoint: str | None = None
+    store_s3_region: str = "us-east-1"
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str = "scadbuddy"
+    store_s3_access_key_id: str | None = None
+    has_store_s3_secret_access_key: bool = False
+    store_s3_path_style: bool = True
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
@@ -345,6 +352,13 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         has_render_api_key=bool(stored.bambuddy_render_api_key),
         render_key_fallback=bool(stored.bambuddy_api_key) and not stored.bambuddy_render_api_key,
         store_backend=stored.store_backend,
+        store_s3_endpoint=stored.store_s3_endpoint,
+        store_s3_region=stored.store_s3_region,
+        store_s3_bucket=stored.store_s3_bucket,
+        store_s3_prefix=stored.store_s3_prefix,
+        store_s3_access_key_id=stored.store_s3_access_key_id,
+        has_store_s3_secret_access_key=bool(stored.store_s3_secret_access_key),
+        store_s3_path_style=stored.store_s3_path_style,
         bambuddy_web_urls=stored.bambuddy_web_urls,
         public_url=stored.public_url,
         library_folder_id=stored.library_folder_id,

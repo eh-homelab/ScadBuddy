@@ -639,6 +639,9 @@ tests, `verify.sh`, and the phase-1 deployment, where it is correct only with a
 single render worker on the same volume as the API; the interface lands in phase 1
 so that phase 3 swaps the backend without touching the workflows.
 
+`s3` (an S3-compatible object store) is the second multi-worker backend; see
+`docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §4.
+
 ### 6.3 The Bambuddy backend
 
 Follows the layout #316 and #317 fix: the Settings `library_folder_id` folder is

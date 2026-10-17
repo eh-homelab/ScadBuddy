@@ -957,6 +957,12 @@ export const settingsDefaults = {
   store_max_total_bytes: 53_687_091_200,
   store_max_count: 200_000,
   worker_cache_max_bytes: 10_737_418_240,
+  store_s3_endpoint: null,
+  store_s3_region: 'us-east-1',
+  store_s3_bucket: null,
+  store_s3_prefix: 'scadbuddy',
+  store_s3_access_key_id: null,
+  store_s3_path_style: true,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
@@ -987,6 +993,13 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   store_max_total_bytes: 'restart',
   store_max_count: 'restart',
   worker_cache_max_bytes: 'restart',
+  store_s3_endpoint: 'restart',
+  store_s3_region: 'restart',
+  store_s3_bucket: 'restart',
+  store_s3_prefix: 'restart',
+  store_s3_access_key_id: 'restart',
+  store_s3_secret_access_key: 'restart',
+  store_s3_path_style: 'restart',
 }
 
 export const settings: Settings = {
@@ -1011,6 +1024,7 @@ export const settings: Settings = {
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
+  has_store_s3_secret_access_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
     bambuddy_url: 'stored',

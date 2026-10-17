@@ -383,7 +383,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
   (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that
-  wires them, reading `store_backend` (a stored setting) at start.
+  wires them, reading `store_backend` (a stored setting) at start, through `backends.py`
+  (`build_backend`, and `UnrecordedSweeper`, the sweep of objects an upload left without a
+  row). `s3.py` is `S3ContentBackend` (`store_backend` `s3`, multipart above 64 MiB).
+  `migrate.py` and `workflows/store_migration.py` copy blobs between backends in two
+  phases (copy and record, then flip `store_backend` and restart; `api/store.py`
+  `/store/migrate`).
 
   `python -m scadbuddy.store.verify_bambuddy` re-measures §6.3; it has not yet been
   run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
