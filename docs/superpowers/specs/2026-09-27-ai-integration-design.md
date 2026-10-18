@@ -780,10 +780,25 @@ Tiers: `read`, `write` (reversible through history), and `outward` (send, print,
 delete, settings or credential writes). A plugin tool ScadBuddy doesn't recognise
 defaults to `outward`.
 
+A tool's tier is the user's to set (#2171). The tier a tool declares (a registry tool's
+`risk`, a plugin server's `readOnlyHint` as a suggestion, otherwise `outward`) is its
+**default**, not a floor. Every tool source is configured the same way: ScadBuddy's
+built-in tool sets, remote MCP plugins, and the MCP servers a plugin package adds each
+have a per-tool tier, in either direction, and an on/off switch. A package's hooks,
+skills and subagents can each be switched off. Lowering a tool below its default asks
+for a confirmation in the UI. A tier or switch change is a settings write: the user makes
+it, never the agent. Only what is technically forced stays fixed: a tool Claude Code
+renames cannot take a tier and stays `outward`, and tools colliding on one name are
+hidden. This replaces the tighten-only rule for built-in tools (#1953). Access belongs to
+the tool, not to where it is called from: the main agent, a subagent, a classic or durable
+turn, a flow run and `/mcp` all get the same item's access, capped by the principal's tier
+(design `2026-10-18-settings-and-tool-access-design.md` §4).
+
 ### 8.2 Approval gate
 
-Outward tools **always** need a human approval in the ScadBuddy UI, in every auth mode,
-including `disabled`. Where it is enforced:
+A tool whose effective tier (§8.1, after the user's setting) is `outward` **always**
+needs a human approval in the ScadBuddy UI, in every auth mode, including `disabled`. A
+tool the user has set to `read` or `write` runs without one. Where it is enforced:
 
 - **Harness:** the SDK permission callback and a `PreToolUse` hook
   ([permissions][sdk-permissions], [hooks][sdk-hooks]). The session goes to
@@ -961,8 +976,8 @@ As built (#254; `agent/src/bridge/`, `docs/ai/browser-bridge.md`):
 
 | Threat | Mitigation |
 |---|---|
-| Prompt injection via model READMEs, upstream sources, library code, plugin output, Bambuddy data | Tool results wrap such content as untrusted; outward actions always need a human approval; `tools: []` means injected text can't reach a shell or the filesystem |
-| Stray or hostile MCP client on the LAN | `bearer` is the default; `disabled` is an explicit operator choice to trust the network (full access, lowerable cap); outward actions always need a human approval; HTTPS in every mode; audit log; rate limits on agent-triggered renders |
+| Prompt injection via model READMEs, upstream sources, library code, plugin output, Bambuddy data | Tool results wrap such content as untrusted; actions at the `outward` tier always need a human approval (a tool the user lowers to `read` or `write` is the user's accepted risk, §8.1); `tools: []` means injected text can't reach a shell or the filesystem |
+| Stray or hostile MCP client on the LAN | `bearer` is the default; `disabled` is an explicit operator choice to trust the network (full access, lowerable cap); actions at the `outward` tier always need a human approval; HTTPS in every mode; audit log; rate limits on agent-triggered renders |
 | Credential leakage | Credentials encrypted at rest (§9), never returned by any route, passed per query, redacted in logs and audit |
 | Malicious or changed plugin | Fetched at a pinned commit; reviewed part by part before enabling; command hooks refused; unknown tools default to `outward`; re-pinning shows a diff |
 | Runaway agent | `maxTurns`, per-session budget, render rate limits, interrupt from any watcher |
