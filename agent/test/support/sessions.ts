@@ -85,7 +85,17 @@ export type ScriptedStream = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt'
  * (`yield* scripted.runner(run)`), those are gone, and the manager's abort
  * signal stands in for them. The real SDK is covered by test/sessions.e2e.test.ts.
  */
-export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn) {
+/**
+ * `loads`: a resumed process loads its transcript through `run.sessionStore` first, as the SDK
+ * does (sdk.mjs: `sessionStore.load({projectKey, sessionId: resume})` before Claude Code starts);
+ * false for one that carries nothing in, which the real SDK never is. `beforeLoad` runs after
+ * the spawn and just before that load: a write that lands in between. Its totals are still the
+ * script's (`costUsd`).
+ */
+export function scriptedRunner(
+  next: (run: HarnessRun, text: string) => FakeTurn,
+  { loads = true, beforeLoad }: { loads?: boolean; beforeLoad?: () => Promise<void> } = {},
+) {
   const runs: HarnessRun[] = []
   const prompts: SDKUserMessage[] = []
   let n = 0
@@ -135,7 +145,8 @@ export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn
       // A resume restores the running total from the transcript the SDK loads
       // through the store before Claude Code starts: its last `cost-state` of
       // this session (test/warmResumeCost.sdk.test.ts measures the real rule).
-      if (run.resume !== undefined && run.sessionStore) {
+      if (loads && run.resume !== undefined && run.sessionStore) {
+        await beforeLoad?.()
         const loaded = (await run.sessionStore.load({ projectKey: '', sessionId: session_id })) ?? []
         const state = loaded.findLast((e) => e.type === 'cost-state' && e.sessionId === session_id)
         if (typeof state?.totalCostUSD === 'number') total = state.totalCostUSD

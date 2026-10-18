@@ -56,6 +56,19 @@ describe('UnpricedSpend', () => {
     expect(s.usd()).toBe(0)
   })
 
+  it('keeps what the finished requests cost (completedUsd): a running total for a placement that may never reach its result', () => {
+    const s = new UnpricedSpend()
+    expect(s.completedUsd()).toBe(0)
+    s.observe(start('claude-sonnet-4-5', { input_tokens: 1000 }))
+    s.observe(ev({ type: 'message_delta', delta: {}, usage: { output_tokens: 5 } }))
+    s.observe(ev({ type: 'message_stop' }))
+    s.observe(start('claude-sonnet-4-5', { input_tokens: 2000 }))
+    s.observe(text('hi'))
+    expect(s.completedUsd()).toBeCloseTo((1000 * 3 + 5 * 15) / 1_000_000, 12)
+    // The open request is still `usd()`'s, not counted twice.
+    expect(s.usd()).toBeCloseTo((2000 * 3 + 1 * 15) / 1_000_000, 12)
+  })
+
   it('prices a request cut off mid-stream, estimating output from the streamed text', () => {
     const s = new UnpricedSpend()
     s.observe(start('claude-sonnet-4-5', { input_tokens: 100_000, output_tokens: 1 }))
