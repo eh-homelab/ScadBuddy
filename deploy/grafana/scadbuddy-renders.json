@@ -749,6 +749,38 @@
           "legendFormat": "to_thread stalls"
         }
       ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Worker Temporal tasks",
+      "description": "The Temporal SDK's own latencies on each worker, per pod (#3788): the render and print workers. Workflow task execution is the worker's own time on a task, schedule-to-start the wait before a worker took it. Execution near the 10 s start-to-close bound with a short schedule-to-start is a stalled worker, not a queue wait. The SDK labels its series with the Temporal namespace, which Prometheus keeps as exported_namespace.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 84, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "min": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (pod, le) (rate(temporal_workflow_task_execution_latency_bucket{namespace=\"$namespace\", job=~\"scadbuddy-(render|print)\"}[$__rate_interval])))",
+          "legendFormat": "workflow task p99 {{pod}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (pod, le) (rate(temporal_workflow_task_schedule_to_start_latency_bucket{namespace=\"$namespace\", job=~\"scadbuddy-(render|print)\"}[$__rate_interval])))",
+          "legendFormat": "workflow schedule-to-start p99 {{pod}}"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (pod, le) (rate(temporal_activity_schedule_to_start_latency_bucket{namespace=\"$namespace\", job=~\"scadbuddy-(render|print)\"}[$__rate_interval])))",
+          "legendFormat": "activity schedule-to-start p99 {{pod}}"
+        }
+      ]
     }
   ]
 }

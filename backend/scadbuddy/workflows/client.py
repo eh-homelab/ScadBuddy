@@ -15,6 +15,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import VersioningBehavior
 from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.runtime import Runtime
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
@@ -52,7 +53,9 @@ RPC_TIMEOUT = timedelta(seconds=10)
 logger = logging.getLogger(__name__)
 
 
-async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client:
+async def connect(
+    address: str, namespace: str, *, lazy: bool = False, runtime: Runtime | None = None
+) -> Client:
     """``lazy`` connects on the first call instead of here (the API, which must boot
     with Temporal down); the worker connects eagerly and fails fast. Every client
     traces (spec 2026-10-01 §4): context rides in workflow headers, and a worker built
@@ -63,6 +66,7 @@ async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client
         data_converter=pydantic_data_converter,
         lazy=lazy,
         interceptors=[TracingInterceptor()],
+        runtime=runtime,
     )
 
 

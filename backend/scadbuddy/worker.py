@@ -26,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from temporalio.client import Client
+from temporalio.runtime import Runtime
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
@@ -105,6 +106,7 @@ from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.projects_worker import projects_worker
+from scadbuddy.workflows.sdk_metrics import sdk_exposition, sdk_runtime
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -611,9 +613,14 @@ async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _Da
 
 
 def _health_app(
-    settings: Settings, metrics: Metrics, store: StoreBundle | None, task_queue: str
+    settings: Settings,
+    metrics: Metrics,
+    store: StoreBundle | None,
+    task_queue: str,
+    sdk_port: int | None = None,
 ) -> Starlette:
-    """``store`` is the render worker's; the print worker holds none (#1060)."""
+    """``store`` is the render worker's; the print worker holds none (#1060). With
+    ``sdk_port``, ``/metrics`` carries the Temporal SDK's own series too (#3788)."""
     data = _DataUsage(settings.data_dir)
 
     async def healthz(_: Request) -> JSONResponse:
@@ -629,7 +636,10 @@ def _health_app(
             except Exception:
                 # Like the API's: keep the last values, never fail the scrape.
                 logger.exception("could not read the store's gauges")
-        return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
+        body = generate_latest(metrics.registry)
+        if sdk_port is not None:
+            body += await sdk_exposition(sdk_port)
+        return Response(body, media_type=CONTENT_TYPE_LATEST)
 
     return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
 
@@ -640,14 +650,22 @@ def _health_app(
 HealthListen = int | socket.socket
 
 
+def _sdk_runtime(settings: Settings) -> tuple[Runtime | None, int | None]:
+    """The Runtime a worker connects with when it connects for itself, and the port
+    its /metrics reads the SDK's series from (#3788); neither when the port is 0."""
+    port = settings.temporal_sdk_metrics_port
+    return (sdk_runtime(port), port) if port else (None, None)
+
+
 def _health_server(
     settings: Settings,
     metrics: Metrics,
     store: StoreBundle | None,
     listen: HealthListen,
     task_queue: str,
+    sdk_port: int | None = None,
 ) -> _HealthServer:
-    app = _health_app(settings, metrics, store, task_queue)
+    app = _health_app(settings, metrics, store, task_queue, sdk_port)
     if isinstance(listen, socket.socket):
         config = uvicorn.Config(app, log_config=None, access_log=False)
         return _HealthServer(config, listen)
@@ -752,11 +770,20 @@ async def run_worker(
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
+        sdk_port: int | None = None
         if client is None:
-            client = await connect(settings.temporal_address, settings.temporal_namespace)
+            runtime, sdk_port = _sdk_runtime(settings)
+            client = await connect(
+                settings.temporal_address, settings.temporal_namespace, runtime=runtime
+            )
         server = (
             _health_server(
-                settings, deps.metrics, store, health_port, settings.temporal_task_queue_render
+                settings,
+                deps.metrics,
+                store,
+                health_port,
+                settings.temporal_task_queue_render,
+                sdk_port,
             )
             if health_port is not None
             else None
@@ -914,8 +941,12 @@ async def run_print_worker(
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
         await deps.events.start()
+        sdk_port: int | None = None
         if client is None:
-            client = await connect(settings.temporal_address, settings.temporal_namespace)
+            runtime, sdk_port = _sdk_runtime(settings)
+            client = await connect(
+                settings.temporal_address, settings.temporal_namespace, runtime=runtime
+            )
         queue = settings.temporal_task_queue_bambuddy
         build_id = settings.revision
         workers = [
@@ -923,7 +954,7 @@ async def run_print_worker(
             follow_worker(client, queue, deps.follow_print, build_id=build_id),
         ]
         server = (
-            _health_server(settings, deps.metrics, None, health_port, queue)
+            _health_server(settings, deps.metrics, None, health_port, queue, sdk_port)
             if health_port is not None
             else None
         )
@@ -983,8 +1014,9 @@ async def run_projects_worker(
     await asyncio.to_thread(settings_store.open)
     try:
         await events.start()
+        runtime, sdk_port = _sdk_runtime(settings)
         client = await connect_flows(
-            settings.temporal_address, settings.temporal_namespace, keys[0]
+            settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
         )
         store = FlowStore(settings_store.pool, events=events)
         queue = settings.temporal_task_queue_projects
@@ -1010,7 +1042,7 @@ async def run_projects_worker(
             [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
         )
         server = (
-            _health_server(settings, metrics, None, health_port, queue)
+            _health_server(settings, metrics, None, health_port, queue, sdk_port)
             if health_port is not None
             else None
         )
