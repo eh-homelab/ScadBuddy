@@ -170,9 +170,13 @@ unique index), the measured facts and the arithmetic:
 - `sliced_sha256` and `sliced_blob_key`: the sliced file the quote was read from,
   kept as a `library` blob with a `blob_refs` row named `order_item_quote:<id>` from
   the moment the quote is recorded, so the bytes an accepted quote names are there
-  when the print starts, days later; the row is released when a later quote is
-  accepted in its place or the item is cancelled, and §6.1's attempt takes a ref of
-  its own on the same key (so neither outlives the other by accident);
+  when the print starts, days later. An item keeps at most two such refs: its
+  accepted quote's and its newest unaccepted one's (a quote a person is still
+  looking at). Recording a quote releases the older unaccepted one's ref; accepting
+  a quote releases every other quote's; cancelling the item, or closing the order,
+  releases them all. The quote rows stay (Ruling 6 is about the record, not the
+  bytes), with `sliced_sha256` saying what was priced. §6.1's attempt takes a ref of
+  its own on the same key, so a print's file outlives the quote's ref;
 - `plates` (jsonb: per plate `{index, print_seconds, filaments: [{slot, used_g}]}`
   as `read_sliced` gives them, §5.2);
 - `lines` (jsonb): the priced lines, each `{kind, label, quantity, unit_minor,
