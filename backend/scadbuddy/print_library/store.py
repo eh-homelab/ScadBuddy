@@ -4,6 +4,8 @@ file's `blob_key`; nothing here touches them."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -220,6 +222,18 @@ class NativeLibraryStore:
             f" WHERE output_id = %s AND filed AND deleted_at IS NULL ORDER BY id",
             (output_id,),
         )
+
+    @contextmanager
+    def output_lock(self, output_id: str) -> Iterator[None]:
+        """Held (a transaction-scoped advisory lock on a pooled connection) while one
+        output's filing checks for its copy and makes it, so overlapping attempts file one."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('scadbuddy:library:output:' || %s, 0))",
+                (output_id,),
+            )
+            yield
 
     def forget_output(self, output_id: str) -> None:
         """A deleted output is named by no row: a file moved out of its folder stays, with

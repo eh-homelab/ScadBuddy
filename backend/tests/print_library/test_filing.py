@@ -52,3 +52,14 @@ async def test_trash_filed_takes_only_unmoved_copies(native: NativeLibrary, thre
     assert await trash_filed(native, other.output_id or "") == [other.id]
     assert native.rows.file(kept.id) is not None
     assert native.rows.file(other.id) is None
+
+
+async def test_overlapping_filings_of_one_output_file_one_copy(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    meta = _meta("d" * 32)
+    filed = await asyncio.gather(
+        *(file_output(native, meta, three_mf, "Name Sign") for _ in range(3))
+    )
+    assert len({f.id for f in filed}) == 1
+    assert len(native.rows.filed_for_output(meta.id)) == 1

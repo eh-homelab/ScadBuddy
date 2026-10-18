@@ -232,11 +232,11 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # A native library's copies still `filed` go to its trash with the inbox copies they
         # stand for; whatever was moved stays, no longer naming the deleted output.
         native = await components.get(PRINT_LIBRARY).serving_native()
-        if native is not None:
-            if request["delete_inbox_copies"]:
-                await trash_filed(native, output_id)
-            await asyncio.to_thread(native.rows.forget_output, output_id)
+        if native is not None and request["delete_inbox_copies"]:
+            await trash_filed(native, output_id)
         await asyncio.to_thread(state.outputs.delete, output_id)
+        if native is not None:
+            await asyncio.to_thread(native.rows.forget_output, output_id)
         # After the files: a failed delete keeps the output, and so must keep its records.
         # Best effort once the files are gone, as for a deleted model: the output is. Each
         # on its own, so a failed upload cleanup cannot leave links serving its archives.

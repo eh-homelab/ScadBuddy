@@ -18,14 +18,19 @@ async def file_output(
 ) -> NativeFile:
     """The output's filed copy. Idempotent per output (I5): an activity retry finds the
     row the first attempt made and uploads nothing."""
-    existing = await asyncio.to_thread(native.rows.filed_for_output, meta.id)
-    if existing:
-        return existing[0]
-    folder = await asyncio.to_thread(native.rows.template_folder, folder_name(title))
-    with model_3mf.open("rb") as data:
-        return await native.upload(
-            download_filename(meta), data, folder.id, output_id=meta.id, filed=True
-        )
+    lock = native.rows.output_lock(meta.id)
+    await asyncio.to_thread(lock.__enter__)
+    try:
+        existing = await asyncio.to_thread(native.rows.filed_for_output, meta.id)
+        if existing:
+            return existing[0]
+        folder = await asyncio.to_thread(native.rows.template_folder, folder_name(title))
+        with model_3mf.open("rb") as data:
+            return await native.upload(
+                download_filename(meta), data, folder.id, output_id=meta.id, filed=True
+            )
+    finally:
+        await asyncio.to_thread(lock.__exit__, None, None, None)
 
 
 async def trash_filed(native: NativeLibrary, output_id: str) -> list[int]:

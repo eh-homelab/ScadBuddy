@@ -953,11 +953,17 @@ def test_output_delete_trashes_only_unmoved_copies(native_client: TestClient, wi
 
 @pytest.mark.requires_git
 def test_a_failed_filing_does_not_fail_the_save(
-    native_client: TestClient, widget: str, monkeypatch: pytest.MonkeyPatch
+    native_client: TestClient,
+    widget: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def full(*_: Any, **__: Any) -> NativeFile:
         raise StoreFullError("the store is full")
 
     monkeypatch.setattr(NativeLibrary, "upload", full)
-    assert _save(native_client, widget, "One").status_code == 201
+    saved = _save(native_client, widget, "One")
+    assert saved.status_code == 201
     assert _all_files(native_client) == []
+    (record,) = [r for r in caplog.records if "could not file a saved output" in r.getMessage()]
+    assert record.id == saved.json()["id"]  # type: ignore[attr-defined]
