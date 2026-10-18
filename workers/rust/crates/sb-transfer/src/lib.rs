@@ -1,4 +1,5 @@
-//! GET a `TransferUrl` to a file and PUT a file to one, with sha256 (spec 2026-10-16 §5).
+//! GET a `TransferUrl` to a file and PUT a file to one, reporting each body's sha256
+//! (spec 2026-10-16 §5). Nothing is checked against a digest: a `TransferUrl` carries none.
 //! The worker holds no store credentials: whatever a URL needs (a presigned query, or the
 //! internal route's `X-ScadBuddy-Transfer`) is in its `headers`, so this crate knows neither.
 
@@ -69,10 +70,6 @@ pub enum TransferError {
     Refused(u16),
     /// Any other non-2xx (a 3xx is not followed): 5xx and 429 are worth a retry.
     Status(u16),
-    Digest {
-        expected: String,
-        actual: String,
-    },
     Io(std::io::Error),
     Http(String),
 }
@@ -84,9 +81,6 @@ impl std::fmt::Display for TransferError {
             Self::Missing => write!(f, "object not found (404)"),
             Self::Refused(code) => write!(f, "transfer refused ({code})"),
             Self::Status(code) => write!(f, "unexpected status {code}"),
-            Self::Digest { expected, actual } => {
-                write!(f, "sha256 mismatch: expected {expected}, got {actual}")
-            }
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Http(e) => write!(f, "http: {e}"),
         }

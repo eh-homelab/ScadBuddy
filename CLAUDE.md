@@ -747,7 +747,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   only copy of a save, under the state directory, never the cache.
 - `workers/rust/` — Rust Temporal workers and tools (spec 2026-10-16 §7):
   `crates/sb-slicer` the `slice_plate` activity, `crates/sb-transfer` GET/PUT of
-  `TransferUrl`s with sha256, `crates/sb-temporal` the worker bootstrap (slicer only),
+  `TransferUrl`s (each body's sha256 reported, never checked: a `TransferUrl` carries
+  none), `crates/sb-temporal` the worker bootstrap (slicer only),
   `bins/scadbuddy-slicer` the `slicer` queue's worker; `vectors/` pins payloads against
   the pydantic models (`UPDATE_SLICE_VECTORS=1` in `backend/tests/slicing/test_models.py`).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,

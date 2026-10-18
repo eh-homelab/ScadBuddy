@@ -31,7 +31,7 @@ pub(crate) fn transfer(e: TransferError) -> ActivityError {
     let refused = match &e {
         TransferError::Missing | TransferError::Expired | TransferError::Refused(_) => true,
         TransferError::Status(code) => !(*code >= 500 || *code == 429),
-        TransferError::Digest { .. } | TransferError::Io(_) | TransferError::Http(_) => false,
+        TransferError::Io(_) | TransferError::Http(_) => false,
     };
     let type_name = if refused {
         TRANSFER_REFUSED
@@ -143,10 +143,5 @@ mod tests {
             retryable()
         );
         assert_eq!(kind(TransferError::Http("timed out".into())), retryable());
-        let digest = TransferError::Digest {
-            expected: "a".into(),
-            actual: "b".into(),
-        };
-        assert_eq!(kind(digest), retryable());
     }
 }
