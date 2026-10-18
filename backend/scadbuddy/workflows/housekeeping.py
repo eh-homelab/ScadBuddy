@@ -136,10 +136,13 @@ SWEEPS = (
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
 #: of lost slice starts, findable only while Bambuddy keeps the job (#2715); and the
-#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6).
+#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6);
+#: and the native print library's trash purge and orphan blobs (#3827), which the generic
+#: blob sweep skips, so with the sweeps off nothing else would collect them. Behind
+#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
 #: Not the dialog's background slices (`PREVIEWS_SWEEP`): they obey the sweeps' switch,
 #: so with the sweeps off they stay in Bambuddy's library.
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP)
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP, LIBRARY_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -165,6 +168,8 @@ GIT_TIMEOUT = timedelta(minutes=12)
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
 #: One Bambuddy archive read per print with attachments, and a delete per gone one.
 ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
+#: The library sweep purges trash past 30 days and deletes the blobs no row names.
+LIBRARY_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -183,6 +188,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return ACTIVITY_TIMEOUT
     if sweep == ATTACHMENTS_SWEEP:
         return ATTACHMENTS_TIMEOUT
+    if sweep == LIBRARY_SWEEP:
+        return LIBRARY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
