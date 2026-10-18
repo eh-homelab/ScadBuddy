@@ -10,7 +10,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
+
+# An unpaired surrogate: JSON.stringify writes it as a lowercase ``\uXXXX`` escape
+# (well-formed JSON), where ``ensure_ascii=False`` leaves it raw and UTF-8 refuses it.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _dumps(value: Any) -> str:
+    return _LONE_SURROGATE.sub(
+        lambda m: f"\\u{ord(m.group()):04x}", json.dumps(value, ensure_ascii=False)
+    )
 
 
 def canonical_json(value: Any) -> str:
@@ -18,14 +29,8 @@ def canonical_json(value: Any) -> str:
         return "[" + ",".join(canonical_json(v) for v in value) + "]"
     if isinstance(value, dict):
         keys = sorted(value, key=lambda k: k.encode("utf-16-be"))
-        return (
-            "{"
-            + ",".join(
-                f"{json.dumps(k, ensure_ascii=False)}:{canonical_json(value[k])}" for k in keys
-            )
-            + "}"
-        )
-    return json.dumps(value, ensure_ascii=False)
+        return "{" + ",".join(f"{_dumps(k)}:{canonical_json(value[k])}" for k in keys) + "}"
+    return _dumps(value)
 
 
 def response_hash(response: Any) -> str:

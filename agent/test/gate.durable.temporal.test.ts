@@ -42,9 +42,9 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     await env?.teardown()
   })
 
-  async function park(sessionId = randomUUID(), queue = QUEUE, hold = false, kind: 'approval' | 'answer' = 'approval') {
+  async function park(sessionId = randomUUID(), queue = QUEUE, hold = false, kind: 'approval' | 'answer' = 'approval', failures = 0) {
     const requestId = durableRequestId(sessionId, 'run-1', 'toolu_1')
-    await env.client.workflow.start('gateStandIn', { workflowId: sessionWorkflowId(sessionId), taskQueue: queue, args: [requestId, kind, hold] })
+    await env.client.workflow.start('gateStandIn', { workflowId: sessionWorkflowId(sessionId), taskQueue: queue, args: [requestId, kind, hold, false, failures] })
     return { sessionId, requestId }
   }
 
@@ -74,6 +74,17 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     await expect(
       new DurableGate(env.client, { timeoutMs: 20_000 }).respond(sessionId, { ...args, response: { kind: 'approval', decision: 'deny' } }),
     ).rejects.toMatchObject({ code: 'resolved' })
+  }, 60_000)
+
+  it('a respond whose handler failed does not pin its ID: the identical body re-sent succeeds (#3723 review)', async () => {
+    // Two failures: the first call's own retry under a fresh ID fails too, so it is a 503.
+    const { sessionId, requestId } = await park(randomUUID(), QUEUE, false, 'approval', 2)
+    const gate = new DurableGate(env.client, { timeoutMs: 20_000 })
+    const args = { request_id: requestId, response: { kind: 'approval', decision: 'approve' }, responder: BROWSER_USER, role: 'browser' as const }
+    await expect(gate.respond(sessionId, args)).rejects.toBeInstanceOf(DurableUnavailable)
+    // Temporal keeps the failed outcome under the respond's ID; the same approve still gets through.
+    expect(await gate.respond(sessionId, args)).toEqual({ kind: 'approval', outcome: 'approved' })
+    expect(await gate.pendingInput(sessionId)).toEqual([])
   }, 60_000)
 
   it('measures: an Update ID is not remembered across continue-as-new (#3717)', async () => {

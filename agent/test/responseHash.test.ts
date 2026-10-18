@@ -20,6 +20,8 @@ const CASES: { name: string; value: unknown }[] = [
   { name: 'astral keys sort by UTF-16 code unit, not code point', value: { kind: 'answer', answers: { '😀': 'a', '～': 'b', z: 'c' } } },
   { name: 'booleans, null and nesting', value: { a: [true, false, null, { b: [] }], c: {} } },
   { name: 'a bare string', value: 'x' },
+  // JSON.stringify escapes an unpaired surrogate (well-formed JSON); canonical.py must too.
+  { name: 'a lone surrogate is escaped, not encoded', value: { kind: 'answer', text: 'a\udc00b\ud83d' } },
 ]
 
 const built = {

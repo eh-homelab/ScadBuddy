@@ -105,6 +105,15 @@
       "value": "x",
       "canonical": "\"x\"",
       "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b"
+    },
+    {
+      "name": "a lone surrogate is escaped, not encoded",
+      "value": {
+        "kind": "answer",
+        "text": "a\udc00b\ud83d"
+      },
+      "canonical": "{\"kind\":\"answer\",\"text\":\"a\\udc00b\\ud83d\"}",
+      "sha256": "c80099ae7d7e36594901a69d15e867ea25f2ef9f9343732c36a62355642b08bf"
     }
   ]
 }

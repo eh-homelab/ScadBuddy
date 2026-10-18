@@ -1,4 +1,5 @@
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
+import { randomUUID } from 'node:crypto'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
 import { responseHash } from './canonical.js'
@@ -20,6 +21,14 @@ import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validat
 
 export class DurableUnavailable extends Error {
   override name = 'DurableUnavailable'
+}
+
+/**
+ * A `respond` the validator took whose handler then failed (its `resolve_input` could
+ * not be written): the entry is pending again, so it is worth sending again.
+ */
+class HandlerFailed extends DurableUnavailable {
+  override name = 'HandlerFailed'
 }
 
 /** The workflow ID of a durable session (§6.2). */
@@ -74,6 +83,7 @@ export class DurableGate {
       const refusal = refusalOf(err)
       if (refusal) throw refusal
       if (err instanceof WorkflowNotFoundError) throw err
+      if (err instanceof WorkflowUpdateFailedError) throw new HandlerFailed(`the session could not record that; try again (${(err as Error).message})`)
       throw new DurableUnavailable(`the session's worker is not answering; try again (${(err as Error).message})`)
     }
   }
@@ -87,7 +97,18 @@ export class DurableGate {
   /** Answers one entry; the workflow's validator may refuse it (RespondRefusal). */
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
-    return this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId: respondUpdateId(args) }))
+    const send = (updateId: string) =>
+      this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId }))
+    const id = respondUpdateId(args)
+    try {
+      return await send(id)
+    } catch (err) {
+      if (!(err instanceof HandlerFailed)) throw err
+      // Temporal keeps a completed Update's outcome under its ID, a failed one too, so
+      // the same body would get this failure back for the rest of the run (#3723 review).
+      // A fresh ID is judged by the validator again; the entry is pending again.
+      return await send(`${id}-${randomUUID()}`)
+    }
   }
 
   /**

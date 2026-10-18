@@ -16,7 +16,12 @@ export const release = defineSignal('release')
 export const rollover = defineSignal('rollover')
 export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 
-export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', hold = false, resolved = false): Promise<string> {
+/**
+ * `failures`: how many responds fail in the handler, after the validator took them, as
+ * one whose `resolve_input` could not be written does: the entry is pending again.
+ */
+export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', hold = false, resolved = false, failures = 0): Promise<string> {
+  let failing = failures
   let rolled = false
   setHandler(rollover, () => {
     rolled = true
@@ -35,6 +40,10 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', 
   setHandler(
     respond,
     async (args) => {
+      if (failing > 0) {
+        failing -= 1
+        throw ApplicationFailure.nonRetryable('resolve_input failed', 'ResolveFailed')
+      }
       entry.state = 'resolved'
       // A held handler has taken effect but not answered: the slow `resolve_input` activity.
       if (hold) await condition(() => released)

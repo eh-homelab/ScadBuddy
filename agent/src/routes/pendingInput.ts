@@ -392,6 +392,8 @@ async function respondDurable(
 async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
   const done = await sessions.projection.recorded(requestId)
   if (!done || done.kind !== body.kind) return undefined
+  // `role` is left out on purpose, though respondUpdateId hashes it: the recorded
+  // responder must be this principal, and one principal answers a request in one role.
   if (done.responder.kind !== principal.kind || done.responder.id !== principal.id) return undefined
   const same =
     body.kind === 'approval'
