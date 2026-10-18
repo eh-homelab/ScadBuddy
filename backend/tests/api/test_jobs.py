@@ -150,6 +150,30 @@ def test_a_failed_render_carries_the_log_tail(client: TestClient, model: str) ->
     assert job["bbox_mm"] is None
 
 
+def test_a_3mf_openscad_could_not_write_says_why(
+    client: TestClient, model: str, settings: Settings, tmp_path: Path
+) -> None:
+    """#4091: lib3mf 1.x refuses a triangle, OpenSCAD logs it, exits 0 and leaves a
+    0-byte 3MF. The job says why, and which parameters the render changed."""
+    directory = Path(settings.openscad).parent
+    empty = tmp_path / "empty.3mf"
+    empty.write_bytes(b"")
+    set_fake_env(directory, "FAKE_3MF", str(empty))
+    set_fake_env(directory, "FAKE_STDERR", ["EXPORT-ERROR: Can't add triangle to 3MF model."])
+
+    response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    job = wait_for_job(client, response.json()["job_id"])
+
+    assert job["status"] == "failed"
+    assert job["error"] == (
+        "OpenSCAD could not write the 3MF (Can't add triangle to 3MF model.): the model's"
+        " geometry has coincident or degenerate triangles, typically from many thin,"
+        " disconnected or self-touching shells, which OpenSCAD's 3MF exporter (lib3mf 1.x)"
+        " cannot write (openscad/openscad#6716). It depends on the parameters: this render"
+        " set width = 12. Change them, or thicken the thin features, and render again"
+    )
+
+
 def test_the_preview_glb_is_served_with_the_gltf_media_type(client: TestClient, model: str) -> None:
     job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 1}}).json()[
         "job_id"
