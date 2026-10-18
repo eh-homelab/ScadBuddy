@@ -85,9 +85,7 @@ async def start_native_slice(
 
     A failed or cancelled row is returned running (`NativeSliceStore.start`), so a read
     straight after this never sees the last outcome (Task 12 review I1)."""
-    profiles = starter.profiles
-    files = await build_presets(plan, profiles, client)
-    preset_key = native_preset_key(plan, plate_id, profiles.version, files.bambuddy_process)
+    preset_key = await native_slice_key(starter, plan, plate_id, client)
     row = await store.start(
         workflow_id=native_workflow_id(
             library_file_id, preset_key, subject=subject, copy_sha256=copy_sha256
@@ -115,6 +113,17 @@ async def start_native_slice(
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         )
     return row
+
+
+async def native_slice_key(
+    starter: NativeSliceStarter, plan: SlicePlan, plate_id: int, client: BambuddyClient | None
+) -> str:
+    """What a native slice of ``plan``'s plate ``plate_id`` is keyed by: the presets are
+    built for it (`start_native_slice`), so a run's reuse lookup asks the same key the
+    slice was recorded under (Task 13). A `ProfileError` propagates."""
+    profiles = starter.profiles
+    files = await build_presets(plan, profiles, client)
+    return native_preset_key(plan, plate_id, profiles.version, files.bambuddy_process)
 
 
 async def _has_execution(temporal: Client, workflow_id: str) -> bool:

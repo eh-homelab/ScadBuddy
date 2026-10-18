@@ -121,7 +121,13 @@ async def start_preview(
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
     # It slices to show the toolpath: no earlier slice is looked up (#2691 review).
     planned = await plan_run(
-        client, source, settings, request, PreparedPlates.of(prepared), reuse_slices=False
+        client,
+        source,
+        settings,
+        request,
+        PreparedPlates.of(prepared),
+        reuse_slices=False,
+        native=native,
     )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")

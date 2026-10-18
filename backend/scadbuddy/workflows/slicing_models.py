@@ -63,6 +63,9 @@ class SliceRecordInput(BaseModel):
     reused_warnings: list[str] = Field(default_factory=list)
     #: The workflow was cancelled: ``failure`` says so and the row reads cancelled.
     cancelled: bool = False
+    #: ``failure`` is a refusal of the plate or its input, not a fault: a run reports
+    #: it as the plan's 422, not a 502 (Task 13).
+    refused: bool = False
 
 
 class SliceWorkflowResult(BaseModel):
@@ -70,3 +73,5 @@ class SliceWorkflowResult(BaseModel):
     sliced_blob_key: str | None
     failure: str | None
     warnings: list[str]
+    #: As `SliceRecordInput.refused`.
+    refused: bool = False

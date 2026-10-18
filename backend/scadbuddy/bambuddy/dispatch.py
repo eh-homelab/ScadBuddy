@@ -37,8 +37,13 @@ logger = logging.getLogger(__name__)
 class QueueOutcome(BaseModel):
     """What the slice-and-queue route produced, in the shape the run route reports."""
 
-    #: ``None`` for a plate queued with no slice (a sliced file, #2671).
+    #: ``None`` for a plate queued with no slice (a sliced file, #2671), and for a
+    #: native slice: a Bambuddy job id only, never a `native_slices` row's.
     slice_job_id: int | None = None
+    #: The `native_slices` row a native slice was (plan 2026-10-16 Task 13), and the
+    #: blob it sliced to, uploaded as ``sliced_library_file_id``.
+    native_slice_id: int | None = None
+    sliced_blob_key: str | None = None
     sliced_library_file_id: int
     #: :attr:`SliceRequest.preset_key` of the slice, recorded with the sliced file (#316).
     preset_key: str | None = None

@@ -935,6 +935,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         on_settled=[settle_hook(rack, links, settings_store.load)],
         newest_failed=newest_failed_from(print_runs, settings_store.load),
     )
+    # The image's profiles, read once for the dialog's starts and the runs' reuse keys.
+    native = native_slice_starter(settings)
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
         outputs=outputs,
@@ -943,7 +945,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         archive_cache=ArchiveCache(),
         library=partial(_given, library),
         native_slices=NativeSliceStore(pool),
-        native=native_slice_starter(settings),
+        native=native,
     )
     printing = PrintActivities(
         PrintDeps(
@@ -956,6 +958,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             rack=rack,
             links=links,
             library=library,
+            native=native,
         )
     )
     return PrintWorkerDeps(

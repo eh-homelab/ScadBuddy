@@ -55,6 +55,8 @@ with workflow.unsafe.imports_passed_through():
         REFUSED,
         SLICE_GONE,
         SLICE_LOST,
+        SLICE_RUN_ACTIVITY,
+        SLICED_UPLOAD_ACTIVITY,
         AcceptAnswer,
         Accepted,
         Checked,
@@ -63,13 +65,17 @@ with workflow.unsafe.imports_passed_through():
         FailInput,
         FinishInput,
         InsertInput,
+        NativeSliced,
         PlanInput,
         PrintRunInput,
         RecordInput,
+        SlicedUploadInput,
+        SliceRunInput,
         SliceStartInput,
         SucceedInput,
     )
     from scadbuddy.workflows.problems import problem_of
+    from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_TIMEOUT
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
 READ_RETRY = RetryPolicy(
@@ -109,6 +115,9 @@ SLICE_BACKOFF = timedelta(seconds=60)
 #: The upload and the slice wait beat while they run, so a worker that died is noticed
 #: within this rather than at the activity's whole budget.
 HEARTBEAT = timedelta(seconds=30)
+#: ``slice_run`` waits out every attempt the shared `SliceWorkflow` makes, and a margin
+#: for its prepare and record.
+SLICE_RUN_TIMEOUT = SLICE_RETRY.maximum_attempts * SLICE_TIMEOUT + timedelta(minutes=10)
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
 SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
@@ -178,6 +187,21 @@ SLICED_PATCH = "print-sliced-file"
 #: gone from Bambuddy as it is queued (#2955). Only a plate that reused a slice and was
 #: refused for it asks; a history from before it recorded the run failed.
 REUSED_GONE_PATCH = "print-slice-again-when-reused-gone"
+#: ``workflow.patched`` id of a plate sliced on the native slicer (plan 2026-10-16 Task
+#: 13): ``slice_run`` and ``print_sliced_upload`` on the ``library`` queue in place of
+#: ``print_slice_start`` and ``print_slice_wait``. Only a run planned native asks, so
+#: no Bambuddy run's history records it.
+NATIVE_SLICER_PATCH = "native-slicer"
+
+
+def _sliced_by(
+    started: SliceStarted | NativeSliced,
+) -> tuple[int | None, str | None, NativeSliced | None]:
+    """A slice's Bambuddy job id (never a native row's: ``REUSED_GONE_PATCH`` reads a
+    reused plate by its ``None``), its preset key, and the native slice if it was one."""
+    if isinstance(started, NativeSliced):
+        return None, started.preset_key, started
+    return started.job_id, started.preset_key, None
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -325,11 +349,14 @@ class PrintRunWorkflow:
         self._upsert(status="refused")
         await workflow.wait_condition(workflow.all_handlers_finished)
 
-    async def _slice(self, planned: PlannedRun, plate: PlatePlan) -> tuple[SliceStarted, int]:
-        """Slice one plate: its job and the sliced file. A slice that left nothing
-        behind (``SLICE_LOST``: the sidecar died under it, Bambuddy restarted and forgot
-        it, or could not be reached to start it) is started again after
-        :data:`SLICE_BACKOFF`, up to :data:`SLICE_ATTEMPTS` in all (#2081). Starting it
+    async def _slice(
+        self, planned: PlannedRun, plate: PlatePlan, subject: str
+    ) -> tuple[SliceStarted | NativeSliced, int]:
+        """Slice one plate: its job and the sliced file; on the native slicer, the
+        `native_slices` row and the file uploaded from it (`NATIVE_SLICER_PATCH`). A
+        slice that left nothing behind (``SLICE_LOST``: the sidecar died under it,
+        Bambuddy restarted and forgot it, or could not be reached to start it) is started
+        again after :data:`SLICE_BACKOFF`, up to :data:`SLICE_ATTEMPTS` in all (#2081). Starting it
         again is safe: nothing was queued, and the run queues each plate once, from the
         slice that finished. Any other failure ends the run as before."""
         if plate.plan is None:
@@ -338,6 +365,8 @@ class PrintRunWorkflow:
             raise ApplicationError(
                 f"plate {plate.plate_id} has no slice plan", type=REFUSED, non_retryable=True
             )
+        if planned.slicer == "native" and workflow.patched(NATIVE_SLICER_PATCH):
+            return await self._slice_native(planned, plate, subject)
         attempt = 1
         while True:
             try:
@@ -374,6 +403,36 @@ class PrintRunWorkflow:
                 continue
             return started, sliced
 
+    async def _slice_native(
+        self, planned: PlannedRun, plate: PlatePlan, subject: str
+    ) -> tuple[NativeSliced, int]:
+        """The shared `SliceWorkflow`, started or joined and waited for by ``slice_run``
+        (re-attaching is idempotent), then its file uploaded beside the copy."""
+        assert plate.plan is not None
+        native = await workflow.execute_activity(
+            SLICE_RUN_ACTIVITY,
+            SliceRunInput(
+                library_file_id=planned.library_file_id,
+                plan=plate.plan,
+                plate_id=plate.plate_id,
+                subject=subject,
+            ),
+            result_type=NativeSliced,
+            task_queue=planned.library_queue,
+            start_to_close_timeout=SLICE_RUN_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT,
+            retry_policy=READ_RETRY,
+        )
+        uploaded = await workflow.execute_activity(
+            SLICED_UPLOAD_ACTIVITY,
+            SlicedUploadInput(planned=planned, plate_id=plate.plate_id, sliced=native),
+            result_type=int,
+            task_queue=planned.library_queue,
+            start_to_close_timeout=SHORT,
+            retry_policy=READ_RETRY,
+        )
+        return native, uploaded
+
     async def _print(self, input: PrintRunInput, accepted: Accepted) -> PrintRun:
         planned = await workflow.execute_activity(
             "print_plan",
@@ -390,12 +449,13 @@ class PrintRunWorkflow:
         for index, plate in enumerate(planned.plates):
             job_id: int | None = None
             preset_key: str | None = None
+            native: NativeSliced | None = None
             if plate.sliced_file_id is not None and workflow.patched(SLICED_PATCH):
                 # Sliced already (#2671): queued as it is.
                 sliced = plate.sliced_file_id
             else:
-                started, sliced = await self._slice(planned, plate)
-                job_id, preset_key = started.job_id, started.preset_key
+                started, sliced = await self._slice(planned, plate, input.subject)
+                job_id, preset_key, native = _sliced_by(started)
             if not self.enqueue_attempted:
                 # Before the first POST /queue/: from here a failure may have queued. The
                 # flag follows the row's column, so a cancel's message agrees with it. A
@@ -456,9 +516,9 @@ class PrintRunWorkflow:
                 if index == 0:
                     self.enqueue_attempted, self.enqueue_unstarted = False, True
                 self._stop_if_cancelled()
-                started, sliced = await self._slice(planned, plate)
+                started, sliced = await self._slice(planned, plate, input.subject)
                 self.enqueue_attempted, self.enqueue_unstarted = True, False
-                job_id, preset_key = started.job_id, started.preset_key
+                job_id, preset_key, native = _sliced_by(started)
                 again = workflow.start_activity(
                     "print_enqueue",
                     EnqueueInput(planned=planned, plate=plate, sliced=sliced),
@@ -473,6 +533,8 @@ class PrintRunWorkflow:
                 slice_job_id=job_id,
                 sliced_library_file_id=sliced,
                 preset_key=preset_key,
+                native_slice_id=native.slice_id if native is not None else None,
+                sliced_blob_key=native.sliced_blob_key if native is not None else None,
                 queue_item_ids=[queued_plate.item_id],
                 printer_id=planned.printer_id,
             )

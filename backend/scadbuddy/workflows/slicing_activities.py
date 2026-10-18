@@ -12,26 +12,43 @@ import logging
 import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, aclosing
+from pathlib import PurePath
 from typing import Any
 
 from fastapi import status
 from temporalio import activity
-from temporalio.exceptions import ApplicationError
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError, is_cancelled_exception
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.commits import upload_into
+from scadbuddy.bambuddy.errors import is_transient
+from scadbuddy.bambuddy.print_run import NATIVE_SLICER_UNAVAILABLE
+from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.component import PrintLibrary
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.print_library.reads import reads_for
-from scadbuddy.slicing.component import Slicing
+from scadbuddy.slicing.component import NO_CONTENT_STORE, Slicing
 from scadbuddy.slicing.models import SlicePlateInput
 from scadbuddy.slicing.presets import build_presets, native_preset_key, needs_bambuddy
-from scadbuddy.slicing.profiles import ProfileError
-from scadbuddy.slicing.store import HOLDER
+from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
+from scadbuddy.slicing.start import start_native_slice
+from scadbuddy.slicing.store import HOLDER, SliceSubjectError
 from scadbuddy.slicing.transfer import TransferRecordError, Transfers, TransferUnavailableError
 from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.workflows.print_activities import raised_as
+from scadbuddy.workflows.print_models import (
+    FAILED,
+    SLICE_RUN_ACTIVITY,
+    SLICED_UPLOAD_ACTIVITY,
+    NativeSliced,
+    SlicedUploadInput,
+    SliceRunInput,
+)
+from scadbuddy.workflows.slicing import CANCELLED
 from scadbuddy.workflows.slicing_models import (
     PREPARE_ACTIVITY,
     RECORD_ACTIVITY,
@@ -243,7 +260,9 @@ class SliceActivities:
             return await self._completed(
                 input.slice_id, input.reused_blob_key, input.reused_warnings
             )
-        return await self._failed(input.slice_id, input.failure or "The slice failed.")
+        return await self._failed(
+            input.slice_id, input.failure or "The slice failed.", refused=input.refused
+        )
 
     async def _completed(self, slice_id: int, key: str, warnings: list[str]) -> SliceWorkflowResult:
         await self.slicing.store.finish(
@@ -253,17 +272,177 @@ class SliceActivities:
             status="completed", sliced_blob_key=key, failure=None, warnings=warnings
         )
 
-    async def _failed(self, slice_id: int, failure: str) -> SliceWorkflowResult:
+    async def _failed(
+        self, slice_id: int, failure: str, *, refused: bool = False
+    ) -> SliceWorkflowResult:
         await self.slicing.store.finish(
             slice_id, status="failed", sliced_blob_key=None, failure=failure, warnings=[]
         )
         return SliceWorkflowResult(
-            status="failed", sliced_blob_key=None, failure=failure, warnings=[]
+            status="failed", sliced_blob_key=None, failure=failure, warnings=[], refused=refused
         )
+
+
+def _run_failed(status_code: int, title: str, detail: str) -> ApplicationError:
+    """A failure `problem_of` reports as the run's error (``FAILED``), never retried."""
+    return ApplicationError(
+        detail,
+        PrintRunError(status=status_code, title=title, detail=detail),
+        type=FAILED,
+        non_retryable=True,
+    )
+
+
+#: What `slice_run` beats at while it waits for the slice.
+RUN_HEARTBEAT_EVERY = 10.0
+
+
+class RunActivities:
+    """``PrintRunWorkflow``'s native-slicer activities on the ``library`` queue (plan
+    2026-10-16 Task 13, Ruling C1): the run builds no presets and touches no store."""
+
+    def __init__(
+        self,
+        slicing: Slicing,
+        library: PrintLibrary,
+        settings_store: Callable[[], SettingsStore],
+    ) -> None:
+        self.slicing = slicing
+        self.library = library
+        self._settings_store = settings_store
+
+    @activity.defn(name=SLICE_RUN_ACTIVITY)
+    async def slice_run(self, input: SliceRunInput) -> NativeSliced:
+        """`start_native_slice`, which starts the shared `SliceWorkflow` or joins the
+        dialog's (Ruling C2), then its result, heartbeating. A retry joins it again. A
+        cancelled run stops waiting and leaves the slice alone: the dialog may share it."""
+        starter = self.slicing.starter
+        if starter is None:
+            raise _run_failed(503, "Service Unavailable", NATIVE_SLICER_UNAVAILABLE)
+        file_id = input.library_file_id
+        settings = await asyncio.to_thread(lambda: self._settings_store().load())
+        native = await self.library.serving_native()
+        try:
+            async with AsyncExitStack() as stack:
+                client = (
+                    await stack.enter_async_context(client_for(settings))
+                    if settings.bambuddy_url
+                    else None
+                )
+                if client is None and not is_native_id(file_id):
+                    raise _run_failed(
+                        503,
+                        "Service Unavailable",
+                        f"library file {file_id} is in Bambuddy's library, and no Bambuddy"
+                        " is configured",
+                    )
+                if client is not None:
+                    reads = reads_for(file_id, client, native)
+                elif native is not None:
+                    reads = native
+                else:
+                    raise _run_failed(404, "Not Found", f"library file {file_id} not found")
+                copy = await reads.library_file(file_id)
+                row = await start_native_slice(
+                    activity.client(),
+                    self.slicing.store,
+                    starter,
+                    library_file_id=file_id,
+                    plan=input.plan,
+                    plate_id=input.plate_id,
+                    subject=input.subject,
+                    client=client,
+                    copy_sha256=copy.file_hash,
+                )
+        except ProfileImageError as error:
+            raise _run_failed(503, "Service Unavailable", str(error)) from None
+        except ProfileError as error:
+            raise _run_failed(422, "Unprocessable Content", str(error)) from None
+        except SliceSubjectError as error:
+            raise _run_failed(409, "Conflict", str(error)) from None
+        except ApiError as error:
+            raise raised_as(error, FAILED, non_retryable=not is_transient(error)) from None
+        if row.status == "completed" and row.sliced_blob_key is not None:
+            return NativeSliced(
+                slice_id=row.id, preset_key=row.preset_key, sliced_blob_key=row.sliced_blob_key
+            )
+        result = await self._waited(row.workflow_id)
+        if result.status == "completed" and result.sliced_blob_key is not None:
+            return NativeSliced(
+                slice_id=row.id, preset_key=row.preset_key, sliced_blob_key=result.sliced_blob_key
+            )
+        failure = result.failure or "The slice failed."
+        raise _run_failed(422 if result.refused else 502, "The slice failed", failure)
+
+    async def _waited(self, workflow_id: str) -> SliceWorkflowResult:
+        handle = activity.client().get_workflow_handle(workflow_id, result_type=SliceWorkflowResult)
+        waiting = asyncio.ensure_future(handle.result())
+        try:
+            while True:
+                done, _ = await asyncio.wait({waiting}, timeout=RUN_HEARTBEAT_EVERY)
+                if done:
+                    break
+                activity.heartbeat()
+            try:
+                result: SliceWorkflowResult = waiting.result()
+                return result
+            except WorkflowFailureError as error:
+                if is_cancelled_exception(error.cause):
+                    return SliceWorkflowResult(
+                        status="cancelled", sliced_blob_key=None, failure=CANCELLED, warnings=[]
+                    )
+                raise
+        finally:
+            # Only the wait: the slice itself is never cancelled from here.
+            waiting.cancel()
+
+    @activity.defn(name=SLICED_UPLOAD_ACTIVITY)
+    async def print_sliced_upload(self, input: SlicedUploadInput) -> int:
+        """The sliced blob beside the copy, as ``<copy stem>.plate<N>.sliced.3mf``: in
+        Bambuddy's library for a Bambuddy copy, whose queue then takes it, or the native
+        library's for a native one. The library file id ``print_enqueue`` queues."""
+        content = self.slicing.core.store.content
+        if content is None:
+            raise _run_failed(503, "Service Unavailable", NO_CONTENT_STORE)
+        stat = await content.stat(input.sliced.sliced_blob_key)
+        if stat is None:
+            raise _run_failed(502, "The slice failed", "The sliced 3MF is gone: print again.")
+        planned = input.planned
+        copy_id = planned.library_file_id
+        await asyncio.to_thread(content.spool.mkdir, parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryFile(dir=content.spool) as body:
+                async with aclosing(content.get(stat.ref)) as chunks:
+                    async for chunk in chunks:
+                        await asyncio.to_thread(body.write, chunk)
+                await asyncio.to_thread(body.seek, 0)
+                if is_native_id(copy_id):
+                    native = await self.library.serving_native()
+                    if native is None:
+                        raise _run_failed(404, "Not Found", f"library file {copy_id} not found")
+                    name = _sliced_name((await native.library_file(copy_id)).filename, input)
+                    return (await native.upload(name, body, planned.folder_id)).id
+                settings = await asyncio.to_thread(lambda: self._settings_store().load())
+                async with client_for(settings) as client:
+                    name = _sliced_name((await client.library_file(copy_id)).filename, input)
+                    uploaded = await upload_into(client, name, body, folder_id=planned.folder_id)
+                    return uploaded.id
+        except ApiError as error:
+            raise raised_as(error, FAILED, non_retryable=not is_transient(error)) from None
+
+
+def _sliced_name(copy_filename: str, input: SlicedUploadInput) -> str:
+    return f"{PurePath(copy_filename).stem}.plate{input.plate_id}.sliced.3mf"
 
 
 def slice_activities(
     slicing: Slicing, library: PrintLibrary, settings_store: Callable[[], SettingsStore]
 ) -> list[Callable[..., Awaitable[Any]]]:
     activities = SliceActivities(slicing, library, settings_store)
-    return [activities.slice_prepare, activities.slice_record]
+    run = RunActivities(slicing, library, settings_store)
+    return [
+        activities.slice_prepare,
+        activities.slice_record,
+        run.slice_run,
+        run.print_sliced_upload,
+    ]

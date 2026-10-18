@@ -47,6 +47,9 @@ class SlicedCopy(BaseModel):
     #: Bambuddy's SHA-256 of the sliced file, read once (#306). An archive of a print of
     #: it has the same ``content_hash``: the link once the queue item is gone.
     file_hash: str | None = None
+    #: The native slicer's blob it was uploaded from (plan 2026-10-16 Task 13):
+    #: provenance only. Nothing reads it, and the blob goes with its `native_slices` row.
+    sliced_blob_key: str | None = None
 
 
 class LibraryCopy(BaseModel):
@@ -741,8 +744,9 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_slices"
-                " (output_id, source_library_file_id, sliced_library_file_id, preset_key)"
-                " SELECT %(output)s, %(source)s, %(sliced)s, %(preset)s"
+                " (output_id, source_library_file_id, sliced_library_file_id, preset_key,"
+                " sliced_blob_key)"
+                " SELECT %(output)s, %(source)s, %(sliced)s, %(preset)s, %(blob)s"
                 " WHERE EXISTS (SELECT 1 FROM output_bambuddy_uploads"
                 "  WHERE output_id = %(output)s AND library_file_id = %(source)s)"
                 " ON CONFLICT (output_id, sliced_library_file_id) DO NOTHING",
@@ -751,6 +755,7 @@ class BambuddyUploadStore:
                     "source": library_file_id,
                     "sliced": sliced.id,
                     "preset": sliced.preset_key,
+                    "blob": sliced.sliced_blob_key,
                 },
             )
 

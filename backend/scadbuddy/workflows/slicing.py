@@ -95,6 +95,19 @@ def _type(cause: BaseException | None) -> str:
     return type(cause).__name__
 
 
+def is_refusal(cause: BaseException | None) -> bool:
+    """A refusal, not a fault: ``slice_prepare``'s own, or Bambu Studio's validation
+    exit. A run reports it as the plan's 422 (Task 13)."""
+    if not isinstance(cause, ApplicationError):
+        return False
+    if cause.type == SLICE_REFUSED:
+        return True
+    if cause.type != SLICER_ERROR or not cause.details:
+        return False
+    details: Any = cause.details[0]
+    return isinstance(details, dict) and details.get("exit_code") == VALIDATION_EXIT
+
+
 def prepare_failure(cause: BaseException | None) -> str:
     """A refusal of ``slice_prepare``'s own says why; anything else names its type only."""
     if isinstance(cause, ApplicationError) and cause.type == SLICE_REFUSED:
@@ -123,6 +136,10 @@ def slice_failure(cause: BaseException | None, queue: str) -> str:
 
 @workflow.defn(name=SLICE_WORKFLOW)
 class SliceWorkflow:
+    def __init__(self) -> None:
+        #: Whether the failure to record is a refusal (`is_refusal`).
+        self.refused = False
+
     @workflow.run
     async def run(self, input: SliceWorkflowInput) -> SliceWorkflowResult:
         try:
@@ -139,6 +156,7 @@ class SliceWorkflow:
             reused_blob_key=reused,
             failure=failure,
             reused_warnings=prepared.reused_warnings if reused is not None and prepared else [],
+            refused=failure is not None and self.refused,
         )
         # Shielded: a cancel that lands while the record runs lets it finish, then
         # records the slice cancelled (re-review N3), rather than leaving it running.
@@ -204,6 +222,7 @@ class SliceWorkflow:
                     again = False
                     prepared, failure = await self._prepare(input)
                     continue
+                self.refused = is_refusal(cause)
                 return prepared, None, slice_failure(cause, input.slicer_queue)
         return prepared, None, failure
 
@@ -219,6 +238,7 @@ class SliceWorkflow:
         except ActivityError as error:
             if _cancelling(error):
                 raise
+            self.refused = is_refusal(error.cause)
             return None, prepare_failure(error.cause)
         return prepared, None
 
