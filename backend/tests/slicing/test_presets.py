@@ -1,6 +1,8 @@
 """Presets as files for the native slicer (#3822, plan 2026-10-16 Task 8)."""
 
+import hashlib
 import json
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.slicing.presets import apply_overrides, build_presets, native_preset_key
 from scadbuddy.slicing.profiles import Flat, ProfileError, Profiles, flatten
 from tests.conftest import SLICER_PROFILES_DIR
+from tests.slicing.conftest import PROFILES
 
 BASE = "https://bambuddy.test"
 API = f"{BASE}/api/v1"
@@ -260,3 +263,84 @@ def test_per_filament_lists_are_cut_to_the_filament_count(profiles: Profiles) ->
 def test_a_per_filament_list_too_short_is_refused(profiles: Profiles) -> None:
     with pytest.raises(ProfileError, match=r"Test Short.*nozzle_temperature_range_low"):
         profiles.filament("Test Short")
+
+
+@respx.mock
+async def test_a_cloud_user_process_takes_bambuddys_values(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    values = respx.get(f"{API}/slicer/preset-values").respond(
+        200, json={"resolved": True, "values": {"type": "process", "layer_height": "0.12"}}
+    )
+    respx.get(f"{API}/slicer/presets").respond(200, json={})
+    respx.get(f"{API}/local-presets/").respond(200, json={})
+    user = plan.model_copy(update={"process_preset": PresetRef(source="cloud", id="PPUS1")})
+    files = await build_presets(user, profiles, client)
+    assert json.loads(files.process)["layer_height"] == "0.12"
+    assert values.calls.last.request.url.params["source"] == "cloud"
+    assert files.bambuddy_process == hashlib.sha256(files.process).hexdigest()
+
+
+@respx.mock
+async def test_a_cloud_user_process_bambuddy_cannot_read_is_refused(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    respx.get(f"{API}/slicer/preset-values").respond(
+        200, json={"resolved": False, "values": {}, "reason": "preset_unresolved"}
+    )
+    respx.get(f"{API}/slicer/presets").respond(200, json={})
+    respx.get(f"{API}/local-presets/").respond(200, json={})
+    user = plan.model_copy(update={"process_preset": PresetRef(source="cloud", id="PPUS1")})
+    with pytest.raises(ProfileError, match=r"cloud process preset PPUS1: preset_unresolved"):
+        await build_presets(user, profiles, client)
+
+
+async def test_a_process_from_the_image_has_no_bambuddy_digest(
+    profiles: Profiles, plan: SlicePlan
+) -> None:
+    assert (await build_presets(plan, profiles, None)).bambuddy_process is None
+
+
+def test_a_process_from_bambuddy_keys_apart(plan: SlicePlan) -> None:
+    image = native_preset_key(plan, 1, "02.08.02.61")
+    bambuddy = native_preset_key(plan, 1, "02.08.02.61", bambuddy_process="ab" * 32)
+    other = native_preset_key(plan, 1, "02.08.02.61", bambuddy_process="cd" * 32)
+    assert len({image, bambuddy, other}) == 3
+    assert bambuddy.startswith("native@02.08.02.61/")
+
+
+def test_a_list_over_a_scalar_option_is_refused() -> None:
+    with pytest.raises(ProfileError, match=r"wall_loops.*list.*single value"):
+        apply_overrides({"wall_loops": "2"}, {"wall_loops": ["3", "3"]})
+
+
+def test_a_list_over_an_option_the_preset_leaves_out_is_written_whole() -> None:
+    assert apply_overrides({}, {"outer_wall_speed": ["150", "150"]}) == {
+        "outer_wall_speed": ["150", "150"]
+    }
+
+
+def _tree(tmp_path: Path) -> Path:
+    shutil.copytree(PROFILES, tmp_path / "profiles")
+    return tmp_path / "profiles"
+
+
+def test_a_listed_file_missing_is_a_profile_error(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / "BBL/process/mid.json").unlink()
+    with pytest.raises(ProfileError, match=r"process/mid\.json"):
+        Profiles(root).process("leaf")
+
+
+def test_a_corrupt_file_is_a_profile_error(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / "BBL/filament/Test PLA.json").write_text("{not json")
+    with pytest.raises(ProfileError, match=r"filament/Test PLA\.json"):
+        Profiles(root).filament("Test PLA")
+
+
+def test_a_corrupt_vendor_file_is_a_profile_error(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / "BBL.json").write_text("")
+    with pytest.raises(ProfileError, match=r"BBL\.json"):
+        Profiles(root).machine("GM_TEST")

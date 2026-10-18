@@ -273,9 +273,9 @@ class Profiles:
 
     @cached_property
     def _vendor(self) -> dict[str, Any]:
-        vendor: dict[str, Any] = json.loads(
-            (self.root / f"{VENDOR}.json").read_text(encoding="utf-8")
-        )
+        vendor = _read(self.root / f"{VENDOR}.json")
+        if not isinstance(vendor, dict):
+            raise ProfileError(f"the profile file {self.root / VENDOR}.json is not an object")
         return vendor
 
     def machine(self, ref_or_name: str) -> Flat:
@@ -305,7 +305,7 @@ class Profiles:
         path = self._index(kind).paths.get(name)
         if path is None:
             return None
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc = _read(path)
         if not isinstance(doc, dict):
             raise ProfileError(f"the native slicer cannot read preset {name}: not an object")
         return doc
@@ -322,9 +322,18 @@ class Profiles:
         names: dict[str, str] = {}
         for entry in self._vendor.get(_LISTS[kind], []):
             path = self.root / VENDOR / entry["sub_path"]
-            doc = json.loads(path.read_text(encoding="utf-8"))
+            doc = _read(path)
             paths[entry["name"]] = path
             setting_id = doc.get("setting_id") if isinstance(doc, dict) else None
             if isinstance(setting_id, str) and setting_id:
                 names[setting_id] = entry["name"]
         return _Index(paths=paths, names=names)
+
+
+def _read(path: Path) -> Any:
+    """``path``'s JSON; a file missing or unreadable as JSON is a :class:`ProfileError`
+    naming it (an image whose tree was cut short or edited by hand)."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ProfileError(f"the profile file {path} cannot be read: {error}") from error

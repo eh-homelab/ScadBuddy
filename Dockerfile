@@ -380,15 +380,9 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # ── slicer-dist: Bambu Studio itself, downloaded and checked once ─────────────
 # The CLI the slicer worker runs, and the BBL profiles the API builds a slice's preset
 # files from (#3822, backend/scadbuddy/slicing/profiles.py). A stage of its own so the
-# app and test images take the profiles without compiling the worker.
-#
-# Ubuntu 24.04, not debian:bookworm-slim: the AppImage is Bambu Studio's
-# ubuntu24.04 build and needs GLIBC_2.38 and GLIBCXX_3.4.32, which bookworm
-# (glibc 2.36) lacks: `ldd /opt/bambu-studio/bin/bambu-studio` there reports
-# "version `GLIBC_2.38' not found" (measured 2026-10-17 on bookworm-slim). Pinned
-# by tag and index digest, as `base` is, so the glibc the CLI was checked
-# against cannot move under a build. The worker built on bookworm (glibc 2.36)
-# runs on 24.04's 2.39.
+# app and test images take the profiles without compiling the worker. It runs
+# nothing it extracts, so any base would do; it shares `slicer`'s base, tag and
+# digest, so the two cannot drift apart.
 #
 # Bambu Studio is pinned by version and the AppImage's sha256, bumped
 # deliberately as OPENSCAD_VERSION is: change BAMBU_STUDIO_VERSION, the release
@@ -440,6 +434,13 @@ RUN case "$TARGETARCH" in \
          bambu-studio/resources/profiles/BBL/filament slicer-profiles/BBL/
 
 # ── slicer: the worker image ───────────────────────────────────────────────────
+# Ubuntu 24.04, not debian:bookworm-slim: the AppImage is Bambu Studio's
+# ubuntu24.04 build and needs GLIBC_2.38 and GLIBCXX_3.4.32, which bookworm
+# (glibc 2.36) lacks: `ldd /opt/bambu-studio/bin/bambu-studio` there reports
+# "version `GLIBC_2.38' not found" (measured 2026-10-17 on bookworm-slim). Pinned
+# by tag and index digest, as `base` is, so the glibc the CLI was checked
+# against cannot move under a build. The worker built on bookworm (glibc 2.36)
+# runs on 24.04's 2.39.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer
 
 ARG BAMBU_STUDIO_VERSION
@@ -671,10 +672,10 @@ RUN uv sync --frozen --no-dev
 COPY --chown=scadbuddy:scadbuddy models/ /app/models/
 COPY --chown=scadbuddy:scadbuddy --from=frontend /src/frontend/dist /app/frontend/dist
 
-# Last of the app layers, after the dependency sync: bumping the openscad-lsp
-# ARGs then rebuilds this one copy and nothing above it. Root-owned (a COPY
-# without --chown is, whatever the USER), outside /app; `test` and `runtime`
-# both inherit it from here.
+# After the dependency sync, with the slicer profiles below it: bumping the
+# openscad-lsp ARGs then rebuilds these two copies and nothing above them.
+# Root-owned (a COPY without --chown is, whatever the USER), outside /app;
+# `test` and `runtime` both inherit them from here.
 COPY --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
 
 # Bambu Studio's BBL presets and its VERSION, which the native slicer's preset files
