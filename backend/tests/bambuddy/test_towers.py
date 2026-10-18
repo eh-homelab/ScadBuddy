@@ -12,8 +12,10 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy.send import towers_within_reach
 from scadbuddy.render.bambu3mf import (
+    MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
     PlateParts,
@@ -83,7 +85,7 @@ def test_a_tower_the_h2c_cannot_reach_is_moved_beside_each_plates_objects(
 
     moved = towers_within_reach(payload, H2C)
 
-    boxes = plate_boxes(moved)
+    boxes = plate_boxes(moved).boxes
     reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
     for index, (x, y) in enumerate(_towers(moved), start=1):
         assert tower_reaches((x, y), H2C)
@@ -122,6 +124,41 @@ def test_no_printer_chosen_moves_no_tower(tmp_path: Path) -> None:
     assert towers_within_reach(payload, DEFAULT_PLATE) is payload
 
 
+def _without_settings(payload: bytes, settings: bytes | None) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(buffer, "w") as out:
+        for info in source.infolist():
+            if info.filename == MODEL_SETTINGS_NAME:
+                if settings is not None:
+                    out.writestr(info, settings)
+                continue
+            out.writestr(info, source.read(info))
+    return buffer.getvalue()
+
+
+def test_a_file_whose_model_settings_do_not_parse_keeps_its_towers(tmp_path: Path) -> None:
+    """The file sent before #4014 and still does, its tower where its author put it
+    (claude-review on #4057)."""
+    damaged = _without_settings(_laid_out_on_an_a1_mini(tmp_path), b"<config><plate>")
+    assert towers_within_reach(damaged, H2C) is damaged
+
+
+def test_a_file_with_no_model_settings_is_one_plate_and_still_sends(tmp_path: Path) -> None:
+    """Read as every reader reads one: a single plate holding every build item."""
+    bare = _without_settings(_laid_out_on_an_a1_mini(tmp_path), None)
+    moved = towers_within_reach(bare, H2C)
+    assert tower_reaches(_towers(moved)[0], H2C)
+
+
+def test_objects_that_leave_no_room_keep_the_authors_tower(tmp_path: Path) -> None:
+    """A plate filled edge to edge has nowhere every extruder reaches clear of it: the
+    tower stays, and the slicer says why rather than ScadBuddy guessing."""
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(send, "tower_beside", lambda rect, plate: None)
+        assert towers_within_reach(payload, H2C) is payload
+
+
 def test_a_painted_mirrored_object_is_boxed_though_it_cannot_be_read_whole(
     tmp_path: Path,
 ) -> None:
@@ -130,13 +167,13 @@ def test_a_painted_mirrored_object_is_boxed_though_it_cannot_be_read_whole(
     payload = _laid_out_on_an_a1_mini(tmp_path)
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         root = archive.read(ROOT_MODEL_NAME).decode()
-    before = plate_boxes(payload)[1]
+    before = plate_boxes(payload).boxes[1]
     mirrored = re.sub(r'transform="1 0 0 ', 'transform="-1 0 0 ', root, count=1)
     assert mirrored != root
     flipped = rezipped(payload, {ROOT_MODEL_NAME: mirrored.encode()})
     painted = _painted(flipped)
 
-    box = plate_boxes(painted)[1]
+    box = plate_boxes(painted).boxes[1]
 
     assert np.allclose(box[1] - box[0], before[1] - before[0])
     with pytest.raises(UnreadableObjectsError, match="painted and mirrored"):

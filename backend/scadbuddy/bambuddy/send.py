@@ -40,7 +40,6 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     layout_of,
     plate_origin,
-    plates_of,
     replate_3mf,
     rezipped,
     state_nozzles,
@@ -362,8 +361,7 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         return payload
     try:
         towers = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
-        count = len(plates_of(io.BytesIO(payload))) or 1
-    except (ValueError, zipfile.BadZipFile):
+    except ValueError:
         return payload
     try:
         side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
@@ -371,21 +369,24 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         side = PRIME_TOWER_SIDE
     unreachable = [
         index
-        for index in range(1, min(count, len(towers)) + 1)
-        if not tower_reaches(towers[index - 1], plate, side)
+        for index, tower in enumerate(towers, start=1)
+        if not tower_reaches(tower, plate, side)
     ]
     if not unreachable:
         return payload
     try:
-        boxes = plate_boxes(payload)
+        # Read within the read budget, model settings included: a library file is
+        # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
+        read = plate_boxes(payload)
     except UnreadableObjectsError:
         return payload
+    boxes, count = read.boxes, read.count
     source = PlateGeometry(
         model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
     )
     moved = list(towers)
     for index in unreachable:
-        if index not in boxes:
+        if index > count or index not in boxes:
             continue
         low, high = boxes[index]
         ox, oy = plate_origin(index, count, source)

@@ -767,11 +767,19 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     return PlateRead(found, count)
 
 
-def plate_boxes(
-    payload: bytes | BinaryIO, budget: ReadBudget | None = None
-) -> dict[int, np.ndarray]:
+@dataclass(frozen=True)
+class PlateBoxes:
+    """:func:`plate_boxes`' answer: each plate's box, and how many plates the file lays
+    out (what spaces their origins), both read within the budget."""
+
+    boxes: dict[int, np.ndarray]
+    count: int
+
+
+def plate_boxes(payload: bytes | BinaryIO, budget: ReadBudget | None = None) -> PlateBoxes:
     """Each plate's ``(2, 3)`` box where the file places its objects, by plate index
-    (one plate, 1, for a file that lists none): the corners of each mesh's own box
+    (one plate, 1, for a file that lists none), and the file's plate count: the
+    corners of each mesh's own box
     carried through its transforms, so it may be larger than the objects' tight box,
     never smaller. A box needs no faces, so a painted or mirrored object, which
     :func:`read_objects` refuses, is boxed like any other (#4014). Refused as
@@ -780,7 +788,7 @@ def plate_boxes(
     return _opened(payload, spend, _plate_boxes)
 
 
-def _plate_boxes(archive: _Archive) -> dict[int, np.ndarray]:
+def _plate_boxes(archive: _Archive) -> PlateBoxes:
     model = _root_model_name(archive)
     plates = _plates(_model_settings(archive))
     instances: dict[str, int] = {}
@@ -799,12 +807,13 @@ def _plate_boxes(archive: _Archive) -> dict[int, np.ndarray]:
         found = _object_corners(archive, path, object_id, _matrix(item.get("transform")), 0, visits)
         for index in on:
             corners.setdefault(index, []).extend(found)
-    return {
+    boxes = {
         index: np.array([stacked.min(axis=0), stacked.max(axis=0)])
         for index, points in corners.items()
         if points
         for stacked in (np.vstack(points),)
     }
+    return PlateBoxes(boxes, len(plates) or 1)
 
 
 def _object_corners(
