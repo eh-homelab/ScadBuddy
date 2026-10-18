@@ -372,6 +372,7 @@ def bambuddy_kinds_over(
                     native=native,
                     native_slices=native_slices,
                     temporal=activity.client(),
+                    native_reads=await library(),
                 )
             )
 

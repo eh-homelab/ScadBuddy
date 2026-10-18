@@ -71,6 +71,7 @@ async def start_native_slice(
     plate_id: int,
     subject: str,
     client: BambuddyClient | None,
+    copy_sha256: str | None,
 ) -> NativeSlice:
     """The row of copy ``library_file_id`` sliced with ``plan``, its execution started
     unless it completed. The presets are built here only for their key: a process
@@ -78,15 +79,19 @@ async def start_native_slice(
     (`PresetFiles.bambuddy_process`), and the key names the execution, so it is known
     before the start; `slice_prepare` builds them again, where they are stored. A
     `ProfileError` propagates: no row is written. ``client`` is None with no Bambuddy
-    configured: then only the image's presets resolve.
+    configured: then only the image's presets resolve. ``copy_sha256`` is the copy's
+    ``file_hash`` as its library states it (Task 12 review M6): it names the execution
+    with the id, and `slice_prepare` refuses other bytes.
 
-    The row is returned as it stands: a failed one reads failed until its new
-    execution's first activity sets it running (`NativeSliceStore.running`)."""
+    A failed or cancelled row is returned running (`NativeSliceStore.start`), so a read
+    straight after this never sees the last outcome (Task 12 review I1)."""
     profiles = starter.profiles
     files = await build_presets(plan, profiles, client)
     preset_key = native_preset_key(plan, plate_id, profiles.version, files.bambuddy_process)
     row = await store.start(
-        workflow_id=native_workflow_id(library_file_id, preset_key),
+        workflow_id=native_workflow_id(
+            library_file_id, preset_key, subject=subject, copy_sha256=copy_sha256
+        ),
         subject=subject,
         library_file_id=library_file_id,
         plate_id=plate_id,
@@ -102,6 +107,7 @@ async def start_native_slice(
                 plate_id=plate_id,
                 preset_key=preset_key,
                 slicer_queue=starter.slicer_queue,
+                copy_sha256=copy_sha256,
             ),
             id=row.workflow_id,
             task_queue=starter.library_queue,
@@ -122,30 +128,46 @@ async def _has_execution(temporal: Client, workflow_id: str) -> bool:
     return bool(status == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING)
 
 
-async def sweep_native_slices(
-    temporal: Client,
-    store: NativeSliceStore,
-    *,
-    finished_older_than: timedelta,
-    lost_after: timedelta = LOST_AFTER,
+async def stop_lost(temporal: Client, store: NativeSliceStore, row: NativeSlice) -> bool:
+    """Fail running ``row`` if no open execution writes it (Task 11 review I2: a start
+    that never reached Temporal, a terminated execution), dropping its holds; only if it
+    still reads running from the same start (re-review N1). Whether it was stopped."""
+    if await _has_execution(temporal, row.workflow_id):
+        return False
+    stopped = await store.stop_lost(row, STOPPED)
+    if stopped:
+        logger.warning("a native slice's execution is gone", extra={"slice_id": row.id})
+    return stopped
+
+
+async def stop_lost_native_slices(
+    temporal: Client, store: NativeSliceStore, lost_after: timedelta = LOST_AFTER
 ) -> list[int]:
-    """Fail the running rows older than ``lost_after`` that no open execution writes
-    (review I2: a start that never reached Temporal, a terminated execution), dropping
-    their holds, then delete the rows finished more than ``finished_older_than`` ago.
-    The ids deleted."""
-    for row in await store.lost(lost_after):
-        if await _has_execution(temporal, row.workflow_id):
-            continue
-        if await store.stop_lost(row, STOPPED):
-            logger.warning("a native slice's execution is gone", extra={"slice_id": row.id})
+    """`stop_lost` for every running row started more than ``lost_after`` ago. On the
+    prune Schedule, so it runs with the sweeps off (Task 12 review M1). The ids stopped."""
+    return [row.id for row in await store.lost(lost_after) if await stop_lost(temporal, store, row)]
+
+
+async def sweep_native_slices(
+    store: NativeSliceStore, *, finished_older_than: timedelta
+) -> list[int]:
+    """Delete the rows finished more than ``finished_older_than`` ago, with their holds;
+    the blobs go on `sweep_content`'s next pass. The ids deleted."""
     return await store.sweep(finished_older_than)
 
 
 async def slice_progress(temporal: Client, workflow_id: str) -> SliceProgress | None:
     """The last heartbeat of the execution's pending ``slice_plate``, None when there is
     none (preparing, recording, done) or it has not beaten yet. The worker's first beat
-    is all zeros (`SliceProgress::default`), so a slice that started reads 0, not None."""
-    description = await temporal.get_workflow_handle(workflow_id).describe()
+    is all zeros (`SliceProgress::default`), so a slice that started reads 0, not None.
+    An execution Temporal has no record of (never started, or past its retention) is
+    None too (Task 12 review M1)."""
+    try:
+        description = await temporal.get_workflow_handle(workflow_id).describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return None
+        raise
     for pending in description.raw_description.pending_activities:
         if pending.activity_type.name != SLICE_PLATE:
             continue

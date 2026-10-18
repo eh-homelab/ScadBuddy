@@ -35,12 +35,18 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.slicing.component import SLICING, Slicing
 from scadbuddy.slicing.models import SliceProgress
 from scadbuddy.slicing.presets import native_preset_key
 from scadbuddy.slicing.profiles import ProfileError
-from scadbuddy.slicing.start import slice_progress, start_native_slice, sweep_native_slices
+from scadbuddy.slicing.start import (
+    slice_progress,
+    start_native_slice,
+    stop_lost_native_slices,
+    sweep_native_slices,
+)
 from scadbuddy.slicing.store import HOLDER, NativeSlice
 from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.content_models import BlobScope
@@ -167,6 +173,7 @@ def _start(
     *,
     plan: SlicePlan = PLAN,
     temporal: Any = None,
+    copy_sha256: str | None = None,
 ) -> NativeSlice:
     slicing = _slicing(client)
     starter = slicing.starter
@@ -179,6 +186,7 @@ def _start(
             "plan": plan,
             "plate_id": 1,
             "subject": SUBJECT,
+            "copy_sha256": copy_sha256,
         }
         target = temporal or slicing.temporal()
         if not settings.bambuddy_url:
@@ -465,16 +473,14 @@ def _terminate(client: TestClient, row: NativeSlice) -> None:
 
 
 def _sweep_lost(client: TestClient) -> list[int]:
+    """The lost-row stop (on the prune Schedule), then the TTL sweep: the ids deleted."""
     slicing = _slicing(client)
-    return _call(
+    _call(
         client,
-        partial(
-            sweep_native_slices,
-            slicing.temporal(),
-            slicing.store,
-            finished_older_than=timedelta(hours=1),
-            lost_after=timedelta(0),
-        ),
+        partial(stop_lost_native_slices, slicing.temporal(), slicing.store, timedelta(0)),
+    )
+    return _call(
+        client, partial(sweep_native_slices, slicing.store, finished_older_than=timedelta(hours=1))
     )
 
 
@@ -525,11 +531,12 @@ def test_a_terminated_slice_is_swept_failed(slice_client: TestClient, slicer: Fa
     _set(slice_client, slicer)
 
 
-def test_a_start_joining_a_closing_slice_leaves_its_row_alone(
+def test_a_start_joining_a_closing_slice_is_healed_by_the_lost_row_stop(
     slice_client: TestClient, slicer: FakeSlicer
 ) -> None:
     """The record has written `failed` and the execution is still closing: a start
-    joins it (USE_EXISTING) and does not set the row running behind it."""
+    joins it (USE_EXISTING). The row reads running at once (Task 12 review I1), with
+    nothing behind it once the execution closes, so the lost-row stop fails it."""
     slicer.hold = _call(slice_client, _event)
     row = _start(slice_client)
     _wait_for_slicing(slice_client, row)
@@ -543,7 +550,7 @@ def test_a_start_joining_a_closing_slice_leaves_its_row_alone(
 
     joined = _start(slice_client)
 
-    assert (joined.id, joined.status) == (row.id, "failed")
+    assert (joined.id, joined.status) == (row.id, "running")
     _terminate(slice_client, row)
     _sweep_lost(slice_client)
     assert _row(slice_client, row).status == "failed"
@@ -814,3 +821,42 @@ def test_an_execution_whose_row_was_swept_takes_no_hold(slice_client: TestClient
             (HOLDER, str(slice_id)),
         ).fetchone()
     assert held is not None and held["n"] == 0
+
+
+# -- Task 12 review: the copy named by its bytes, a native id where none serves ---------
+
+
+def test_a_copy_whose_bytes_changed_since_the_start_is_refused(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    """Task 12 review M6: a reused Bambuddy id with other bytes than the start read is
+    another copy: the slice is refused, never made of the wrong file."""
+    row = _finished(slice_client, _start(slice_client, copy_sha256="0" * 64))
+    assert (row.status, row.failure) == (
+        "failed",
+        "The copy changed while the slice started: slice again.",
+    )
+    assert slicer.calls == 0 and _holds(slice_client, row) == set()
+
+
+def test_the_copys_own_bytes_slice(slice_client: TestClient, slicer: FakeSlicer) -> None:
+    row = _slice_with(slice_client, hashlib.sha256(INPUT).hexdigest())
+    assert row.status == "completed", row.failure
+
+
+def _slice_with(client: TestClient, sha: str) -> NativeSlice:
+    return _finished(client, _start(client, copy_sha256=sha))
+
+
+def test_a_native_id_where_the_native_library_does_not_serve_is_refused(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    """Task 12 review M3: on ``library_backend=bambuddy`` a native id is refused by
+    name, never downloaded from Bambuddy."""
+    row = _slice(slice_client, NATIVE_ID_BASE + 5)
+    assert row.status == "failed"
+    assert row.failure == (
+        f"library file {NATIVE_ID_BASE + 5} is in ScadBuddy's own library, which does not"
+        " serve here"
+    )
+    assert slicer.calls == 0

@@ -105,7 +105,7 @@ from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
-from scadbuddy.slicing.start import sweep_native_slices
+from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -149,6 +149,7 @@ from scadbuddy.workflows.housekeeping import (
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
     LIBRARY_SWEEP,
+    LOST_NATIVE_SLICES_SWEEP,
     LOST_SLICES_SWEEP,
     NATIVE_SLICES_SWEEP,
     PREVIEWS_SWEEP,
@@ -607,6 +608,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def prune_transfer_puts() -> None:
         await _heartbeating(_prune_transfer_puts_logged(state))
 
+    @activity.defn(name=LOST_NATIVE_SLICES_SWEEP)
+    async def stop_lost_native_slice_rows() -> None:
+        await _heartbeating(_stop_lost_native_slices_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -624,23 +629,33 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_print_library,
         sweep_native_slice_rows,
         prune_transfer_puts,
+        stop_lost_native_slice_rows,
     ]
 
 
 async def _sweep_native_slices_logged(state: AppState) -> None:
     """The native slicer's settled slices (plan 2026-10-16 Task 12): the rows past
-    `PREVIEW_GRACE` with their holds, after failing the running ones whose execution is
-    gone. The blobs go on `sweep_content`'s next pass."""
+    `PREVIEW_GRACE` with their holds. The blobs go on `sweep_content`'s next pass."""
     slicing = state.components.get(SLICING)
     try:
-        removed = await sweep_native_slices(
-            slicing.temporal(), slicing.store, finished_older_than=PREVIEW_GRACE
-        )
+        removed = await sweep_native_slices(slicing.store, finished_older_than=PREVIEW_GRACE)
     except Exception:
         logger.exception("could not sweep the native slices")
         raise
     if removed:
         logger.info("removed settled native slices", extra={"count": len(removed)})
+
+
+async def _stop_lost_native_slices_logged(state: AppState) -> None:
+    """The running native slices no execution writes, failed (Task 12 review M1)."""
+    slicing = state.components.get(SLICING)
+    try:
+        stopped = await stop_lost_native_slices(slicing.temporal(), slicing.store)
+    except Exception:
+        logger.exception("could not stop the lost native slices")
+        raise
+    if stopped:
+        logger.info("stopped lost native slices", extra={"count": len(stopped)})
 
 
 #: How long the slicer worker's PUT records are kept: a slice records its PUT within

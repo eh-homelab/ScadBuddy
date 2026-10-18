@@ -234,6 +234,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
     monkeypatch.setattr(main, "sweep_native_slices", _broken_async)
+    monkeypatch.setattr(main, "stop_lost_native_slices", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -357,6 +358,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return SimpleNamespace(purged=0, orphans=0)
 
     monkeypatch.setattr(main, "sweep_library", slow_library)
+    monkeypatch.setattr(main, "stop_lost_native_slices", slow_previews)
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
     state.components = SimpleNamespace(
@@ -366,6 +368,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             serving_native=serving_native,
             # The transfer PUTs' prune (plan 2026-10-16 Task 12).
             puts=SimpleNamespace(prune=lambda older_than: time.sleep(0.1)),
+            temporal=object,
+            store=None,
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]

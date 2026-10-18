@@ -49,6 +49,8 @@ _SCOPE = BlobScope(folder="work")
 GONE = "The slice's record is gone: slice again."
 #: The row's failure when the worker's PUT cannot be recorded.
 LOST_PUT = "The sliced 3MF was lost; slice again."
+#: The copy's bytes are not the ones the start named the slice by.
+COPY_CHANGED = "The copy changed while the slice started: slice again."
 
 
 def _refused(message: str) -> ApplicationError:
@@ -145,6 +147,9 @@ class SliceActivities:
                 else None
             )
             key, sha = await self._input(content, input, native, client)
+            if input.copy_sha256 is not None and sha != input.copy_sha256.lower():
+                # A reused Bambuddy id now holding another file (Task 12 review M6).
+                raise _refused(COPY_CHANGED)
             await self._hold(content, key, input.slice_id)
             await self.slicing.store.prepared(input.slice_id, sha)
             reused = await self.slicing.store.reusable(sha, input.preset_key)

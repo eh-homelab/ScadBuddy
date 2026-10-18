@@ -16,9 +16,10 @@ runs ``ACTIVITY_SWEEP``, and ``lost_slices`` with ``LOST_SLICES_PATCH`` (#2715's
 out of ``PREVIEWS_SWEEP``), which also runs ``LOST_SLICES_SWEEP``, and
 ``print_attachments`` with ``ATTACHMENTS_PATCH`` (#3047), which also runs
 ``ATTACHMENTS_SWEEP``, and ``native_slices`` with ``LIBRARY_PATCH`` (#3827, recorded
-with none of its own), ``NATIVE_SLICES_PATCH`` and ``TRANSFER_PUTS_PATCH`` (plan
-2026-10-16-native-slicer-rust-worker Task 12), which also run ``LIBRARY_SWEEP``,
-``NATIVE_SLICES_SWEEP`` and ``TRANSFER_PUTS_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1``
+with none of its own), ``NATIVE_SLICES_PATCH``, ``TRANSFER_PUTS_PATCH`` and
+``LOST_NATIVE_SLICES_PATCH`` (plan 2026-10-16-native-slicer-rust-worker Task 12), which
+also run ``LIBRARY_SWEEP``, ``NATIVE_SLICES_SWEEP``, ``TRANSFER_PUTS_SWEEP`` and
+``LOST_NATIVE_SLICES_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1``
 runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.

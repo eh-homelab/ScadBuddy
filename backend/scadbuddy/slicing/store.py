@@ -47,11 +47,18 @@ class SliceSubjectError(ValueError):
     """A start for a subject other than the one the copy's row was started for."""
 
 
-def native_workflow_id(library_file_id: int, preset_key: str) -> str:
-    """The execution that slices copy ``library_file_id`` with ``preset_key``: known
-    before its bytes are read, so the dialog and the run name one (Ruling C2). Reuse
-    across copies of identical bytes is `slice_prepare`'s (Ruling C1)."""
-    digest = hashlib.sha256(preset_key.encode()).hexdigest()[:32]
+def native_workflow_id(
+    library_file_id: int, preset_key: str, *, subject: str, copy_sha256: str | None
+) -> str:
+    """The execution that slices copy ``library_file_id`` for ``subject`` with
+    ``preset_key``: known before the slice reads the bytes, so the dialog and the run
+    name one (Ruling C2). The copy's ``file_hash`` is in it as well as its id (Task 12
+    review M6): Bambuddy's SQLite library hands the id of a deleted newest file out
+    again (an ``INTEGER PRIMARY KEY`` without ``AUTOINCREMENT``), so the id alone may
+    name another copy. ``None`` when the library states no hash. Reuse across copies of
+    identical bytes is `slice_prepare`'s (Ruling C1)."""
+    named = "\n".join((subject, copy_sha256 or "", preset_key))
+    digest = hashlib.sha256(named.encode()).hexdigest()[:32]
     return f"slice-{library_file_id}-{digest}"
 
 
@@ -70,10 +77,14 @@ class NativeSliceStore:
         plate_id: int,
         preset_key: str,
     ) -> NativeSlice:
-        """The row of ``workflow_id``, inserted if there is none, as it stands: the
-        execution, not the start, sets it running (`running`), so a start that joins a
-        closing execution never leaves it running with nothing behind it. A copy belongs
-        to one subject: the row of another's is refused (`SliceSubjectError`)."""
+        """The row of ``workflow_id``, inserted if there is none. A failed or cancelled
+        row reads running at once, its failure cleared and ``started_at`` now (Task 12
+        review I1): the dialog reads it the moment this answers, before the new
+        execution's `running`. A start that no execution follows (one that joined an
+        execution as it closed) is the lost-row stop's, which compares that
+        ``started_at``. A completed row's ``finished_at`` is refreshed, so the TTL runs
+        from its last use (review M5); a running row is left as it is. A copy belongs to
+        one subject: the row of another's is refused (`SliceSubjectError`)."""
 
         def run() -> NativeSlice:
             with self._pool.connection() as conn:
@@ -81,11 +92,22 @@ class NativeSliceStore:
                     "INSERT INTO native_slices"
                     " (workflow_id, subject, library_file_id, plate_id, preset_key)"
                     " VALUES (%s, %s, %s, %s, %s)"
-                    # A finished row that did not complete is about to run again: its
-                    # finish is refreshed, so the TTL sweep does not delete it before its
-                    # execution starts it (re-review N2).
-                    " ON CONFLICT (workflow_id) DO UPDATE SET finished_at = CASE"
-                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN now()"
+                    # Only the same subject's row is touched: another's is refused below.
+                    " ON CONFLICT (workflow_id) DO UPDATE SET"
+                    " status = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                    " THEN native_slices.status"
+                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN 'running'"
+                    " ELSE native_slices.status END,"
+                    " failure = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                    " OR native_slices.status NOT IN ('failed', 'cancelled')"
+                    " THEN native_slices.failure END,"
+                    " started_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                    " OR native_slices.status NOT IN ('failed', 'cancelled')"
+                    " THEN native_slices.started_at ELSE clock_timestamp() END,"
+                    " finished_at = CASE WHEN native_slices.subject <> EXCLUDED.subject"
+                    " THEN native_slices.finished_at"
+                    " WHEN native_slices.status = 'completed' THEN now()"
+                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN NULL"
                     " ELSE native_slices.finished_at END"
                     f" RETURNING {_COLUMNS}",
                     (workflow_id, subject, library_file_id, plate_id, preset_key),

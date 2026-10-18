@@ -50,22 +50,40 @@ async def test_start_twice_with_one_workflow_id_is_one_row(store: NativeSliceSto
     assert first.status == "running" and first.warnings == [] and first.finished_at is None
 
 
-async def test_start_leaves_a_failed_row_to_its_next_execution(store: NativeSliceStore) -> None:
-    """The execution owns the running transition (review I2): a start that joins one
-    closing never sets the row running behind it."""
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_start_on_an_unfinished_row_reads_running_at_once(
+    store: NativeSliceStore, status: Literal["failed", "cancelled"]
+) -> None:
+    """Task 12 review I1: the dialog reads the row the moment the start answers, before
+    the new execution's first activity; it must not read the old failure and stop. A
+    start that no execution follows is the lost-row stop's (`started_at` refreshed)."""
     slice_id = await _start(store)
     await store.finish(
-        slice_id, status="failed", sliced_blob_key=None, failure="The slicer failed: x", warnings=[]
+        slice_id, status=status, sliced_blob_key=None, failure="The slicer failed: x", warnings=[]
     )
+    before = await store.get(slice_id, "out-1")
+    assert before is not None
     again = await store.start(
         workflow_id="slice-1-a", subject="out-1", library_file_id=1, plate_id=1, preset_key="k"
     )
-    assert (again.id, again.status) == (slice_id, "failed")
-
-    await store.running(slice_id)
+    assert (again.id, again.status, again.failure, again.finished_at) == (
+        slice_id,
+        "running",
+        None,
+        None,
+    )
+    assert again.started_at > before.started_at
     found = await store.get(slice_id, "out-1")
-    assert found is not None
-    assert (found.status, found.failure, found.finished_at) == ("running", None, None)
+    assert found is not None and found.status == "running"
+
+
+async def test_a_start_on_a_running_row_leaves_its_start(store: NativeSliceStore) -> None:
+    """A start joining a running execution keeps the start the lost-row stop compares."""
+    slice_id = await _start(store)
+    started = await store.running(slice_id)
+    again = await _start(store)
+    found = await store.get(again, "out-1")
+    assert found is not None and found.started_at == started
 
 
 async def test_start_under_another_subject_is_refused(store: NativeSliceStore) -> None:
@@ -113,6 +131,27 @@ async def test_start_on_a_completed_row_returns_it(store: NativeSliceStore) -> N
     )
     assert (again.id, again.status, again.sliced_blob_key) == (slice_id, "completed", "slice-abc")
     assert again.warnings == ["w"] and again.finished_at is not None
+
+
+async def test_a_completed_row_answered_again_is_kept_from_the_ttl_sweep(
+    store: NativeSliceStore,
+) -> None:
+    """Task 12 review M5: the grace runs from its last use, so a dialog reopened on it
+    past `PREVIEW_GRACE` does not lose it to the next sweep."""
+    slice_id = await _start(store)
+    await store.finish(
+        slice_id, status="completed", sliced_blob_key="slice-abc", failure=None, warnings=[]
+    )
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE native_slices SET finished_at = now() - interval '2 days' WHERE id = %s",
+            (slice_id,),
+        )
+    again = await store.start(
+        workflow_id="slice-1-a", subject="out-1", library_file_id=1, plate_id=1, preset_key="k"
+    )
+    assert again.status == "completed"
+    assert await store.sweep(timedelta(days=1)) == []
 
 
 async def test_reusable_finds_a_completed_row_not_a_failed_one(store: NativeSliceStore) -> None:
@@ -177,12 +216,22 @@ async def test_sweep_deletes_finished_rows_and_their_holds(
     assert refs.referenced() == {f"slice-{running}"}
 
 
-def test_native_workflow_id_names_the_copy_and_the_presets() -> None:
-    assert native_workflow_id(7, "k") == native_workflow_id(7, "k")
-    assert native_workflow_id(7, "k") != native_workflow_id(8, "k")
-    assert native_workflow_id(7, "k") != native_workflow_id(7, "j")
-    assert native_workflow_id(7, "k").startswith("slice-7-")
-    assert len(native_workflow_id(7, "k")) == len("slice-7-") + 32
+def test_native_workflow_id_names_the_copy_its_bytes_its_subject_and_the_presets() -> None:
+    """Task 12 review M6: Bambuddy's SQLite library reuses the id of a deleted newest
+    file, so the id alone does not name the copy; its sha256 and subject do."""
+
+    def named(
+        file_id: int = 7, key: str = "k", *, sha: str | None = "a" * 64, subject: str = "out-1"
+    ) -> str:
+        return native_workflow_id(file_id, key, subject=subject, copy_sha256=sha)
+
+    assert named() == named()
+    assert (
+        len({named(), named(8), named(key="j"), named(sha="b" * 64), named(subject="out-2")}) == 5
+    )
+    assert named(sha=None) != named()
+    assert named().startswith("slice-7-")
+    assert len(named()) == len("slice-7-") + 32
 
 
 async def test_a_stop_of_a_lost_row_spares_a_newer_execution(

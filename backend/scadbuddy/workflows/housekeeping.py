@@ -121,8 +121,8 @@ ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
 LIBRARY_SWEEP = "housekeeping_sweep_library"
 LIBRARY_PATCH = "housekeeping-sweep-library"
 #: The native slicer's settled slices (plan 2026-10-16 Task 12): rows past
-#: `PREVIEW_GRACE` deleted with their holds (`sweep_content` then collects the blobs), and
-#: the running rows whose execution is gone failed first. It obeys the sweeps' switch, as
+#: `PREVIEW_GRACE` deleted with their holds (`sweep_content` then collects the blobs). It
+#: obeys the sweeps' switch, as
 #: `PREVIEWS_SWEEP` does: with the sweeps off, `sweep_content` does not run either.
 NATIVE_SLICES_SWEEP = "housekeeping_sweep_native_slices"
 NATIVE_SLICES_PATCH = "housekeeping-sweep-native-slices"
@@ -130,6 +130,11 @@ NATIVE_SLICES_PATCH = "housekeeping-sweep-native-slices"
 #: on. On the prune Schedule too, like the claims, so it runs with the sweeps off.
 TRANSFER_PUTS_SWEEP = "housekeeping_prune_transfer_puts"
 TRANSFER_PUTS_PATCH = "housekeeping-prune-transfer-puts"
+#: The native slices whose execution is gone, failed (Task 12 review M1): a correctness
+#: repair, not storage, so on the prune Schedule, with the sweeps off too; the TTL
+#: delete (`NATIVE_SLICES_SWEEP`) stays under the switch.
+LOST_NATIVE_SLICES_SWEEP = "housekeeping_stop_lost_native_slices"
+LOST_NATIVE_SLICES_PATCH = "housekeeping-stop-lost-native-slices"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -148,6 +153,7 @@ SWEEPS = (
     LIBRARY_SWEEP,
     NATIVE_SLICES_SWEEP,
     TRANSFER_PUTS_SWEEP,
+    LOST_NATIVE_SLICES_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -166,6 +172,7 @@ PRUNE_SWEEPS = (
     ACTIVITY_SWEEP,
     LIBRARY_SWEEP,
     TRANSFER_PUTS_SWEEP,
+    LOST_NATIVE_SLICES_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -196,6 +203,8 @@ ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
 LIBRARY_TIMEOUT = timedelta(minutes=10)
 #: A delete, and a describe per running native slice past `LOST_AFTER`.
 NATIVE_SLICES_TIMEOUT = timedelta(minutes=5)
+#: A describe per running native slice past `LOST_AFTER`, each stopped in one update.
+LOST_NATIVE_SLICES_TIMEOUT = timedelta(minutes=2)
 #: One delete.
 TRANSFER_PUTS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
@@ -220,6 +229,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return LIBRARY_TIMEOUT
     if sweep == NATIVE_SLICES_SWEEP:
         return NATIVE_SLICES_TIMEOUT
+    if sweep == LOST_NATIVE_SLICES_SWEEP:
+        return LOST_NATIVE_SLICES_TIMEOUT
     if sweep == TRANSFER_PUTS_SWEEP:
         return TRANSFER_PUTS_TIMEOUT
     return SWEEP_TIMEOUT
@@ -258,6 +269,8 @@ class Housekeeping:
             if sweep == NATIVE_SLICES_SWEEP and not workflow.patched(NATIVE_SLICES_PATCH):
                 continue
             if sweep == TRANSFER_PUTS_SWEEP and not workflow.patched(TRANSFER_PUTS_PATCH):
+                continue
+            if sweep == LOST_NATIVE_SLICES_SWEEP and not workflow.patched(LOST_NATIVE_SLICES_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

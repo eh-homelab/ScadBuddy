@@ -177,6 +177,12 @@ class ProfileError(ValueError):
     ``inherits`` loop, or one only Bambuddy holds. The message names it."""
 
 
+class ProfileImageError(ProfileError):
+    """The image's profile tree itself is unreadable (a file missing, not JSON, not an
+    object, or a malformed vendor entry): the image's defect, not the plan's, which no
+    other choice of presets can avoid (Task 12 review N-b)."""
+
+
 def flatten(name: str, load: Callable[[str], dict[str, Any] | None]) -> Flat:
     """Preset ``name`` with its ``inherits`` chain applied, child over parent, as Bambu
     Studio loads it (the module's docstring); ``load`` answers a preset's own JSON by
@@ -272,7 +278,7 @@ class Profiles:
         try:
             return str(self._vendor["version"])
         except KeyError:
-            raise ProfileError(
+            raise ProfileImageError(
                 f"the profile file {self.root / VENDOR}.json has no version"
             ) from None
 
@@ -280,7 +286,7 @@ class Profiles:
     def _vendor(self) -> dict[str, Any]:
         vendor = _read(self.root / f"{VENDOR}.json")
         if not isinstance(vendor, dict):
-            raise ProfileError(f"the profile file {self.root / VENDOR}.json is not an object")
+            raise ProfileImageError(f"the profile file {self.root / VENDOR}.json is not an object")
         return vendor
 
     def machine(self, ref_or_name: str) -> Flat:
@@ -312,7 +318,7 @@ class Profiles:
             return None
         doc = _read(path)
         if not isinstance(doc, dict):
-            raise ProfileError(f"the native slicer cannot read preset {name}: not an object")
+            raise ProfileImageError(f"the native slicer cannot read preset {name}: not an object")
         return doc
 
     def _index(self, kind: Kind) -> _Index:
@@ -330,7 +336,7 @@ class Profiles:
             try:
                 name, path = entry["name"], self.root / VENDOR / entry["sub_path"]
             except (KeyError, TypeError) as error:
-                raise ProfileError(
+                raise ProfileImageError(
                     f"the profile file {self.root / VENDOR}.json has a malformed {listed}"
                     f" entry {entry!r}: {error!r}"
                 ) from None
@@ -348,4 +354,4 @@ def _read(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise ProfileError(f"the profile file {path} cannot be read: {error}") from error
+        raise ProfileImageError(f"the profile file {path} cannot be read: {error}") from error

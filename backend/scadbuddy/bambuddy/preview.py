@@ -44,10 +44,11 @@ from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.slicing import slice_info
-from scadbuddy.slicing.profiles import ProfileError
+from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
 from scadbuddy.slicing.start import NativeSliceStarter, start_native_slice
-from scadbuddy.slicing.store import NativeSliceStore
+from scadbuddy.slicing.store import NativeSliceStore, SliceSubjectError
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ async def start_preview(
     native: NativeSliceStarter | None = None,
     native_slices: NativeSliceStore | None = None,
     temporal: Client | None = None,
+    native_reads: LibraryReads | None = None,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
     record the slice for ``subject``; the first plate when every plate prints.
@@ -142,6 +144,7 @@ async def start_preview(
             native=native,
             native_slices=native_slices,
             temporal=temporal,
+            native_reads=native_reads,
         )
     key = slice_request(plate.plan, plate.plate_id).preset_key
     job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
@@ -177,6 +180,7 @@ async def _start_native(
     native: NativeSliceStarter | None,
     native_slices: NativeSliceStore | None,
     temporal: Client | None,
+    native_reads: LibraryReads | None,
 ) -> PreviewStarted:
     """The laid-out copy sliced by `SliceWorkflow` (Ruling C1: this only starts it; every
     byte moves on the ``library`` queue). Its ``job_id`` is the `native_slices` row's."""
@@ -194,6 +198,9 @@ async def _start_native(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"the native slicer is not set up here: {', '.join(missing)}",
         )
+    # The copy named by its bytes as well as its id (review M6): its library's own
+    # ``file_hash``, read where `reads_for` reads it.
+    copy = await reads_for(library_file_id, client, native_reads).library_file(library_file_id)
     try:
         row = await start_native_slice(
             temporal,
@@ -204,9 +211,15 @@ async def _start_native(
             plate_id=plate_id,
             subject=subject,
             client=client,
+            copy_sha256=copy.file_hash,
         )
+    except ProfileImageError as error:
+        # The image's tree, not the plan (review N-b).
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
     except ProfileError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except SliceSubjectError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     return PreviewStarted(
         job_id=row.id, plate_id=plate_id, nozzle_plan=nozzle_plan, slicer="native"
     )
@@ -341,13 +354,13 @@ async def read_toolpath(
     if job.status != "completed" or job.result is None or sliced is None:
         raise ApiError(status.HTTP_409_CONFLICT, f"background slice {job_id} has not finished")
     key = (row.id or 0, sliced, job.result.name, row.plate_id)
-    return await _toolpath(key, lambda: _plate_gcode(client, sliced, row.plate_id))
+    return await cached_toolpath(key, lambda: _plate_gcode(client, sliced, row.plate_id))
 
 
 ToolpathKey = tuple[int, int, str | None, int]
 
 
-async def _toolpath(key: ToolpathKey, fetch: Callable[[], Awaitable[bytes | None]]) -> bytes:
+async def cached_toolpath(key: ToolpathKey, fetch: Callable[[], Awaitable[bytes | None]]) -> bytes:
     """The toolpath of the plate G-code ``fetch`` gives (None when there is none that
     can be read), cached under ``key``: Bambuddy's background slices and native ones share
     the cache, the turns and the parse."""

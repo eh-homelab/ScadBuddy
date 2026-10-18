@@ -36,6 +36,9 @@ class SliceWorkflowInput(BaseModel):
     slicer_queue: str
     #: `SLICER_WAIT`; a test names a shorter one.
     slicer_wait: timedelta = SLICER_WAIT
+    #: The copy's ``file_hash`` the start named the execution by (Task 12 review M6):
+    #: other bytes under the id are refused. None when the library stated none.
+    copy_sha256: str | None = None
 
 
 class SlicePrepared(BaseModel):

@@ -58,6 +58,8 @@ class FakeSlicer:
         self.wrong_sha = False
         #: Waited on after the heartbeat, before the upload.
         self.hold: asyncio.Event | None = None
+        #: The sliced 3MF it uploads.
+        self.sliced = SLICED
         self.calls = 0
         #: What each successful call downloaded: the input 3MF, then each preset.
         self.downloads: list[list[bytes]] = []
@@ -110,13 +112,13 @@ class FakeSlicer:
             await self.hold.wait()
         async with self._http(input.sliced_3mf) as http:
             response = await http.put(
-                input.sliced_3mf.url, headers=input.sliced_3mf.headers, content=SLICED
+                input.sliced_3mf.url, headers=input.sliced_3mf.headers, content=self.sliced
             )
         response.raise_for_status()
         self.downloads.append(downloaded)
         return SlicePlateOutput(
-            sliced_sha256=hashlib.sha256(b"other" if self.wrong_sha else SLICED).hexdigest(),
-            sliced_size=len(SLICED),
+            sliced_sha256=hashlib.sha256(b"other" if self.wrong_sha else self.sliced).hexdigest(),
+            sliced_size=len(self.sliced),
             warnings=["a warning"],
             exit_code=0,
             elapsed_seconds=1.5,
