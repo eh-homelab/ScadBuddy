@@ -881,9 +881,11 @@ set `SCADBUDDY_STORE_BACKEND=local` instead.
 **Print library** in Settings → *Projects & files* (`library_backend`, seeded by
 `SCADBUDDY_LIBRARY_BACKEND`) picks where print files live: `bambuddy` (the default) or
 `native`, ScadBuddy's own library of folders and files over the blob store. It applies
-when ScadBuddy and its render workers restart. It needs a content store, so choose
-`store_backend` `s3` or `bambuddy` first; with `s3`, nothing at start needs Bambuddy,
-while `bambuddy` still needs its inbox folder at start
+when the API restarts; no worker needs a restart, since `library_backend` is not among
+the settings render workers read (`RENDER_FIELDS`) and the print worker reads a native
+file through the API, which answers for the library it serves. It needs a content
+store, so choose `store_backend` `s3` or `bambuddy` first; with `s3`, nothing at start
+needs Bambuddy, while `bambuddy` still needs its inbox folder at start
 (spec 2026-10-16 §4.5, `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md`).
 
 **A flip moves no files.** Switching to `native` starts an empty library, and Bambuddy's

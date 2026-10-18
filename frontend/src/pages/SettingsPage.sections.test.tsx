@@ -917,6 +917,10 @@ describe('SettingsPage blob store (#426)', () => {
     )
     expect(bodies[0]).toEqual({ library_backend: 'native' })
     expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy\u2019s own')
+    // Only the API reads it at start: the workers ask the API on every call (#3827).
+    expect(
+      within(region('Projects & files')).getByText(/Takes effect when the ScadBuddy API restarts; its workers need no restart/),
+    ).toBeInTheDocument()
   })
 
   it('does not fall back to local while the library is native', async () => {

@@ -1271,7 +1271,7 @@ function SettingsSections() {
                 label="Print library"
                 badge={badge('library_backend')}
                 error={errors.library_backend}
-                help="Where print files are kept. Takes effect when ScadBuddy and its render workers restart. Switching moves no files: ScadBuddy’s own library starts empty, and Bambuddy’s files stay in Bambuddy."
+                help="Where print files are kept. Takes effect when the ScadBuddy API restarts; its workers need no restart. Switching moves no files: ScadBuddy’s own library starts empty, and Bambuddy’s files stay in Bambuddy."
               >
                 <ChoiceSelect
                   id="library-backend"
