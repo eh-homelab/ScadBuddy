@@ -487,6 +487,22 @@ async def test_a_missing_download_is_blob_missing(pool: Pool) -> None:
 
 
 @respx.mock
+async def test_a_failed_download_other_than_404_is_not_blob_missing(pool: Pool) -> None:
+    """Only a 404 is "gone" (#4084): a migration forgets those rows, and records any
+    other failure on the row to be tried again."""
+    respx.get(f"{API}/library/files/9/download").mock(
+        return_value=httpx.Response(500, json={"detail": "x"})
+    )
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(ApiError) as raised:
+        async for _ in backend.download("9"):
+            pass
+    # The client reports an upstream failure as 502; anything but 404 is not "gone".
+    assert raised.value.status != 404 and not isinstance(raised.value, BlobMissingError)
+    await backend.aclose()
+
+
+@respx.mock
 async def test_a_work_folder_deleted_in_bambuddy_is_made_again(pool: Pool) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
     # Really gone: the read-back never finds it, so it is made again.

@@ -6,6 +6,7 @@ still read, until a start on the target switches it (`BlobIndex.switch_migrated`
 from __future__ import annotations
 
 import asyncio
+import enum
 import hashlib
 import logging
 import tempfile
@@ -84,7 +85,10 @@ async def migrate_batch(
     """Copy up to ``limit`` of ``source``'s rows not yet on ``target``, least recently
     touched first, but those whose copy failed since ``started``. A row whose object
     the source no longer has is dropped and ``forgotten`` (#4084): nothing can copy it,
-    and the store would only re-render it. One whose object cannot be read or is not
+    and the store would only re-render it. Only once the source is seen serving, though
+    (`_source_serves`): a source that misses everything (a wrong base URL, an unmounted
+    volume) must not empty the index, so its misses are ``failed`` instead. One whose
+    object cannot be read or is not
     its sha256, or whose copy the target refused, records the error and is ``failed``;
     one that moved on meanwhile (its mark missed) is left for the next batch.
     ``heartbeat`` is called with the key, from the event loop, while each copy runs
@@ -93,26 +97,63 @@ async def migrate_batch(
         index.unmigrated, source.backend, target.backend, limit=limit, started=started
     )
     moved, failed, forgotten = 0, [], []
+    missing: list[BlobStat] = []
     for row in rows:
         error = await _copy(index, source, target, row, heartbeat)
         if error is None:
             moved += 1
-        elif error == MISSING:
-            if await asyncio.to_thread(index.forget_missing, row.key, row.ref):
-                forgotten.append(row.key)
+        elif isinstance(error, _Missing):
+            missing.append(row)
         elif error:
             failed.append(row.key)
             await asyncio.to_thread(
                 index.mark_migration_failed, row.key, row.ref, error[:ERROR_CHARS]
             )
+    if missing and (moved or await _source_serves(index, source, target)):
+        for row in missing:
+            if await asyncio.to_thread(index.forget_missing, row.key, row.ref):
+                forgotten.append(row.key)
+            else:
+                logger.debug("a missing blob's row was put again; kept", extra={"key": row.key})
+    elif missing:
+        logger.warning(
+            "the source served none of this batch; its misses are failed, not forgotten",
+            extra={"missing": len(missing)},
+        )
+        for row in missing:
+            failed.append(row.key)
+            await asyncio.to_thread(index.mark_migration_failed, row.key, row.ref, UNPROVEN_MISS)
     remaining, _, _ = await asyncio.to_thread(
         index.migration_counts, source.backend, target.backend, started=started
     )
     return MigrationBatch(moved=moved, remaining=remaining, failed=failed, forgotten=forgotten)
 
 
-#: `_copy`'s answer for an object the source no longer has.
-MISSING = "missing"
+class _Missing(enum.Enum):
+    """`_copy`'s answer for an object the source no longer has: its own type, so no
+    error text can be taken for it."""
+
+    MISSING = enum.auto()
+
+
+#: Why a miss is failed rather than forgotten: nothing showed the source serving.
+UNPROVEN_MISS = (
+    "BlobMissingError: not forgotten, since the source served no object in its batch;"
+    " check the source backend's settings"
+)
+
+
+async def _source_serves(index: BlobIndex, source: ContentBackend, target: ContentBackend) -> bool:
+    """Whether ``source`` still has an object this migration already copied: what lets
+    a batch that copied nothing trust its misses."""
+    ref = await asyncio.to_thread(index.a_copied_ref, source.backend, target.backend)
+    if ref is None:
+        return False
+    try:
+        return await source.exists(ref.backend_id)
+    except Exception:
+        logger.warning("could not ask the source whether it serves", exc_info=True)
+        return False
 
 
 def _error(error: BaseException) -> str:
@@ -125,9 +166,9 @@ async def _copy(
     target: ContentBackend,
     row: BlobStat,
     beat: Callable[[str], None],
-) -> str | None:
-    """None once copied and recorded, "" when the row moved on, `MISSING` when the
-    source has no such object, else the error."""
+) -> str | _Missing | None:
+    """None once copied and recorded, "" when the row moved on, `_Missing.MISSING` when
+    the source has no such object, else the error."""
     spool = await asyncio.to_thread(tempfile.TemporaryFile, "w+b")
     with spool:
         beating = asyncio.create_task(_beat_while(row.key, beat))
@@ -144,7 +185,7 @@ async def _copy_through(
     target: ContentBackend,
     row: BlobStat,
     spool: BinaryIO,
-) -> str | None:
+) -> str | _Missing | None:
     ref = row.ref
     digest = hashlib.sha256()
     try:
@@ -154,7 +195,7 @@ async def _copy_through(
                 await asyncio.to_thread(spool.write, chunk)
     except BlobMissingError:
         logger.warning("a blob to copy is gone from its backend", extra={"key": row.key})
-        return MISSING
+        return _Missing.MISSING
     except Exception as error:
         # Unreadable or refused: one bad object never fails the batch.
         logger.warning("could not read a blob to copy", extra={"key": row.key}, exc_info=True)
