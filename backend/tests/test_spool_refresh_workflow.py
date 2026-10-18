@@ -124,7 +124,9 @@ async def test_the_real_activities_isolate_each_provider(client: Client, breaks:
             self.refreshed: list[str] = []
             self.failures: list[str] = []
 
-        async def replace_records(self, name: str, snapshots: object, at: object) -> None:
+        async def replace_records(
+            self, name: str, snapshots: object, at: object, *, timeout: float
+        ) -> None:
             if name == "a" and breaks == "replace_records":
                 raise RuntimeError("the store refused it")
             self.refreshed.append(name)

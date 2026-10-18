@@ -115,6 +115,17 @@ async def test_bambuddys_own_assignment_is_the_records_location(
     assert records["13"].location is None
 
 
+async def test_a_failed_assignments_read_still_refreshes_the_records(
+    bambuddy: respx.MockRouter,
+) -> None:
+    """Re-review N4: the locations are a hint; without them the records still refresh."""
+    bambuddy.get(SPOOLS).respond(json=recording("inventory-spools.json"))
+    bambuddy.get(ASSIGNMENTS).respond(500)
+    records = await provider().records()
+    assert len(records) == 12
+    assert all(r.location is None for r in records)
+
+
 class FakeStore:
     def __init__(self, *, fail_write: str | None = None) -> None:
         self.replaced: list[tuple[str, list[SpoolSnapshot]]] = []
@@ -123,7 +134,7 @@ class FakeStore:
         self.fail_write = fail_write
 
     async def replace_records(
-        self, name: str, snapshots: list[SpoolSnapshot], at: datetime
+        self, name: str, snapshots: list[SpoolSnapshot], at: datetime, *, timeout: float
     ) -> None:
         if name == self.fail_write:
             raise RuntimeError("the store is down")

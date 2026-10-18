@@ -32,6 +32,7 @@ tray (`SpoolSnapshot.location`), which never overrides a person's link.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
@@ -74,11 +75,22 @@ class SpoolStore:
     # -- the refresh ----------------------------------------------------------------
 
     async def replace_records(
-        self, provider: str, snapshots: Sequence[SpoolSnapshot], at: datetime
+        self,
+        provider: str,
+        snapshots: Sequence[SpoolSnapshot],
+        at: datetime,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """``provider``'s whole inventory as of ``at``: its cached records replaced, the
-        RFID links brought up to date, and its refresh recorded (clearing any failure)."""
-        await self._call(self._replace_records, provider, list(snapshots), at)
+        RFID links brought up to date, and its refresh recorded (clearing any failure).
+
+        Within ``timeout`` seconds or not at all: each statement, the lock's wait
+        included, is bounded by what is left, and a write that is past it at the end
+        rolls back (`TimeoutError`). The refresh's caller cancels its wait at the same
+        deadline and records the provider as failed, and a thread it left running must
+        not then commit."""
+        await self._call(self._replace_records, provider, list(snapshots), at, timeout)
 
     async def failed(self, provider: str, at: datetime, failure: str) -> None:
         """A refresh of ``provider`` failed with ``failure`` (a type, never a message):
@@ -141,11 +153,22 @@ class SpoolStore:
 
     # -- sync ---------------------------------------------------------------------------
 
-    def _replace_records(self, provider: str, snapshots: list[SpoolSnapshot], at: datetime) -> None:
+    def _replace_records(
+        self,
+        provider: str,
+        snapshots: list[SpoolSnapshot],
+        at: datetime,
+        timeout: float | None,
+    ) -> None:
+        deadline = None if timeout is None else time.monotonic() + timeout
         listed: dict[str, SpoolSnapshot] = {}
         for snapshot in snapshots:
             listed.setdefault(snapshot.record_id, snapshot)
         with self._pool.connection() as conn, conn.transaction():
+            if deadline is not None:
+                bound = f"{max(1, int((deadline - time.monotonic()) * 1000))}ms"
+                conn.execute("SELECT set_config('lock_timeout', %s, true)", (bound,))
+                conn.execute("SELECT set_config('statement_timeout', %s, true)", (bound,))
             conn.execute(_LOCK)
             conn.execute("DELETE FROM spool_provider_records WHERE provider = %s", (provider,))
             for snapshot in listed.values():
@@ -206,6 +229,8 @@ class SpoolStore:
                 " failed_at = NULL, failure = NULL",
                 (provider, at),
             )
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"the refresh of {provider} ran past its deadline")
 
     def _failed(self, provider: str, at: datetime, failure: str) -> None:
         with self._pool.connection() as conn:
@@ -491,7 +516,7 @@ def _manual_tray_spool(conn: Conn, printer_id: UUID, tray: SeenTray) -> UUID | N
 
 
 def _located(
-    conn: Conn, tray: SeenTray, fresh: list[str], located: dict[str, str]
+    conn: Conn, printer_id: UUID, tray: SeenTray, fresh: list[str], located: dict[str, str]
 ) -> tuple[str, SpoolSnapshot] | None:
     """The first fresh provider's record whose own location is this tray, with what the
     provider saw there still in it."""
@@ -499,12 +524,23 @@ def _located(
         printer = located.get(provider)
         if printer is None:
             continue
+        # A record whose spool better evidence places is not this tray's: a tagged spool
+        # is wherever its keys are reported, and a person's link elsewhere is where the
+        # person put it (re-review of #4180, N1).
         for row in conn.execute(
-            "SELECT snapshot FROM spool_provider_records WHERE provider = %s"
-            " AND snapshot->'location'->>'printer' = %s"
-            " AND (snapshot->'location'->>'ams_id')::int = %s"
-            " AND (snapshot->'location'->>'tray_id')::int = %s ORDER BY record_id",
-            (provider, printer, tray.ams_id, tray.tray_id),
+            "SELECT r.snapshot FROM spool_provider_records r"
+            " LEFT JOIN spool_record_links l USING (provider, record_id)"
+            " LEFT JOIN physical_spools p ON p.id = l.physical_spool_id"
+            " WHERE r.provider = %s"
+            " AND r.snapshot->'location'->>'printer' = %s"
+            " AND (r.snapshot->'location'->>'ams_id')::int = %s"
+            " AND (r.snapshot->'location'->>'tray_id')::int = %s"
+            " AND (p.id IS NULL OR (p.tray_uuid IS NULL AND p.tag_uid IS NULL))"
+            " AND NOT EXISTS (SELECT 1 FROM tray_spool_links t"
+            "   WHERE t.physical_spool_id = l.physical_spool_id"
+            "   AND NOT (t.printer_id = %s AND t.ams_id = %s AND t.tray_id = %s))"
+            " ORDER BY r.record_id",
+            (provider, printer, tray.ams_id, tray.tray_id, printer_id, tray.ams_id, tray.tray_id),
         ):
             snapshot = SpoolSnapshot.model_validate(row["snapshot"])
             assert snapshot.location is not None
@@ -528,7 +564,7 @@ def _tray_spool(
     else:
         spool = _manual_tray_spool(conn, printer_id, tray)
         found_by = "manual" if spool is not None else None
-        if spool is None and (hit := _located(conn, tray, fresh, located)) is not None:
+        if spool is None and (hit := _located(conn, printer_id, tray, fresh, located)) is not None:
             provider, snapshot = hit
             spool = _linked_spool(conn, provider, snapshot.record_id)
             found_by = "provider"
@@ -563,7 +599,9 @@ def repoint_tray_links(conn: Conn, merged: UUID, into: UUID) -> None:
     """Move printer ``merged``'s tray links to printer ``into``, on ``conn`` and in its
     transaction: the printer registry's merge of a synthetic-serial Bambuddy row into
     the real one runs it beside the other references it repoints. Where both printers
-    have a link for one tray, ``into``'s stands."""
+    have a link for one tray, ``into``'s stands. It takes the store's lock, held to the
+    end of the caller's transaction, as every writer here does."""
+    conn.execute(_LOCK)
     conn.execute(
         "DELETE FROM tray_spool_links m USING tray_spool_links i WHERE m.printer_id = %s"
         " AND i.printer_id = %s AND i.ams_id = m.ams_id AND i.tray_id = m.tray_id",

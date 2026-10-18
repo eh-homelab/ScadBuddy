@@ -38,11 +38,16 @@ async def refresh_provider(
     recorded as failed (its type only, never its message), its rows kept."""
     provider = next(p for p in spools.providers if p.name == name)
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + PROVIDER_TIMEOUT
+
     async def step() -> Outcome:
         if not await provider.configured():
             return "skipped"
         records = await provider.records()
-        await spools.store.replace_records(name, records, now())
+        # The write ends by the same deadline, so it never commits after the provider
+        # was recorded as failed (`SpoolStore.replace_records`).
+        await spools.store.replace_records(name, records, now(), timeout=deadline - loop.time())
         return "refreshed"
 
     try:

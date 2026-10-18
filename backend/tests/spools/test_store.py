@@ -3,6 +3,7 @@ physical spool, and each spool provider keeps its own record of it (1:N)."""
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -10,7 +11,7 @@ import psycopg
 import pytest
 
 from scadbuddy.spools.models import SeenTray, SpoolLocation, SpoolSnapshot, tray_fingerprint
-from scadbuddy.spools.store import SPOOL_OVERLAY_STALE, SpoolStore, repoint_tray_links
+from scadbuddy.spools.store import _LOCK, SPOOL_OVERLAY_STALE, SpoolStore, repoint_tray_links
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -339,12 +340,11 @@ async def test_a_manually_linked_record_whose_tag_names_another_spool_moves_to_i
     assert untagged.records == {}
 
 
-@pytest.mark.parametrize("state", [10, 11, 15])
-def test_the_fingerprint_ignores_the_trays_state(state: int) -> None:
-    """I2: `state` is a bitfield that changes as the AMS feeds and scans."""
+def test_the_fingerprint_is_material_and_colour_only() -> None:
+    """I2: never the tray's `state`, a bitfield that changes as the AMS feeds and scans
+    (`SeenTray` carries none)."""
     assert tray_fingerprint("PLA", "#FF0000") == tray_fingerprint(" PLA ", "ff0000ff")
-    assert tray(1, 2).fingerprint == tray_fingerprint("PLA", "#FF0000")
-    assert str(state) not in tray(1, 2).fingerprint.split("|")
+    assert tray(1, 2).fingerprint == "PLA|FF0000"
 
 
 async def test_a_link_made_while_the_tray_was_not_fed_holds_once_it_feeds(
@@ -461,3 +461,75 @@ async def test_a_merged_printers_tray_links_move_to_the_printer_it_merged_into(
     overlay = await store.overlay(real, [tray(0, 0), tray(0, 1)], now=NOW, providers=["bambuddy"])
     assert [t.records["bambuddy"].record_id for t in overlay.trays] == ["1", "3"]
     assert rows(pg_pool, "SELECT 1 FROM tray_spool_links WHERE printer_id = %s", synthetic) == []
+
+
+async def test_a_providers_assignment_never_puts_a_person_linked_spool_on_a_second_tray(
+    store: SpoolStore,
+) -> None:
+    """Re-review N1 (probe P1): Bambuddy still says (0,0); a person put it in (0,1)."""
+    await store.replace_records("bambuddy", [located("1", 0, 0)], NOW)
+    linked = await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="1")
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(0, 0), tray(0, 1)],
+        now=NOW,
+        providers=["bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    stale, placed = overlay.trays
+    assert (stale.physical_spool_id, stale.linked_by, stale.records) == (None, None, {})
+    assert placed.physical_spool_id == linked.physical_spool_id
+    assert placed.linked_by == "manual"
+
+
+async def test_a_providers_assignment_never_puts_a_tagged_spool_on_an_untagged_tray(
+    store: SpoolStore,
+) -> None:
+    """Re-review N1 (probe P2): a tagged spool's tray is the one reporting its keys."""
+    await store.replace_records("bambuddy", [located("1", 0, 0, tray_uuid=UUID_A)], NOW)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(0, 0), tray(0, 2, tray_uuid=UUID_A)],
+        now=NOW,
+        providers=["bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    untagged, tagged = overlay.trays
+    assert (untagged.physical_spool_id, untagged.linked_by, untagged.records) == (None, None, {})
+    assert tagged.linked_by == "rfid"
+    assert tagged.records["bambuddy"].record_id == "1"
+
+
+async def test_a_write_that_cannot_finish_in_time_commits_nothing(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """Re-review N2: a refresh past its provider's timeout is recorded as failed; its
+    write must not commit after that."""
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute(_LOCK)
+        # Its lock wait is cut short, by lock_timeout or statement_timeout.
+        with pytest.raises(psycopg.OperationalError):
+            await store.replace_records("bambuddy", [record("1")], NOW, timeout=0.2)
+    assert rows(pg_pool, "SELECT 1 FROM spool_provider_records") == []
+    assert await store.refreshes() == []
+
+
+async def test_a_write_past_its_deadline_rolls_back(
+    store: SpoolStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every statement finished in time, but the deadline passed before the commit."""
+    clock = iter([0.0, 0.0])
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock, 100.0))
+    with pytest.raises(TimeoutError):
+        await store.replace_records("bambuddy", [record("1")], NOW, timeout=30.0)
+    assert rows(pg_pool, "SELECT 1 FROM spool_provider_records") == []
+
+
+def test_repointing_waits_for_the_stores_writers(pg_pool: PgPool) -> None:
+    """Re-review N3: it serialises with `link()` and the refresh on the store's lock."""
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute(_LOCK)
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute("SET LOCAL lock_timeout = '200ms'")
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                repoint_tray_links(conn, uuid.uuid4(), uuid.uuid4())

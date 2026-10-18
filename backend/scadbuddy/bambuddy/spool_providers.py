@@ -15,6 +15,7 @@ them to a printer (plan 2026-10-16 Task 2).
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 
 from scadbuddy.bambuddy.client import client_for
@@ -30,6 +31,8 @@ from scadbuddy.spools.models import (
     tray_fingerprint,
 )
 from scadbuddy.spools.providers import SpoolProvider, SpoolProviderBuild
+
+logger = logging.getLogger(__name__)
 
 
 def location(assignment: SpoolAssignment) -> SpoolLocation:
@@ -79,7 +82,15 @@ class BambuddyProvider:
         stored = await asyncio.to_thread(self._load)
         async with client_for(stored) as client:
             spools = await client.spools()
-            assignments = await client.spool_assignments()
+            try:
+                assignments = await client.spool_assignments()
+            except Exception as error:
+                # The locations are a hint: the records still refresh without them.
+                logger.warning(
+                    "could not read Bambuddy's spool assignments; refreshing without them",
+                    extra={"error": type(error).__name__},
+                )
+                assignments = []
         where = {a.spool_id: location(a) for a in assignments}
         return [snapshot(spool, where.get(spool.id)) for spool in spools]
 
