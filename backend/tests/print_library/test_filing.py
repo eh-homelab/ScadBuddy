@@ -8,11 +8,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.print_library.component import CONNECT_TIMEOUT, ROW_POOL_SIZE
 from scadbuddy.print_library.filing import file_output, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.print_library.store import NativeLibraryStore
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.store.content import ContentStore
+from scadbuddy.store.index import Pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -63,3 +70,28 @@ async def test_overlapping_filings_of_one_output_file_one_copy(
     )
     assert len({f.id for f in filed}) == 1
     assert len(native.rows.filed_for_output(meta.id)) == 1
+
+
+async def test_filings_past_the_row_pool_all_file(
+    pg_conninfo: str, content: ContentStore, three_mf: Path, tmp_path: Path
+) -> None:
+    """Twice the component's row pool of saves filing at once (an Arrange batch, the
+    agent) each file their copy: a filing holds one row connection, never a second
+    while it waits on the pool, so none times out and drops its filing."""
+    rows: Pool = ConnectionPool(
+        pg_conninfo,
+        min_size=1,
+        max_size=ROW_POOL_SIZE,
+        timeout=CONNECT_TIMEOUT,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    with rows:
+        native = NativeLibrary(NativeLibraryStore(rows), content, tmp_path)
+        metas = [_meta(f"{i + 0xE0:032x}", f"n{i}") for i in range(2 * ROW_POOL_SIZE)]
+        filed = await asyncio.gather(
+            *(file_output(native, meta, three_mf, "Name Sign") for meta in metas)
+        )
+        assert len({f.id for f in filed}) == len(metas)
+        for meta in metas:
+            assert len(native.rows.filed_for_output(meta.id)) == 1

@@ -1061,7 +1061,7 @@ def test_a_failed_filing_does_not_fail_the_save(
     async def full(*_: Any, **__: Any) -> NativeFile:
         raise StoreFullError("the store is full")
 
-    monkeypatch.setattr(NativeLibrary, "upload", full)
+    monkeypatch.setattr(NativeLibrary, "stage", full)
     saved = _save(native_client, widget, "One")
     assert saved.status_code == 201
     assert _all_files(native_client) == []

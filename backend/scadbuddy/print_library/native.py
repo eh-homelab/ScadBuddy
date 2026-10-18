@@ -260,6 +260,20 @@ class NativeLibrary:
         filed: bool = False,
     ) -> NativeFile:
         await self._folder_must_exist(folder_id)
+        row = await self.stage(filename, data, folder_id, output_id=output_id, filed=filed)
+        return await self._insert(row, folder_id)
+
+    async def stage(
+        self,
+        filename: str,
+        data: BinaryIO,
+        folder_id: int | None,
+        *,
+        output_id: str | None = None,
+        filed: bool = False,
+    ) -> NativeFile:
+        """The bytes stored and the row that names them, not yet inserted. The caller
+        inserts the row or deletes ``blob_key``: a `library` blob is never swept."""
         file_id = await asyncio.to_thread(self.rows.next_file_id)
         file_type = file_type_of(filename)
         plates, has_thumbnail = (
@@ -272,7 +286,7 @@ class NativeLibrary:
             "library", data, name=filename, scope=BlobScope(), key=key, meta={"file_id": file_id}
         )
         now = datetime.now(UTC)
-        row = NativeFile(
+        return NativeFile(
             id=file_id,
             folder_id=folder_id,
             name=filename,
@@ -288,7 +302,6 @@ class NativeLibrary:
             updated_at=now,
             deleted_at=None,
         )
-        return await self._insert(row, folder_id)
 
     async def _insert(self, row: NativeFile, folder_id: int | None) -> NativeFile:
         """The row for a blob just stored. Any failure releases the blob first, since a

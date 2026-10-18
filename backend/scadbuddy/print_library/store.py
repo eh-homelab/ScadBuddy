@@ -4,8 +4,6 @@ file's `blob_key`; nothing here touches them."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -75,6 +73,63 @@ _FOLDER_COLUMNS = "id, name, parent_id, created_at"
 _FOLDER_TREE_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:library:tree', 0))"
 
 
+def _insert_file(conn: Connection[DictRow], row: NativeFile) -> NativeFile:
+    out = conn.execute(
+        f"INSERT INTO library_files (id, folder_id, name, size, sha256, blob_key, media_type,"
+        f" plates, has_thumbnail, output_id, filed, created_at, updated_at, deleted_at)"
+        f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        f" RETURNING {_FILE_COLUMNS}".encode(),
+        (
+            row.id,
+            row.folder_id,
+            row.name,
+            row.size,
+            row.sha256,
+            row.blob_key,
+            row.media_type,
+            Jsonb([p.model_dump(mode="json") for p in row.plates]),
+            row.has_thumbnail,
+            row.output_id,
+            row.filed,
+            row.created_at,
+            row.updated_at,
+            row.deleted_at,
+        ),
+    ).fetchone()
+    assert out is not None
+    return NativeFile.model_validate(out)
+
+
+def _filed_for_output(conn: Connection[DictRow], output_id: str) -> list[NativeFile]:
+    rows = conn.execute(
+        f"SELECT {_FILE_COLUMNS} FROM library_files"
+        f" WHERE output_id = %s AND filed AND deleted_at IS NULL ORDER BY id".encode(),
+        (output_id,),
+    ).fetchall()
+    return [NativeFile.model_validate(r) for r in rows]
+
+
+def _template_folder(conn: Connection[DictRow], name: str) -> NativeFolder:
+    """In a transaction of ``conn``'s."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:library:folder:' || %s, 0))",
+        (name,),
+    )
+    row = conn.execute(
+        f"SELECT {_FOLDER_COLUMNS} FROM library_folders"
+        f" WHERE parent_id IS NULL AND name = %s ORDER BY id LIMIT 1".encode(),
+        (name,),
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            f"INSERT INTO library_folders (name, parent_id) VALUES (%s, NULL)"
+            f" RETURNING {_FOLDER_COLUMNS}".encode(),
+            (name,),
+        ).fetchone()
+    assert row is not None
+    return NativeFolder.model_validate(row)
+
+
 class NativeLibraryStore:
     """The pool must be autocommit, as `BlobRefs`' is; a multi-statement write opens its
     own transaction."""
@@ -103,29 +158,8 @@ class NativeLibraryStore:
         return int(row["id"])
 
     def insert_file(self, row: NativeFile) -> NativeFile:
-        (out,) = self._files(
-            f"INSERT INTO library_files (id, folder_id, name, size, sha256, blob_key, media_type,"
-            f" plates, has_thumbnail, output_id, filed, created_at, updated_at, deleted_at)"
-            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            f" RETURNING {_FILE_COLUMNS}",
-            (
-                row.id,
-                row.folder_id,
-                row.name,
-                row.size,
-                row.sha256,
-                row.blob_key,
-                row.media_type,
-                Jsonb([p.model_dump(mode="json") for p in row.plates]),
-                row.has_thumbnail,
-                row.output_id,
-                row.filed,
-                row.created_at,
-                row.updated_at,
-                row.deleted_at,
-            ),
-        )
-        return out
+        with self._pool.connection() as conn:
+            return _insert_file(conn, row)
 
     def file(self, id: int, *, trashed: bool = False) -> NativeFile | None:
         state = "IS NOT NULL" if trashed else "IS NULL"
@@ -217,23 +251,26 @@ class NativeLibraryStore:
         return found[0] if found else None
 
     def filed_for_output(self, output_id: str) -> list[NativeFile]:
-        return self._files(
-            f"SELECT {_FILE_COLUMNS} FROM library_files"
-            f" WHERE output_id = %s AND filed AND deleted_at IS NULL ORDER BY id",
-            (output_id,),
-        )
+        with self._pool.connection() as conn:
+            return _filed_for_output(conn, output_id)
 
-    @contextmanager
-    def output_lock(self, output_id: str) -> Iterator[None]:
-        """Held (a transaction-scoped advisory lock on a pooled connection) while one
-        output's filing checks for its copy and makes it, so overlapping attempts file one."""
+    def file_for_output(self, row: NativeFile, folder: str) -> tuple[NativeFile, bool]:
+        """Insert ``row``, an output's filed copy, in the top-level folder ``folder``
+        (found or made), unless the output already has one: that copy and False, or
+        ``row`` as inserted and True. One short transaction on one connection, under an
+        advisory lock per output, so overlapping attempts file one and a filing never
+        holds a connection while it waits on the pool for another."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "SELECT pg_advisory_xact_lock("
                 "hashtextextended('scadbuddy:library:output:' || %s, 0))",
-                (output_id,),
+                (row.output_id,),
             )
-            yield
+            existing = _filed_for_output(conn, row.output_id or "")
+            if existing:
+                return existing[0], False
+            folder_id = _template_folder(conn, folder).id
+            return _insert_file(conn, row.model_copy(update={"folder_id": folder_id})), True
 
     def forget_output(self, output_id: str) -> None:
         """A deleted output is named by no row: a file moved out of its folder stays, with
@@ -351,21 +388,4 @@ class NativeLibraryStore:
         """The oldest top-level folder called ``name``, or a new one, once even when
         several callers race."""
         with self._pool.connection() as conn, conn.transaction():
-            conn.execute(
-                "SELECT pg_advisory_xact_lock("
-                "hashtextextended('scadbuddy:library:folder:' || %s, 0))",
-                (name,),
-            )
-            row = conn.execute(
-                f"SELECT {_FOLDER_COLUMNS} FROM library_folders"
-                f" WHERE parent_id IS NULL AND name = %s ORDER BY id LIMIT 1".encode(),
-                (name,),
-            ).fetchone()
-            if row is None:
-                row = conn.execute(
-                    f"INSERT INTO library_folders (name, parent_id) VALUES (%s, NULL)"
-                    f" RETURNING {_FOLDER_COLUMNS}".encode(),
-                    (name,),
-                ).fetchone()
-        assert row is not None
-        return NativeFolder.model_validate(row)
+            return _template_folder(conn, name)
