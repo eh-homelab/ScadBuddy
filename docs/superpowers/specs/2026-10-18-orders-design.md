@@ -10,7 +10,8 @@ template-owned UIs in §4) and the own-store spec
 #2182 (print as easily as a page).
 
 Every fact about the code below was read from the tree at `d4df45d` on 2026-10-18; file
-and line references are to that commit. Nothing here was measured on a live system.
+and line references are to that commit, except F4, re-read at `ee43c92` (#4162) the same
+day. Nothing here was measured on a live system.
 
 ## 1. Goal
 
@@ -78,7 +79,7 @@ projects (§8.1), which is the only place the word "project" appears in an order
 | F1 | A render is keyed by `render_key(slug, params, model_version)`, sha256 of the triple; pipeline templates use `inputs_key(slug, inputs, model_version)` over whole inputs. | `render/job_models.py:261-265`, `render/inputs.py:111-117`, chosen at `render/submit.py:291-296` |
 | F2 | A model version is a git commit of `data/models` (`COMMIT_ID_PATTERN` `^[0-9a-f]{7,40}$`); `restore` makes a new commit and never rewrites history; `export(slug, commit, dest)` reproduces the tree. | `library/history.py:1-13,105,208-224,469`, `core/gitrepo.py:100` |
 | F3 | An output's `meta.json` carries `slug`, `model_version`, `job_id`, `colors`, `parts`, `layout_plates` and `libraries` (the exact library commits), beside `params.json` and `inputs.json`; outputs can be deleted. | `library/outputs.py:50-60,131-186,388-499` |
-| F4 | ScadBuddy's native slice result has no grams: `SlicePlateOutput` is digests, sizes, warnings, exit code and elapsed time. The own-store spec plans `slicing/slice_info.py` to read per-filament `used_g` and `used_m` from the sliced 3MF's `Metadata/slice_info.config`. | `slicing/models.py:56-64`, `workers/rust/crates/sb-slicer/src/models.rs:57-71`, own-store spec §5.4 (lines 323-342) |
+| F4 | ScadBuddy's native slice result carries no grams: `SlicePlateOutput` is digests, sizes, warnings, exit code and elapsed time. The grams are read from the sliced 3MF afterwards: `slicing/slice_info.py` `read_sliced(payload, plate_id)` (#4162) gives a plate's `print_time_seconds`, `grams_by_slot` and `filament_changes`, over `filaments3mf.read_filaments(sliced=True)`, the same parser of `Metadata/slice_info.config` the Bambuddy path uses (F5). It reads no metres. | `slicing/models.py:56-64`, `workers/rust/crates/sb-slicer/src/models.rs:57-71`, `slicing/slice_info.py:58-101` at `ee43c92`, own-store spec §5.4 |
 | F5 | Today every grams figure comes through Bambuddy: `_sliced()` reads per-plate, per-slot `used_grams` from the same `slice_info.config`; `SlicePreview` sums the slots because Bambuddy's `filament_used_g` covers only the first filament (#2450). | `bambuddy/filaments3mf.py:108-117,268-291`, `bambuddy/preview.py:68-86,330-339` |
 | F6 | The only price anywhere is Bambuddy's per-spool `cost_per_kg`, exposed as `price_per_g` and a `grams_cost` on `GET /farm/spools/{id}/summary?grams=`; ScadBuddy stores no price and no density. | `bambuddy/farm.py:75,172-181,207-270`, `api/farm.py:105-126` |
 | F7 | A print run's row holds `status` (running, succeeded, failed), `result` and `error`; "succeeded" means queued. The exact sliced file is `PrintRunResult.sliced_library_file_id`; the colour choice is `PrintRunRequest.filament_plan.slots[{slot_id, spool_id}]`. | `bambuddy/runs.py:91-114`, `bambuddy/print_run.py:169-206,311-339` |
@@ -167,7 +168,7 @@ template's gallery with defaults. The agent makes one with `order_item_add` (§7
 unique index), the measured facts and the arithmetic:
 
 - `sliced_sha256`, `plates` (jsonb: per plate `{index, print_seconds, filaments:
-  [{slot, used_g, used_m}]}` as read from `slice_info.config`, §5.2);
+  [{slot, used_g}]}` as `read_sliced` gives them, §5.2);
 - `lines` (jsonb): the priced lines, each `{kind, label, quantity, unit_minor,
   amount_minor}` with `kind` one of `filament` (one per slot: grams × price per g),
   `machine_time`, `setup`, `labour`, `markup`, `manual`;
@@ -275,12 +276,13 @@ The `order_item_quote` operation, on the `library` queue, as activities of one
    filaments' slicer profiles, through the slicer the stack has: the print dialog's
    background slice (`housekeeping_sweep_preview_slices`' path) today, the native
    `slice_plate` activity once #3822 lands. The quote records `sliced_sha256`.
-3. **Read usage.** Open the sliced 3MF's `Metadata/slice_info.config` and read, per
-   plate, `prediction` (seconds) and per filament `used_g` and `used_m`. This is the
-   reader the own-store spec §5.4 names `slicing/slice_info.py` (F4); it is written
-   here if #3822 has not, and `bambuddy/filaments3mf.py:268-291` (F5) moves onto it,
-   so both slicers price from one reader. Grams of `0` for a slot means not sliced,
-   as F5's code treats it, and fails the quote rather than pricing a slot at nothing.
+3. **Read usage.** For each plate, `slice_info.read_sliced(payload, plate_id)` (F4):
+   `print_time_seconds` and `grams_by_slot`, from the sliced 3MF's
+   `Metadata/slice_info.config`. It sits over the parser the Bambuddy path reads
+   with (F5), so both slicers price from one reader and no second parser is written.
+   A plate that reads as unknown (`read_sliced`'s every-field-None answer), or a slot
+   at `0` grams (not sliced, as F5's code treats it), fails the quote rather than
+   pricing a slot at nothing.
 4. **Price.** For each slot: `used_g × cost_per_kg / 1000` at the slot's filament; a
    slot with no `filament_id` fails the quote naming the slot. Then machine time
    (`prediction` summed over plates × rate), setup (per plate), labour, markup on the
@@ -660,9 +662,10 @@ usable on its own.
 1. **Customers and orders** (§3.1-3.3, §3.5 without print states, §4's reads and
    writes, the three pages, agent tools, mocks). An item can be added from Customize
    and from an output. Close works with manual fulfilment (§6.1 by hand).
-2. **Pricing** (§5): the price book, the `slice_info.config` reader shared with
-   `filaments3mf.py`, the `order_item_quote` operation, accept, the rough estimate.
-   Depends on nothing in #3818; moves onto the native slicer when #3822 lands.
+2. **Pricing** (§5): the price book, the `order_item_quote` operation over
+   `slice_info.read_sliced` (F4, on main), accept, the rough estimate. Slices through
+   the Bambuddy slicer until #3822's remaining parts put the native one in
+   `PrintRunWorkflow`; the reader is the same either way.
 3. **Fulfilment and provenance** (§6): attempts from the print path (`subject`
    `order_item:<id>`), the `attachments` table and routes, shipments, costs.
 4. **Flows** (§7): the two bus-named trigger kinds, `match`, the subject generalisation, `trigger()`
