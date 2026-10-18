@@ -29,7 +29,8 @@ from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
-from scadbuddy.workflows.printer_watch import ensure_watch, stop_watch
+from scadbuddy.workflows.follow import RPC_TIMEOUT
+from scadbuddy.workflows.printer_watch import ensure_watch, restart_watch, stop_watch
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ CONNECT_TIMEOUT = 5.0
 #: The LAN link's whole probe: the certificate read, the MQTT connect and the first
 #: report (plan Task 3: "within 10 s").
 PROBE_TIMEOUT = 10.0
+
+#: A watch call's whole bound: the API's Temporal client is lazy, and its first connect
+#: retries for minutes when Temporal is down (`follow.follow` bounds it the same way).
+WATCH_RPC_BOUND = RPC_TIMEOUT.total_seconds() + 2
 
 #: ``(host, serial, access_code)`` -> the first report and the certificate's SHA-256.
 Probe = Callable[[str, str, str], Awaitable[tuple[LanReport, str]]]
@@ -52,25 +57,41 @@ async def lan_probe(host: str, serial: str, access_code: str) -> tuple[LanReport
 
 
 class Watches:
-    """Each LAN printer's `PrinterWatch`, started and stopped on the print queue through
-    the API's (lazy) Temporal client. Best effort: a failure is logged and the
-    housekeeping sweep (`ensure_watches`) starts what is missing."""
+    """Each LAN printer's `PrinterWatch`, started, restarted and stopped on the print
+    queue through the API's (lazy) Temporal client. Best effort, and bounded by
+    `WATCH_RPC_BOUND`: a failure is logged and the housekeeping prune Schedule
+    (`ensure_watches`) starts what is missing."""
 
     def __init__(self, core: Core) -> None:
         self.core = core
 
     async def ensure(self, printer_id: str, serial: str) -> None:
-        commands = self.core.print_runs
-        try:
-            await ensure_watch(commands.client, commands.task_queue, printer_id, serial)
-        except Exception:
-            logger.warning("could not start a printer watch", extra={"printer_id": printer_id})
+        def call() -> Awaitable[None]:
+            commands = self.core.print_runs
+            return ensure_watch(commands.client, commands.task_queue, printer_id, serial)
+
+        await self._bounded("start", printer_id, call)
+
+    async def restart(self, printer_id: str, serial: str) -> None:
+        def call() -> Awaitable[None]:
+            commands = self.core.print_runs
+            return restart_watch(commands.client, commands.task_queue, printer_id, serial)
+
+        await self._bounded("restart", printer_id, call)
 
     async def stop(self, printer_id: str, serial: str) -> None:
+        await self._bounded(
+            "stop", printer_id, lambda: stop_watch(self.core.print_runs.client, serial)
+        )
+
+    async def _bounded(
+        self, what: str, printer_id: str, call: Callable[[], Awaitable[None]]
+    ) -> None:
         try:
-            await stop_watch(self.core.print_runs.client, serial)
+            async with asyncio.timeout(WATCH_RPC_BOUND):
+                await call()
         except Exception:
-            logger.warning("could not stop a printer watch", extra={"printer_id": printer_id})
+            logger.warning("could not %s a printer watch", what, extra={"printer_id": printer_id})
 
 
 class Printers:
@@ -91,7 +112,9 @@ class Printers:
             },
             name="scadbuddy-printers",
         )
-        self._store = PrinterStore(self._pool, settings_kek(core.settings.secret_key_file))
+        self._store = PrinterStore(
+            self._pool, settings_kek(core.settings.secret_key_file), events=core.events
+        )
         self._reports = PrinterReportStore(self._pool)
         self._opened = False
         self.probe: Probe = lan_probe

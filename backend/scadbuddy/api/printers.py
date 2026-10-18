@@ -19,7 +19,14 @@ from scadbuddy.bambuddy.models import Printer
 from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.address import UnsafeAddressError, lan_address
 from scadbuddy.printers.component import PROBE_TIMEOUT, PrintersDep
-from scadbuddy.printers.models import BambuddyLink, LanLink, PrinterCreate, PrinterPatch, PrinterRow
+from scadbuddy.printers.models import (
+    BambuddyLink,
+    LanLink,
+    PrinterCreate,
+    PrinterPatch,
+    PrinterRow,
+    is_synthetic_serial,
+)
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
@@ -32,8 +39,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/printers", tags=["printers"])
 
-NO_SERIAL = "Bambuddy did not report a serial"
+NO_SERIAL = "Bambuddy did not report a serial: link it from a printer you created by serial"
 KEK_MISSING = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE"
+SERIAL_UNKNOWN = (
+    "this printer's serial is not known (Bambuddy withheld it): create the printer"
+    " with its serial and link Bambuddy to it"
+)
 
 
 class DiscoveredPrinter(BaseModel):
@@ -45,6 +56,8 @@ class DiscoveredPrinter(BaseModel):
     serial: str | None = None
     #: The registry row linking it, if any.
     linked_to: str | None = None
+    #: Whether a row can be matched to it by serial; one without can still be linked
+    #: from a printer created by its serial (`reason` says so).
     linkable: bool
     reason: str | None = None
 
@@ -71,11 +84,7 @@ async def _call[T](work: Callable[[], T]) -> T:
     except KekMissingError:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING) from None
     except SerialUnknownError:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "this printer's serial is not known (Bambuddy withheld it): create the printer"
-            " with its serial and link Bambuddy to it",
-        ) from None
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN) from None
 
 
 async def _bambuddy_printers(store: SettingsStoreDep) -> list[Printer]:
@@ -145,9 +154,23 @@ async def patch_printer(printers: PrintersDep, printer_id: str, body: PrinterPat
     return row
 
 
-@router.delete("/{printer_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Forget a printer")
+@router.delete(
+    "/{printer_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Forget a printer",
+    description=(
+        "409 while it links a Bambuddy printer: the next read of what the printers are "
+        "doing would make it again, under a new id. Unlink Bambuddy first."
+    ),
+)
 async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
     row = await _call(lambda: printers.store.require(printer_id))
+    if row.bambuddy_printer_id is not None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"printer {row.id} is linked to Bambuddy printer {row.bambuddy_printer_id};"
+            " unlink it first",
+        )
     await _call(lambda: printers.store.delete(printer_id))
     if row.lan_host is not None:
         await printers.watches.stop(row.id, row.serial)
@@ -205,13 +228,16 @@ PROBE_FAILED = "the printer did not answer at that address"
     description=(
         "Tests the address and the 8-digit access code by asking the printer for its "
         "state (within 10 s), pins the certificate it presents, then stores the code "
-        "sealed. 422 when the host is not a private LAN address; 502 when the printer "
+        "sealed. 422 when the host is not a private LAN address, or the printer's serial "
+        "is not known (Bambuddy withheld it); 502 when the printer "
         "does not answer there (one message, whatever failed); 503 when the "
         "secret key file is not configured. The code is never returned."
     ),
 )
 async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> PrinterRow:
     row = await _call(lambda: printers.store.require(printer_id))
+    if is_synthetic_serial(row.serial):  # before the code goes anywhere
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN)
     if printers.kek is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING)
     try:
@@ -228,7 +254,7 @@ async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> Pri
         )
         raise ApiError(status.HTTP_502_BAD_GATEWAY, PROBE_FAILED) from None
     linked = await _call(lambda: printers.store.link_lan(printer_id, body, cert_sha256=cert_sha256))
-    await printers.watches.ensure(linked.id, linked.serial)
+    await printers.watches.restart(linked.id, linked.serial)
     printers.changed(printer_id)
     return linked
 

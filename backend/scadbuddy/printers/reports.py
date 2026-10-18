@@ -13,6 +13,8 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.printers.store import printer_uuid
+
 
 class PrinterReportStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
@@ -20,11 +22,15 @@ class PrinterReportStore:
 
     def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> None:
         """Write the report. A printer gone from the registry (deleted while it was
-        watched) writes nothing."""
+        watched) or no longer LAN-linked (an attempt still running after the unlink)
+        writes nothing."""
+        key = printer_uuid(printer_id)
+        if key is None:
+            return
         with self.pool.connection() as conn:
             conn.execute(
                 "INSERT INTO printer_reports (printer_id, report, seen_at)"
-                " SELECT id, %s, %s FROM printers WHERE id = %s"
+                " SELECT id, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
                 " ON CONFLICT (printer_id) DO UPDATE"
                 " SET report = EXCLUDED.report, seen_at = EXCLUDED.seen_at",
                 (Jsonb(report), seen_at, printer_id),
@@ -32,6 +38,9 @@ class PrinterReportStore:
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         """Heard from, with nothing new to say."""
+        key = printer_uuid(printer_id)
+        if key is None:
+            return
         with self.pool.connection() as conn:
             conn.execute(
                 "UPDATE printer_reports SET seen_at = %s WHERE printer_id = %s",
@@ -39,6 +48,9 @@ class PrinterReportStore:
             )
 
     def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+        key = printer_uuid(printer_id)
+        if key is None:
+            return None
         with self.pool.connection() as conn:
             data = conn.execute(
                 "SELECT report, seen_at FROM printer_reports WHERE printer_id = %s",
@@ -51,4 +63,4 @@ class PrinterReportStore:
             rows = conn.execute(
                 "SELECT printer_id, report, seen_at FROM printer_reports"
             ).fetchall()
-        return {row["printer_id"]: (dict(row["report"]), row["seen_at"]) for row in rows}
+        return {str(row["printer_id"]): (dict(row["report"]), row["seen_at"]) for row in rows}

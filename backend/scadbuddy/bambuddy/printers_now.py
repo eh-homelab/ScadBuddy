@@ -6,9 +6,12 @@ started from Bambuddy, or one paused on an HMS error, is as visible as one ScadB
 queued. A job whose archive ScadBuddy linked points at its print; any other at
 Bambuddy's archives.
 
-Since the printer registry (#3823) a card is a registry printer's: a Bambuddy-linked one
-from Bambuddy's status, a LAN-only one from its own MQTT report (`printers/watch.py`).
-A LAN printer that is also in Bambuddy shows Bambuddy's status while Bambuddy answers.
+Since the printer registry (#3823) a card is a registry printer's. A LAN-linked one
+with a report fresher than `STALE_AFTER` shows that report, whether or not it is also in
+Bambuddy, and costs no Bambuddy call (hot-path plan 2026-10-18 D4); otherwise a
+Bambuddy-linked one shows Bambuddy's status. A Bambuddy that is configured but does not
+answer costs only the cards only it could fill: each of those says so (#4186 review I1).
+The serial stays off the card (I6): the registry's own ``GET /printers`` carries it.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore
-from scadbuddy.printers.status import status_from_report
+from scadbuddy.printers.status import STALE_AFTER, status_from_report
 from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,6 @@ CardPath = Literal["bambuddy", "native", "none"]
 class PrinterNow(BaseModel):
     #: The registry printer (#3823): what a card is keyed by.
     id: str
-    serial: str
     path: CardPath
     #: The Bambuddy printer's id, when the row links one: its camera and its archives.
     printer_id: int | None
@@ -120,7 +122,6 @@ def _card(row: PrinterRow, path: CardPath, status: PrinterStatus) -> PrinterNow:
     working = activity in ("printing", "paused")
     return PrinterNow(
         id=row.id,
-        serial=row.serial,
         path=path,
         printer_id=row.bambuddy_printer_id,
         name=status.name or row.name,
@@ -147,7 +148,6 @@ async def printer_now(
         logger.info("printer status unreadable", extra={"printer_id": printer.id})
         return PrinterNow(
             id=row.id,
-            serial=row.serial,
             path="bambuddy",
             printer_id=printer.id,
             name=printer.name,
@@ -162,7 +162,6 @@ async def printer_now(
         logger.warning("printer status malformed", extra={"printer_id": printer.id})
         return PrinterNow(
             id=row.id,
-            serial=row.serial,
             path="bambuddy",
             printer_id=printer.id,
             name=printer.name,
@@ -194,7 +193,6 @@ def lan_card(
     if report is None:
         return PrinterNow(
             id=row.id,
-            serial=row.serial,
             path="none",
             printer_id=row.bambuddy_printer_id,
             name=row.name,
@@ -207,6 +205,27 @@ def lan_card(
     return _card(row, "native", status)
 
 
+Reports = dict[str, tuple[dict[str, Any], datetime]]
+
+
+def _fresh(row: PrinterRow, latest: Reports, now: datetime) -> bool:
+    """Whether the row's own LAN report answers for it (D4)."""
+    report = latest.get(row.id)
+    return row.lan_host is not None and report is not None and now - report[1] < STALE_AFTER
+
+
+def _unreachable(row: PrinterRow, error: str) -> PrinterNow:
+    return PrinterNow(
+        id=row.id,
+        path="bambuddy",
+        printer_id=row.bambuddy_printer_id,
+        name=row.name,
+        activity="unknown",
+        awaiting_plate_clear=None,
+        error=error,
+    )
+
+
 async def printers_now(
     client: BambuddyClient | None,
     links: PrintLinkStore,
@@ -217,12 +236,20 @@ async def printers_now(
 ) -> PrintersNow:
     """One card per registry printer (#3823). Every active Bambuddy printer first, in
     Bambuddy's order, each with its registry row (`ensure_bambuddy` makes one for a
-    printer it has never seen, so the strip never loses one), its card from Bambuddy's
-    status; then every other LAN-linked row, by name, from its report. ``client`` is
-    ``None`` when no Bambuddy is configured."""
+    printer it has never seen, so the strip never loses one); then every other
+    LAN-linked row, by name. Each card from the row's fresh LAN report, else Bambuddy's
+    status, else offline. ``client`` is ``None`` when no Bambuddy is configured; a
+    Bambuddy that fails to list its printers leaves every Bambuddy-linked row a card
+    that says so, or its LAN report."""
     active: list[Printer] = []
+    unreachable: str | None = None
     if client is not None:
-        active = [printer for printer in await client.printers() if printer.is_active]
+        try:
+            active = [printer for printer in await client.printers() if printer.is_active]
+        except ApiError as error:
+            logger.info("Bambuddy's printers unreadable; the registry answers")
+            unreachable = error.detail
+    listed = frozenset(printer.id for printer in active)
     rows = [
         await asyncio.to_thread(
             printers.ensure_bambuddy,
@@ -230,23 +257,25 @@ async def printers_now(
             serial=printer.serial_number,
             name=printer.name,
             model=printer.model,
+            listed=listed,
         )
         for printer in active
     ]
-    cards: list[PrinterNow] = []
-    if client is not None:
-        cards = list(
-            await asyncio.gather(
-                *(printer_now(client, links, p, r) for p, r in zip(active, rows, strict=True))
-            )
-        )
+    latest: Reports = await asyncio.to_thread(reports.all)
+
+    async def card(printer: Printer, row: PrinterRow) -> PrinterNow:
+        if _fresh(row, latest, now) or client is None:
+            return lan_card(row, latest.get(row.id), now=now)
+        return await printer_now(client, links, printer, row)
+
+    cards = list(await asyncio.gather(*(card(p, r) for p, r in zip(active, rows, strict=True))))
     shown = {row.id for row in rows}
-    others = [
-        row
-        for row in await asyncio.to_thread(printers.list)
-        if row.id not in shown and row.lan_host is not None
-    ]
-    if others:
-        latest = await asyncio.to_thread(reports.all)
-        cards.extend(lan_card(row, latest.get(row.id), now=now) for row in others)
+    for row in await asyncio.to_thread(printers.list):
+        if row.id in shown:
+            continue
+        bambuddy_down = unreachable is not None and row.bambuddy_printer_id is not None
+        if bambuddy_down and not _fresh(row, latest, now):
+            cards.append(_unreachable(row, unreachable or ""))
+        elif row.lan_host is not None:
+            cards.append(lan_card(row, latest.get(row.id), now=now))
     return PrintersNow(printers=cards)

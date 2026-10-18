@@ -26,6 +26,7 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
+    PRINTER_WATCHES_SWEEP,
     PRUNE_SWEEPS,
     SWEEPS,
 )
@@ -355,12 +356,18 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         await asyncio.sleep(0.1)
         return SimpleNamespace(purged=0, orphans=0)
 
+    async def slow_watches(*args: object) -> list[str]:
+        await asyncio.sleep(0.1)
+        return []
+
     monkeypatch.setattr(main, "sweep_library", slow_library)
+    monkeypatch.setattr(main, "ensure_watches", slow_watches)
+    state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
     state.components = SimpleNamespace(
         get=lambda key: SimpleNamespace(
-            index=SlowIndex(), prune=slow_batches, serving_native=serving_native
+            index=SlowIndex(), prune=slow_batches, serving_native=serving_native, store=None
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
@@ -613,6 +620,11 @@ def test_the_background_slices_obey_the_sweeps_switch() -> None:
     assert PREVIEWS_SWEEP in SWEEPS
     assert PREVIEWS_SWEEP not in PRUNE_SWEEPS
     assert LOST_SLICES_SWEEP in PRUNE_SWEEPS
+
+
+def test_the_printer_watches_come_back_within_the_prune_interval() -> None:
+    """#4186 review I4: a lost watch is started again within 300 s, sweeps on or off."""
+    assert PRINTER_WATCHES_SWEEP in PRUNE_SWEEPS
 
 
 def test_the_native_library_sweep_runs_with_the_sweeps_off() -> None:

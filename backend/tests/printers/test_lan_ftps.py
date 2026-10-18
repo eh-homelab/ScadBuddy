@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import os
 import socket
 import ssl
@@ -38,8 +39,14 @@ class Received:
 
 
 class FtpsServer:
-    def __init__(self, context: ssl.SSLContext) -> None:
+    """``close`` is how the data connection ends once the client's bytes are in:
+    ``clean`` answers the client's ``close_notify``; ``tcp`` drops the connection with
+    none; ``silent`` keeps it open and never answers (#4186 review I5)."""
+
+    def __init__(self, context: ssl.SSLContext, close: str = "clean") -> None:
         self.context = context
+        self.close_mode = close
+        self.held: list[ssl.SSLSocket] = []
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         self.received = Received()
@@ -86,17 +93,25 @@ class FtpsServer:
                     reply("150 send")
                     conn, _ = data_listener.accept()
                     data_listener.close()
-                    with self.context.wrap_socket(conn, server_side=True) as data:
-                        self.received.versions.append(str(data.version()))
-                        chunks = []
-                        while chunk := data.recv(65536):
-                            chunks.append(chunk)
-                        self.received.files[argument] = b"".join(chunks)
+                    data = self.context.wrap_socket(conn, server_side=True)
+                    self.received.versions.append(str(data.version()))
+                    chunks = []
+                    while chunk := data.recv(65536):
+                        chunks.append(chunk)
+                    self.received.files[argument] = b"".join(chunks)
+                    if self.close_mode == "clean":
                         with suppress(OSError):  # its close_notify, if the client sent one
                             data.unwrap()
+                        data.close()
+                    elif self.close_mode == "tcp":
+                        data.close()  # no close_notify
+                    else:
+                        self.held.append(data)  # never answered, never closed
                     reply("226 done")
                 case "QUIT":
                     reply("221 bye")
+                    for held in self.held:
+                        held.close()
                     return
                 case _:
                     reply("502 no")
@@ -106,19 +121,25 @@ class FtpsServer:
         self.thread.join(timeout=10)
 
 
-@pytest.fixture
-def ftps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FtpsServer, str]]:
+def _serving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: str) -> tuple[FtpsServer, str]:
     cert, key, sha = _certificate(tmp_path, "printer")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
     context.maximum_version = ssl.TLSVersion.TLSv1_3  # what the client must not rely on
-    server = FtpsServer(context)
+    server = FtpsServer(context, close)
     monkeypatch.setattr(lan_module, "FTPS_PORT", server.port)
+    monkeypatch.setattr(lan_module, "UNWRAP_TIMEOUT", 0.5)
 
     async def loopback(host: str) -> str:  # the test's server is on loopback
         return host
 
     monkeypatch.setattr(lan_module, "lan_address", loopback)
+    return server, sha
+
+
+@pytest.fixture
+def ftps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FtpsServer, str]]:
+    server, sha = _serving(tmp_path, monkeypatch, "clean")
     try:
         yield server, sha
     finally:
@@ -150,3 +171,23 @@ async def test_an_upload_to_another_certificate_is_refused(
     with pytest.raises(lan_module.CertificateMismatchError):
         await printer.upload(io.BytesIO(b"x"), "x.3mf")
     assert server.received.files == {}
+
+
+@pytest.mark.parametrize("close", ["tcp", "silent"])
+async def test_a_printer_that_never_answers_close_notify_still_took_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, close: str
+) -> None:
+    """#4186 review I5: the file is whole once the 226 arrives, however the printer ends
+    the data connection; a close that times out or hits EOF is logged, not a failure."""
+    server, sha = _serving(tmp_path, monkeypatch, close)
+    body = os.urandom(150_000)
+    printer = LanPrinter("127.0.0.1", "01P00A000000001", CODE, sha)
+    try:
+        with caplog.at_level(logging.INFO, logger="scadbuddy.printers.lan"):
+            md5 = await printer.upload(io.BytesIO(body), "scadbuddy-probe.3mf")
+    finally:
+        server.close()
+    assert not server.received.errors
+    assert server.received.files["scadbuddy-probe.3mf"] == body
+    assert md5 == hashlib.md5(body, usedforsecurity=False).hexdigest()
+    assert "close_notify" in caplog.text

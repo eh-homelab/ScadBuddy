@@ -278,19 +278,99 @@ def _lan_printer(client: TestClient, serial: str = SERIAL, name: str = "Garage")
 
 
 @respx.mock
-def test_now_prefers_bambuddy_when_linked(client: TestClient) -> None:
+def test_now_prefers_the_lan_report_when_both_links_are_set(client: TestClient) -> None:
+    """D4 (hot-path plan, 2026-10-18): a fresh LAN report answers, and Bambuddy's
+    status is never read for that printer."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}])
+    )
+    status_read = respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1))
+    )
+    pid = _lan_printer(client)
+    _registry(client).reports.put(pid, {"gcode_state": "IDLE"}, datetime.now(UTC))
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert (card["id"], card["printer_id"]) == (pid, 1)
+    assert (card["path"], card["activity"]) == ("native", "idle")
+    assert "serial" not in card  # I6: the serial stays out of the strip
+    assert not status_read.called
+
+
+@respx.mock
+def test_now_reads_bambuddy_for_a_bambuddy_only_printer(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert (card["printer_id"], card["path"], card["activity"]) == (1, "bambuddy", "printing")
+
+
+@respx.mock
+def test_now_reads_bambuddy_when_the_lan_report_is_stale(client: TestClient) -> None:
     configure(client)
     respx.get(f"{API}/printers/").mock(
         return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}])
     )
     respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
     pid = _lan_printer(client)
-    _registry(client).reports.put(pid, {"gcode_state": "IDLE"}, datetime.now(UTC))
+    _registry(client).reports.put(
+        pid, {"gcode_state": "IDLE"}, datetime.now(UTC) - timedelta(seconds=91)
+    )
 
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
 
-    assert (card["id"], card["serial"], card["printer_id"]) == (pid, SERIAL, 1)
-    assert (card["path"], card["activity"]) == ("bambuddy", "printing")
+    assert (card["id"], card["path"], card["activity"]) == (pid, "bambuddy", "printing")
+
+
+@respx.mock
+def test_now_with_bambuddy_down_still_lists_lan_printers(client: TestClient) -> None:
+    """I1: an unreachable Bambuddy costs only what only it can say."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(503))
+    lan_only = _lan_printer(client, serial="01P00A000000002", name="Attic")
+    _registry(client).reports.put(lan_only, {"gcode_state": "IDLE"}, datetime.now(UTC))
+    both = _lan_printer(client)
+    _registry(client).store.link_bambuddy(both, 1)
+    _registry(client).reports.put(both, {"gcode_state": "RUNNING"}, datetime.now(UTC))
+    bambuddy_only = _registry(client).store.ensure_bambuddy(
+        2, serial="01P00A000000003", name="P2", model=None
+    )
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    cards = {card["id"]: card for card in response.json()["printers"]}
+    assert (cards[lan_only]["path"], cards[lan_only]["activity"]) == ("native", "idle")
+    assert (cards[both]["path"], cards[both]["activity"]) == ("native", "printing")
+    gone = cards[bambuddy_only.id]
+    assert (gone["path"], gone["activity"], gone["printer_id"]) == ("bambuddy", "unknown", 2)
+    assert gone["error"]
+
+
+@respx.mock
+def test_a_merged_printer_keeps_its_id_on_the_strip(client: TestClient) -> None:
+    """I7: once Bambuddy reports the serial, the synthetic row's card becomes the row
+    holding the serial, and nothing keeps the synthetic id."""
+    configure(client)
+    listing = respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[{**printer(1), "serial_number": ""}])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    (synthetic,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    mine = _registry(client).store.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    listing.mock(return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}]))
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert card["id"] == mine.id != synthetic["id"]
+    assert _registry(client).store.get(synthetic["id"]) is None
 
 
 @respx.mock
@@ -308,10 +388,9 @@ def test_every_bambuddy_printer_gets_a_registry_row(client: TestClient) -> None:
     again = client.get("/api/v1/print/printers/now").json()["printers"]
 
     assert [card["id"] for card in first] == [card["id"] for card in again]
-    assert [(card["printer_id"], card["serial"]) for card in first] == [
-        (1, SERIAL),
-        (2, "bambuddy-2"),
-    ]
+    serials = [_registry(client).store.require(card["id"]).serial for card in first]
+    assert [card["printer_id"] for card in first] == [1, 2]
+    assert serials == [SERIAL, "bambuddy-2"]
     assert len(_registry(client).store.list()) == 2
 
 

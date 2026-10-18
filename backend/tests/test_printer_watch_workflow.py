@@ -7,7 +7,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -27,6 +27,7 @@ from scadbuddy.workflows.printer_watch import (
     PrinterWatch,
     ensure_watch,
     ensure_watches,
+    restart_watch,
     stop_watch,
     watch_id,
 )
@@ -59,8 +60,12 @@ class FakeLan:
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = self
 
-        async def reports(printer: LanPrinter) -> AsyncIterator[LanReport]:
+        async def reports(
+            printer: LanPrinter, connected: asyncio.Event | None = None
+        ) -> AsyncIterator[LanReport]:
             fake.connects += 1
+            if connected is not None:
+                connected.set()
             fake.hosts.append(printer.host)
             merged: dict[str, Any] = {}
             for delta in fake.deltas:
@@ -100,7 +105,14 @@ async def serving(client: Client, queue: str, watches: WatchActivities) -> Async
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(Worker(client, task_queue=queue, workflows=[PrinterWatch]))
         await stack.enter_async_context(
-            Worker(client, task_queue=follow_queue(queue), activities=[watches.printer_watch])
+            Worker(
+                client,
+                task_queue=follow_queue(queue),
+                activities=[watches.printer_watch],
+                # A cancel reaches the attempt on its next heartbeat: soon, in a test.
+                max_heartbeat_throttle_interval=timedelta(milliseconds=200),
+                default_heartbeat_throttle_interval=timedelta(milliseconds=200),
+            )
         )
         try:
             yield
@@ -238,3 +250,96 @@ async def test_the_sweep_watches_every_lan_printer(
         assert described.status is not None and described.status.name == "RUNNING"
         with pytest.raises(RPCError):
             await client.get_workflow_handle(watch_id("01P00A000000002")).describe()
+
+
+async def _running(client: Client, serial: str = SERIAL) -> bool:
+    described = await client.get_workflow_handle(watch_id(serial)).describe()
+    return described.status is not None and described.status.name == "RUNNING"
+
+
+async def test_unlink_then_relink_watches_again(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4186 review I4: the re-link's restart reaches the run the unlink's stop is still
+    ending, so it keeps watching instead of returning ``stopped``."""
+    lan = FakeLan([{"mc_percent": 1}])
+    lan.install(monkeypatch)
+    pid = linked(printers)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    async with serving(client, queue, WatchActivities(printers, reports, None)):
+        await ensure_watch(client, queue, pid, SERIAL)
+        await _until(lambda: lan.connects == 1)
+        await stop_watch(client, SERIAL)
+        await restart_watch(client, queue, pid, SERIAL)
+        await _until(lambda: lan.connects == 2)
+        await asyncio.sleep(0.5)
+        assert await _running(client)
+
+
+async def test_a_restart_reads_the_new_link(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed host or code takes effect at once, not after the old connection drops."""
+    lan = FakeLan([{"mc_percent": 1}])
+    lan.install(monkeypatch)
+    pid = linked(printers)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    async with serving(client, queue, WatchActivities(printers, reports, None)):
+        await ensure_watch(client, queue, pid, SERIAL)
+        await _until(lambda: lan.connects == 1)
+        printers.link_lan(
+            pid, LanLink(host="10.0.0.10", access_code="87654321"), cert_sha256="cd" * 32
+        )
+        await restart_watch(client, queue, pid, SERIAL)
+        await _until(lambda: lan.hosts == ["10.0.0.9", "10.0.0.10"])
+        await ensure_watch(client, queue, pid, SERIAL)  # the sweep's: no restart
+        await asyncio.sleep(0.5)
+        assert lan.connects == 2
+
+
+async def test_a_restart_starts_a_watch_that_ended(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lan = FakeLan([])
+    lan.install(monkeypatch)
+    row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    async with serving(client, queue, WatchActivities(printers, reports, None)):
+        await ensure_watch(client, queue, row.id, SERIAL)
+        assert await client.get_workflow_handle(watch_id(SERIAL)).result() == "unlinked"
+        printers.link_lan(
+            row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
+        )
+        await restart_watch(client, queue, row.id, SERIAL)
+        await _until(lambda: lan.connects == 1)
+        assert await _running(client)
+
+
+async def test_the_watch_continues_as_new(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M12: past its bound the run continues as new, and the next run watches on."""
+    lan = FakeLan([{"mc_percent": 1}])
+    lan.install(monkeypatch)
+    pid = linked(printers)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    async with serving(client, queue, WatchActivities(printers, reports, None)):
+        first = await client.start_workflow(
+            PrinterWatch.run, args=[pid, 1.0], id=watch_id(SERIAL), task_queue=queue
+        )
+        await _until(lambda: lan.connects >= 2, timeout=30)
+        described = await client.get_workflow_handle(watch_id(SERIAL)).describe()
+        assert described.run_id != first.result_run_id
+        assert await _running(client)

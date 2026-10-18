@@ -3,9 +3,10 @@
 -- own LAN connection. A Bambuddy printer whose serial is withheld gets the synthetic serial
 -- `bambuddy-<id>`. The access code is an envelope under the KEK (core/secrets.py), its AAD
 -- `printer:<id>:<serial>`; no route returns it. `lan_cert_sha256` pins the printer's
--- self-signed leaf certificate, recorded when the access code was typed.
+-- self-signed leaf certificate, recorded when the access code was typed. `id` is a uuid4,
+-- the printer's identity on every surface (spec 2026-10-16 §6.1).
 CREATE TABLE printers (
-    id text PRIMARY KEY,
+    id uuid PRIMARY KEY,
     serial text NOT NULL UNIQUE,
     name text NOT NULL,
     model text,
@@ -25,7 +26,7 @@ CREATE TABLE printers (
 
 -- The latest merged MQTT report of each LAN printer, written by its `PrinterWatch`.
 CREATE TABLE printer_reports (
-    printer_id text PRIMARY KEY REFERENCES printers (id) ON DELETE CASCADE,
+    printer_id uuid PRIMARY KEY REFERENCES printers (id) ON DELETE CASCADE,
     report jsonb NOT NULL,
     seen_at timestamptz NOT NULL
 );

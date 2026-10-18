@@ -38,6 +38,7 @@ import ftplib
 import hashlib
 import hmac
 import json
+import logging
 import re
 import socket
 import ssl
@@ -57,6 +58,15 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 #: How long an FTPS command or block may wait.
 FTP_TIMEOUT = 30.0
 FTP_BLOCK = 64 * 1024
+#: How long an upload waits for the printer's answer to its ``close_notify``. Some
+#: printers never send one (ha-bambulab skips the unwrap for that reason); the ``226``
+#: reply, not the close, says the file arrived.
+UNWRAP_TIMEOUT = 5.0
+#: MQTT keepalive: paho pings at this interval and drops a link with no answer, so a
+#: printer that vanished is noticed well inside `status.STALE_AFTER` (90 s).
+KEEPALIVE = 15
+
+logger = logging.getLogger(__name__)
 
 
 class CertificateMismatchError(ssl.SSLError):
@@ -216,6 +226,7 @@ class LanPrinter:
             tls_context=pinned_context(self.cert_sha256),
             tls_insecure=True,  # the pin is the check; the certificate names no host
             timeout=10.0,
+            keepalive=KEEPALIVE,
         )
 
     async def probe(self, timeout: float = 10.0) -> LanReport:
@@ -225,12 +236,16 @@ class LanPrinter:
                 return report
         raise ConnectionError("the printer closed the connection before it reported")
 
-    async def reports(self) -> AsyncIterator[LanReport]:
+    async def reports(self, connected: asyncio.Event | None = None) -> AsyncIterator[LanReport]:
         """Each report, merged over the ones before, for as long as the connection
-        lasts. A message that is not a JSON object with a ``print`` object is skipped."""
+        lasts. A message that is not a JSON object with a ``print`` object is skipped.
+        ``connected`` is set once the printer has taken the login and the subscription:
+        the evidence it is there, before it has said anything."""
         merged: dict[str, Any] | None = None
         async with await self._client() as client:
             await client.subscribe(self.report_topic)
+            if connected is not None:
+                connected.set()
             await client.publish(self.request_topic, json.dumps(pushall_command()))
             async for message in client.messages:
                 delta = _print_of(message.payload)
@@ -257,11 +272,36 @@ class LanPrinter:
             ftp.connect(address, FTPS_PORT)
             ftp.login(USERNAME, self._access_code)
             ftp.prot_p()
-            # ftplib's own STOR: it unwraps the data connection's TLS before closing it.
-            ftp.storbinary(f"STOR {remote_name}", data, FTP_BLOCK, md5.update)
+            ftp.voidcmd("TYPE I")
+            conn = ftp.transfercmd(f"STOR {remote_name}")
+            try:
+                while block := data.read(FTP_BLOCK):
+                    conn.sendall(block)
+                    md5.update(block)
+                _close_data(conn)
+            finally:
+                conn.close()
+            ftp.voidresp()  # the 226: the printer has the whole file
         finally:
             ftp.close()
         return md5.hexdigest()
+
+
+def _close_data(conn: socket.socket) -> None:
+    """End the data connection's TLS cleanly, so the printer reads every byte and not
+    a truncation (the >128 KiB fix). A printer that never answers the ``close_notify``,
+    or drops TCP instead, is logged, not a failure: `UNWRAP_TIMEOUT` bounds the wait,
+    and the ``226`` that follows decides (#4186 review I5)."""
+    if not isinstance(conn, ssl.SSLSocket):
+        return
+    conn.settimeout(UNWRAP_TIMEOUT)
+    try:
+        conn.unwrap()
+    except (OSError, ssl.SSLError) as error:
+        logger.info(
+            "the printer did not answer the upload's close_notify; its 226 decides",
+            extra={"error": type(error).__name__},
+        )
 
 
 def _print_of(payload: Any) -> dict[str, Any] | None:

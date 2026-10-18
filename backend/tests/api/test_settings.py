@@ -336,8 +336,8 @@ def test_no_settings_route_returns_a_printers_serial_or_address(client: TestClie
         "/api/v1/settings",
         json={"bambuddy_url": "https://bambuddy.test/", "bambuddy_api_key": "s3cret"},
     )
-    rows = recording("printers.json")
-    assert rows[0]["serial_number"] and rows[0]["ip_address"]
+    rows = [{**recording("printers.json")[0], "serial_number": "01P00A000000001"}]
+    assert rows[0]["ip_address"]
     respx.get(PRINTERS_URL).mock(return_value=httpx.Response(200, json=rows))
     respx.get("https://bambuddy.test/api/v1/library/folders").mock(
         return_value=httpx.Response(200, json=[])

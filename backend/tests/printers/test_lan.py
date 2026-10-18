@@ -4,6 +4,7 @@ wrapping and the certificate pin."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import socket
@@ -271,6 +272,8 @@ async def test_reports_merge_and_skip_what_is_not_a_print_report(
     [client] = fake_mqtt.instances
     assert (client.host, client.port) == ("10.0.0.9", 8883)
     assert client.kwargs["username"] == "bblp" and client.kwargs["password"] == "12345678"
+    # #4186 review I3: paho proves the link itself, well inside the 90 s offline window.
+    assert client.kwargs["keepalive"] == 15
     assert isinstance(client.kwargs["tls_context"], ssl.SSLContext)
     assert client.subscribed == ["device/01P00A000000001/report"]
     assert client.published == [
@@ -293,3 +296,15 @@ async def test_probe_without_a_report_fails(fake_mqtt: type[FakeMqtt]) -> None:
     printer = LanPrinter("10.0.0.9", "01P00A000000001", "12345678", "ab" * 32)
     with pytest.raises(ConnectionError):
         await printer.probe()
+
+
+async def test_connected_is_set_once_subscribed(fake_mqtt: type[FakeMqtt]) -> None:
+    """#4186 review I3: the watch takes ``connected`` as proof the printer is there."""
+    PAYLOADS[:] = []
+    printer = LanPrinter("10.0.0.9", "01P00A000000001", "12345678", "ab" * 32)
+    seen: list[bool] = []
+    connected = asyncio.Event()
+    async for _ in printer.reports(connected=connected):
+        pass
+    seen.append(connected.is_set())
+    assert seen == [True]

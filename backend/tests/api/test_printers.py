@@ -4,6 +4,7 @@ Bambuddy has to link. The LAN access code never comes back."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,6 +42,9 @@ class RecordedWatches:
 
     async def ensure(self, printer_id: str, serial: str) -> None:
         self.calls.append(("ensure", printer_id, serial))
+
+    async def restart(self, printer_id: str, serial: str) -> None:
+        self.calls.append(("restart", printer_id, serial))
 
     async def stop(self, printer_id: str, serial: str) -> None:
         self.calls.append(("stop", printer_id, serial))
@@ -174,7 +178,9 @@ def test_discover_marks_linked_and_unlinkable(client: TestClient) -> None:
     assert set(cards) == {1, 2, 3}
     assert cards[1]["linked_to"] == row["id"] and cards[1]["serial"] == SERIAL
     assert cards[2]["serial"] is None and cards[2]["linkable"] is False
-    assert cards[2]["reason"] == "Bambuddy did not report a serial"
+    assert cards[2]["reason"] == (
+        "Bambuddy did not report a serial: link it from a printer you created by serial"
+    )
     assert cards[3] == {
         "bambuddy_printer_id": 3,
         "name": "P3",
@@ -225,7 +231,7 @@ def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatche
         assert CODE not in read.text
     unlinked = client.delete(f"/api/v1/printers/{pid}/lan")
     assert unlinked.status_code == 200 and unlinked.json()["has_access_code"] is False
-    assert watches.calls == [("ensure", pid, SERIAL), ("stop", pid, SERIAL)]
+    assert watches.calls == [("restart", pid, SERIAL), ("stop", pid, SERIAL)]
 
 
 GENERIC = "the printer did not answer at that address"
@@ -329,3 +335,62 @@ def test_every_registry_write_announces_the_printer(client: TestClient) -> None:
     client.patch(f"/api/v1/printers/{pid}", json={"name": "B"})
     client.delete(f"/api/v1/printers/{pid}")
     assert [(e.kind, e.printer_id) for e in seen] == [("printer.changed", pid)] * 3
+
+
+# ── #4186 review ─────────────────────────────────────────────────────────────────────
+
+
+@respx.mock
+def test_a_lan_link_on_a_withheld_serial_is_422_before_any_dial(client: TestClient) -> None:
+    """I8: the row's serial names the MQTT topics; a synthetic one is refused before the
+    access code goes anywhere."""
+    configure(client)
+    printers = registry(client)
+    printers.store.kek = KEK
+    calls: list[tuple[str, str, str]] = []
+    printers.probe = _probe_ok(calls)
+    row = printers.store.ensure_bambuddy(7, serial=None, name="H2C", model=None)
+
+    response = client.put(
+        f"/api/v1/printers/{row.id}/lan", json={"host": "10.0.0.9", "access_code": CODE}
+    )
+
+    assert response.status_code == 422, response.text
+    assert "serial is not known" in response.json()["detail"]
+    assert calls == []
+
+
+@respx.mock
+def test_a_bambuddy_linked_printer_is_not_deleted(client: TestClient) -> None:
+    """M14: the next /printers/now would make it again under a new id."""
+    configure(client)
+    bambuddy_printers(bambuddy_printer(1, SERIAL))
+    row = create(client)
+    client.put(f"/api/v1/printers/{row['id']}/bambuddy", json={"bambuddy_printer_id": 1})
+
+    refused = client.delete(f"/api/v1/printers/{row['id']}")
+
+    assert refused.status_code == 409
+    assert "unlink" in refused.json()["detail"]
+    client.delete(f"/api/v1/printers/{row['id']}/bambuddy")
+    assert client.delete(f"/api/v1/printers/{row['id']}").status_code == 204
+
+
+async def test_a_watch_call_never_hangs_a_route(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M5: a lazy Temporal client that cannot connect costs the route a bound, not
+    minutes; the link is made and the sweep starts the watch."""
+    from scadbuddy.printers import component as component_module
+
+    async def hangs(*args: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(component_module, "restart_watch", hangs)
+    monkeypatch.setattr(component_module, "stop_watch", hangs)
+    monkeypatch.setattr(component_module, "WATCH_RPC_BOUND", 0.1)
+    printers = registry(client)
+    watches = component_module.Watches(printers.core)
+    async with asyncio.timeout(5):
+        await watches.restart("p", SERIAL)
+        await watches.stop("p", SERIAL)

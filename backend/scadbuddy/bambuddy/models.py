@@ -8,6 +8,7 @@ Bambuddy's own OpenAPI, not a guess.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -25,6 +26,10 @@ SliceStatus = Literal["pending", "running", "completed", "failed"]
 #: ``bed_levelling``, ``flow_cali`` and ``nozzle_offset_cali`` on the queue route.
 CalibrationMode = Literal["off", "on", "auto"]
 PreheatOverride = Literal["inherit", "on", "off"]
+
+
+#: A Bambu printer serial, as the registry stores one (`printers.models.PrinterCreate`).
+_SERIAL = re.compile(r"[0-9A-Z]{8,32}")
 
 
 class BambuddyModel(BaseModel):
@@ -136,6 +141,17 @@ class Printer(BambuddyModel):
             return None
         text = str(value).strip()
         return text or None
+
+    @field_validator("serial_number")
+    @classmethod
+    def _a_serial_or_withheld(cls, value: str | None) -> str | None:
+        """A serial names the printer's MQTT topics (``device/<serial>/report``), so only
+        a Bambu serial's shape is one (upper-cased); anything else counts as withheld,
+        never a topic with ``+``, ``#`` or ``/`` in it (#4186 review M6)."""
+        if value is None:
+            return None
+        upper = value.upper()
+        return upper if _SERIAL.fullmatch(upper) else None
 
 
 class Archive(BambuddyModel):

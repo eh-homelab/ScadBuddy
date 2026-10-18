@@ -4,14 +4,18 @@ only its own row opens it."""
 
 from __future__ import annotations
 
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
 from scadbuddy.core.secrets import SealError
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
+from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import (
+    PRINTER_REFERENCES,
     BambuddyLinkTakenError,
     KekMissingError,
     NoAccessCodeError,
@@ -21,6 +25,7 @@ from scadbuddy.printers.store import (
     SerialUnknownError,
 )
 from tests.conftest import PgPool
+from tests.printers.conftest import RecordingBus
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -209,3 +214,99 @@ def test_delete(printers: PrinterStore) -> None:
     assert printers.get(row.id) is None
     with pytest.raises(PrinterNotFoundError):
         printers.delete(row.id)
+
+
+# ── #4186 review ─────────────────────────────────────────────────────────────────────
+
+
+def test_ids_are_uuids_and_a_malformed_id_is_not_found(printers: PrinterStore) -> None:
+    """M1: `printers.id` is a uuid (spec §6.1)."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    assert str(uuid.UUID(row.id)) == row.id
+    assert printers.get("nope") is None and printers.resolve_bambuddy_id("nope") is None
+    with pytest.raises(PrinterNotFoundError):
+        printers.delete("nope")
+
+
+def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
+    """I7: every foreign key to `printers.id` is in `PRINTER_REFERENCES`, so a merge
+    repoints it. A table that names a printer without one (#4180's `tray_spool_links`,
+    Task 8's activity attribution) must add itself too."""
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT cl.relname AS t, a.attname AS c FROM pg_constraint co"
+            " JOIN pg_class cl ON cl.oid = co.conrelid"
+            " JOIN pg_attribute a ON a.attrelid = co.conrelid AND a.attnum = ANY(co.conkey)"
+            " WHERE co.contype = 'f' AND co.confrelid = 'printers'::regclass"
+        ).fetchall()
+    fks = {(row["t"], row["c"]) for row in rows}
+    assert fks
+    assert fks <= {(ref.table, ref.column) for ref in PRINTER_REFERENCES}
+
+
+def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
+    printers: PrinterStore, pg_pool: PgPool, bus: RecordingBus
+) -> None:
+    """I7: the synthetic row's dependents move to the row that keeps the printer, and
+    both ids are announced so a page drops the gone one."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    reports = PrinterReportStore(pg_pool)
+    with pg_pool.connection() as conn:  # a synthetic row takes no LAN link; a report is
+        conn.execute(  # the dependent at hand, written as a merge would find it
+            "INSERT INTO printer_reports (printer_id, report, seen_at) VALUES (%s, '{}', now())",
+            (synthetic.id,),
+        )
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    bus.events.clear()
+
+    kept = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    assert kept.id == mine.id and kept.bambuddy_printer_id == 4
+    assert printers.get(synthetic.id) is None
+    assert reports.get(mine.id) is not None and reports.get(synthetic.id) is None
+    assert set(bus.changed()) == {synthetic.id, mine.id}
+
+
+def test_link_bambuddy_takeover_merges_and_announces(
+    printers: PrinterStore, bus: RecordingBus
+) -> None:
+    synthetic = printers.ensure_bambuddy(3, serial=None, name="H2C", model=None)
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    bus.events.clear()
+    printers.link_bambuddy(mine.id, 3)
+    assert set(bus.changed()) == {synthetic.id, mine.id}
+
+
+def test_a_re_added_printer_moves_the_link_when_the_old_one_is_gone(
+    printers: PrinterStore,
+) -> None:
+    """M7: Bambuddy lists the printer under a new id only; its row moves to it."""
+    first = printers.ensure_bambuddy(1, serial=SERIAL, name="Old", model="H2C")
+    moved = printers.ensure_bambuddy(2, serial=SERIAL, name="New", model="H2C", listed={2})
+    assert moved.id == first.id and moved.bambuddy_printer_id == 2
+    assert [row.id for row in printers.list()] == [first.id]
+
+
+def test_a_report_after_unlink_is_not_written(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """M2: an attempt still running after the unlink writes nothing."""
+    pid = printers_with_kek.create(PrinterCreate(serial=SERIAL, name="A")).id
+    printers_with_kek.link_lan(pid, LanLink(host="10.0.0.9", access_code=CODE), cert_sha256=CERT)
+    reports = PrinterReportStore(pg_pool)
+    reports.put(pid, {"mc_percent": 1}, datetime.now(UTC))
+    printers_with_kek.unlink_lan(pid)
+    reports.put(pid, {"mc_percent": 2}, datetime.now(UTC))
+    assert reports.get(pid) is None
+
+
+def test_ensure_takes_no_lock_when_nothing_changes(printers: PrinterStore, pg_pool: PgPool) -> None:
+    """M13: a strip read for a known printer waits on no writer."""
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model=None)
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))")
+        with ThreadPoolExecutor(1) as pool:
+            found = pool.submit(
+                printers.ensure_bambuddy, 4, serial=SERIAL, name="H2C", model=None
+            ).result(timeout=5)
+    assert found.bambuddy_printer_id == 4

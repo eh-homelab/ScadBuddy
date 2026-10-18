@@ -8,7 +8,6 @@ import type { PrinterNow, PrintersNow } from '../../api/types'
 export const PRINTERS_NOW: PrinterNow[] = [
   {
     id: '00000000-0000-4000-8000-000000000001',
-    serial: '01P00A000000001',
     path: 'bambuddy',
     printer_id: 1,
     name: '3DP-31B-598',
@@ -31,7 +30,6 @@ export const PRINTERS_NOW: PrinterNow[] = [
   },
   {
     id: '00000000-0000-4000-8000-000000000002',
-    serial: '01P00A000000002',
     path: 'bambuddy',
     printer_id: 2,
     name: 'Workshop',
@@ -51,7 +49,6 @@ export const PRINTERS_NOW: PrinterNow[] = [
   },
   {
     id: '00000000-0000-4000-8000-000000000003',
-    serial: '01P00A000000003',
     path: 'bambuddy',
     printer_id: 3,
     name: 'Spare',

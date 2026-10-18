@@ -11,9 +11,11 @@ from tests.bambuddy.conftest import recording
 
 def test_printer_parses_serial_and_address() -> None:
     rows = recording("printers.json")
-    printer = Printer.model_validate(rows[0])
-    assert printer.serial_number == "REDACTED-SERIAL"
+    printer = Printer.model_validate({**rows[0], "serial_number": "01P00A000000001"})
+    assert printer.serial_number == "01P00A000000001"
     assert printer.ip_address == rows[0]["ip_address"]
+    # The recording's redaction (``REDACTED-SERIAL``) is no serial (M6): withheld.
+    assert Printer.model_validate(rows[0]).serial_number is None
 
 
 def test_one_printer_route_parses_the_same_fields() -> None:
@@ -38,7 +40,9 @@ def test_a_serial_never_reaches_the_repr() -> None:
 def test_the_serial_and_address_are_never_serialised() -> None:
     """Security review of Task 1: read server-side only. Every response model that
     embeds a `Printer` dumps it without them."""
-    printer = Printer.model_validate(recording("printers.json")[0])
+    printer = Printer.model_validate(
+        {**recording("printers.json")[0], "serial_number": "01P00A000000001"}
+    )
     assert printer.serial_number and printer.ip_address
     assert "serial_number" not in printer.model_dump()
     assert "ip_address" not in printer.model_dump()
@@ -48,4 +52,19 @@ def test_the_serial_and_address_are_never_serialised() -> None:
         ChoicesView.model_construct(printers=[printer]),
     ):
         text = view.model_dump_json()
-        assert "REDACTED-SERIAL" not in text and "10.0.0.1" not in text
+        assert "01P00A000000001" not in text and "10.0.0.1" not in text
+
+
+def test_a_serial_is_upper_cased_and_anything_else_is_withheld() -> None:
+    """#4186 M6: a serial names the MQTT topics, so only `[0-9A-Z]{8,32}` is one."""
+    assert (
+        Printer.model_validate(
+            {"id": 1, "name": "x", "serial_number": " 01p00a000000001 "}
+        ).serial_number
+        == "01P00A000000001"
+    )
+    for bad in ("01P00A/#", "01P+0000000", "short", "x" * 33, "REDACTED-SERIAL"):
+        assert (
+            Printer.model_validate({"id": 1, "name": "x", "serial_number": bad}).serial_number
+            is None
+        )

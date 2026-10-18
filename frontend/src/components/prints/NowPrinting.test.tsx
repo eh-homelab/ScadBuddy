@@ -147,7 +147,6 @@ describe('NowPrinting (#977)', () => {
     const lan: PrinterNow = {
       ...(PRINTERS_NOW[2] as PrinterNow),
       id: '00000000-0000-4000-8000-0000000000aa',
-      serial: '01P00A0000000AA',
       path: 'native',
       printer_id: null,
       name: 'Garage',

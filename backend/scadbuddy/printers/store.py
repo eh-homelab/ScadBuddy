@@ -9,17 +9,27 @@ and no exception here carries the code.
 Every write that changes which row holds a serial or a Bambuddy id runs under one
 transaction-scoped advisory lock, so two concurrent `ensure_bambuddy` calls (two
 ``/printers/now`` reads) never race into a unique violation.
+
+A row's id is the printer's identity on every surface (spec §6.1), so a row is never
+just deleted when another row turns out to be the same printer (a synthetic row whose
+serial is learned, a Bambuddy link taken over): `_merge` moves everything that names the
+gone row onto the kept one in the same transaction. Its list is `PRINTER_REFERENCES`;
+a table that names a printer adds itself there (`tests/printers/test_store.py` checks
+that every foreign key to ``printers`` is listed). #4180's ``tray_spool_links`` and Task
+8's activity attribution join it as they land.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
 from scadbuddy.printers.models import (
     LanLink,
@@ -84,22 +94,54 @@ class SerialUnknownError(ValueError):
         self.printer_id = printer_id
 
 
+@dataclass(frozen=True)
+class PrinterReference:
+    """A column naming a printer by its registry id. ``unique``: one row per printer
+    (the gone row's is dropped when the kept row has one)."""
+
+    table: str
+    column: str
+    unique: bool = False
+
+
+#: Everything a merge repoints (I7 of the #4186 review). The extension point for every
+#: later table keyed by ``printers.id``.
+PRINTER_REFERENCES: tuple[PrinterReference, ...] = (
+    PrinterReference("printer_reports", "printer_id", unique=True),
+)
+
+
 def access_code_aad(printer_id: str, serial: str) -> str:
     return f"printer:{printer_id}:{serial}"
 
 
+def printer_uuid(printer_id: str) -> uuid.UUID | None:
+    """``printer_id`` as the column's uuid; ``None`` for anything that is not one, which
+    then names no printer."""
+    try:
+        return uuid.UUID(printer_id)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _row(data: dict[str, Any]) -> PrinterRow:
-    return PrinterRow.model_validate(data)
+    return PrinterRow.model_validate({**data, "id": str(data["id"])})
 
 
 class PrinterStore:
-    def __init__(self, pool: Pool, kek: Kek | None) -> None:
+    def __init__(self, pool: Pool, kek: Kek | None, *, events: EventBus | None = None) -> None:
         self.pool = pool
         self.kek = kek
+        #: Where a merge announces the two rows it touched (``printer.changed``).
+        self.events = events
 
     # ── reads ─────────────────────────────────────────────────────────────────────
 
     def _one(self, conn: Connection[DictRow], where: str, value: object) -> PrinterRow | None:
+        if where == "id":
+            value = printer_uuid(str(value))
+            if value is None:
+                return None
         found = conn.execute(f"SELECT {_COLUMNS} FROM printers WHERE {where} = %s", (value,))
         data = found.fetchone()
         return None if data is None else _row(data)
@@ -174,13 +216,36 @@ class PrinterStore:
     def _update(
         self, conn: Connection[DictRow], printer_id: str, sets: str, args: tuple[Any, ...]
     ) -> PrinterRow:
+        key = printer_uuid(printer_id)
+        if key is None:
+            raise PrinterNotFoundError(printer_id)
         data = conn.execute(
             f"UPDATE printers SET {sets}, updated_at = now() WHERE id = %s RETURNING {_COLUMNS}",
-            (*args, printer_id),
+            (*args, key),
         ).fetchone()
         if data is None:
             raise PrinterNotFoundError(printer_id)
         return _row(data)
+
+    def _merge(self, conn: Connection[DictRow], gone: str, kept: str) -> None:
+        """Make ``kept`` the printer ``gone`` was: every `PRINTER_REFERENCES` row naming
+        ``gone`` names ``kept`` (a unique one is dropped when ``kept`` has its own), then
+        ``gone`` is deleted. In the caller's transaction, under its lock."""
+        for ref in PRINTER_REFERENCES:
+            if ref.unique:
+                conn.execute(
+                    f"DELETE FROM {ref.table} WHERE {ref.column} = %s AND EXISTS"
+                    f" (SELECT 1 FROM {ref.table} WHERE {ref.column} = %s)",
+                    (gone, kept),
+                )
+            conn.execute(
+                f"UPDATE {ref.table} SET {ref.column} = %s WHERE {ref.column} = %s", (kept, gone)
+            )
+        conn.execute("DELETE FROM printers WHERE id = %s", (gone,))
+
+    def _announce(self, *printer_ids: str) -> None:
+        for printer_id in printer_ids:
+            emit(self.events, PrinterEvent(kind="printer.changed", printer_id=printer_id))
 
     def patch(self, printer_id: str, body: PrinterPatch) -> PrinterRow:
         with self.pool.connection() as conn:
@@ -197,7 +262,8 @@ class PrinterStore:
     def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
         """Link ``printer_id`` to a Bambuddy printer. A row `ensure_bambuddy` made for
         that Bambuddy printer while its serial was withheld (a synthetic serial, no LAN
-        link) gives the link up and is removed; any other holder refuses."""
+        link) is merged into this one (`_merge`); any other holder refuses."""
+        merged: str | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
             row = self._one(conn, "id", printer_id)
@@ -211,10 +277,12 @@ class PrinterStore:
             if holder is not None:
                 if not (is_synthetic_serial(holder.serial) and holder.lan_host is None):
                     raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
-                conn.execute("DELETE FROM printers WHERE id = %s", (holder.id,))
-            return self._update(
-                conn, printer_id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
-            )
+                self._merge(conn, holder.id, row.id)
+                merged = holder.id
+            linked = self._update(conn, row.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,))
+        if merged is not None:
+            self._announce(merged, linked.id)
+        return linked
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
         with self.pool.connection() as conn:
@@ -246,7 +314,10 @@ class PrinterStore:
 
     def unlink_lan(self, printer_id: str) -> PrinterRow:
         with self.pool.connection() as conn, conn.transaction():
-            conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (printer_id,))
+            row = self._one(conn, "id", printer_id)
+            if row is None:
+                raise PrinterNotFoundError(printer_id)
+            conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (row.id,))
             return self._update(
                 conn,
                 printer_id,
@@ -260,11 +331,14 @@ class PrinterStore:
         sealed value is not this row's (or another key sealed it)."""
         if self.kek is None:
             raise KekMissingError()
+        key = printer_uuid(printer_id)
+        if key is None:
+            raise PrinterNotFoundError(printer_id)
         with self.pool.connection() as conn:
             data = conn.execute(
                 "SELECT id, serial, access_code_sealed, access_code_dek_sealed,"
                 " access_code_kek_id FROM printers WHERE id = %s",
-                (printer_id,),
+                (key,),
             ).fetchone()
         if data is None:
             raise PrinterNotFoundError(printer_id)
@@ -275,69 +349,108 @@ class PrinterStore:
             dek_sealed=bytes(data["access_code_dek_sealed"]),
             kek_id=data["access_code_kek_id"],
         )
-        return open_secret(self.kek, envelope, access_code_aad(data["id"], data["serial"]))
+        return open_secret(self.kek, envelope, access_code_aad(str(data["id"]), data["serial"]))
 
     def ensure_bambuddy(
-        self, bambuddy_printer_id: int, *, serial: str | None, name: str, model: str | None
+        self,
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None = None,
     ) -> PrinterRow:
         """The row for a Bambuddy printer, made when there is none: the row linking that
         id; else the row holding ``serial`` (which it links, if that row has no Bambuddy
-        link); else a new row, ``preferred_path`` ``bambuddy``. Without a serial (Bambuddy
-        withheld it) the new row's serial is `synthetic_serial`, so an unlinked Bambuddy
-        printer still gets exactly one row; once the serial is known a synthetic row
-        adopts it, or gives way to the row that already holds it."""
+        link, or links to one Bambuddy no longer lists: a re-added printer); else a new
+        row, ``preferred_path`` ``bambuddy``. Without a serial (Bambuddy withheld it) the
+        new row's serial is `synthetic_serial`, so an unlinked Bambuddy printer still
+        gets exactly one row; once the serial is known a synthetic row adopts it, or is
+        merged into the row that already holds it (`_merge`).
+
+        ``listed`` is every id Bambuddy lists now; ``None`` treats every link as live.
+        The known case (a row links this id and has nothing to adopt) is read without
+        the lock, so a strip read waits on no writer."""
+        with self.pool.connection() as conn:
+            linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+        if linked is not None and not self._adopts(linked, serial):
+            return linked
+        merged: tuple[str, str] | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
-            linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
-            if linked is not None:
-                if (
-                    serial is None
-                    or linked.serial == serial
-                    or not is_synthetic_serial(linked.serial)
-                ):
-                    return linked
-                holder = self._one(conn, "serial", serial)
-                if holder is None:
-                    return self._update(conn, linked.id, "serial = %s", (serial,))
-                if holder.bambuddy_printer_id is None:
-                    conn.execute("DELETE FROM printers WHERE id = %s", (linked.id,))
-                    return self._update(
-                        conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
-                    )
-                return linked
-            if serial is not None:
-                holder = self._one(conn, "serial", serial)
-                if holder is not None and holder.bambuddy_printer_id is None:
-                    return self._update(
-                        conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
-                    )
-                if holder is None:
-                    return self._insert(
-                        conn,
-                        serial=serial,
-                        name=name,
-                        model=model,
-                        preferred_path="bambuddy",
-                        bambuddy_printer_id=bambuddy_printer_id,
-                    )
-                # A re-added printer: the serial's row is linked to another Bambuddy
-                # printer. This one gets a row of its own, as one with no serial would.
-            own = self._one(conn, "serial", synthetic_serial(bambuddy_printer_id))
-            if own is not None:  # its link was taken off; it is still this printer's
-                return self._update(
-                    conn, own.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
-                )
-            return self._insert(
-                conn,
-                serial=synthetic_serial(bambuddy_printer_id),
-                name=name,
-                model=model,
-                preferred_path="bambuddy",
-                bambuddy_printer_id=bambuddy_printer_id,
+            row, merged = self._ensure_locked(
+                conn, bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
             )
+        if merged is not None:
+            self._announce(*merged)
+        return row
+
+    @staticmethod
+    def _adopts(linked: PrinterRow, serial: str | None) -> bool:
+        """Whether the row linking a Bambuddy printer has its serial still to learn."""
+        return serial is not None and linked.serial != serial and is_synthetic_serial(linked.serial)
+
+    def _ensure_locked(
+        self,
+        conn: Connection[DictRow],
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None,
+    ) -> tuple[PrinterRow, tuple[str, str] | None]:
+        def live(other: int | None) -> bool:
+            return other is not None and (listed is None or other in listed)
+
+        linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+        if linked is not None and not self._adopts(linked, serial):
+            return linked, None
+        if serial is not None:
+            holder = self._one(conn, "serial", serial)
+            if holder is None and linked is not None:  # the synthetic row learns its serial
+                return self._update(conn, linked.id, "serial = %s", (serial,)), None
+            if holder is not None and not live(holder.bambuddy_printer_id):
+                merged = None
+                if linked is not None:  # the synthetic row made meanwhile is this printer
+                    self._merge(conn, linked.id, holder.id)
+                    merged = (linked.id, holder.id)
+                row = self._update(
+                    conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
+                )
+                return row, merged
+            if linked is not None:  # the serial's row is another live Bambuddy printer's
+                return linked, None
+            if holder is None:
+                return self._insert(
+                    conn,
+                    serial=serial,
+                    name=name,
+                    model=model,
+                    preferred_path="bambuddy",
+                    bambuddy_printer_id=bambuddy_printer_id,
+                ), None
+            # Two live Bambuddy printers report one serial: this one gets a row of its
+            # own, as one with no serial would (`link_bambuddy` refuses the pair, 409).
+        own = self._one(conn, "serial", synthetic_serial(bambuddy_printer_id))
+        if own is not None:  # its link was taken off; it is still this printer's
+            return self._update(
+                conn, own.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
+            ), None
+        return self._insert(
+            conn,
+            serial=synthetic_serial(bambuddy_printer_id),
+            name=name,
+            model=model,
+            preferred_path="bambuddy",
+            bambuddy_printer_id=bambuddy_printer_id,
+        ), None
 
     def delete(self, printer_id: str) -> None:
+        key = printer_uuid(printer_id)
+        if key is None:
+            raise PrinterNotFoundError(printer_id)
         with self.pool.connection() as conn:
-            gone = conn.execute("DELETE FROM printers WHERE id = %s", (printer_id,))
+            gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
             if gone.rowcount == 0:
                 raise PrinterNotFoundError(printer_id)
