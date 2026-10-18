@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from itertools import count
 
@@ -130,3 +132,43 @@ def test_filing_and_keys(rows: NativeLibraryStore) -> None:
     assert a.blob_key in rows.live_file_keys()
     assert rows.files_by_ids([a.id]) == [] and rows.filed_for_output("o1") == []
     assert len(rows.files(None, every_folder=True)) == 1
+
+
+def _wait_for_a_lock_wait(pool: PgPool) -> None:
+    """Until some backend of this database waits on a lock (the delete, here)."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()
+        if row is not None and row["n"] > 0:
+            return
+        time.sleep(0.05)
+    raise AssertionError("the delete never waited on a lock")
+
+
+def test_a_move_inside_a_subtree_being_deleted_does_not_deadlock(
+    rows: NativeLibraryStore, pg_pool: PgPool
+) -> None:
+    # The move locks the file's row, then needs KEY SHARE on its target folder; the
+    # delete must take the file rows before the folder rows, or each waits on the other.
+    a = rows.create_folder("a", None)
+    b = rows.create_folder("b", a.id)
+    c = rows.create_folder("c", a.id)
+    f = stored(rows, folder_id=b.id)
+    with ThreadPoolExecutor(1) as pool:
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT id FROM library_files WHERE id = %s FOR UPDATE", (f.id,))
+            deleting = pool.submit(rows.delete_folder_tree, a.id)
+            _wait_for_a_lock_wait(pg_pool)
+            conn.execute(
+                "UPDATE library_files SET folder_id = %s, updated_at = now() WHERE id = %s",
+                (c.id, f.id),
+            )
+        done = deleting.result(timeout=30)
+    assert done is not None
+    trashed, folders = done
+    assert [t.id for t in trashed] == [f.id] and set(folders) == {a.id, b.id, c.id}
+    assert rows.files(None) == [] and rows.file(f.id, trashed=True) is not None

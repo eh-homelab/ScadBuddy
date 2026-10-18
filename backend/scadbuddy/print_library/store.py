@@ -280,10 +280,13 @@ class NativeLibraryStore:
         """Trash every live file in the folder and its subfolders, then delete the
         folders deepest first, in one transaction; ``None`` when the folder is gone.
 
-        The subtree's rows are locked ``FOR UPDATE`` before the files are read, and an
-        insert or move into a folder takes ``FOR KEY SHARE`` on it for its FK check, so
-        a file arriving mid-delete waits and then fails its FK: no live file is left in
-        a deleted folder for ``ON DELETE SET NULL`` to drop at the top level."""
+        The subtree's folder rows are locked ``FOR UPDATE`` before the files are
+        trashed, and an insert or move into a folder takes ``FOR KEY SHARE`` on it for its
+        FK check, so a file arriving mid-delete waits and then fails its FK: no live file
+        is left in a deleted folder for ``ON DELETE SET NULL`` to drop at the top level.
+        The subtree's live file rows are locked first, by id, as a move takes them (its
+        row, then its target folder's KEY SHARE): taking the folders first would deadlock
+        with a move between two folders of the subtree."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(_FOLDER_TREE_LOCK)
             tree = conn.execute(
@@ -297,6 +300,11 @@ class NativeLibraryStore:
             if not tree:
                 return None
             order = [int(r["id"]) for r in tree]
+            conn.execute(
+                "SELECT id FROM library_files WHERE folder_id = ANY(%s) AND deleted_at IS NULL"
+                " ORDER BY id FOR UPDATE",
+                (order,),
+            )
             conn.execute(
                 "SELECT id FROM library_folders WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
                 (order,),
