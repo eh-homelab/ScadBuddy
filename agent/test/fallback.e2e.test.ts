@@ -241,6 +241,8 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
       ['b', 'ok', undefined],
     ])
     const cooled = reports[0]!.outcome
+    // The canary for the bundled CLI's limit wording (2.1.296): if an SDK bump fails
+    // here, rateLimitResetFromText (and agent-durable's rate_limit_reset) need the new text.
     expect(cooled).toMatchObject({ reason: expect.stringMatching(/^You've hit your session limit · resets \d{1,2}(:\d{2})?[ap]m \(UTC\)$/) })
     expect(cooled.class === 'rate_limited' ? cooled.until.getTime() : 0).toBe(reset)
   }, 60_000)
