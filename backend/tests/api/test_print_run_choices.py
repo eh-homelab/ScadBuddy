@@ -368,7 +368,7 @@ def test_the_check_reads_every_spools_presets_together(client: TestClient, model
         if request.url.path.endswith("/spools/9/filament-presets"):
             asked.set()
         else:
-            await asyncio.wait_for(asked.wait(), timeout=5)
+            await asyncio.wait_for(asked.wait(), timeout=1)
         return httpx.Response(200, json=[])
 
     respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
@@ -378,6 +378,38 @@ def test_the_check_reads_every_spools_presets_together(client: TestClient, model
     check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
 
     assert check.status_code == 200, check.text
+
+
+@respx.mock
+def test_the_spools_read_together_are_capped(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4198 review: a body's plan is not capped, so no more than
+    ``SPOOL_PRESET_READS`` spools' presets are read at once."""
+    monkeypatch.setattr(print_run, "SPOOL_PRESET_READS", 1)
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    open_reads = 0
+    most = 0
+
+    async def presets(request: httpx.Request) -> httpx.Response:
+        nonlocal open_reads, most
+        open_reads += 1
+        most = max(most, open_reads)
+        await asyncio.sleep(0.05)
+        open_reads -= 1
+        return httpx.Response(200, json=[])
+
+    route = respx.route(
+        method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets"
+    ).mock(side_effect=presets)
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert route.call_count >= 2
+    assert most == 1
 
 
 @respx.mock

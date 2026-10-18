@@ -84,6 +84,7 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
     Spool,
+    SpoolFilamentPreset,
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
@@ -164,6 +165,9 @@ RACK_USAGE_FALLBACK = "rack usage unreadable; ranked without it"
 RACK_FALLBACKS = frozenset({RACK_PICK_FALLBACK, RACK_PREVIEW_FALLBACK, RACK_USAGE_FALLBACK})
 
 QUEUE_PATH = "/queue"
+
+#: The most spools whose presets a check or a run reads at once (#4196).
+SPOOL_PRESET_READS = 4
 
 
 class PrintRunRequest(BaseModel):
@@ -696,9 +700,16 @@ async def resolve_plates(
         if spool_id > 0
     ]
     # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
-    # Unbounded, because a plan's slots bound it: a few reads, never a burst Bambuddy must queue.
+    # A body's plan is not capped, only matched to the inventory, so at most
+    # SPOOL_PRESET_READS at a time: Bambuddy is one process.
+    gate = asyncio.Semaphore(SPOOL_PRESET_READS)
+
+    async def presets(spool_id: int) -> list[SpoolFilamentPreset]:
+        async with gate:
+            return await client.spool_filament_presets(spool_id)
+
     read = await asyncio.gather(
-        *(client.spool_filament_presets(spool_id) for spool_id in spool_ids), return_exceptions=True
+        *(presets(spool_id) for spool_id in spool_ids), return_exceptions=True
     )
     spool_presets = {
         spool_id: settled(result) for spool_id, result in zip(spool_ids, read, strict=True)
