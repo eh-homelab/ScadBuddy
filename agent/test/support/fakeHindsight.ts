@@ -7,7 +7,8 @@ import type { AddressInfo } from 'node:net'
 //   POST /v1/default/banks/<bank>/memories/recall
 //   POST /v1/default/banks/<bank>/memories
 //
-// and records every request. `respond` decides each answer; by default recall
+// and records every request. `respond` decides each answer (a Promise of one answers
+// when it settles, for a test that releases the answer itself); by default recall
 // returns `memories` and retain accepts.
 
 export type HindsightRequest = {
@@ -28,7 +29,7 @@ export type FakeHindsight = {
   recalls(): HindsightRequest[]
   retains(): HindsightRequest[]
   memories: string[]
-  respond: (request: HindsightRequest) => Answer | undefined
+  respond: (request: HindsightRequest) => Answer | Promise<Answer> | undefined
   close(): Promise<void>
 }
 
@@ -64,14 +65,16 @@ export async function startFakeHindsight(): Promise<FakeHindsight> {
       }
       const request: HindsightRequest = { method: req.method ?? '', path: req.url ?? '', headers: req.headers, body }
       requests.push(request)
-      const answer =
+      const decided =
         fake.respond(request) ??
         (request.path.endsWith('/memories/recall')
           ? { json: { results: fake.memories.map((m) => ({ text: m, type: 'world' })) } }
           : { json: { success: true, operation_id: `op-${requests.length}` } })
-      if ('hang' in answer) return
-      if (answer.delayMs) setTimeout(() => send(res, answer), answer.delayMs)
-      else send(res, answer)
+      void Promise.resolve(decided).then((answer) => {
+        if ('hang' in answer) return
+        if (answer.delayMs) setTimeout(() => send(res, answer), answer.delayMs)
+        else send(res, answer)
+      })
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
