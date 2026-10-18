@@ -1,6 +1,8 @@
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
+import { randomUUID } from 'node:crypto'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
+import { responseHash } from './canonical.js'
 import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
@@ -21,6 +23,14 @@ export class DurableUnavailable extends Error {
   override name = 'DurableUnavailable'
 }
 
+/**
+ * A `respond` the validator took whose handler then failed (its `resolve_input` could
+ * not be written): the entry is pending again, so it is worth sending again.
+ */
+class HandlerFailed extends DurableUnavailable {
+  override name = 'HandlerFailed'
+}
+
 /** The workflow ID of a durable session (§6.2). */
 export const sessionWorkflowId = (sessionId: string): string => `session-${sessionId}`
 
@@ -33,6 +43,17 @@ export type DurableGateOptions = {
   timeoutMs?: number
   /** How long `cancel_input` may take before its caller decides without it (spec: 10 s). */
   cancelTimeoutMs?: number
+}
+
+/**
+ * The `respond` Update's ID (#3717): the same request, response, responder and role
+ * always give the same ID, so a retry after a 503 joins the Update the workflow
+ * already accepted and gets its outcome; any difference is a new Update, which the
+ * validator still judges. A hash, so the ID stays far inside Temporal's length limit
+ * whatever the request id or response holds.
+ */
+export function respondUpdateId(args: RespondArgs): string {
+  return `respond-${responseHash([args.request_id, args.response, args.responder, args.role])}`
 }
 
 function refusalOf(err: unknown): RespondRefusal | undefined {
@@ -62,6 +83,7 @@ export class DurableGate {
       const refusal = refusalOf(err)
       if (refusal) throw refusal
       if (err instanceof WorkflowNotFoundError) throw err
+      if (err instanceof WorkflowUpdateFailedError) throw new HandlerFailed(`the session could not record that; try again (${(err as Error).message})`)
       throw new DurableUnavailable(`the session's worker is not answering; try again (${(err as Error).message})`)
     }
   }
@@ -75,7 +97,18 @@ export class DurableGate {
   /** Answers one entry; the workflow's validator may refuse it (RespondRefusal). */
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
-    return this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args] }))
+    const send = (updateId: string) =>
+      this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId }))
+    const id = respondUpdateId(args)
+    try {
+      return await send(id)
+    } catch (err) {
+      if (!(err instanceof HandlerFailed)) throw err
+      // Temporal keeps a completed Update's outcome under its ID, a failed one too, so
+      // the same body would get this failure back for the rest of the run (#3723 review).
+      // A fresh ID is judged by the validator again; the entry is pending again.
+      return await send(`${id}-${randomUUID()}`)
+    }
   }
 
   /**

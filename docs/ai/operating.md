@@ -488,6 +488,13 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
   recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it. So
   does a ledger still keyed by position (before #491) that holds a row main never had
   (`MigrationLedgerError`): that database ran an unmerged branch's migration.
+- **The agent migrates before agent-durable writes.** agent-durable runs no migrations
+  of its own but writes columns the agent's create, such as
+  `ai_input_responses.response_hash` (`20261015T1500Z_input_response_hash.sql`, #3724),
+  which `resolve_input` sets on every respond. So roll the agent out first. If
+  agent-durable runs ahead of that migration, every respond fails in its handler: the
+  route answers 503, the entry stays pending, and it goes through once the agent has
+  migrated.
 
 ## 6. Origin allowlist and trusted proxies
 
