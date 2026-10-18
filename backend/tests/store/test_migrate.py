@@ -360,6 +360,8 @@ async def test_a_probe_that_raises_is_passed_over_for_the_next(
 async def test_every_probe_raising_fails_the_misses(
     pool: Pool, tmp_path: Path, target: S3ContentBackend
 ) -> None:
+    """With every probe raising, nothing shows the source serving: the misses are
+    failed with `UNPROVEN_MISS`, not forgotten."""
     src, index, key, started = await _copied_two_then_one_gone(pool, tmp_path, target)
     try:
         flaky = cast(ContentBackend, _FlakyExists(src.backend, raises=SERVES_PROBES))
