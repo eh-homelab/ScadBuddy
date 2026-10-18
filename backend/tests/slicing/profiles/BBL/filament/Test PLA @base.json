@@ -1,0 +1,11 @@
+{
+    "type": "filament",
+    "name": "Test PLA @base",
+    "inherits": "fdm_filament_root",
+    "from": "system",
+    "instantiation": "false",
+    "filament_id": "GFL_TEST",
+    "nozzle_temperature": [
+        "210"
+    ]
+}

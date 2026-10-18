@@ -18,10 +18,7 @@ and made a sliced file that is still there under the name it made it with.
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
-import re
-import zipfile
 from collections import OrderedDict
 from contextlib import aclosing
 from datetime import timedelta
@@ -45,16 +42,12 @@ from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.slicing import slice_info
 
 logger = logging.getLogger(__name__)
 
 #: A sliced file past this is not read for its filament changes.
 MAX_SLICED_BYTES = 128 * 1024 * 1024
-#: A plate's G-code, unzipped, past this is not read.
-MAX_GCODE_BYTES = 256 * 1024 * 1024
-#: Bambu's ``change_filament_gcode`` loads each filament with ``M620 S<n>A``; 255 is
-#: "no filament" (an unload).
-_LOAD = re.compile(rb"^M620 S(\d+)A", re.MULTILINE)
 
 
 class PreviewStarted(BaseModel):
@@ -343,8 +336,7 @@ async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) 
     gcode = await _plate_gcode(client, sliced, plate_id)
     if gcode is None:
         return None
-    loads = [int(match) for match in _LOAD.findall(gcode) if int(match) != 255]
-    return max(len(loads) - 1, 0)
+    return slice_info.filament_changes(gcode)
 
 
 async def _plate_gcode(client: BambuddyClient, sliced: int, plate_id: int) -> bytes | None:
@@ -361,24 +353,8 @@ async def _plate_gcode(client: BambuddyClient, sliced: int, plate_id: int) -> by
         # downloaded buffer goes before the G-code member is read beside it.
         payload = bytes(data)
         data.clear()
-        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            names = [
-                name
-                for name in archive.namelist()
-                if re.fullmatch(r"Metadata/plate_\d+\.gcode", name)
-            ]
-            wanted = f"Metadata/plate_{plate_id}.gcode"
-            name = wanted if wanted in names else (names[0] if len(names) == 1 else None)
-            if name is None:
-                return None
-            # Read no further than the bound, whatever the zip's header claims.
-            with archive.open(name) as member:
-                gcode = member.read(MAX_GCODE_BYTES + 1)
-            if len(gcode) > MAX_GCODE_BYTES:
-                logger.info("the sliced plate's G-code is past its bound")
-                return None
-            return gcode
-    except (ApiError, zipfile.BadZipFile, KeyError) as error:
+        return slice_info.plate_gcode(payload, plate_id)
+    except ApiError as error:
         logger.info("the sliced file could not be read", extra={"error": type(error).__name__})
         return None
 

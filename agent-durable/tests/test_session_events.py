@@ -72,6 +72,26 @@ def test_translates_the_plugins_events_into_the_panels() -> None:
         assert translate(SID, {"type": dropped, "offset": 1}, tiers) == []
 
 
+def test_a_segments_own_call_keeps_its_parent_and_takes_its_tools_tier() -> None:
+    """runner.py SegmentCalls: a subagent's call names its Agent call, a subagent's
+    ScadBuddy tool takes that tool's tier, and the own plugin's built-ins are read, as
+    a classic turn labels them (ownPlugin.ts ownPluginTierOf)."""
+    tiers = {"render_preview": "read", "print_output": "outward"}
+
+    def call(name: str, **more: Any) -> dict[str, Any]:
+        [out] = translate(
+            SID, {"type": "tool_call", "id": "t", "name": name, "offset": 1, **more}, tiers
+        )
+        return out
+
+    sub = call("mcp__scadbuddy__render_preview", parent="agent-1")
+    assert (sub["risk"], sub["parent"]) == ("read", "agent-1")
+    assert call("mcp__scadbuddy__print_output")["risk"] == "outward"
+    assert call("mcp__scadbuddy__unknown")["risk"] == "outward"
+    assert [call(n)["risk"] for n in ("Skill", "Agent", "Task")] == ["read"] * 3
+    assert "parent" not in call("Skill", parent="")
+
+
 def test_a_logged_input_blanks_secrets_and_is_capped() -> None:
     assert logged_input({"api_key": "k", "nested": [{"password": "p", "ok": 1}]}) == {
         "api_key": REDACTED,

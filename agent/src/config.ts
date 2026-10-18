@@ -56,6 +56,12 @@ export type Config = {
    * stored, and a stored one cannot be read.
    */
   payloadDir: string | undefined
+  /**
+   * The build the `agent-sessions` worker is versioned as (unified runtime spec 2026-10-13
+   * §5.1, D4): SCADBUDDY_BUILD_ID, else the image's tag, SCADBUDDY_VERSION (the Dockerfile's
+   * `dev` default is no tag). Neither → that worker runs unversioned.
+   */
+  buildId: string | undefined
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
@@ -75,6 +81,8 @@ export const ENV_VARS = [
   'SCADBUDDY_TEMPORAL_NAMESPACE',
   'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
   'SCADBUDDY_PAYLOAD_DIR',
+  'SCADBUDDY_BUILD_ID',
+  'SCADBUDDY_VERSION',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -102,6 +110,11 @@ function flag(name: string, value: string | undefined): boolean {
   if (['true', '1', 'yes', 'on'].includes(lower)) return true
   if (['false', '0', 'no', 'off'].includes(lower)) return false
   throw new ConfigError(`${name} must be true or false, not ${value}`)
+}
+
+function imageTag(value: string | undefined): string | undefined {
+  const tag = present(value)
+  return tag === undefined || tag === 'dev' || /\s/.test(tag) ? undefined : tag
 }
 
 export function loadConfig(env: Env = process.env): Config {
@@ -160,5 +173,6 @@ export function loadConfig(env: Env = process.env): Config {
       present(env.SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES),
     ),
     payloadDir: present(env.SCADBUDDY_PAYLOAD_DIR),
+    buildId: temporalValue('SCADBUDDY_BUILD_ID', present(env.SCADBUDDY_BUILD_ID)) ?? imageTag(env.SCADBUDDY_VERSION),
   }
 }

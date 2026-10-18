@@ -36,7 +36,7 @@ const tsNames = [
 describe('activity names', () => {
   it('reads the names it compares', () => {
     expect(pythonNames).toEqual(expect.arrayContaining(['open_input', 'resolve_input', 'grant_input', 'deny_input', 'gate_settings', 'finish_turn', 'follow_session']))
-    expect(tsNames).toEqual(expect.arrayContaining(['gate.open_input', 'gate.describe_call', 'turn_tool_tier', 'memory_recall']))
+    expect(tsNames).toEqual(expect.arrayContaining(['gate.open_input', 'gate.describe_call', 'turn_tool_tier', 'memory_recall', 'session_turn', 'acquire_worker', 'release_worker']))
   })
 
   it("shares none between the agent's workers and agent-durable's", () => {
