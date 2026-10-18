@@ -1,6 +1,7 @@
 import type { Context as ActivityContext } from '@temporalio/activity'
 import type { ActivityExecuteInput } from '@temporalio/worker'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { SESSION_TURN_ACTIVITY } from '../src/temporal/session/names.js'
 import { ACTIVITY_HEARTBEAT_MS, heartbeatingActivities } from '../src/temporal/worker.js'
 
 // Every agent-tools activity beats from its first moment (#4199), so a caller's
@@ -10,8 +11,8 @@ import { ACTIVITY_HEARTBEAT_MS, heartbeatingActivities } from '../src/temporal/w
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 
-function intercepted(heartbeat: () => void) {
-  const inbound = heartbeatingActivities()({ heartbeat } as unknown as ActivityContext).inbound
+function intercepted(heartbeat: () => void, activityType = 'turn_tool_tier') {
+  const inbound = heartbeatingActivities()({ heartbeat, info: { activityType } } as unknown as ActivityContext).inbound
   if (!inbound?.execute) throw new Error('no inbound execute')
   return inbound.execute.bind(inbound)
 }
@@ -35,4 +36,15 @@ it('stops beating when the activity fails', async () => {
   await expect(execute({} as ActivityExecuteInput, () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
   await vi.advanceTimersByTimeAsync(ACTIVITY_HEARTBEAT_MS * 3)
   expect(heartbeat).not.toHaveBeenCalled()
+})
+
+it('leaves session_turn alone: its own beat is how a stalled placement is noticed, and carries the turn', async () => {
+  const heartbeat = vi.fn()
+  let finish!: (value: string) => void
+  const execute = intercepted(heartbeat, SESSION_TURN_ACTIVITY)
+  const running = execute({} as ActivityExecuteInput, () => new Promise<string>((resolve) => (finish = resolve)))
+  await vi.advanceTimersByTimeAsync(ACTIVITY_HEARTBEAT_MS * 3)
+  expect(heartbeat).not.toHaveBeenCalled()
+  finish('done')
+  await expect(running).resolves.toBe('done')
 })
