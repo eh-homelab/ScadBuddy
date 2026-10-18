@@ -1348,6 +1348,8 @@ async def test_a_rate_limit_that_names_its_reset_cools_down_until_then(
     """#4088: a segment never sees the 429's reset headers, but Claude Code's result
     names the reset ("resets 10:30pm (UTC)"), and the key cools down until then, not
     for the default 60 s."""
+    # The runner reads its own clock; 5 h out keeps the named time well clear of it
+    # (and of RESET_GRACE), so do not shrink the margin.
     at = (datetime.now(UTC) + timedelta(hours=5)).replace(second=0, microsecond=0)
     named = f"{at.hour % 12 or 12}:{at.minute:02d}{'am' if at.hour < 12 else 'pm'}"
     text = f"API Error: 429 You've hit your session limit · resets {named} (UTC)"

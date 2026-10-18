@@ -191,7 +191,7 @@ NOW = datetime(2026, 10, 17, 22, 16, 5, tzinfo=UTC)
         ),
         ("API Error: 429 · resets 12am (UTC)", datetime(2026, 10, 18, 0, 0)),
         ("resets 12pm (UTC)", datetime(2026, 10, 18, 12, 0)),
-        ("resets 10:16PM (utc)", datetime(2026, 10, 18, 22, 16)),
+        ("resets 9:30PM (utc)", datetime(2026, 10, 18, 21, 30)),
     ],
 )
 def test_a_rate_limit_reset_is_read_from_the_result_text(text: str, at: datetime) -> None:
@@ -208,6 +208,30 @@ def test_a_time_only_reset_rolls_past_midnight_and_a_dated_one_past_year_end() -
     assert rate_limit_reset("resets Dec 31, 11:55pm (UTC)", late) == datetime(
         2026, 12, 31, 23, 55, tzinfo=UTC
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The text names the minute only: one just passed is passing now, not
+        # tomorrow's or next year's (#4093 review).
+        "resets 10:16pm (UTC)",
+        "resets 10:15pm (UTC)",
+        "resets 10:02pm (UTC)",
+        "resets Oct 17, 10:15pm (UTC)",
+        "resets Oct 17, 10pm (UTC)",
+        # A date earlier this year has passed; it is not next year's.
+        "resets Sep 3, 4am (UTC)",
+        "resets Jan 2, 4am (UTC)",
+    ],
+)
+def test_a_reset_that_has_just_passed_keeps_the_default_cooldown(text: str) -> None:
+    assert rate_limit_reset(text, NOW) is None
+    assert cooldown_until(NOW, rate_limit_reset(text, NOW)) == NOW + timedelta(seconds=60)
+
+
+def test_a_time_only_reset_past_the_grace_is_tomorrows() -> None:
+    assert rate_limit_reset("resets 10pm (UTC)", NOW) == datetime(2026, 10, 18, 22, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(

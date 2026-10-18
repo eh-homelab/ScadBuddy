@@ -166,15 +166,24 @@ _RESET = re.compile(
     r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<half>am|pm)\s*\(UTC\)",
     re.IGNORECASE,
 )
+#: How long after a named minute it still counts as passing now (see rate_limit_reset).
+RESET_GRACE = timedelta(minutes=15)
+#: How far ahead a dated reset may roll into next year (weekly limits name days ahead).
+RESET_HORIZON = timedelta(days=31)
 _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 
 def rate_limit_reset(text: str, now: datetime) -> datetime | None:
     """The reset a rate-limited result's text names, as the next such time after
-    ``now``: a time alone is today's or tomorrow's, a date this year's or next year's.
-    None when the text names none, or one that is not a time; the caller then keeps the
-    default cooldown. A segment never sees the 429's ``anthropic-ratelimit-*-reset``
-    headers a classic probe reads (credentialErrors.ts ``rateLimitResetFromHeaders``)."""
+    ``now``: a time alone is today's or tomorrow's, a date this year's or, across the
+    new year, next year's. None when the text names none, or one that is not a time;
+    the caller then keeps the default cooldown. A segment never sees the 429's
+    ``anthropic-ratelimit-*-reset`` headers a classic probe reads (credentialErrors.ts
+    ``rateLimitResetFromHeaders``).
+
+    The text names the minute, never the second, so a reset within RESET_GRACE before
+    ``now`` is one that is passing now, not tomorrow's (or next year's): None, the
+    default cooldown, rather than a day's lock-out (#4093 review)."""
     m = _RESET.search(text)
     if m is None:
         return None
@@ -186,10 +195,17 @@ def rate_limit_reset(text: str, now: datetime) -> datetime | None:
     try:
         if m["month"] is None:
             at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            return at if at > now else at + timedelta(days=1)
+            if at > now:
+                return at
+            return None if at > now - RESET_GRACE else at + timedelta(days=1)
         month = _MONTHS.index(m["month"].lower()) + 1
         at = datetime(now.year, month, int(m["day"]), hour, minute, tzinfo=UTC)
-        return at if at > now else at.replace(year=now.year + 1)
+        if at > now:
+            return at
+        # Only a date just across the new year is next year's ("Jan 2" on Dec 31); one
+        # earlier this year has passed, however recently.
+        later = at.replace(year=now.year + 1)
+        return later if later - now <= RESET_HORIZON else None
     except ValueError:
         # Not a month, or not a day of it (Feb 30; Feb 29 of next year).
         return None
