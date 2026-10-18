@@ -21,7 +21,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import jobs
 from scadbuddy.render.job_models import PipelineOutput
-from scadbuddy.render.projection import workflow_id_for
+from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT, workflow_id_for
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import pipelines
 from scadbuddy.workflows.activities import WorkerDeps
@@ -569,9 +569,17 @@ async def test_a_lost_projection_attempt_is_retried_within_seconds() -> None:
     cost a page load 60 s on prod (2026-10-18)."""
     world, job = _LostFirstProjection(), a_job(params={"w": 12})
     async with temporal_client() as client:
+        # The lost attempt holds one of the worker's activity slots until the worker
+        # shuts down, as an undelivered one holds nothing on prod; the rest of the job
+        # runs beside it (asserted below), so the slot starves nothing.
         await asyncio.wait_for(run_job(world, job, client=client), 30)
     assert world.lost
+    assert len(world.pieces) == 1 and len(world.outputs) == 1
     assert world.final().state == "done"
+
+
+def test_a_projection_gives_up_on_the_pool_before_its_attempt_times_out() -> None:
+    assert timedelta(seconds=PROJECT_POOL_TIMEOUT) < pipelines.PROJECT_TIMEOUT
 
 
 async def test_a_snapshot_download_longer_than_short_still_loads_the_pipeline(

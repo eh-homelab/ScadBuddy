@@ -57,7 +57,12 @@ from scadbuddy.render.jobs import (
 from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.paint import PaintCodeError
 from scadbuddy.render.previews import PreviewFailedError, render_preview
-from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
+from scadbuddy.render.projection import (
+    PROJECT_POOL_TIMEOUT,
+    JobProjection,
+    LegacyPendingError,
+    legacy_unrun,
+)
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
@@ -885,7 +890,9 @@ class RenderActivities:
             if started is not None:
                 return True
             try:
-                job = await asyncio.to_thread(p.read, projection.job_id)
+                job = await asyncio.to_thread(
+                    p.read, projection.job_id, pool_timeout=PROJECT_POOL_TIMEOUT
+                )
             except JobNotFoundError:
                 # Gone (pruned): nothing to render into. Unlike the writes below, where
                 # a missing row lets the pipeline carry on, here False stops it.
@@ -896,7 +903,9 @@ class RenderActivities:
                 await asyncio.to_thread(p.set_steps, projection.job_id, projection.steps)
             return True
         try:
-            job = await asyncio.to_thread(p.read, projection.job_id)
+            job = await asyncio.to_thread(
+                p.read, projection.job_id, pool_timeout=PROJECT_POOL_TIMEOUT
+            )
         except JobNotFoundError:
             return True
         # The API cancelled it first: its error says why, the workflow's does not.

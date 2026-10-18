@@ -1,5 +1,6 @@
 import type { DataConverter } from '@temporalio/common'
-import { NativeConnection, Worker, type WorkerOptions } from '@temporalio/worker'
+import type { Context as ActivityContext } from '@temporalio/activity'
+import { type ActivityInterceptors, NativeConnection, Worker, type WorkerOptions } from '@temporalio/worker'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { TASK_QUEUE } from './names.js'
 
@@ -15,6 +16,32 @@ import { TASK_QUEUE } from './names.js'
 // pod's 30 s whatever an activity does (the SDK's `shutdownForceTime`).
 
 export type TemporalHealth = 'connecting' | 'ok' | 'unavailable'
+
+/** How often every activity on this worker heartbeats, from its first moment. */
+export const ACTIVITY_HEARTBEAT_MS = 10_000
+
+/**
+ * Every activity beats while it runs, from its start (#4199): a caller's heartbeat
+ * timeout then tells an attempt Temporal recorded as started but never delivered (a
+ * poll that gave up mid-handoff, or a replica a deploy took) within that timeout, not
+ * at the end of a start-to-close sized for the slowest real call. `turn_tool_tier`
+ * spends ~35 s connecting a turn's servers before it answers, with no beat of its own.
+ * A tool's own beats (progress) go on beside these.
+ */
+export function heartbeatingActivities(everyMs = ACTIVITY_HEARTBEAT_MS): (ctx: ActivityContext) => ActivityInterceptors {
+  return (ctx) => ({
+    inbound: {
+      async execute(input, next) {
+        const beat = setInterval(() => ctx.heartbeat(), everyMs)
+        try {
+          return await next(input)
+        } finally {
+          clearInterval(beat)
+        }
+      },
+    },
+  })
+}
 
 export type AgentWorkerOptions = {
   address: string
@@ -96,6 +123,7 @@ export class AgentWorker {
           namespace: options.namespace,
           taskQueue: options.taskQueue ?? TASK_QUEUE,
           activities: options.activities,
+          interceptors: { activity: [heartbeatingActivities()] },
           ...options.workflows,
           ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
           shutdownGraceTime: options.shutdownGraceMs ?? 10_000,
