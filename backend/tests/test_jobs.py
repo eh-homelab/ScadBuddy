@@ -1739,9 +1739,11 @@ async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
     work = paths.root / "blob"
     loop_thread = threading.get_ident()
     on_loop: list[str] = []
+    ran: list[str] = []
 
     def watched[**P, T](name: str, fn: Callable[P, T]) -> Callable[P, T]:
         def call(*args: P.args, **kwargs: P.kwargs) -> T:
+            ran.append(name)
             if threading.get_ident() == loop_thread:
                 on_loop.append(name)
             return fn(*args, **kwargs)
@@ -1771,4 +1773,6 @@ async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
             checkouts=None,
             holder="piece",
         )
+    # Both were reached, so an empty `on_loop` is not a guard that never ran.
+    assert {"split", "write_glb"} <= set(ran)
     assert on_loop == []

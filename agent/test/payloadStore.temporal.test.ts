@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { FilePayloadStore, OFFLOAD_BYTES, type PayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { FilePayloadStore, OFFLOAD_BYTES, type PayloadKeys, referenceOf, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
 
 // A session's large payloads on a real Temporal (#2243, #3739): kept on the data share by
@@ -57,6 +57,10 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
       expect(await handle.result()).toBe(`${words} (done)`)
       // An activity's input over OFFLOAD_BYTES: the agent-tools worker's own walk.
       expect(await client.workflow.execute('toolInput', { workflowId: tool, taskQueue, args: [words.length] })).toBe(words.length)
+      // The activity's input is what history holds by reference, named, not inferred from files.
+      const { history } = await env.client.workflowService.getWorkflowExecutionHistory({ namespace: 'default', execution: { workflowId: tool } })
+      const scheduled = history?.events?.find((e) => e.activityTaskScheduledEventAttributes)?.activityTaskScheduledEventAttributes
+      expect(scheduled?.input?.payloads?.map((p) => referenceOf(p))).toEqual([{ subject: tool, digest: expect.stringMatching(/^[0-9a-f]{64}$/) }])
     })
     // Both by reference, not inline: each subject's payloads are files on the share
     // (`tool`'s only large payload is its activity's input).

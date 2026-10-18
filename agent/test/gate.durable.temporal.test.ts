@@ -109,6 +109,16 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     expect(await gate.pendingInput(sessionId)).toEqual([])
   }, 60_000)
 
+  it('a cancel_input that fails in its handler is plainly unavailable, not a respond to send again', async () => {
+    const gate = new DurableGate(env.client)
+    const { sessionId } = await park()
+    const err = await gate.cancelInput(sessionId, 'fail in the handler').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(DurableUnavailable)
+    // HandlerFailed, the subclass respond retries under a fresh ID, is respond's alone.
+    expect((err as Error).name).toBe('DurableUnavailable')
+    expect((err as Error).message).toMatch(/not answering/)
+  }, 60_000)
+
   it('says a session with no workflow is not found', async () => {
     await expect(new DurableGate(env.client).pendingInput(randomUUID())).rejects.toBeInstanceOf(WorkflowNotFoundError)
   }, 60_000)

@@ -137,6 +137,9 @@ async def test_a_probe_left_waiting_after_leaving_is_no_stall(
         _blocks_the_loop(0.2)  # the probe passes `threshold`
         await asyncio.sleep(0.1)  # and the beat runs, after the stop
         assert watch._thread is not None
+        # Joined on the loop, not through to_thread: the one executor thread is still
+        # held, so a to_thread join would wait behind it. The watch needs nothing from
+        # the loop once its beat has run.
         watch._thread.join(2)
         assert not watch._thread.is_alive()
         assert not caplog.records, caplog.text

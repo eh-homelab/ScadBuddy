@@ -77,14 +77,14 @@ export class DurableGate {
   }
 
   /** `respond` alone says an Update that failed in its handler is HandlerFailed: worth sending again. */
-  async #call<T>(timeoutMs: number, fn: () => Promise<T>, respond = false): Promise<T> {
+  async #call<T>(timeoutMs: number, fn: () => Promise<T>, { handlerFailed = false }: { handlerFailed?: boolean } = {}): Promise<T> {
     try {
       return await this.#client.withDeadline(Date.now() + timeoutMs, fn)
     } catch (err) {
       const refusal = refusalOf(err)
       if (refusal) throw refusal
       if (err instanceof WorkflowNotFoundError) throw err
-      if (respond && err instanceof WorkflowUpdateFailedError) throw new HandlerFailed(`the session could not record that; try again (${(err as Error).message})`)
+      if (handlerFailed && err instanceof WorkflowUpdateFailedError) throw new HandlerFailed(`the session could not record that; try again (${(err as Error).message})`)
       throw new DurableUnavailable(`the session's worker is not answering; try again (${(err as Error).message})`)
     }
   }
@@ -99,7 +99,7 @@ export class DurableGate {
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     const send = (updateId: string) =>
-      this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId }), true)
+      this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId }), { handlerFailed: true })
     const id = respondUpdateId(args)
     try {
       return await send(id)
