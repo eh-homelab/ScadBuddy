@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
@@ -22,7 +23,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome
 from scadbuddy.core.problems import ApiError
-from scadbuddy.main import BATCH_TTL
+from scadbuddy.main import BATCH_TTL, PENDING_BATCH_TTL
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import SLICED_RUN, sliced_3mf, sliced_file
 from tests.api.test_print_run_choices import follow_run, run_routes
@@ -390,6 +391,27 @@ def test_a_file_that_fails_to_start_twice_is_refused_so_it_can_be_left(
     assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={"skipped": True}).status_code == 200
 
 
+@respx.mock
+def test_a_start_that_answers_a_follow_is_a_refusal_not_an_outage(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3886: an `assert` took the run's type on trust; failed, it read as an outage
+    (pending). Queue all never asks for a follow, so one is a fault, shown as one."""
+
+    async def follow(*_: Any, **__: Any) -> Any:
+        return JSONResponse({"follow": "/print/runs/x"}, status_code=202)
+
+    monkeypatch.setattr(print_batches, "start_library_run", follow)
+    configure(client)
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+
+    outcome = client.post(f"{BATCHES}/{batch['id']}/queue").json()["items"][0]["outcome"]
+
+    assert outcome["status"] == "refused"
+    assert outcome["detail"] == print_batches.NOT_A_RUN
+
+
 def test_a_files_press_is_its_choices() -> None:
     """The same choices are the same run (a repeat re-attaches); changed ones after a
     refusal are a new one."""
@@ -454,10 +476,122 @@ async def test_a_batch_nobody_touched_for_a_week_is_forgotten(client: TestClient
             (BATCH_TTL + timedelta(hours=1), stale["id"]),
         )
 
-    assert await store.prune(BATCH_TTL) == 1
+    assert (await store.prune(BATCH_TTL, pending_older_than=PENDING_BATCH_TTL)).count == 1
 
     assert client.get(f"{BATCHES}/{stale['id']}").status_code == 404
     assert client.get(f"{BATCHES}/{fresh['id']}").status_code == 200
+
+
+def _age(client: TestClient, batch_id: str, by: timedelta) -> None:
+    store = _state(client).components.get(PRINT_BATCHES)
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s", (by, batch_id)
+        )
+
+
+async def test_a_batch_following_a_pending_file_is_kept_longer_and_named(
+    client: TestClient,
+) -> None:
+    """#3798: the prune took a batch with a file still being checked, the very batch that
+    follows that file's run, so a new batch could send it again. It is kept until
+    PENDING_BATCH_TTL, then pruned by name so the log says which."""
+    week, month = new_batch(client, 104), new_batch(client, 105)
+    store = _state(client).components.get(PRINT_BATCHES)
+    for batch in (week, month):
+        await store.record_outcome(batch["id"], 0, BatchOutcome(status="pending"))
+    _age(client, week["id"], BATCH_TTL + timedelta(hours=1))
+    _age(client, month["id"], PENDING_BATCH_TTL + timedelta(hours=1))
+
+    pruned = await store.prune(BATCH_TTL, pending_older_than=PENDING_BATCH_TTL)
+
+    assert (pruned.count, pruned.pending) == (1, [month["id"]])
+    assert client.get(f"{BATCHES}/{week['id']}").status_code == 200
+
+
+async def test_a_batch_following_a_pending_file_cannot_be_deleted(client: TestClient) -> None:
+    """#3798: only the dialog's close kept such a batch; the route deleted it for any
+    other caller. It answers 409 now, and deletes it once nothing is pending."""
+    batch = new_batch(client, 104)
+    store = _state(client).components.get(PRINT_BATCHES)
+    await store.record_outcome(batch["id"], 0, BatchOutcome(status="pending"))
+
+    refused = client.delete(f"{BATCHES}/{batch['id']}")
+    assert refused.status_code == 409, refused.text
+    assert client.get(f"{BATCHES}/{batch['id']}").status_code == 200
+
+    await store.record_outcome(batch["id"], 0, BatchOutcome(status="refused", detail="no"))
+    assert client.delete(f"{BATCHES}/{batch['id']}").status_code == 204
+    assert client.delete(f"{BATCHES}/{batch['id']}").status_code == 404
+
+
+async def test_the_pending_batches_are_read_together(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3798: each pending batch was read on its own (two queries and a pool checkout
+    apiece). They are read in one go, each with its own files."""
+    first, second = new_batch(client, 104, 105), new_batch(client, 106)
+    store = _state(client).components.get(PRINT_BATCHES)
+    for batch in (first, second):
+        await store.record_outcome(batch["id"], 0, BatchOutcome(status="pending"))
+
+    def one_at_a_time(*_: Any, **__: Any) -> Any:
+        raise AssertionError("a pending batch was read on its own")
+
+    monkeypatch.setattr(store, "_get", one_at_a_time)
+    found = {
+        batch.id: [item.library_file_id for item in batch.items]
+        for batch in await store.with_pending()
+    }
+
+    assert found == {first["id"]: [104, 105], second["id"]: [106]}
+
+
+async def test_an_edited_refusal_says_it_is_of_other_choices(client: TestClient) -> None:
+    """#3798: after a refused file was edited, its row still read "Not queued: <the old
+    refusal>" against choices that were not the ones refused. The refusal is kept, with
+    its attempt, and marked stale; the same choices saved again leave it as it is."""
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    store = _state(client).components.get(PRINT_BATCHES)
+    refusal = BatchOutcome(status="refused", detail="No spool for slot 2.", attempt=1)
+    await store.record_outcome(batch["id"], 0, refusal)
+
+    same = choose(client, batch["id"], 0, request=SLICED_RUN)["items"][0]["outcome"]
+    assert same["stale"] is False
+    edited = choose(client, batch["id"], 0, request={**SLICED_RUN, "copies": 2})
+    outcome = edited["items"][0]["outcome"]
+
+    assert (outcome["status"], outcome["attempt"], outcome["stale"]) == ("refused", 1, True)
+
+
+async def test_an_edit_back_to_the_refused_choices_is_not_stale(client: TestClient) -> None:
+    """#3932 review: once stale, a refusal stayed stale after the file was edited back
+    to the very choices refused, and the row said they were others. Stale compares
+    against the choices the refusal was of, not the last edit."""
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    store = _state(client).components.get(PRINT_BATCHES)
+    refusal = BatchOutcome(status="refused", detail="No spool for slot 2.", attempt=1)
+    await store.record_outcome(batch["id"], 0, refusal)
+
+    away = choose(client, batch["id"], 0, request={**SLICED_RUN, "copies": 2})
+    assert away["items"][0]["outcome"]["stale"] is True
+    back = choose(client, batch["id"], 0, request=SLICED_RUN)["items"][0]["outcome"]
+
+    assert (back["status"], back["attempt"], back["stale"]) == ("refused", 1, False)
+
+
+async def test_a_queued_batchs_step_holds_against_a_late_move(client: TestClient) -> None:
+    """#3798: the step's write took the batch open on an earlier read, so a Queue all
+    landing in between still moved a queued batch's step."""
+    batch = new_batch(client, 104)
+    store = _state(client).components.get(PRINT_BATCHES)
+    with store._pool.connection() as conn:
+        conn.execute("UPDATE print_batches SET status = 'queued' WHERE id = %s", (batch["id"],))
+
+    assert await store.set_step(batch["id"], 1) is None
+    assert (await store.get(batch["id"])).step == 0  # type: ignore[union-attr]
 
 
 def _fail_run(client: TestClient, run_id: str, *, may_have_queued: bool) -> None:
@@ -575,7 +709,7 @@ async def test_queue_all_counts_as_touching_the_batch(client: TestClient) -> Non
 
     await store.record_outcome(batch["id"], 0, BatchOutcome(status="unchosen"))
 
-    assert await store.prune(BATCH_TTL) == 0
+    assert (await store.prune(BATCH_TTL, pending_older_than=PENDING_BATCH_TTL)).count == 0
 
 
 async def test_reading_a_batch_counts_as_touching_it(client: TestClient) -> None:
@@ -591,7 +725,7 @@ async def test_reading_a_batch_counts_as_touching_it(client: TestClient) -> None
 
     assert client.get(f"{BATCHES}/{batch['id']}").status_code == 200
 
-    assert await store.prune(BATCH_TTL) == 0
+    assert (await store.prune(BATCH_TTL, pending_older_than=PENDING_BATCH_TTL)).count == 0
 
 
 async def test_a_batch_is_queued_only_while_every_kept_file_has_started(

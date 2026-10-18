@@ -29,6 +29,7 @@ import type {
   PrintRunResult,
   SlicedProfile,
   BatchChoice,
+  BatchOutcome,
   NewBatchFile,
   PrintBatch,
 } from '../../api/types'
@@ -548,6 +549,16 @@ function startLibraryRun(fileId: number, body: PrintRunRequest): PrintRun {
 
 /** #2672 — batch prints, as the backend keeps them in Postgres. */
 const batches = new Map<string, PrintBatch>()
+/** The choices each refusal was of (`refused_request`), by `<batch>:<position>` (#3932 review). */
+const refusedRequests = new Map<string, string>()
+const itemKey = (batchId: string, position: number) => `${batchId}:${position}`
+
+/** Sets one file's outcome, as a Queue all the mock cannot make would (a `pending` answer). */
+export function setMockPrintBatchOutcome(batchId: string, position: number, outcome: BatchOutcome): void {
+  const item = batches.get(batchId)?.items.find((row) => row.position === position)
+  if (!item) throw new Error(`no batch item ${batchId}:${position}`)
+  item.outcome = outcome
+}
 
 function batchHandlers() {
   const found = (id: unknown) => batches.get(String(id))
@@ -603,6 +614,14 @@ function batchHandlers() {
       const item = batch.items.find((row) => row.position === Number(params['position']))
       if (!item) return problem(404, 'Not Found', 'The batch print has no such file.')
       const choice = (await request.json()) as BatchChoice
+      // A refusal of other choices than these says so, and one edited back to the
+      // choices it refused does not, as the backend marks it (#3798, #3932 review).
+      // JSON text compares key order too, where jsonb does not: both sides here come
+      // from the client's one serializer, so they agree; a request from elsewhere may not.
+      if (item.outcome?.status === 'refused') {
+        const refused = refusedRequests.get(itemKey(batch.id, item.position)) ?? null
+        item.outcome = { ...item.outcome, stale: JSON.stringify(choice.request ?? null) !== refused }
+      }
       Object.assign(item, {
         request: choice.request ?? null,
         skipped: choice.skipped ?? false,
@@ -619,22 +638,35 @@ function batchHandlers() {
       for (const item of batch.items) {
         if (item.skipped || item.removed || item.outcome?.status === 'started') continue
         if (!item.request) {
-          item.outcome = { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.', attempt: 0 }
+          item.outcome = { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.', attempt: 0, stale: false }
           continue
         }
         const refused = libraryRefusal(item.library_file_id)
+        if (refused) refusedRequests.set(itemKey(batch.id, item.position), JSON.stringify(item.request))
+        else refusedRequests.delete(itemKey(batch.id, item.position))
         item.outcome = refused
-          ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.`, attempt: 0 }
-          : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null, attempt: 0 }
+          ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.`, attempt: 0, stale: false }
+          : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null, attempt: 0, stale: false }
       }
       // Open until every file kept has started, as the backend leaves it (#2718 review).
       const kept = batch.items.filter((item) => !item.skipped && !item.removed)
       if (kept.every((item) => item.outcome?.status === 'started')) batch.status = 'queued'
       return HttpResponse.json(batch)
     }),
-    http.delete(`${base}/print/batches/:id`, ({ params }) =>
-      batches.delete(String(params['id'])) ? new HttpResponse(null, { status: 204 }) : missing(),
-    ),
+    http.delete(`${base}/print/batches/:id`, ({ params }) => {
+      const batch = found(params['id'])
+      if (!batch) return missing()
+      // A batch following a file still being checked is kept, as the backend keeps it (#3798).
+      if (batch.items.some((item) => !item.removed && item.outcome?.status === 'pending')) {
+        return problem(
+          409,
+          'Conflict',
+          'A file in this batch print is still being checked, so the batch is kept to follow it. Resume it from the Library.',
+        )
+      }
+      batches.delete(batch.id)
+      return new HttpResponse(null, { status: 204 })
+    }),
   ]
 }
 
@@ -697,6 +729,7 @@ export function mockLibraryFileFolder(fileId: number): number | null {
 export function reset(): void {
   lastQueued.clear()
   batches.clear()
+  refusedRequests.clear()
   trashed.clear()
   removed.clear()
   moved.clear()

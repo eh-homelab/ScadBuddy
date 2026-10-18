@@ -52,22 +52,25 @@ def test_a_name_that_is_not_a_digest_is_refused(tmp_path: Path, bad: str) -> Non
         ClaimStore(tmp_path).get(bad)
 
 
-async def test_the_housekeeping_sweep_removes_old_claims(tmp_path: Path) -> None:
+async def test_the_housekeeping_sweep_removes_old_claims(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     from types import SimpleNamespace
 
+    from scadbuddy.batches.store import Pruned
     from scadbuddy.core.paths import DataPaths
-    from scadbuddy.main import BATCH_TTL, _housekeeping_activities
+    from scadbuddy.main import BATCH_TTL, PENDING_BATCH_TTL, _housekeeping_activities
     from scadbuddy.workflows.housekeeping import SWEEPS
 
     paths = DataPaths(tmp_path)
     old = ClaimStore(paths.claims).put(b"old")
     past = time.time() - timedelta(days=2).total_seconds()
     os.utime(paths.claims / old, (past, past))
-    pruned: list[timedelta] = []
+    pruned: list[tuple[timedelta, timedelta]] = []
 
-    async def prune(ttl: timedelta) -> int:
-        pruned.append(ttl)
-        return 0
+    async def prune(ttl: timedelta, *, pending_older_than: timedelta) -> Pruned:
+        pruned.append((ttl, pending_older_than))
+        return Pruned(count=2, pending=["b7"])
 
     batches = SimpleNamespace(prune=prune)
     state = SimpleNamespace(paths=paths, components=SimpleNamespace(get=lambda key: batches))
@@ -75,8 +78,11 @@ async def test_the_housekeeping_sweep_removes_old_claims(tmp_path: Path) -> None
     await sweeps["housekeeping_sweep_claims"]()
     assert "housekeeping_sweep_claims" in SWEEPS
     assert not (paths.claims / old).exists()
-    # #2718: the same sweep forgets batch prints left untouched.
-    assert pruned == [BATCH_TTL]
+    # #2718: the same sweep forgets batch prints left untouched; #3798: one that still
+    # followed a pending file is kept longer, and named when it goes.
+    assert pruned == [(BATCH_TTL, PENDING_BATCH_TTL)]
+    named = [r for r in caplog.records if r.getMessage().startswith("forgot batch prints with")]
+    assert [getattr(r, "batches", None) for r in named] == [["b7"]]
 
 
 def test_a_put_survives_the_sweep_removing_the_claim_under_it(

@@ -196,7 +196,10 @@ async def put_batch_step(
     _open(batch)
     _step(batch, body.step)
     updated = await batches.set_step(batch_id, body.step)
-    assert updated is not None
+    if updated is None:
+        # Queued (or gone) since it was read: its step holds, as `_open` says (#3798).
+        _open(await _batch(batches, batch_id))
+        raise ApiError(status.HTTP_409_CONFLICT, "This batch print changed; open it again.")
     return updated
 
 
@@ -367,8 +370,6 @@ async def _queue_one(
             budget=budget,
             downloads=downloads,
         )
-        # Started with no `http`, so never the 202 to follow (#2793): always the run.
-        assert isinstance(run, PrintRun)
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
         # may have started. The same request_id sent again follows that run.
@@ -389,10 +390,24 @@ async def _queue_one(
             # nor removed, nor its batch cancelled. Refused, it can (#2718 review).
             return BatchOutcome(status="refused", detail=NOT_STARTED_AGAIN, attempt=attempt)
         return BatchOutcome(status="pending", detail=NOT_STARTED, attempt=attempt)
+    if not isinstance(run, PrintRun):
+        # Started with no `http`, so never the 202 to follow (#2793). Were it one, the
+        # run's id is not known here: a fault to show as one, never an outage (#3886).
+        logger.error(
+            "batch %s file %s: its start answered a follow, not a run", batch_id, item.position
+        )
+        return BatchOutcome(status="refused", detail=NOT_A_RUN, attempt=attempt)
     return BatchOutcome(status="started", run_id=run.id, attempt=attempt)
 
 
 NOT_STARTED = "ScadBuddy could not start this file's print. Queue all again to retry."
+# Refused, so the row can be acted on, but a print may be queued (#3932 review): an
+# edit gives the next Queue all a new request, which starts a second one.
+NOT_A_RUN = (
+    "ScadBuddy started this file's print but could not read which run it is. Check"
+    " Bambuddy's queue first: if the print is there, remove this file rather than edit"
+    " or queue it again, or a second print starts."
+)
 NOT_STARTED_AGAIN = (
     "ScadBuddy could not start this file's print, twice. Check Bambuddy's queue, then"
     " edit, skip or remove the file."
@@ -413,6 +428,15 @@ def batch_request_id(batch_id: str, item: BatchItem, attempt: int = 0) -> str:
 
 @router.delete("/{batch_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Drop a batch print")
 async def delete_batch(batch_id: BatchIdPath, batches: PrintBatchesDep) -> None:
-    """Forgets the batch. Nothing it queued is touched: that is Bambuddy's queue."""
-    if not await batches.delete(batch_id):
+    """Forgets the batch. Nothing it queued is touched: that is Bambuddy's queue. One
+    with a file still being checked is kept, 409: it is what follows that file's run, so
+    a new batch does not send it again (#3798)."""
+    deleted = await batches.delete(batch_id)
+    if deleted == "missing":
         raise ApiError(status.HTTP_404_NOT_FOUND, "There is no such batch print.")
+    if deleted == "pending":
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "A file in this batch print is still being checked, so the batch is kept to"
+            " follow it. Resume it from the Library.",
+        )

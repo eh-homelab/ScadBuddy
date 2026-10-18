@@ -205,6 +205,48 @@ describe('BatchPrintDialog (#2672)', () => {
     await waitFor(() => expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.'))
   })
 
+  it('lists what a step chose over the template, and says an edited refusal is of other choices (#3798, #3799)', async () => {
+    const batch = await newBatch(89, 91)
+    await api.putPrintBatchItem(batch.id, 0, {
+      request: {
+        ...REQUEST,
+        supports: { enabled: true, type: 'tree', threshold_angle: 25, on_build_plate_only: true },
+        prime_tower: { enabled: false },
+        print_sequence: 'by object',
+        filament_profiles: ['silk-pla'],
+      },
+      skipped: false,
+      removed: false,
+    })
+    await api.putPrintBatchItem(batch.id, 1, { request: { ...REQUEST }, skipped: false, removed: false })
+    await api.putPrintBatchStep(batch.id, 2)
+    const read = (await api.getPrintBatch(batch.id)) as PrintBatch
+    server.use(
+      http.get(`/api/v1/print/batches/${batch.id}`, () =>
+        HttpResponse.json({
+          ...read,
+          items: [
+            read.items[0],
+            {
+              ...read.items[1],
+              outcome: { status: 'refused', run_id: null, detail: 'No spool for slot 2.', attempt: 0, stale: true },
+            },
+          ],
+        }),
+      ),
+    )
+    renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await screen.findByRole('dialog', { name: 'Review 2 files' })
+
+    expect(screen.getByTestId('batch-overrides-0')).toHaveTextContent(
+      'Tree supports, 25° threshold, on the build plate only · No prime tower · By object · Filament profile: silk-pla',
+    )
+    expect(screen.queryByTestId('batch-overrides-1')).toBeNull()
+    const edited = screen.getByTestId('batch-outcome-1')
+    expect(edited).toHaveTextContent('Edited since it was refused (No spool for slot 2.). Queue all sends the new choices.')
+    expect(edited).not.toHaveTextContent('Not queued')
+  })
+
   it("reports a refused file beside the queued ones, and one refusal stops nothing", async () => {
     const batch = await newBatch(89, 91)
     await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })

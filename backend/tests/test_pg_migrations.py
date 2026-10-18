@@ -247,3 +247,31 @@ def test_the_old_link_tables_and_their_forwarding_are_gone(pg_conninfo: str) -> 
         ).fetchall()
     assert tables == []
     assert functions == []
+
+
+@pytest.mark.requires_postgres
+def test_the_refused_request_migration_backfills_unedited_refusals(pg_conninfo: str) -> None:
+    # #3932 review: a refusal recorded before `refused_request` existed would read stale
+    # after any edit, even one back to the choices refused. An unedited one takes the
+    # choices it holds; an edited (stale) one keeps none, as stale already says.
+    column = next(
+        i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_print_batch_refused_request")
+    )
+    refused = '{"status": "refused", "attempt": 1, "stale": false}'
+    edited = '{"status": "refused", "attempt": 0, "stale": true}'
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:column])
+        conn.execute("INSERT INTO print_batches (id) VALUES ('b')")
+        conn.execute(
+            "INSERT INTO print_batch_items"
+            " (batch_id, position, library_file_id, filename, request, outcome)"
+            " VALUES ('b', 0, 89, 'a.3mf', '{\"copies\": 1}', %s),"
+            "        ('b', 1, 91, 'b.3mf', '{\"copies\": 2}', %s),"
+            "        ('b', 2, 92, 'c.3mf', '{\"copies\": 3}', NULL)",
+            (refused, edited),
+        )
+        assert migrate(conn)[0] == MIGRATIONS[column].id
+        rows = conn.execute(
+            "SELECT position, refused_request FROM print_batch_items ORDER BY position"
+        ).fetchall()
+    assert rows == [(0, {"copies": 1}), (1, None), (2, None)]
