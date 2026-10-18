@@ -387,11 +387,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(await m.interrupt(session.id, browser)).toBe(false)
   }, 60_000)
 
-  it('ends at once, when Stop finds no workflow, a running session the sweep would end later (#4018)', async () => {
+  it('leaves a fresh first claim whose workflow is not started yet to the sweep, on Stop (#4131 review)', async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-    // A kept claim whose workflow never started: only the sweep, past its grace, ended it.
+    // A first send's claim, its update-with-start possibly still in flight.
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() WHERE id = ${session.id}`
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+    expect(await status(session.id)).toBe('running')
+    expect((await m.events.read(session.id)).some((e) => e.event.type === 'error')).toBe(false)
+  }, 60_000)
+
+  it('ends at once, when Stop finds no workflow past the grace, a running session the sweep would end later (#4018)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    // A kept claim whose workflow never started, past RUNNING_GRACE_MS.
+    await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
     expect(await m.interrupt(session.id, browser)).toBe(true)
     expect(await status(session.id)).toBe('idle')
     expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
@@ -414,6 +424,16 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       code: 'turn_failed',
       message: expect.stringMatching(/workflow has ended/),
     })
+  }, 60_000)
+
+  it('writes nothing on Stop when the gone workflow is open again by the time it is described (#4131 review)', async () => {
+    const m = await durableManager()
+    m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, describe: async () => 'open' })
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+    expect(await status(session.id)).toBe('running')
+    expect((await m.events.read(session.id)).some((e) => e.event.type === 'error')).toBe(false)
   }, 60_000)
 
   it("hands off, then ends the old owner's parked calls with cancel_input, or the interrupt Signal when it goes unanswered", async () => {
