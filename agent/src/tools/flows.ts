@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { ok } from './call.js'
 import { answered, command } from './command.js'
@@ -6,7 +5,7 @@ import { page, PAGED, pageInput } from './pagination.js'
 import { EscalationError, ESCALATION_ACTIONS } from '../flows/escalations.js'
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
-import { defineTool, json, text, ToolError, type Tool } from './registry.js'
+import { defineTool, idempotencyKey, json, text, ToolError, type Tool } from './registry.js'
 
 // Flows (#1057, spec 2026-10-01 §7): a Python script over ScadBuddy's host functions,
 // registered by name and run durably as a ProjectWorkflow. Routes:
@@ -308,7 +307,7 @@ export const flowTools: Tool[] = [
     routes: ['POST /api/v1/workflows/{definition_id}/runs'],
     handler: async ({ definition_id, approval_timeout, grant, inputs }, ctx) => {
       // One key for this call, re-sent after an answer that never came, so a re-send reaches the same run.
-      const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+      const headers = { 'Idempotency-Key': idempotencyKey(ctx) }
       const what = `start flow ${definition_id}`
       const sent = await answered(
         ctx,

@@ -181,7 +181,9 @@ async def generate_target(
             filaments = len(meta.colors)
             if plan is not None:
                 stats = plan.nozzle_stats(nozzles)
-                filament_map = plan.stated_map(filaments)
+                # Never pinned (#3955 review): the plates are not known here, and a
+                # pinned file of more than one cannot be sliced by plate.
+                filament_map = plan.stated_map(filaments, one_plate=False)
             else:
                 sides = _offered_sides(status, nozzles)
                 stats = nozzle_stats_for(sides, nozzles) if sides is not None else None

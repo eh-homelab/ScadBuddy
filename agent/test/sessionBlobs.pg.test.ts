@@ -313,6 +313,20 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
     })
   })
 
+  it('putIf stores under its fence, checked in the same transaction, and nothing when the fence refuses', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const blobs = new SessionBlobs(db.sql)
+    const image = sessionImage('image/png', Buffer.from(PNG, 'base64'))
+    const inTx = async (tx: { unsafe: (q: string) => Promise<unknown> }, answer: boolean) => {
+      await tx.unsafe('SELECT 1')
+      return answer
+    }
+    expect(await blobs.putIf(session.id, [image], (tx) => inTx(tx, false))).toBe(false)
+    expect(await blobs.get(session.id, NAME)).toBeUndefined()
+    expect(await blobs.putIf(session.id, [image], (tx) => inTx(tx, true))).toBe(true)
+    expect((await blobs.get(session.id, NAME))?.mediaType).toBe('image/png')
+  })
+
   it('shows the call without its images when they cannot be stored', async () => {
     await db.sql`ALTER TABLE ai_session_blobs ADD CONSTRAINT no_more CHECK (false) NOT VALID`
     const id = await withImage()

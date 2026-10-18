@@ -11,12 +11,14 @@ that owns the route's behaviour.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import time
 import zipfile
 from datetime import timedelta
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 import pytest
@@ -351,6 +353,91 @@ def test_a_resolver_error_is_a_422_before_anything_is_sliced(
     assert response.status_code == 422
     assert "different sizes" in response.json()["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_the_check_reads_every_spools_presets_together(client: TestClient, model: str) -> None:
+    """#4196: spool 5's presets answer only once spool 9's read has started, so a check
+    that read them one after the other would time out here."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    asked = asyncio.Event()
+
+    async def presets(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/spools/9/filament-presets"):
+            asked.set()
+        else:
+            await asyncio.wait_for(asked.wait(), timeout=1)
+        return httpx.Response(200, json=[])
+
+    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
+        side_effect=presets
+    )
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+
+
+@respx.mock
+def test_the_spools_read_together_are_capped(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4198 review: a body's plan is not capped, so no more than
+    ``SPOOL_PRESET_READS`` spools' presets are read at once."""
+    monkeypatch.setattr(print_run, "SPOOL_PRESET_READS", 1)
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    open_reads = 0
+    most = 0
+
+    async def presets(request: httpx.Request) -> httpx.Response:
+        nonlocal open_reads, most
+        open_reads += 1
+        most = max(most, open_reads)
+        await asyncio.sleep(0.05)
+        open_reads -= 1
+        return httpx.Response(200, json=[])
+
+    route = respx.route(
+        method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets"
+    ).mock(side_effect=presets)
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert route.call_count >= 2
+    assert most == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(("first", "second"), [(404, 403), (403, 404)])
+def test_the_spools_read_together_fail_as_the_serial_reads_did(
+    client: TestClient, model: str, first: int, second: int
+) -> None:
+    """#4196 review: with both spools' presets failing, the check answers with spool 5's
+    failure, the first the serial reads made, whichever way round the two fail."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    failing = {5: first, 9: second}
+
+    def presets(request: httpx.Request) -> httpx.Response:
+        spool_id = int(request.url.path.split("/")[-2])
+        return httpx.Response(failing.get(spool_id, 200), json=[])
+
+    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
+        side_effect=presets
+    )
+
+    both = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    failing.pop(9)
+    spool_5_alone = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert spool_5_alone.status_code >= 400, spool_5_alone.text
+    assert (both.status_code, both.json()) == (spool_5_alone.status_code, spool_5_alone.json())
 
 
 @respx.mock
@@ -1434,6 +1521,98 @@ def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     assert settings["extruder_nozzle_stats"] == ["High Flow#1", "Standard#0"]
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         assert "Metadata/slice_info.config" not in archive.namelist()
+
+
+def _sides_run(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    *plates: tuple[int, ...],
+    plate_id: int = 1,
+    **choices: Any,
+) -> tuple[httpx.Response, respx.Route, respx.Route]:
+    """A two-colour run on an H2C with a Standard 0.4 on each side, so both are offered
+    and the plan puts one colour on each; the upload and the slice it posted. ``plates``
+    as for :func:`two_colour_output`, printing ``plate_id``."""
+    output_id = two_colour_output(client, model, paths, *plates)
+    upload = upload_route()
+    run_routes()
+    _status(**_mounted(("HS01", "0.4"), ("HS01", "0.4")))
+    sliced = slice_routes()
+    queue_route()
+    response = run_print(
+        client,
+        output_id,
+        json={
+            **body(tier="standard", nozzles=[{"size": "0.4"}], **choices),
+            "filament_plan": BOTH_ON_RIGHT,
+            "plate_id": plate_id,
+        },
+    )
+    return response, upload, sliced
+
+
+def _plate_metadata(route: respx.Route) -> list[dict[str, str]]:
+    """Each ``<plate>``'s metadata in the uploaded 3MF, as key → value."""
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(route))) as archive:
+        root = ET.fromstring(archive.read("Metadata/model_settings.config"))
+    return [
+        {entry.get("key", ""): entry.get("value", "") for entry in plate.findall("metadata")}
+        for plate in root.findall("plate")
+    ]
+
+
+@respx.mock
+def test_sides_chosen_by_hand_are_pinned_on_every_plate_and_sliced_whole(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3955: a side chosen by hand was regrouped by the slicer (preview-slice 140 put
+    black on the right, chosen left). The deployed slicer keeps a map only when the
+    plate states it in "Nozzle Manual" mode with the project's nozzle map, and reads that
+    only in a slice of the whole file: a slice naming a plate segfaults."""
+    response, upload, sliced = _sides_run(client, model, paths, sides={"1": "R", "2": "L"})
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    # The slicer numbers its extruders left (1) then right (2).
+    assert settings["filament_map"] == ["2", "1"]
+    assert settings["filament_nozzle_map"] == ["1", "0"]
+    [plate] = _plate_metadata(upload)
+    assert plate["filament_map_mode"] == "Nozzle Manual"
+    assert plate["filament_maps"] == "2 1"
+    assert plate["filament_volume_maps"] == "0 0"
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [0]
+
+
+@respx.mock
+def test_sides_chosen_by_hand_in_a_file_of_more_plates_slice_only_the_plate_printed(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3955 review: a whole-file slice (``plate: 0``) slices every plate, so in a file
+    of two it would be reported and queued as plate 2's. Its map is left unpinned, as a
+    plate named in the slice cannot read a pinned one, and plate 2 is sliced alone."""
+    response, upload, sliced = _sides_run(
+        client, model, paths, (1, 2), (1, 2), plate_id=2, sides={"1": "R", "2": "L"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert "filament_nozzle_map" not in _uploaded_settings(upload)
+    assert all("filament_map_mode" not in plate for plate in _plate_metadata(upload))
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [2]
+
+
+@respx.mock
+def test_a_plan_nobody_touched_is_left_to_the_slicers_grouping(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3955: with every side on Automatic the slicer still groups the filaments itself
+    (Auto For Flush), as the owner's inkjet-easy default, and the plate is named."""
+    response, upload, sliced = _sides_run(client, model, paths)
+
+    assert response.status_code == 200, response.text
+    assert "filament_nozzle_map" not in _uploaded_settings(upload)
+    assert all("filament_map_mode" not in plate for plate in _plate_metadata(upload))
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [1]
 
 
 def _mounted(right: tuple[str, str], left: tuple[str, str]) -> dict[str, Any]:

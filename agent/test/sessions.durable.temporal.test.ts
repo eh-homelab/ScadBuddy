@@ -426,6 +426,30 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     })
   }, 60_000)
 
+  it('ends a session parked on a call whose workflow is gone on Stop, and cancels the entry no run will resolve (#4018)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'print it' })
+    // The turn parked on an approval, then its workflow ended without resolving it.
+    const rid = `durable:${session.id}:run-1:toolu_p`
+    await db.sql`
+      INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, prompt,
+                                    requested_by, responders, expires_at)
+      VALUES (${rid}, ${session.id}, ${sessionWorkflowId(session.id)}, 'run-1', 'approval', 'print_output', 'print box', ${'a'.repeat(64)}, '',
+              ${db.sql.json({ kind: 'browser', id: 'browser', label: 'You' })}, ${['browser']}, now() + interval '1 hour')`
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    expect(await status(session.id)).toBe('idle')
+    expect(await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${session.id}`).toHaveLength(0)
+    const [response] = await db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_input_responses WHERE request_id = ${rid}`
+    expect(response?.outcome).toBe('cancelled')
+    const log = (await m.events.read(session.id)).map((e) => e.event)
+    expect(log).toContainEqual(expect.objectContaining({ type: 'error', code: 'turn_failed', message: expect.stringMatching(/workflow has ended/) }))
+    expect(log).toContainEqual(expect.objectContaining({ type: 'approval.resolved', id: rid, decision: 'cancelled' }))
+    // Once ended, Stop has nothing left to stop.
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+  }, 60_000)
+
   it('writes nothing on Stop when the gone workflow is open again by the time it is described (#4131 review)', async () => {
     const m = await durableManager()
     m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: QUEUE, describe: async () => 'open' })
@@ -582,6 +606,55 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const running = await twoTurns(m, { busy: true })
     const atLast = await m.fork(running.id, browser)
     expect((await recorded(atLast.id)).start).toMatchObject({ agent: { checkpoint: 'a2' } })
+  }, 60_000)
+
+  it('forks a parent whose committed state ends at a paused call before that call, with its history through the reply (#4173)', async () => {
+    const m = await durableManager()
+    const parent = await twoTurns(m)
+    // A third turn paused on a call, then streamed a reply and was stopped: its last segment
+    // never committed, so the workflow's checkpoint is the paused call, and the reply is only in the log.
+    const third = await m.send(parent.id, browser, 'paint it')
+    await finishTurn(parent.id, [...reply('durable-11', 'painting it now'), { type: 'session.status', status: 'idle' }])
+    await third.done
+    const paused = [
+      ...conversation,
+      entry('u3', 'user', 'paint it'),
+      entry('a3', 'assistant', [{ type: 'tool_use', id: 'toolu_p', name: 'mcp__scadbuddy__list_models', input: {} }]),
+    ]
+    const setConversation = (entries: unknown[], checkpoint: string) =>
+      env.client.workflow.getHandle(sessionWorkflowId(parent.id)).signal('set_conversation', {
+        session_id: 'claude-1',
+        checkpoint,
+        conversation: entries.map((e) => JSON.stringify(e)),
+      })
+    await setConversation(paused, 'a3')
+    const child = await m.fork(parent.id, browser)
+    expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2' } })
+    expect(conversationOf((await recorded(child.id)).start as Record<string, unknown>)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    // The child shows the conversation its agent has: not the stopped turn's uncommitted reply.
+    const log = (await m.events.read(child.id)).map((e) => e.event)
+    expect(log.filter((e) => e.type === 'assistant.text.delta').map((e) => (e as { delta: string }).delta)).toEqual(['a box', 'a taller box'])
+
+    // Once the call is answered and committed, the whole conversation forks.
+    await setConversation(
+      [...paused, entry('r3', 'user', [{ type: 'tool_result', tool_use_id: 'toolu_p', content: '[]' }])],
+      'r3',
+    )
+    const later = await m.fork(parent.id, browser)
+    expect((await recorded(later.id)).start).toMatchObject({ agent: { checkpoint: 'r3' } })
+
+    // A paused call with no finished reply before it has nothing to fork.
+    const { session: fresh, turn } = await m.start(browser, { origin: 'chat', prompt: 'list them' })
+    await finishTurn(fresh.id, [{ type: 'session.status', status: 'idle' }])
+    await turn!.done
+    await env.client.workflow.getHandle(sessionWorkflowId(fresh.id)).signal('set_conversation', {
+      session_id: 'claude-2',
+      checkpoint: 'a1',
+      conversation: [entry('u1', 'user', 'list them'), entry('a1', 'assistant', [{ type: 'tool_use', id: 'toolu_q', name: 'x', input: {} }])].map((e) =>
+        JSON.stringify(e),
+      ),
+    })
+    await expect(m.fork(fresh.id, browser)).rejects.toMatchObject({ code: 'no_transcript' })
   }, 60_000)
 
   it('refuses to fork a durable session with no conversation yet, and leaves no child', async () => {
@@ -800,10 +873,11 @@ describe("a durable handoff whose workflow cannot be reached", () => {
       withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
       workflow: { getHandle: () => ({ executeUpdate: down, signal: down }) },
     } as unknown as Client
-    const turns = new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog })
+    // handoff reads the row's runtime first: no row, so a classic durable session.
+    const turns = new DurableTurns({ client, sql: (() => Promise.resolve([])) as unknown as Sql, events: {} as EventLog })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      await turns.handoff({ id: 'f0e1d2c3-0000-4000-8000-000000000000' } as SessionRecord, 'the session was handed off to You')
+      await turns.handoff({ id: 'f0e1d2c3-0000-4000-8000-000000000000' } as SessionRecord, 'the session was handed off to You', { kind: 'browser', id: 'browser', label: 'You' })
       expect(warn).toHaveBeenCalledTimes(1)
       const [line] = warn.mock.calls[0] as [string]
       expect(line).toContain('f0e1d2c3-0000-4000-8000-000000000000')
@@ -821,7 +895,9 @@ describe('a durable fork whose workflow cannot be read (#3739)', () => {
       withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
       workflow: { getHandle: () => ({ query: () => Promise.reject(err) }) },
     } as unknown as Client
-    return new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog })
+    // forkSource reads the row's runtime first: no row, so a classic durable session.
+    const sql = (() => Promise.resolve([])) as unknown as Sql
+    return new DurableTurns({ client, sql, events: {} as EventLog })
   }
 
   it('logs why, and says when no worker answered in time', async () => {

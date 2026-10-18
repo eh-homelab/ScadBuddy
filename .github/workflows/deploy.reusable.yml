@@ -24,6 +24,11 @@ name: Deploy (reusable)
 #      `ghcr.io/eh-homelab/scadbuddy-agent-durable:<version>@sha256:<its digest>`,
 #      in scadbuddy-agent-durable.yaml (its own Deployment) or, before that
 #      file exists, in the API's manifest (where it first ran as a sidecar).
+#      The slicer worker's line (#3822) is pinned the same way, to
+#      `ghcr.io/eh-homelab/scadbuddy-slicer:<version>@sha256:<its digest>`, in
+#      scadbuddy-slicer.yaml, once that file exists. Unlike the others, a build
+#      that published no slicer image (its job is continue-on-error) keeps the
+#      pin clusters has and warns; the rest of the deploy goes ahead.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #      And, once clusters#1596 Phase 5 adds it, the `ref=` of the remote
@@ -92,6 +97,11 @@ env:
   MANIFEST_PRINT: applications/scadbuddy/scadbuddy-print.yaml
   # The flow runs' worker's Deployment (#1057, `--queue projects`): same image, same pin.
   MANIFEST_PROJECTS: applications/scadbuddy/scadbuddy-projects.yaml
+  # The slicer worker (#3821, #3822), same run, same tags, its own Deployment.
+  # Optional until that file lands in clusters (clusters#2549), and the only
+  # image whose absence for a build is not an error: see the pin step.
+  SLICER_IMAGE: ghcr.io/eh-homelab/scadbuddy-slicer
+  MANIFEST_SLICER: applications/scadbuddy/scadbuddy-slicer.yaml
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
@@ -111,7 +121,7 @@ jobs:
   pin:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
-    # The agent wait below can take up to 10 of these, the agent-durable one 20.
+    # The agent wait below can take up to 10 of these, the agent-durable one 20, the slicer 10.
     timeout-minutes: 45
     # The one place the two callers can race: this job closes the previous
     # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
@@ -238,6 +248,38 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The slicer worker (#3822), resolved like agent-durable but only when
+      # its manifest exists and names the image. Its `slicer` job is
+      # continue-on-error, so a build can legitimately have no image: this
+      # waits up to 10 minutes, then warns and outputs an empty digest, and
+      # the pin step keeps the current pin rather than failing the deploy.
+      - name: Resolve the slicer image
+        id: slicer
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -sqE "^\s*(- )?image:.*${SLICER_IMAGE//./\\.}" "clusters/${MANIFEST_SLICER}"; then
+            echo "clusters/${MANIFEST_SLICER} is absent or does not run the slicer; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${SLICER_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 60); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest'); the slicer pin stays as it is"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The dashboard's ref= may only move to a revision that has the
       # kustomization it points at: one without it (a rollback to a build from
       # before #988) would fail the whole overlay's sync, the images included.
@@ -274,6 +316,7 @@ jobs:
           DIGEST: ${{ inputs.digest }}
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
           AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
+          SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -380,6 +423,27 @@ jobs:
             sed -i -E "s|${durable_line}|\1image: ${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}|" "$target"
             expect_one "$target" "^\s*image: ${AGENT_DURABLE_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DURABLE_DIGEST}\$" "pinned agent-durable image"
             durable=pinned
+          }
+
+          # The slicer worker's line (#3822), in its own Deployment's file.
+          # Optional until clusters has the file. Once it does, the file must
+          # carry exactly one line for the image, but a build that published no
+          # slicer image keeps whatever the file pins and warns: the slicer is
+          # idle until slices are routed to it and its job may fail on its own.
+          # Sets $slicer to `pinned`, `kept` or (file absent) `none`.
+          slicer=none
+          pin_slicer() { # manifest
+            local target=$1
+            local slicer_line="^(\s*)image: ${SLICER_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            expect_one "$target" "$slicer_line" "slicer image"
+            if [[ ! "${SLICER_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::warning file=$target::no ${SLICER_IMAGE} image was published for ${VERSION}; keeping the slicer pin as it is"
+              slicer=kept
+              return 0
+            fi
+            sed -i -E "s|${slicer_line}|\1image: ${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${SLICER_IMAGE//./\\.}:${VERSION//./\\.}@${SLICER_DIGEST}\$" "pinned slicer image"
+            slicer=pinned
           }
 
           # True when transformers[] holds a NamespaceTransformer with
@@ -507,6 +571,13 @@ jobs:
             manifests+=("$MANIFEST_AGENT_DURABLE")
           fi
           echo "durable=$durable" >> "$GITHUB_OUTPUT"
+          if [ -f "$MANIFEST_SLICER" ]; then
+            pin_slicer "$MANIFEST_SLICER"
+            [ "$slicer" != pinned ] || manifests+=("$MANIFEST_SLICER")
+          else
+            echo "::notice::${MANIFEST_SLICER} is not in clusters yet; not pinning it"
+          fi
+          echo "slicer=$slicer" >> "$GITHUB_OUTPUT"
           pin_dashboard "$KUSTOMIZATION"
           echo "dashboard=$dashboard" >> "$GITHUB_OUTPUT"
           if [ "$dashboard" = pinned ]; then
@@ -556,6 +627,8 @@ jobs:
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
           AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
           DURABLE: ${{ steps.edit.outputs.durable }}
+          SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
+          SLICER: ${{ steps.edit.outputs.slicer }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -590,6 +663,11 @@ jobs:
           else
             durable_note="not run in clusters yet (#1056)"
           fi
+          case "$SLICER" in
+            pinned) slicer_note="\`${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}\`" ;;
+            kept)   slicer_note="kept at its current pin: no image was published for ${VERSION}" ;;
+            *)      slicer_note="not run in clusters yet (#3822)" ;;
+          esac
           git checkout -B "$DEPLOY_BRANCH"
           git add -- "${manifest_files[@]}"
           git commit -q -F - <<EOF
@@ -597,7 +675,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (agent-durable: ${durable_note}; dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; slicer: ${slicer_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -618,6 +696,7 @@ jobs:
           - **Image:** \`${IMAGE}:${VERSION}@${DIGEST}\`
           - **Agent:** \`${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}\`
           - **Agent-durable:** ${durable_note}
+          - **Slicer:** ${slicer_note}
           - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}
           - **Built from:** ${SOURCE_URL} (\`${REVISION}\`)

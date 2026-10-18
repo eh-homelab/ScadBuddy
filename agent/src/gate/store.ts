@@ -4,6 +4,7 @@ import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../sessions/p
 import { busKindOf } from '../sessions/busEvents.js'
 import { responseHash } from './canonical.js'
 import { parseRequestId } from './ids.js'
+import { cut } from './limits.js'
 
 // Every write about a durable entry (durable-agents spec §6.6, "How a durable entry
 // opens and closes"), ported whole from agent-durable's gate/store.py; the SQL is the
@@ -158,12 +159,6 @@ function event(body: object): ServerEvent {
 
 function iso(at: Date): string {
   return at.toISOString()
-}
-
-/** Python slices by code point, not UTF-16 unit. */
-function cut(text: string, limit: number): string {
-  const points = [...text]
-  return points.length <= limit ? text : points.slice(0, limit).join('')
 }
 
 function cap(text: string, limit: number): string {

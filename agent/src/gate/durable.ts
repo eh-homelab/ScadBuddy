@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
 import { responseHash } from './canonical.js'
+import { OWNER_CHANGED_SIGNAL } from '../temporal/session/names.js'
 import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
@@ -128,6 +129,16 @@ export class DurableGate {
   async interrupt(sessionId: string, reason: string): Promise<void> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     await this.#call(this.#timeoutMs, () => handle.signal<[{ reason: string }]>(INTERRUPT_SIGNAL, { reason }))
+  }
+
+  /**
+   * An AgentSession session's new owner (unified runtime spec §5.6): what its gate checks a
+   * response against from now on. DurableSession has no such Signal; only a unified session's
+   * workflow is sent it.
+   */
+  async ownerChanged(sessionId: string, owner: Owner): Promise<void> {
+    const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
+    await this.#call(this.#timeoutMs, () => handle.signal<[{ owner: Owner }]>(OWNER_CHANGED_SIGNAL, { owner }))
   }
 
   /**
