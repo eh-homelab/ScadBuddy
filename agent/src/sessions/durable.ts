@@ -15,6 +15,8 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { SESSION_QUEUE, UNIFIED_SESSIONS_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
+import { cancelOrphanedEntries } from '../gate/sweep.js'
+import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
 import { POOL_BUDGET, POOL_COST, SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
@@ -164,6 +166,8 @@ export type DurableTurnsDeps = {
    * serves AgentSession's turns; without it a unified session is not ready here.
    */
   sessionHostQueue?: string
+  /** Where a Stop records the approvals it cancels on a session whose workflow is gone (#4018). */
+  audit?: AuditSink | undefined
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
@@ -187,6 +191,7 @@ export class DurableTurns {
   readonly #client: Client
   readonly #sql: Sql
   readonly #events: EventLog
+  readonly #audit: AuditSink | undefined
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
@@ -201,6 +206,7 @@ export class DurableTurns {
     this.#client = deps.client
     this.#sql = deps.sql
     this.#events = deps.events
+    this.#audit = deps.audit
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
@@ -606,7 +612,11 @@ export class DurableTurns {
     // `graceMs` (durableSweep.ts, the constructor): a sweep given a longer one would still be
     // waiting on a claim this ends.
     if (state !== 'closed' && !row.settled) return false
-    return endLostTurn(this.#sql, this.#events, row, state)
+    const ended = await endLostTurn(this.#sql, this.#events, row, state)
+    // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
+    // rather than left for PendingInputSweep's next look, ten minutes or more away.
+    const cancelled = await cancelOrphanedEntries({ sql: this.#sql, events: this.#events, audit: this.#audit }, { sessionId: row.id })
+    return ended || cancelled > 0
   }
 
   /**

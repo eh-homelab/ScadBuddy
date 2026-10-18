@@ -784,6 +784,7 @@ if (sessions && temporalClient && payloadKeys && database) {
     client: temporalClient,
     sql: database.sql,
     events: sessions.events,
+    audit,
     // This replica's host for AgentSession turns, which a unified session's readiness checks (§5.2).
     ...(hostWorkers?.sessions ? { sessionHostQueue: SESSION_HOST_QUEUE } : {}),
   })
