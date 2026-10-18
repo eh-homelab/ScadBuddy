@@ -162,8 +162,8 @@ async def _source_serves(index: BlobIndex, source: ContentBackend, target: Conte
             if await source.exists(ref.backend_id):
                 return True
         except Exception:
+            # One failed probe is not a dead source; the next may answer.
             logger.warning("could not ask the source whether it serves", exc_info=True)
-            return False
     return False
 
 
