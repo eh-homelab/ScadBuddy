@@ -221,12 +221,15 @@ describe('memory activities in a durable turn', () => {
     fake.respond = (r) => (r.path.endsWith('/memories') ? accepted.then(() => ({ json: { success: true } })) : undefined)
     let released = false
     const acts = memoryActivities(deps({}, () => void (released = true)))
-    await env(MEMORY_RETAIN_ACTIVITY).run(acts[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
-    // Back before Hindsight answered: nothing recorded yet, and the plugin's route still
-    // held for the retain in flight.
-    expect(appended).toEqual([])
-    expect(released).toBe(false)
-    accept()
+    try {
+      await env(MEMORY_RETAIN_ACTIVITY).run(acts[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
+      // Back before Hindsight answered: nothing recorded yet, and the plugin's route still
+      // held for the retain in flight.
+      expect(appended).toEqual([])
+      expect(released).toBe(false)
+    } finally {
+      accept() // also on a failed assertion, so no retain stays in flight for later tests
+    }
     await drainRetains()
     expect(fake.retains()).toHaveLength(1)
     expect(appended).toEqual([expect.objectContaining({ type: 'memory', action: 'retain', outcome: 'ok' })])
