@@ -66,8 +66,12 @@ Keys = tuple[str | None, str | None]
 
 
 class SpoolStore:
-    def __init__(self, pool: ConnectionPool[Conn]) -> None:
+    def __init__(
+        self, pool: ConnectionPool[Conn], *, clock: Callable[[], float] = time.monotonic
+    ) -> None:
         self._pool = pool
+        #: What a write's deadline (`replace_records`' ``timeout``) is measured on.
+        self._clock = clock
 
     async def _call[T](self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         return await asyncio.to_thread(fn, *args, **kwargs)
@@ -160,13 +164,13 @@ class SpoolStore:
         at: datetime,
         timeout: float | None,
     ) -> None:
-        deadline = None if timeout is None else time.monotonic() + timeout
+        deadline = None if timeout is None else self._clock() + timeout
         listed: dict[str, SpoolSnapshot] = {}
         for snapshot in snapshots:
             listed.setdefault(snapshot.record_id, snapshot)
         with self._pool.connection() as conn, conn.transaction():
             if deadline is not None:
-                bound = f"{max(1, int((deadline - time.monotonic()) * 1000))}ms"
+                bound = f"{max(1, int((deadline - self._clock()) * 1000))}ms"
                 conn.execute("SELECT set_config('lock_timeout', %s, true)", (bound,))
                 conn.execute("SELECT set_config('statement_timeout', %s, true)", (bound,))
             conn.execute(_LOCK)
@@ -229,7 +233,7 @@ class SpoolStore:
                 " failed_at = NULL, failure = NULL",
                 (provider, at),
             )
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is not None and self._clock() >= deadline:
                 raise TimeoutError(f"the refresh of {provider} ran past its deadline")
 
     def _failed(self, provider: str, at: datetime, failure: str) -> None:

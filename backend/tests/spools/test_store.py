@@ -3,7 +3,6 @@ physical spool, and each spool provider keeps its own record of it (1:N)."""
 
 from __future__ import annotations
 
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -514,12 +513,10 @@ async def test_a_write_that_cannot_finish_in_time_commits_nothing(
     assert await store.refreshes() == []
 
 
-async def test_a_write_past_its_deadline_rolls_back(
-    store: SpoolStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_write_past_its_deadline_rolls_back(pg_pool: PgPool) -> None:
     """Every statement finished in time, but the deadline passed before the commit."""
-    clock = iter([0.0, 0.0])
-    monkeypatch.setattr(time, "monotonic", lambda: next(clock, 100.0))
+    ticks = iter([0.0, 0.0])
+    store = SpoolStore(pg_pool, clock=lambda: next(ticks, 100.0))
     with pytest.raises(TimeoutError):
         await store.replace_records("bambuddy", [record("1")], NOW, timeout=30.0)
     assert rows(pg_pool, "SELECT 1 FROM spool_provider_records") == []
