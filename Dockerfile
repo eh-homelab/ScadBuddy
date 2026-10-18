@@ -399,20 +399,24 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # what backend/scadbuddy/slicing/profiles.py says of the profiles. The sha256 was
 # measured with `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
 # lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
-# Upstream publishes no arm64 AppImage, so any other TARGETARCH fails here.
+# Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
+# whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
+# `slicer`, which runs the CLI, refuses another architecture.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer-dist
 
-ARG TARGETARCH
 ARG BAMBU_STUDIO_VERSION
 ARG BAMBU_STUDIO_ASSET
 ARG BAMBU_STUDIO_SHA256_AMD64
 
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl squashfs-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Extracted, not run as an AppImage: --appimage-extract needs no FUSE. AppRun
+# Extracted, never run: the AppImage is an x86-64 ELF runtime followed by a squashfs
+# image, which starts where the ELF's section header table ends (e_shoff at byte 40 plus
+# e_shnum at 60 times e_shentsize at 58, little-endian), so unsquashfs reads it on any
+# build host, where `--appimage-extract` would have to execute the runtime. AppRun
 # sets LD_LIBRARY_PATH to the bundled bin/ and LC_ALL=C, then execs
 # bin/bambu-studio. `profiles` is the vendor profile tree (profiles/BBL/),
 # linked where the worker's contract names it. VERSION is what a native slice's
@@ -422,17 +426,13 @@ RUN apt-get update \
 # vendor file BBL.json beside the machine, process and filament presets, laid out
 # as resources/profiles/ is, without the tree's cover images and bed models.
 WORKDIR /opt
-RUN case "$TARGETARCH" in \
-      amd64) sha="$BAMBU_STUDIO_SHA256_AMD64" ;; \
-      *) echo "ERROR: Bambu Studio publishes no AppImage for '${TARGETARCH}'." >&2; exit 1 ;; \
-    esac \
-    && curl --fail --silent --show-error --location --output bambu-studio.AppImage \
+RUN curl --fail --silent --show-error --location --output bambu-studio.AppImage \
          "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
-    && printf '%s  bambu-studio.AppImage\n' "$sha" > bambu-studio.sha256 \
+    && printf '%s  bambu-studio.AppImage\n' "$BAMBU_STUDIO_SHA256_AMD64" > bambu-studio.sha256 \
     && sha256sum --check --strict bambu-studio.sha256 \
-    && chmod +x bambu-studio.AppImage \
-    && ./bambu-studio.AppImage --appimage-extract > /dev/null \
-    && mv squashfs-root bambu-studio \
+    && le() { od -An -t "u$2" -j "$1" -N "$2" --endian=little bambu-studio.AppImage; } \
+    && offset=$(( $(le 40 8) + $(le 60 2) * $(le 58 2) )) \
+    && unsquashfs -quiet -no-progress -offset "$offset" -dest bambu-studio bambu-studio.AppImage \
     && ln -s resources/profiles bambu-studio/profiles \
     && test -d bambu-studio/profiles/BBL \
     && rm bambu-studio.AppImage bambu-studio.sha256 \
@@ -452,7 +452,12 @@ RUN case "$TARGETARCH" in \
 # runs on 24.04's 2.39.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer
 
+ARG TARGETARCH
 ARG BAMBU_STUDIO_VERSION
+
+# `slicer-dist` holds the amd64 CLI only: upstream publishes no other AppImage.
+RUN [ "$TARGETARCH" = amd64 ] \
+    || { echo "ERROR: Bambu Studio publishes no AppImage for '${TARGETARCH}'." >&2; exit 1; }
 
 # The CLI's runtime libraries. The AppImage bundles only ffmpeg's (in bin/, which
 # AppRun puts on LD_LIBRARY_PATH); the rest are the binary's NEEDED entries
@@ -709,7 +714,7 @@ COPY --link --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/opens
 # Bambu Studio's BBL presets and its VERSION, which the native slicer's preset files
 # are built from (settings.slicer_profiles_dir, #3822). From `slicer-dist`, not
 # `slicer`, so this build never compiles the slicer worker.
-COPY --from=slicer-dist /opt/slicer-profiles /opt/slicer-profiles
+COPY --link --from=slicer-dist /opt/slicer-profiles /opt/slicer-profiles
 
 ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \
