@@ -638,17 +638,21 @@ def _health_app(
                 # Like the API's: keep the last values, never fail the scrape.
                 logger.exception("could not read the store's gauges")
         body = generate_latest(metrics.registry)
-        if sdk_port is not None:
+        if sdk_port is not None and sdk_reader is not None:
             body += await sdk_exposition(sdk_port, sdk_reader)
         return Response(body, media_type=CONTENT_TYPE_LATEST)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
+        if sdk_reader is None:
+            yield
+            return
         async with sdk_reader:
             yield
 
-    # One connection to the SDK's exporter for every scrape, closed with the server.
-    sdk_reader = httpx.AsyncClient(timeout=SDK_READ_TIMEOUT)
+    # One connection to the SDK's exporter for every scrape, closed with the server;
+    # none when the worker serves no SDK series.
+    sdk_reader = httpx.AsyncClient(timeout=SDK_READ_TIMEOUT) if sdk_port is not None else None
     return Starlette(
         routes=[Route("/healthz", healthz), Route("/metrics", exposition)], lifespan=lifespan
     )
@@ -671,7 +675,8 @@ def _sdk_runtime(settings: Settings) -> tuple[Runtime | None, int | None]:
         return sdk_runtime(port), port
     except ValueError as err:
         # The SDK raises ValueError when its exporter's port is taken (two workers in
-        # one network namespace, as in a compose or dev run).
+        # one network namespace, as in a compose or dev run), and nothing narrower:
+        # temporalio 1.34 maps the core's bind error to a plain ValueError.
         logger.warning("serving no Temporal SDK metrics on port %d: %s", port, err)
         return None, None
 
