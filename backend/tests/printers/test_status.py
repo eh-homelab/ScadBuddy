@@ -95,7 +95,7 @@ def test_hms_code_formatting() -> None:
     [error] = hms_errors([{"attr": 0x07002200, "code": 0x00020025}])
     assert error.code == error.full_code == "0700220000020025"
     assert error.severity == 2 and error.description is None
-    assert hms_errors([{"attr": "x"}, "nope", {"attr": 1}]) == []  # type: ignore[list-item]
+    assert hms_errors([{"attr": "x"}, "nope", {"attr": 1}]) == []
     assert hms_errors(None) == []
 
 
