@@ -127,6 +127,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.rack.rank import (
     RackCandidate,
     RackGroup,
@@ -1178,13 +1179,14 @@ async def check_for_library(
     *,
     rack: RackUsage | None = None,
     filaments: FilamentReader | None = None,
+    files: LibraryReads | None = None,
 ) -> PrintCheck:
-    """:func:`check_print` for a file already in Bambuddy's library; with ``filaments``,
-    its slots read from the file itself (#2550)."""
+    """:func:`check_print` for a file already in the library; with ``filaments``, its
+    slots read from the file itself (#2550); ``files`` reads a native one (#3827)."""
     return await check_print(
         client,
         await LibrarySource.load(
-            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments, files=files
         ),
         settings,
         request,
@@ -2028,13 +2030,15 @@ async def filament_options_for_library(
     all_plates: bool = False,
     plate_ids: Sequence[int] | None = None,
     filaments: FilamentReader | None = None,
+    files: LibraryReads | None = None,
 ) -> FilamentOptions:
-    """:func:`filament_options` for a file already in Bambuddy's library (#313); with
-    ``filaments``, its slots read from the file itself (#2550)."""
+    """:func:`filament_options` for a file already in the library (#313); with
+    ``filaments``, its slots read from the file itself (#2550); ``files`` reads a native
+    one (#3827)."""
     return await filament_options(
         client,
         await LibrarySource.load(
-            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments, files=files
         ),
         printer_id=printer_id,
         plate_id=plate_id,

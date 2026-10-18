@@ -85,11 +85,18 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
-from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.library.settings_store import (
+    NATIVE_LIBRARY_NOT_READY,
+    RECOVER_BAMBUDDY_LIBRARY_SQL,
+    StoreNotReadyError,
+    load_render_store_settings,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
@@ -125,6 +132,7 @@ from scadbuddy.workflows.housekeeping import (
     FLOWS_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
@@ -567,6 +575,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_attachments() -> None:
         await _heartbeating(_sweep_print_attachments_logged(state))
 
+    @activity.defn(name=LIBRARY_SWEEP)
+    async def sweep_print_library() -> None:
+        await _heartbeating(_sweep_print_library_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -581,7 +593,25 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         maintain_models_git,
         sweep_activity,
         sweep_print_attachments,
+        sweep_print_library,
     ]
+
+
+async def _sweep_print_library_logged(state: AppState) -> None:
+    """#3827: the native library's old trash and orphan blobs; nothing on ``bambuddy``."""
+    try:
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
+        done = await sweep_library(native, now=datetime.now(UTC))
+    except Exception:
+        logger.exception("could not sweep the print library")
+        raise
+    if done.purged or done.orphans:
+        logger.info(
+            "swept the print library",
+            extra={"purged": done.purged, "orphans": done.orphans},
+        )
 
 
 async def _sweep_print_attachments_logged(state: AppState) -> None:
@@ -987,6 +1017,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
         links=state.print_links,
+        # This process's own native library when it serves (#3827).
+        library=await state.components.get(PRINT_LIBRARY).serving_native(),
     )
     ops = state.components.get(OPERATIONS)
     activities = [
@@ -1268,6 +1300,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # #2788: on the API's /data, so every replica shares it.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
+        # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
+        # (a save never checks a seeded value), `native` needs a content store.
+        if snapshot.stored.library_backend == "native" and state.store.content is None:
+            await state.store.aclose()
+            raise StoreNotReadyError(
+                f"{NATIVE_LIBRARY_NOT_READY}. To start on"
+                f" Bambuddy's library, run {RECOVER_BAMBUDDY_LIBRARY_SQL} in ScadBuddy's"
+                " database, in the schema its SCADBUDDY_DATABASE_URL uses (or, when no"
+                " library_backend is stored, set SCADBUDDY_LIBRARY_BACKEND=bambuddy)."
+            )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
         await asyncio.to_thread(state.settings_store.close)

@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Sequen
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -47,7 +47,12 @@ from scadbuddy.api.operations import (
     recorded,
     run_operation,
 )
-from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
+from scadbuddy.api.outputs import (
+    OutputPlate,
+    live_outputs_for_files,
+    native_outputs_for_files,
+    read_plain_files,
+)
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key
@@ -57,8 +62,10 @@ from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
+    LibraryEntry,
     LibraryListing,
     LibrarySearch,
+    folder_views,
     list_library,
     search_library,
 )
@@ -109,10 +116,19 @@ from scadbuddy.library.library_write_operations import (
     LibraryFolderDeleteResult,
     LibraryFolderUpdate,
 )
+from scadbuddy.library.outputs import OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
 from scadbuddy.library_search.component import LibraryIndexDep
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.print_library.reads import (
+    LibraryReads,
+    check_served,
+    reads_for,
+    served_reads,
+)
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
@@ -122,7 +138,22 @@ from scadbuddy.workflows.print_models import SourceSpec
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/print/library", tags=["print"])
+
+async def _served_file_id(request: Request, library: PrintLibraryDep) -> None:
+    """Every ``/{file_id}`` route's 404 for an id of the library that does not serve
+    (#3827), before it reads, records or starts anything, so a route added later cannot
+    read the other library's file. The path's own validation answers a non-integer."""
+    raw = request.path_params.get("file_id")
+    if raw is None:
+        return
+    try:
+        file_id = int(raw)
+    except ValueError:
+        return
+    check_served(file_id, await library.serving_native())
+
+
+router = APIRouter(prefix="/print/library", tags=["print"], dependencies=[Depends(_served_file_id)])
 
 #: The operations record's subject for a library operation on several files, or none yet.
 LIBRARY_FILES_SUBJECT = "library-files"
@@ -143,6 +174,7 @@ async def get_library(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     outputs: OutputsDep,
+    library: PrintLibraryDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
     file_id: Annotated[int | None, Query(ge=1)] = None,
@@ -153,7 +185,15 @@ async def get_library(
     exists: the upload row outlives a deleted output, and a file whose output is gone is
     any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
     folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
-    no longer has is its 404."""
+    no longer has is its 404. On ``library_backend=native`` it is ScadBuddy's own library,
+    and an id outside it is a 404."""
+    native = await library.serving_native()
+    if native is not None:
+        if file_id is not None and folder_id is None:
+            folder_id = (await native.library_file(file_id)).folder_id
+        listing = await list_library(native, folder_id=folder_id, show_all=show_all)
+        await _name_native_outputs(native, outputs, listing.files)
+        return listing
     async with client_for(store.load()) as client:
         if file_id is not None and folder_id is None:
             folder_id = (await client.library_file(file_id)).folder_id
@@ -162,6 +202,16 @@ async def get_library(
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+async def _name_native_outputs(
+    native: NativeLibrary, outputs: OutputStore, entries: Sequence[LibraryEntry]
+) -> None:
+    """Each entry's ``output_id`` from its row (`LibraryEntry` carries none of its own)."""
+    rows = await asyncio.to_thread(native.rows.files_by_ids, [entry.id for entry in entries])
+    made = await native_outputs_for_files(outputs, rows)
+    for entry in entries:
+        entry.output_id = made.get(entry.id)
 
 
 #: The most file ids one names lookup reads, and how many it asks Bambuddy at once.
@@ -184,6 +234,7 @@ class LibraryFileName(BaseModel):
 )
 async def get_library_names(
     store: SettingsStoreDep,
+    library: PrintLibraryDep,
     ids: Annotated[list[Annotated[int, Field(ge=1)]], Query(min_length=1, max_length=NAMES_MAX)],
 ) -> list[LibraryFileName]:
     """Each file's name and folder, in the order asked (a repeated id once), read from
@@ -192,9 +243,19 @@ async def get_library_names(
     ``name: null``; any other failure is the route's, and cancels the other reads before
     the client closes. When several files are asked and Bambuddy has none of them, that
     reads as a misrouted base URL rather than every file deleted, so it is a 502: a page
-    then shows the ids, never "deleted file" on every row, which invites a wrong Forget."""
-    gate = asyncio.Semaphore(NAMES_AT_ONCE)
+    then shows the ids, never "deleted file" on every row, which invites a wrong Forget.
+    On ``library_backend=native`` the names are read from its rows in one query, and no
+    502 applies: there is no base URL to have wrong."""
     unique = list(dict.fromkeys(ids))
+    native = await library.serving_native()
+    if native is not None:
+        return [
+            LibraryFileName(id=file_id, name=None)
+            if file is None
+            else LibraryFileName(id=file_id, name=file.name, folder_id=file.folder_id)
+            for file_id, file in await native.names(unique)
+        ]
+    gate = asyncio.Semaphore(NAMES_AT_ONCE)
     async with client_for(store.load()) as client:
 
         async def one(file_id: int) -> LibraryFileName:
@@ -232,6 +293,7 @@ async def get_library_search(
     index: LibraryIndexDep,
     uploads: UploadsDep,
     outputs: OutputsDep,
+    library: PrintLibraryDep,
     q: Annotated[str, Query(max_length=200)],
     show_all: Annotated[bool, Query(alias="all")] = False,
     fresh: bool = False,
@@ -246,7 +308,18 @@ async def get_library_search(
     process: answered from it for 30 s, and for 10 minutes after while one read
     replaces it in the background. ``fresh`` waits for a read that started after the
     request did or at most 2 s before it (a kept read that started then counts too), as
-    the page asks after its own changes."""
+    the page asks after its own changes.
+
+    On ``library_backend=native`` every request reads the library's rows, which is cheap,
+    and ``fresh`` has nothing to wait for."""
+    native = await library.serving_native()
+    if native is not None:
+        tree, rows = await asyncio.gather(
+            native.folders(), native.library_listing(folder_id=None, every_folder=True)
+        )
+        found = search_library(folder_views(tree), rows, q, show_all=show_all)
+        await _name_native_outputs(native, outputs, found.files)
+        return found
     config = BambuddyConfig.from_settings(store.load())
     source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
     # One config for the key and the client, so the two cannot drift apart.
@@ -590,11 +663,18 @@ async def patch_library_file(
 @router.get(
     "/{file_id}/plates", response_model=list[OutputPlate], summary="The library file's plates"
 )
-async def get_library_plates(file_id: FileIdPath, store: SettingsStoreDep) -> list[OutputPlate]:
+async def get_library_plates(
+    file_id: FileIdPath, store: SettingsStoreDep, library: PrintLibraryDep
+) -> list[OutputPlate]:
     """What the dialog offers as ``plate_id``; empty when Bambuddy reads none (an STL,
-    or a 3MF with no plate metadata), which prints as plate 1."""
-    async with client_for(store.load()) as client:
-        plates = await client.library_plates(file_id)
+    or a 3MF with no plate metadata), which prints as plate 1. On ``native`` they are the
+    plates read at upload."""
+    native = await library.serving_native()
+    if native is not None:
+        plates = await native.library_plates(file_id)
+    else:
+        async with client_for(store.load()) as client:
+            plates = await client.library_plates(file_id)
     return [
         OutputPlate(index=plate.index, has_thumbnail=plate.has_thumbnail, name=plate.name or None)
         for plate in plates.plates
@@ -628,14 +708,22 @@ class LibraryFileObjects(BaseModel):
     summary="The objects Arrange reads from a library file",
 )
 async def get_library_objects(
-    file_id: FileIdPath, store: SettingsStoreDep, state: StateDep, budget: ReadBudgetDep
+    file_id: FileIdPath,
+    store: SettingsStoreDep,
+    state: StateDep,
+    budget: ReadBudgetDep,
+    library: PrintLibraryDep,
 ) -> LibraryFileObjects:
     """Each object the file's 3MF places, with its count (#1863): what the Arrange
     dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the
     arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends
     the read budgets in effect, each overridable for this request (#2087)."""
-    async with client_for(store.load()) as client:
-        found = (await read_plain_files(client, [file_id], state, budget))[file_id]
+    native = await library.serving_native()
+    if native is not None:
+        found = (await read_plain_files(None, [file_id], state, budget, native))[file_id]
+    else:
+        async with client_for(store.load()) as client:
+            found = (await read_plain_files(client, [file_id], state, budget))[file_id]
     return LibraryFileObjects(
         file_id=file_id,
         filename=found.filename,
@@ -665,19 +753,34 @@ async def get_library_preview(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     plate: Annotated[int, Query(ge=1)] = 1,
 ) -> Response:
     """Plate ``plate`` of the file, read from the 3MF a print of it slices (#1753), as an
     output's ``preview.glb`` is read from its own: its parts in their colours, where the
     file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,
     damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404."""
-    async with client_for(store.load()) as client:
-        try:
-            data = await library_preview(client, paths.cache, file_id, plate, budget, downloads)
-        except NotViewableError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        except NoSuchPlateError as error:
-            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+    native = await library.serving_native()
+    try:
+        if native is not None:
+            data = await library_preview(
+                None, paths.cache, file_id, plate, budget, downloads, files=native
+            )
+        else:
+            async with client_for(store.load()) as client:
+                data = await library_preview(
+                    client,
+                    paths.cache,
+                    file_id,
+                    plate,
+                    budget,
+                    downloads,
+                    files=reads_for(file_id, client, None),
+                )
+    except NotViewableError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except NoSuchPlateError as error:
+        raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
     return Response(data, media_type=GLB_MEDIA_TYPE)
 
 
@@ -699,6 +802,7 @@ async def get_library_file(
     store: SettingsStoreDep,
     paths: PathsDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
 ) -> Response:
     """The file as Bambuddy's library holds it: what a print of it was made from. Always
     a download: a library file can be any type (an SVG, an HTML page), and served on
@@ -707,7 +811,14 @@ async def get_library_file(
     #2788: a whole-file ask for a file Bambuddy states a hash for is served from the
     shared download cache when it is there, and streamed from Bambuddy while it is
     kept there when it is not, so the first byte never waits on the whole download. A
-    ranged ask streams from Bambuddy as before."""
+    ranged ask streams from Bambuddy as before.
+
+    On ``library_backend=native`` the file is read from the blob store whole, ``Range``
+    or not (bambuddy-fs reads whole files): ``200`` with its hash as the ``etag`` and
+    ``accept-ranges: none``."""
+    native = await library.serving_native()
+    if native is not None:
+        return await _native_download(native, file_id)
     sha: str | None = None
     keep = False
     if request.headers.get("range") is None and downloads is not None:
@@ -758,6 +869,40 @@ async def get_library_file(
         assert isinstance(response, StreamingResponse)
         response.body_iterator = _kept_as_sent(downloads, sha, response.body_iterator)
     return response
+
+
+async def _native_download(native: NativeLibrary, file_id: int) -> Response:
+    file = await native.library_file(file_id)
+    chunks = native.download_library_file(file_id)
+    # The first chunk before the headers: a file whose blob is gone is its 404, not a
+    # 200 that breaks off.
+    try:
+        first = await anext(chunks)
+    except StopAsyncIteration:
+        first = b""
+    except BaseException:
+        await chunks.aclose()
+        raise
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            yield first
+            async for chunk in chunks:
+                yield chunk
+        finally:
+            await chunks.aclose()
+
+    return StreamingResponse(
+        body(),
+        media_type="application/octet-stream",
+        headers={
+            "content-disposition": "attachment",
+            "x-content-type-options": "nosniff",
+            "content-length": str(file.file_size),
+            "accept-ranges": "none",
+            "etag": f'"{file.file_hash}"',
+        },
+    )
 
 
 async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
@@ -845,6 +990,14 @@ async def _kept_as_sent(
             await close()
 
 
+async def _native_thumbnail(native: NativeLibrary, file_id: int, plate: int | None) -> Response:
+    """Read from the file's 3MF on demand (Ruling 9); one it lacks is a 404."""
+    data = await native.thumbnail(file_id, plate)
+    if data is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"library file {file_id} has no such image")
+    return Response(data, media_type="image/png", headers={"x-content-type-options": "nosniff"})
+
+
 @router.get(
     "/{file_id}/thumbnail",
     response_class=StreamingResponse,
@@ -852,8 +1005,11 @@ async def _kept_as_sent(
     summary="The library file's thumbnail",
 )
 async def get_library_thumbnail(
-    file_id: FileIdPath, request: Request, store: SettingsStoreDep
+    file_id: FileIdPath, request: Request, store: SettingsStoreDep, library: PrintLibraryDep
 ) -> Response:
+    native = await library.serving_native()
+    if native is not None:
+        return await _native_thumbnail(native, file_id, None)
     return await _proxy(
         store,
         request,
@@ -874,7 +1030,11 @@ async def get_library_plate_thumbnail(
     index: Annotated[int, Path(ge=1)],
     request: Request,
     store: SettingsStoreDep,
+    library: PrintLibraryDep,
 ) -> Response:
+    native = await library.serving_native()
+    if native is not None:
+        return await _native_thumbnail(native, file_id, index)
     return await _proxy(
         store,
         request,
@@ -897,6 +1057,7 @@ async def get_library_choices(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
@@ -905,7 +1066,9 @@ async def get_library_choices(
     ScadBuddy cannot read them from (#2550)."""
     settings = store.load()
     remembered = store.library_choices(file_id)
+    native = await library.serving_native()
     async with client_for(settings) as client:
+        files = served_reads(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
         source = LibrarySource.load(
             client,
@@ -913,8 +1076,14 @@ async def get_library_choices(
             uploads=uploads,
             settings=settings,
             filaments=partial(
-                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+                library_filaments,
+                client,
+                paths.cache,
+                budget=budget,
+                downloads=downloads,
+                files=files,
             ),
+            files=files,
         )
         return await choices_for(
             client,
@@ -952,6 +1121,7 @@ async def get_library_filaments(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
@@ -960,7 +1130,9 @@ async def get_library_filaments(
     ] = None,
 ) -> FilamentOptions:
     settings = store.load()
+    native = await library.serving_native()
     async with client_for(settings) as client:
+        files = served_reads(file_id, client, native)
         return await filament_options_for_library(
             client,
             uploads,
@@ -971,8 +1143,14 @@ async def get_library_filaments(
             all_plates=all_plates,
             plate_ids=plate_ids,
             filaments=partial(
-                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+                library_filaments,
+                client,
+                paths.cache,
+                budget=budget,
+                downloads=downloads,
+                files=files,
             ),
+            files=files,
         )
 
 
@@ -1001,6 +1179,7 @@ async def post_library_run(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
 ) -> PrintRun | JSONResponse:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
@@ -1021,6 +1200,7 @@ async def post_library_run(
         downloads=downloads,
         response=response,
         http=http,
+        native=await library.serving_native(),
     )
 
 
@@ -1036,16 +1216,20 @@ async def start_library_run(
     downloads: DownloadCache | None,
     response: Response | None = None,
     http: Request | None = None,
+    native: LibraryReads | None = None,
 ) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
     signature (#2718 review). ``response`` takes the route's status code; a caller with
     no response of its own reads the run's ``status`` instead. Only ``http`` asking for
     ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
-    calls it, the answer is always the run."""
+    calls it, the answer is always the run. ``native`` is the native library that serves,
+    if one does (#3827), and a file of the library that does not serve is its 404, before
+    anything is accepted."""
+    check_served(file_id, native)
 
     async def prepare(source: SourceSpec) -> SourceSpec:
-        filaments = await _run_filaments(store, paths, budget, file_id, downloads)
+        filaments = await _run_filaments(store, paths, budget, file_id, downloads, native)
         return source.model_copy(update={"filaments": filaments})
 
     return await accept_run(
@@ -1067,6 +1251,7 @@ async def _run_filaments(
     budget: ReadBudget,
     file_id: int,
     downloads: DownloadCache | None,
+    native: LibraryReads | None = None,
 ) -> LocalFilaments | None:
     """The slots a run of library file ``file_id`` reads (#2550): from the cache the
     dialog filled, or a download of the file that fills it. Only for a file Bambuddy
@@ -1076,10 +1261,13 @@ async def _run_filaments(
     why a file cannot print."""
     try:
         async with client_for(store.load()) as client:
-            file = await client.library_file(file_id)
+            files = served_reads(file_id, client, native)
+            file = await files.library_file(file_id)
             if not file.file_hash:
                 return None
-            return await library_filaments(client, paths.cache, file, budget, downloads)
+            return await library_filaments(
+                client, paths.cache, file, budget, downloads, files=files
+            )
     except ApiError:
         return None
 
@@ -1224,11 +1412,14 @@ async def post_library_check(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550)."""
     settings = store.load()
+    native = await library.serving_native()
     async with client_for(settings) as client:
+        files = served_reads(file_id, client, native)
         return await check_for_library(
             client,
             uploads,
@@ -1237,6 +1428,12 @@ async def post_library_check(
             body,
             rack=rack,
             filaments=partial(
-                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+                library_filaments,
+                client,
+                paths.cache,
+                budget=budget,
+                downloads=downloads,
+                files=files,
             ),
+            files=files,
         )

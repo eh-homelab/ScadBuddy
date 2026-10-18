@@ -109,6 +109,7 @@ const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
     'last_project_id',
     'destination_sort',
     'store_backend',
+    'library_backend',
     // The S3 store's, under the Blob store choice.
     'store_s3_endpoint',
     'store_s3_region',
@@ -196,7 +197,7 @@ type Problem = { problem: string }
 /** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
 function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
   if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
-  if (name === 'display_unit' || name === 'destination_sort') return raw
+  if (name === 'display_unit' || name === 'destination_sort' || name === 'library_backend') return raw
   if (name === 'store_s3_path_style') return raw === 'true'
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
@@ -451,7 +452,10 @@ function SettingsSections() {
       id === 'connection' &&
       changed('bambuddy_url') &&
       value('bambuddy_url') === '' &&
-      settings.store_backend === 'bambuddy'
+      settings.store_backend === 'bambuddy' &&
+      // ScadBuddy's own library cannot sit on the local store: the save goes as it is, the
+      // server's refusal is shown, and the user picks s3 first.
+      settings.library_backend !== 'native'
     ) {
       body.store_backend = 'local'
     }
@@ -518,7 +522,9 @@ function SettingsSections() {
       // Resetting what the Bambuddy store needs takes the store back to local with it, as a
       // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
       const fallBack =
-        (name === 'bambuddy_url' || name === 'library_folder_id') && settings?.store_backend === 'bambuddy'
+        (name === 'bambuddy_url' || name === 'library_folder_id') &&
+        settings?.store_backend === 'bambuddy' &&
+        settings.library_backend !== 'native'
       const since = beginSeed()
       const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
       requestSeed(fallBack ? [name, 'store_backend'] : [name], since)
@@ -1256,6 +1262,29 @@ function SettingsSections() {
                 {!s3Ready && (
                   <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-s3-hint">
                     The S3 store needs its endpoint, bucket and keys saved first.
+                  </p>
+                )}
+              </FieldRow>
+
+              <FieldRow
+                id="library-backend"
+                label="Print library"
+                badge={badge('library_backend')}
+                error={errors.library_backend}
+                help="Where print files are kept. Takes effect when the ScadBuddy API restarts; its workers need no restart. Switching moves no files: ScadBuddy’s own library starts empty, and Bambuddy’s files stay in Bambuddy."
+              >
+                <ChoiceSelect
+                  id="library-backend"
+                  value={value('library_backend') === 'native' ? 'native' : 'bambuddy'}
+                  onValueChange={(next) => setField('library_backend', next)}
+                  choices={[
+                    { value: 'bambuddy', label: 'Bambuddy’s' },
+                    { value: 'native', label: 'ScadBuddy’s own', disabled: chosenBackend === 'local' },
+                  ]}
+                />
+                {chosenBackend === 'local' && (
+                  <p className="mt-1.5 text-xs text-muted-foreground" data-testid="library-backend-hint">
+                    ScadBuddy’s own library keeps its files in the blob store: choose the S3 or Bambuddy store first.
                   </p>
                 )}
               </FieldRow>

@@ -19,6 +19,11 @@ What a delete leaves alone, and why:
 
 Both kinds run once: a bulk delete repeated after a crash would count the files
 already trashed as skipped, and a repeated restore would answer 404.
+
+On ``library_backend=native`` (plan 2026-10-17-native-print-library, Rulings 2, 6 and 15)
+the same kinds trash and restore ScadBuddy's own rows instead, chosen when they run: every
+file goes to the trash (``trashed: true``), and no Bambuddy queue is read, since none
+names a native id.
 """
 
 from __future__ import annotations
@@ -33,9 +38,11 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
+from scadbuddy.print_library.component import PRINT_LIBRARY
 
 if TYPE_CHECKING:
-    from scadbuddy.core.components import Core
+    from scadbuddy.core.components import Components, Core
+    from scadbuddy.print_library.native import NativeLibrary
 
 #: The most files one request deletes or restores; the page's selection is far smaller.
 MAX_FILES = 500
@@ -79,6 +86,10 @@ class LibraryRestoreResult(BaseModel):
 
 #: Why Bambuddy's bulk delete skips a file: its key's user did not add it.
 NOT_OWNED = "Bambuddy deletes only files its API key's user added"
+#: A native restore's skip: the file is live, or was never a native file.
+NOT_IN_TRASH = "it is not in the trash"
+#: A native file trashed or purged between a check and its run.
+GONE = "it is no longer in the library"
 
 
 def _unique(ids: list[int]) -> list[int]:
@@ -183,12 +194,50 @@ async def delete_files(client: BambuddyClient, files: list[dict[str, Any]]) -> L
     return result
 
 
-def library_file_kinds(state: Core) -> list[OperationKind]:
+async def read_native_files(native: NativeLibrary, ids: list[int]) -> list[dict[str, Any]]:
+    """`read_files` on the native library: one it does not have is the 404 naming it."""
+    found = await native.names(ids)
+    for file_id, row in found:
+        if row is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f"library file {file_id} is not in the library",
+                file_id=file_id,
+            )
+    return [
+        {"id": row.id, "filename": row.name, "external": False}
+        for _, row in found
+        if row is not None
+    ]
+
+
+async def trash_native(native: NativeLibrary, files: list[dict[str, Any]]) -> LibraryDeleteResult:
+    """`delete_files` on the native library: each file to the trash; one gone since its
+    check is skipped."""
+    trashed = {row.id: row for row in await native.trash([entry["id"] for entry in files])}
+    result = LibraryDeleteResult(deleted=[], skipped=[])
+    for entry in files:
+        row = trashed.get(entry["id"])
+        if row is None:
+            result.skipped.append(
+                SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=GONE)
+            )
+        else:
+            result.deleted.append(DeletedLibraryFile(id=row.id, filename=row.name, trashed=True))
+    return result
+
+
+def library_file_kinds(state: Core, components: Components) -> list[OperationKind]:
     """The delete and the restore, bound to this process's settings store (read at each
-    call, so a test's replaced store is the one used)."""
+    call, so a test's replaced store is the one used) and print library, whose backend
+    each check and run reads when it runs."""
+    library = components.get(PRINT_LIBRARY)
 
     async def delete_check(request: dict[str, Any]) -> dict[str, Any]:
         ids = _unique(LibraryFilesRequest.model_validate(request).file_ids)
+        native = await library.serving_native()
+        if native is not None:
+            return {"files": await read_native_files(native, ids)}
         settings = await asyncio.to_thread(state.settings_store.load)
         async with waiting_on_bambuddy(), client_for(settings) as client:
             files = await read_files(client, ids)
@@ -196,6 +245,9 @@ def library_file_kinds(state: Core) -> list[OperationKind]:
         return {"files": files}
 
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        native = await library.serving_native()
+        if native is not None:
+            return (await trash_native(native, checked["files"])).model_dump(mode="json")
         async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
             result = await delete_files(client, checked["files"])
         return result.model_dump(mode="json")
@@ -206,6 +258,17 @@ def library_file_kinds(state: Core) -> list[OperationKind]:
 
     async def restore_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         result = LibraryRestoreResult(restored=[], skipped=[])
+        native = await library.serving_native()
+        if native is not None:
+            ids = _unique(LibraryFilesRequest.model_validate(request).file_ids)
+            result.restored = await native.restore(ids)
+            back = set(result.restored)
+            result.skipped = [
+                SkippedLibraryFile(id=file_id, reason=NOT_IN_TRASH)
+                for file_id in ids
+                if file_id not in back
+            ]
+            return result.model_dump(mode="json")
         async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
             for file_id in _unique(LibraryFilesRequest.model_validate(request).file_ids):
                 try:

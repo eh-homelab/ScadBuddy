@@ -61,7 +61,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
-from scadbuddy.core.config import StoreBackend
+from scadbuddy.core.config import LibraryBackend, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import (
@@ -165,7 +165,9 @@ RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
 RACK_ALGORITHM_VERSIONS = "printer_rack_algorithm_versions"
 
 #: The settings `StoreNotReadyError` is decided from.
-STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id", *S3_FIELDS})
+STORE_READINESS = frozenset(
+    {"store_backend", "library_backend", "bambuddy_url", "library_folder_id", *S3_FIELDS}
+)
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
 STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
 
@@ -177,7 +179,8 @@ class RackAlgorithmSupersededError(Exception):
 
 class StoreNotReadyError(ValueError):
     """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
-    `store_backend = s3` without the endpoint, bucket, both keys and a prefix."""
+    `store_backend = s3` without the endpoint, bucket, both keys and a prefix, or
+    `library_backend = native` on `store_backend = local`."""
 
 
 S3_NOT_READY = (
@@ -185,6 +188,14 @@ S3_NOT_READY = (
 )
 #: A blank prefix (or "/", blank once its outer slashes go): `build_backend` refuses it.
 S3_PREFIX_NOT_READY = "the S3 store needs a prefix saved first"
+NATIVE_LIBRARY_NOT_READY = (
+    "ScadBuddy's own library keeps its files in the blob store: "
+    "set store_backend to s3 or bambuddy first"
+)
+#: What returns a refused start (`native` over the local store) to Bambuddy's library.
+RECOVER_BAMBUDDY_LIBRARY_SQL = (
+    "UPDATE settings SET value = '\"bambuddy\"' WHERE name = 'library_backend';"
+)
 BAMBUDDY_NOT_READY = (
     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
 )
@@ -289,6 +300,8 @@ class StoredSettings(BambuddyIds):
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     #: Where blobs live. Read at process start by the API and every worker.
     store_backend: StoreBackend = "local"
+    #: Whose library the print routes serve (restart).
+    library_backend: LibraryBackend = "bambuddy"
     #: The S3 store's connection (:data:`S3_FIELDS`); the secret is sealed as the
     #: Bambuddy keys are.
     store_s3_endpoint: str | None = None
@@ -541,6 +554,7 @@ class SettingsPatch(BaseModel):
     #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
     #: change applies at the next one; a reset puts one back on the deployment's value.
     store_backend: StoreBackend | None = None
+    library_backend: LibraryBackend | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None
@@ -846,6 +860,8 @@ class SettingsStore:
             raise StoreNotReadyError(BAMBUDDY_NOT_READY)
         if backend == "s3" and (problem := _s3_not_ready(merged)) is not None:
             raise StoreNotReadyError(problem)
+        if merged("library_backend") == "native" and backend == "local":
+            raise StoreNotReadyError(NATIVE_LIBRARY_NOT_READY)
 
     def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
         """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""

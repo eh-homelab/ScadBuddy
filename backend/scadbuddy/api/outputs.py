@@ -104,6 +104,11 @@ from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.print_library.reads import LibraryReads, served_reads
+from scadbuddy.print_library.store import NativeFile
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import (
@@ -409,6 +414,17 @@ async def live_outputs_for_files(
     return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
 
 
+async def native_outputs_for_files(
+    outputs: OutputStore, files: Iterable[NativeFile]
+) -> dict[int, str]:
+    """`live_outputs_for_files` for ScadBuddy's own library (plan
+    2026-10-17-native-print-library, Task 4): the output each file's row names, while
+    that output still exists."""
+    made = {f.id: f.output_id for f in files if f.output_id is not None}
+    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
+
+
 def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
     """Those of ``output_ids`` the output store still has."""
     found: set[str] = set()
@@ -422,15 +438,25 @@ def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
 
 
 async def resolve_library_files(
-    uploads: BambuddyUploadStore, outputs: OutputStore, body: ArrangeRequest
+    uploads: BambuddyUploadStore,
+    outputs: OutputStore,
+    body: ArrangeRequest,
+    native: NativeLibrary | None = None,
 ) -> tuple[ArrangeRequest, list[int]]:
     """``body`` with each library file ScadBuddy uploaded named by the output it is a
     copy of (#1864), and the plain files left, which are read from their 3MF (#1863). A
-    file whose output has since been deleted is a plain file (#2138)."""
+    file whose output has since been deleted is a plain file (#2138). A native file
+    (#3827) names its output by its row in ``native``."""
     wanted = list(dict.fromkeys(o.library_file_id for o in body.objects if o.library_file_id))
     if not wanted:
         return body, []
-    found = await live_outputs_for_files(uploads, outputs, wanted)
+    found = await live_outputs_for_files(
+        uploads, outputs, [i for i in wanted if not is_native_id(i)]
+    )
+    own = [i for i in wanted if is_native_id(i)]
+    if own and native is not None:
+        rows = await asyncio.to_thread(native.rows.files_by_ids, own)
+        found |= await native_outputs_for_files(outputs, rows)
     objects = [
         o
         if o.library_file_id not in found
@@ -442,11 +468,16 @@ async def resolve_library_files(
 
 
 async def read_plain_files(
-    client: BambuddyClient, file_ids: list[int], state: AppState, budget: ReadBudget
+    client: BambuddyClient | None,
+    file_ids: list[int],
+    state: AppState,
+    budget: ReadBudget,
+    native: LibraryReads | None = None,
 ) -> dict[int, LibraryObjects]:
     """Each plain library file's objects, read from its 3MF (#1863) once per file hash
-    (#1973), their pieces stored. Every file that cannot be arranged is refused at
-    once, each with why."""
+    (#1973), their pieces stored. On ``native``, the library served (#3827), every file
+    is read from it and needs no ``client`` (`served_reads`). Every file that cannot be
+    arranged is refused at once, each with why."""
     read: dict[int, LibraryObjects] = {}
     refused: list[NotArrangeableError] = []
     for file_id in file_ids:
@@ -458,6 +489,7 @@ async def read_plain_files(
                 cache=state.paths.cache,
                 budget=budget,
                 downloads=state.store.downloads,
+                files=served_reads(file_id, client, native),
             )
         except NotArrangeableError as error:
             refused.append(error)
@@ -668,22 +700,27 @@ async def arrange_outputs(
     catalogue: CatalogueDep,
     state: StateDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    print_library: PrintLibraryDep,
     idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
-    body, plain = await resolve_library_files(uploads, outputs, body)
+    native = await print_library.serving_native()
+    body, plain = await resolve_library_files(uploads, outputs, body, native)
     stored = await asyncio.to_thread(store.load)
     printer_id = body.printer_id if body.printer_id is not None else stored.printer_id
     # No printer: the plate the preview falls back to (Settings), else the default plate.
     plate_model = stored.default_plate
     library: dict[int, LibraryObjects] = {}
-    if printer_id is not None or plain:
+    budget = budget_of(state.settings, body.read_budget)
+    # On native the plain files are read from it (#3827): Bambuddy only names the plate.
+    if printer_id is not None or (plain and native is None):
         # `printer()` declares Scope.READ_STATUS, and the client's `_send` maps a refusal
         # through bambuddy/errors.py, so a key without it gets a 403 naming the scope.
         async with client_for(stored) as client:
             if printer_id is not None:
                 plate_model = (await client.printer(printer_id)).model
-            budget = budget_of(state.settings, body.read_budget)
-            library = await read_plain_files(client, plain, state, budget)
+            library = await read_plain_files(client, plain, state, budget, native)
+    elif plain:
+        library = await read_plain_files(None, plain, state, budget, native)
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )

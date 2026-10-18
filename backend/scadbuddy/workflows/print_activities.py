@@ -63,6 +63,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -123,6 +124,9 @@ class PrintDeps:
     rack: RackUsage | None = None
     #: Where every run's queue items are recorded by subject (#976, #1750).
     links: PrintLinkStore | None = None
+    #: The native library a native file is read from (#3827): the API's own in-process,
+    #: the API's internal routes on the print worker; ``None`` on ``bambuddy``.
+    library: LibraryReads | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -174,6 +178,7 @@ class PrintActivities:
                 settings=settings,
                 sends=self.d.links,
                 filaments=given_filaments(spec.filaments) if spec.filaments else None,
+                files=reads_for(spec.file_id, client, self.d.library),
             )
         return await self._output_source(spec, settings)
 

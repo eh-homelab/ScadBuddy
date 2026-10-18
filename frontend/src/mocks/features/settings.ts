@@ -52,6 +52,7 @@ const NULLABLE = new Set([
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = [
   'store_backend',
+  'library_backend',
   'bambuddy_url',
   'library_folder_id',
   'store_s3_endpoint',
@@ -158,6 +159,18 @@ function putSettings(body: Record<string, unknown>) {
       422,
       'Unprocessable Content',
       'the S3 store needs its endpoint, bucket, access key id and secret access key saved first',
+    )
+  }
+  // #3827 — `SettingsStore.save`: ScadBuddy's own library needs a content store.
+  if (
+    STORE_READINESS.some((name) => name in body || reset.includes(name)) &&
+    next.library_backend === 'native' &&
+    (next.store_backend ?? 'local') === 'local'
+  ) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 or bambuddy first",
     )
   }
   // #426 — without their own key, render workers are handed the full one.

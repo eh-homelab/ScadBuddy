@@ -760,3 +760,35 @@ async def test_a_refused_delete_of_the_replaced_object_does_not_fail_the_put(
     stat = store.index.get("k")
     assert stat is not None and stat.ref == new
     assert [r for r in caplog.records if getattr(r, "key", None) == "k"]
+
+
+async def test_link_indexes_an_existing_object_under_a_new_key(content: ContentStore) -> None:
+    ref = await content.put("library", b"x", name="a", scope=BlobScope(), key="library-file-1")
+    await content.link("library-file-2", ref, scope=BlobScope())
+    await content.delete("library-file-1")
+    stat = await content.stat("library-file-2")
+    assert stat is not None and await content.read(stat.ref) == b"x"
+
+
+async def test_link_to_a_freed_object_raises_reuse_lost(content: ContentStore) -> None:
+    ref = await content.put("library", b"y", name="a", scope=BlobScope(), key="library-file-3")
+    await content.delete("library-file-3")
+    with pytest.raises(ReuseLostError):
+        await content.link("library-file-4", ref, scope=BlobScope())
+    assert await content.stat("library-file-4") is None
+
+
+@pytest.mark.parametrize(
+    "backend_id",
+    ["model/" + "0" * 64, "library/" + "0" * 63, "library/" + "0" * 64 + "\n", "../" + "0" * 64],
+)
+async def test_a_local_object_id_outside_the_kinds_is_refused(
+    backend_id: str, tmp_path: Path
+) -> None:
+    backend = LocalContentBackend(tmp_path)
+    with pytest.raises(ValueError, match="not a local object id"):
+        await backend.exists(backend_id)
+
+
+async def test_a_local_library_object_id_is_accepted(tmp_path: Path) -> None:
+    assert not await LocalContentBackend(tmp_path).exists("library/" + "0" * 64)

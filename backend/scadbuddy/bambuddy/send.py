@@ -13,11 +13,12 @@ import hashlib
 import io
 import json
 import logging
+import tempfile
 import weakref
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, NamedTuple
+from typing import BinaryIO, Literal, NamedTuple, Protocol
 
 from fastapi import status
 from pydantic import BaseModel
@@ -736,7 +737,8 @@ async def _left_unrecorded(
     if not rows:
         return None
     recorded = await uploads.recorded([row.id for row in rows])
-    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], digest)
     if found is not None:
         logger.info(
             "an earlier attempt's upload was never recorded; taking it",
@@ -746,11 +748,10 @@ async def _left_unrecorded(
 
 
 async def _same_bytes(
-    client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], payload: bytes
+    client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], digest: str
 ) -> LibraryFile | None:
-    """The newest of ``rows`` whose ``file_hash`` is the sha256 of ``payload``, or
-    ``None``. A row whose read fails is passed over."""
-    digest = hashlib.sha256(payload).hexdigest()
+    """The newest of ``rows`` whose ``file_hash`` is ``digest``, a sha256, or ``None``. A
+    row whose read fails is passed over."""
     # Newest first: a retry's own upload is the latest of its name.
     for row in sorted(rows, key=lambda row: row.id, reverse=True):
         try:
@@ -973,6 +974,101 @@ async def _still_there(
         await uploads.forget(key, copy.id)
         return None
     return CopyFound(filename=found.filename)
+
+
+class Sink(Protocol):
+    """Where :func:`ensure_raw_copy`'s ``write`` puts the bytes."""
+
+    def write(self, data: bytes, /) -> int: ...
+
+
+class _Hashing:
+    """A spool file that counts and hashes what is written to it."""
+
+    def __init__(self, out: BinaryIO) -> None:
+        self.out = out
+        self.size = 0
+        self.digest = hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        self.size += len(data)
+        self.digest.update(data)
+        return self.out.write(data)
+
+
+async def _raw_left_unrecorded(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    folder: int | None,
+    filename: str,
+    size: int,
+    digest: str,
+) -> LibraryFile | None:
+    """The raw copy an earlier attempt uploaded into ``folder`` and died before
+    recording, or ``None``: one named ``filename``, of ``size`` bytes hashing to
+    ``digest``, that nothing records (:func:`_left_unrecorded`'s check, #1145)."""
+    listed = await _listing(client, folder)
+    if listed is None:
+        return None
+    name = filename.casefold()
+    rows = [row for row in listed if row.filename.casefold() == name and row.file_size == size]
+    if not rows:
+        return None
+    recorded = await uploads.recorded([row.id for row in rows])
+    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], digest)
+    if found is not None:
+        logger.info(
+            "an earlier attempt's raw copy was never recorded; taking it",
+            extra={"library_file_id": found.id, "folder_id": found.folder_id},
+        )
+    return found
+
+
+#: The ``target_key`` of a copy uploaded as the file is, with nothing laid out (#3827).
+RAW_TARGET = "raw"
+
+
+async def ensure_raw_copy(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    settings: StoredSettings,
+    *,
+    folder_id: int | None,
+    filename: str,
+    media_type: str,
+    write: Callable[[Sink], Awaitable[None]],
+) -> int:
+    """A copy of a file Bambuddy does not hold, uploaded as it is into ``folder_id`` (the
+    inbox when ``None``) and recorded under ``key`` as :data:`RAW_TARGET` (#3827): a
+    native library file with no 3MF to lay out. One recorded there is reused while
+    Bambuddy still has it; else ``write`` spools the bytes and they are uploaded. In the
+    inbox the new copy supersedes the key's others there, as :func:`upload_copy`'s does.
+    Held under the copy's folder lock, as :func:`ensure_uploaded` is. An upload an
+    earlier attempt left unrecorded is taken rather than uploaded again, as
+    :func:`_left_unrecorded` takes one (#1145): the bytes are hashed as they spool."""
+    folder = folder_id if folder_id is not None else settings.library_folder_id
+    lock = _copy_lock_key(key, folder, settings)
+    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0] or ''}:{lock[1]}"):
+        for copy in await uploads.for_output(key):
+            if copy.folder_id != folder or copy.target_key != RAW_TARGET:
+                continue
+            if await _still_there(client, uploads, key, copy, tolerate_errors=True) is not None:
+                return copy.id
+        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+            hashed = _Hashing(spool)
+            await write(hashed)
+            uploaded = await _raw_left_unrecorded(
+                client, uploads, folder, filename, hashed.size, hashed.digest.hexdigest()
+            ) or await upload_into(client, filename, spool, folder_id=folder, media_type=media_type)
+        await uploads.record(
+            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET)
+        )
+        if is_inbox(folder, settings):
+            for copy in await uploads.for_output(key):
+                if copy.id != uploaded.id and copy.folder_id == folder:
+                    await _delete_copy(client, uploads, key, copy.id, strict=False)
+    return uploaded.id
 
 
 @dataclass(frozen=True)

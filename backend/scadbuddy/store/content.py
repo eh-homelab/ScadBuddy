@@ -202,6 +202,25 @@ class ContentStore:
             await self._release_replaced(key, previous)
         return ref
 
+    async def link(
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        scope: BlobScope,
+        meta: dict[str, Any] | None = None,
+    ) -> BlobRef:
+        """Index ``ref``, an object another key names, under ``key`` too, moving no
+        bytes (a native library copy, plan 2026-10-17 Ruling 4). `ReuseLostError` means
+        the object was freed first (`BlobIndex._locked`), so no `get` of it could succeed
+        either: it propagates."""
+        previous = await asyncio.to_thread(
+            self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=True
+        )
+        if previous is not None and previous.backend_id != ref.backend_id:
+            await self._release_replaced(key, previous)
+        return ref
+
     async def _release_unindexed(self, ref: BlobRef, reused: bool) -> None:
         """After the index gave up on a deadlock: remove what this call uploaded, which
         no row will name. A reused object is another row's, and stays."""

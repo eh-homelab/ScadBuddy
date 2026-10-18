@@ -113,6 +113,9 @@ ACTIVITY_PATCH = "housekeeping-activity"
 #: and after `ACTIVITY_SWEEP`, so a run without the patch is today's run exactly.
 ATTACHMENTS_SWEEP = "housekeeping_sweep_print_attachments"
 ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
+#: The native print library's trash purge and orphan blobs (#3827); after the attachments.
+LIBRARY_SWEEP = "housekeeping_sweep_library"
+LIBRARY_PATCH = "housekeeping-sweep-library"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -128,6 +131,7 @@ SWEEPS = (
     GIT_SWEEP,
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
+    LIBRARY_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -209,6 +213,8 @@ class Housekeeping:
             if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
                 continue
             if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
+                continue
+            if sweep == LIBRARY_SWEEP and not workflow.patched(LIBRARY_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

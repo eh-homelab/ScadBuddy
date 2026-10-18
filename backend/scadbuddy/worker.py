@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Seque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -36,7 +37,7 @@ from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
-from scadbuddy.bambuddy.output_reader import RemoteOutputs
+from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     PrintProgress,
@@ -74,6 +75,8 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsStore, load_render_store_settings
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.rack.usage import RackUsageStore, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
@@ -862,9 +865,13 @@ class PrintWorkerDeps:
     operations: OperationStore
     activities: list[Callable[..., Any]]
     follow_print: Callable[..., Any]
+    #: Native library files, read through the API's internal routes (#3827).
+    library: LibraryReads | None = None
 
     async def aclose(self) -> None:
         await self.outputs.aclose()
+        if isinstance(self.library, RemoteLibrary):
+            await self.library.aclose()
         await self.events.aclose()
         await asyncio.to_thread(self.rack.close)
         await asyncio.to_thread(self.settings_store.close)
@@ -872,6 +879,10 @@ class PrintWorkerDeps:
 
 class ApiUrlMissingError(ValueError):
     pass
+
+
+async def _given(library: LibraryReads) -> LibraryReads | None:
+    return library
 
 
 def build_print_deps(settings: Settings) -> PrintWorkerDeps:
@@ -894,6 +905,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
     outputs = RemoteOutputs(settings.api_internal_url)
+    # Asked of the API whichever library serves: on ``bambuddy`` it answers every native
+    # id with the 404 of a file not found.
+    library = RemoteLibrary(settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT))
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
 
@@ -925,6 +939,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         uploads=uploads,
         links=links,
         archive_cache=ArchiveCache(),
+        library=partial(_given, library),
     )
     printing = PrintActivities(
         PrintDeps(
@@ -936,6 +951,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             observer=observer,
             rack=rack,
             links=links,
+            library=library,
         )
     )
     return PrintWorkerDeps(
@@ -955,6 +971,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             ),
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
+        library=library,
     )
 
 

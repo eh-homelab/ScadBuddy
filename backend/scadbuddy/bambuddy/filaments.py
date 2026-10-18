@@ -59,6 +59,7 @@ from scadbuddy.bambuddy.models import (
     SpoolAssignment,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 
 logger = logging.getLogger(__name__)
 
@@ -921,6 +922,7 @@ async def gather_plate_options(
     own_colours: list[str] | None = None,
     inventory: Inventory | None = None,
     known: Callable[[int | None], FilamentRequirements] | None = None,
+    native: LibraryReads | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -931,12 +933,15 @@ async def gather_plate_options(
     the printer's, and among plates the first failing one in ``plate_ids`` order wins.
     ``inventory`` is the spools and assignments when the caller has read them already.
     ``known`` answers each plate's slots in place of Bambuddy's ``filament-requirements``
-    when they were read from the file itself (#2550)."""
+    when they were read from the file itself (#2550). A native file's (#3827) are read
+    from ``native``: the empty requirement, so its slots read as unknown."""
     spools, assignments = inventory if inventory is not None else await read_inventory(client)
 
     answers = await asyncio.gather(
         *(
-            _requirements(client, library_file_id, plate, fallback_colours, own_colours, known)
+            _requirements(
+                client, library_file_id, plate, fallback_colours, own_colours, known, native
+            )
             for plate in plate_ids
         ),
         *(
@@ -975,6 +980,7 @@ async def _requirements(
     fallback_colours: list[str] | None,
     own_colours: list[str] | None = None,
     known: Callable[[int | None], FilamentRequirements] | None = None,
+    native: LibraryReads | None = None,
 ) -> list[SlotNeed]:
     """The plate's slots, from Bambuddy, falling back to the output's own colours.
 
@@ -993,7 +999,9 @@ async def _requirements(
                 f"plate {plate_id}'s slots were neither read from the file nor named by a"
                 " library file",
             )
-        answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
+        answer = await reads_for(library_file_id, client, native).filament_requirements(
+            library_file_id, plate_id=plate_id
+        )
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,

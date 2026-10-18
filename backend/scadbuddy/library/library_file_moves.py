@@ -29,6 +29,13 @@ linked to it; each such file names the project it left (``left_project``).
 All three run once: a repeated copy would upload a second copy, and a repeated move or
 rename would answer as though it did the work again. So a copy that fails partway, or
 nears its time limit, still answers: the copies made, and every other file ``skipped``.
+
+On ``library_backend=native`` (plan 2026-10-17-native-print-library, Rulings 4 and 15)
+the same kinds work on ScadBuddy's own rows, chosen when they run: a move clears the
+file's ``filed`` (Ruling 8) and names no project (native folders have none), a copy
+indexes the source's blob under the copy's key and moves no bytes
+(`NativeLibrary.copy`), and a rename keeps the extension as on Bambuddy. The upload rows
+are Bambuddy's copies, so none of them is touched.
 """
 
 from __future__ import annotations
@@ -51,15 +58,21 @@ from scadbuddy.bambuddy.send import is_inbox
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.library_file_operations import (
+    GONE,
     MAX_FILES,
     READ_CONCURRENCY,
     WHERE,
     SkippedLibraryFile,
+    read_native_files,
 )
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.store import file_type_of
+from scadbuddy.store.content_models import ReuseLostError
 
 if TYPE_CHECKING:
-    from scadbuddy.core.components import Core
+    from scadbuddy.core.components import Components, Core
+    from scadbuddy.print_library.native import NativeLibrary
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +88,11 @@ COPY_BUDGET = COPY_TIMEOUT - timedelta(minutes=3)
 WHERE_COPIES = "the target folder in Bambuddy"
 #: Bambuddy's ``FileUpdate.filename`` limit.
 MAX_FILENAME = 255
+#: A native copy whose source's blob was freed between its read and its link.
+COPY_LOST = "the file was deleted while it was copied"
+#: A native copy whose target folder was deleted after the check.
+TARGET_GONE = "the folder it was copied into is no longer in the library"
+MOVE_TARGET_GONE = "the folder it was moved into is no longer in the library"
 
 
 class LibraryFolderTarget(BaseModel):
@@ -167,14 +185,16 @@ def _paths(folders: list[Folder]) -> dict[int, str]:
     return paths
 
 
-def resolve_folder(target: LibraryFolderTarget, folders: list[Folder]) -> int | None:
+def resolve_folder(
+    target: LibraryFolderTarget, folders: list[Folder], library: str = "Bambuddy's library"
+) -> int | None:
     """The folder id ``target`` names, ``None`` for the top level. A path no folder has is
     the 404, and one two folders share the 409 naming both."""
     if target.folder_id is not None:
         if not any(folder.id == target.folder_id for folder in folders):
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
-                f"library folder {target.folder_id} is not in Bambuddy's library",
+                f"library folder {target.folder_id} is not in {library}",
                 folder_id=target.folder_id,
             )
         return target.folder_id
@@ -272,9 +292,91 @@ async def _not_moved_to(
     return {file_id: reason for file_id, reason in read if reason is not None}
 
 
-def library_file_move_kinds(state: Core) -> list[OperationKind]:
+async def _native_target(native: NativeLibrary, request: LibraryFolderTarget) -> int | None:
+    return resolve_folder(request, _flat(await native.folders()), "the library")
+
+
+async def _native_transfer_check(
+    native: NativeLibrary, body: LibraryTransferRequest
+) -> dict[str, Any]:
+    folder_id = await _native_target(native, body)
+    files = await read_native_files(native, _unique(body.file_ids))
+    return {
+        "folder_id": folder_id,
+        "files": [{"id": entry["id"], "filename": entry["filename"]} for entry in files],
+    }
+
+
+async def _native_move(native: NativeLibrary, checked: dict[str, Any]) -> LibraryMoveResult:
+    """Each file into the folder, ``filed`` cleared; one gone since the check, or whose
+    target folder went since, is skipped, so the moves made are always answered."""
+    folder_id: int | None = checked["folder_id"]
+    result = LibraryMoveResult(folder_id=folder_id, moved=[], skipped=[])
+    for entry in checked["files"]:
+        try:
+            row = await native.update_file(entry["id"], folder_id=folder_id, filed=False)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                raise
+            reason = GONE if error.extensions.get("file_id") == entry["id"] else MOVE_TARGET_GONE
+            result.skipped.append(
+                SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=reason)
+            )
+        else:
+            result.moved.append(MovedLibraryFile(id=row.id, filename=row.name))
+    return result
+
+
+async def _native_copy(native: NativeLibrary, checked: dict[str, Any]) -> LibraryCopyResult:
+    """Each file in turn, by `NativeLibrary.copy`; one that could not be copied is
+    skipped, so the copies made are always answered."""
+    folder_id: int | None = checked["folder_id"]
+    result = LibraryCopyResult(folder_id=folder_id, copied=[], skipped=[])
+    for entry in checked["files"]:
+        try:
+            row = await native.copy(entry["id"], folder_id)
+        except ReuseLostError:
+            reason = COPY_LOST
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                raise
+            # The copies made are answered even when the folder went meanwhile.
+            reason = GONE if error.extensions.get("file_id") == entry["id"] else TARGET_GONE
+        else:
+            result.copied.append(
+                CopiedLibraryFile(source_id=entry["id"], id=row.id, filename=row.name)
+            )
+            continue
+        result.skipped.append(
+            SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=reason)
+        )
+    return result
+
+
+def _renamed(body: LibraryRenameRequest, filename: str, file_type: str | None) -> str:
+    """The new name, refused with 422 when it is empty, names a folder or drops the
+    file's extension."""
+    name = body.filename.strip()
+    if not name or "/" in name or "\\" in name:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{body.filename!r} is not a file name: it is empty or names a folder",
+        )
+    keep = _extension(filename, file_type)
+    if keep and not name.lower().endswith(keep.lower()):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"a rename keeps the file's type: {name!r} has to end in {keep!r}",
+            extension=keep,
+        )
+    return name
+
+
+def library_file_move_kinds(state: Core, components: Components) -> list[OperationKind]:
     """Copy, move and rename, bound to this process's settings store and upload rows
-    (read at each call, so a test's replaced store is the one used)."""
+    (read at each call, so a test's replaced store is the one used) and print library,
+    whose backend each check and run reads when it runs."""
+    library = components.get(PRINT_LIBRARY)
 
     async def _target(client: BambuddyClient, request: LibraryFolderTarget) -> dict[str, Any]:
         folders = _flat(await client.folders())
@@ -282,6 +384,9 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
 
     async def move_check(request: dict[str, Any]) -> dict[str, Any]:
         body = LibraryTransferRequest.model_validate(request)
+        native = await library.serving_native()
+        if native is not None:
+            return await _native_transfer_check(native, body)
         settings = await asyncio.to_thread(state.settings_store.load)
         async with waiting_on_bambuddy(), client_for(settings) as client:
             target = await _target(client, body)
@@ -302,6 +407,9 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
 
     async def move_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         folder_id: int | None = checked["folder_id"]
+        native = await library.serving_native()
+        if native is not None:
+            return (await _native_move(native, checked)).model_dump(mode="json")
         files = [MovedLibraryFile.model_validate(entry) for entry in checked["files"]]
         settings = await asyncio.to_thread(state.settings_store.load)
         result = LibraryMoveResult(folder_id=folder_id, moved=[], skipped=[])
@@ -337,6 +445,9 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
 
     async def copy_check(request: dict[str, Any]) -> dict[str, Any]:
         body = LibraryTransferRequest.model_validate(request)
+        native = await library.serving_native()
+        if native is not None:
+            return await _native_transfer_check(native, body)
         settings = await asyncio.to_thread(state.settings_store.load)
         async with waiting_on_bambuddy(), client_for(settings) as client:
             target = await _target(client, body)
@@ -350,6 +461,9 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
         """Each file in turn. A failure stops the run but not the answer: the copies made
         so far are reported (and recorded), the file that failed and those after it are
         ``skipped``, so the one run never fails having made copies nobody is told of."""
+        native = await library.serving_native()
+        if native is not None:
+            return (await _native_copy(native, checked)).model_dump(mode="json")
         folder_id: int | None = checked["folder_id"]
         settings = await asyncio.to_thread(state.settings_store.load)
         # A copy into the inbox stays an ordinary file: a recorded inbox copy is one the
@@ -430,25 +544,27 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
 
     async def rename_check(request: dict[str, Any]) -> dict[str, Any]:
         body = LibraryRenameRequest.model_validate(request)
-        name = body.filename.strip()
-        if not name or "/" in name or "\\" in name:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"{body.filename!r} is not a file name: it is empty or names a folder",
-            )
-        settings = await asyncio.to_thread(state.settings_store.load)
-        async with waiting_on_bambuddy(), client_for(settings) as client:
-            [file] = await _read_files(client, [body.file_id])
-        keep = _extension(file.filename, file.file_type)
-        if keep and not name.lower().endswith(keep.lower()):
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"a rename keeps the file's type: {name!r} has to end in {keep!r}",
-                extension=keep,
-            )
-        return {"file_id": file.id, "filename": name, "previous": file.filename}
+        _renamed(body, "", None)  # an empty or folder name, before any read
+        native = await library.serving_native()
+        file_type: str | None
+        if native is not None:
+            [entry] = await read_native_files(native, [body.file_id])
+            filename, file_type = entry["filename"], file_type_of(entry["filename"])
+        else:
+            settings = await asyncio.to_thread(state.settings_store.load)
+            async with waiting_on_bambuddy(), client_for(settings) as client:
+                [file] = await _read_files(client, [body.file_id])
+            filename, file_type = file.filename, file.file_type
+        name = _renamed(body, filename, file_type)
+        return {"file_id": body.file_id, "filename": name, "previous": filename}
 
     async def rename_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        native = await library.serving_native()
+        if native is not None:
+            row = await native.update_file(checked["file_id"], name=checked["filename"])
+            return LibraryRenameResult(
+                id=row.id, filename=row.name, previous=checked["previous"]
+            ).model_dump(mode="json")
         async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
             renamed = await client.rename_library_file(checked["file_id"], checked["filename"])
         return LibraryRenameResult(

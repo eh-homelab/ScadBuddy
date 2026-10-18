@@ -8,7 +8,7 @@ import hashlib
 import io
 import json
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from typing import Any, ClassVar, cast
 from xml.etree import ElementTree as ET
@@ -24,7 +24,16 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments, SlicedPlate, SlicedProfile
-from scadbuddy.bambuddy.models import Folder, LibraryFile, Printer, SlotChoice, Spool
+from scadbuddy.bambuddy.models import (
+    FilamentRequirements,
+    Folder,
+    LibraryFile,
+    LibraryPlate,
+    LibraryPlates,
+    Printer,
+    SlotChoice,
+    Spool,
+)
 from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_source import (
     UNKNOWN_COLOUR,
@@ -37,10 +46,11 @@ from scadbuddy.bambuddy.print_source import (
 )
 from scadbuddy.bambuddy.send import Target
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import ProjectTarget, SlicedCopy
+from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
@@ -789,3 +799,317 @@ async def test_a_recorded_slice_that_cannot_be_forgotten_still_plans(
     )
 
     assert await _library(_ForgetFails()).recorded_slice(bambuddy, 11, "key") is None
+
+
+# --- #3827: a file in ScadBuddy's own library ------------------------------------------
+
+NATIVE_ID, NATIVE_SLICED_ID, NATIVE_BAD_STL_ID = 1_000_000_001, 1_000_000_002, 1_000_000_003
+
+
+class _NativeReads:
+    """The native library's reads (`LibraryReads`), in memory."""
+
+    def __init__(self, files: dict[int, tuple[str, str, bytes]]) -> None:
+        self.files = files
+        self.downloads: list[int] = []
+
+    def bytes_of(self, file_id: int) -> bytes:
+        return self.files[file_id][2]
+
+    async def library_file(self, file_id: int) -> LibraryFile:
+        if file_id not in self.files:
+            raise ApiError(404, f"library file {file_id} not found")
+        name, kind, payload = self.files[file_id]
+        return LibraryFile(
+            id=file_id,
+            filename=name,
+            file_type=kind,
+            file_size=len(payload),
+            file_hash=hashlib.sha256(payload).hexdigest(),
+        )
+
+    async def library_plates(self, file_id: int) -> LibraryPlates:
+        await self.library_file(file_id)
+        return LibraryPlates(file_id=file_id, plates=[LibraryPlate(index=1)])
+
+    async def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]:
+        await self.library_file(file_id)
+        self.downloads.append(file_id)
+        payload = self.bytes_of(file_id)
+        # In two chunks, as a stream is.
+        yield payload[: len(payload) // 2]
+        yield payload[len(payload) // 2 :]
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements:
+        file = await self.library_file(file_id)
+        return FilamentRequirements(file_id=file_id, filename=file.filename, plate_id=plate_id)
+
+
+class _NativeBambuddy(_Bambuddy):
+    """Bambuddy for a native file's print: it never holds the file, only its copies."""
+
+    def __init__(self) -> None:
+        super().__init__(b"")
+        self.media_types: list[str] = []
+        self.deleted: list[int] = []
+
+    async def download_library_file(self, file_id: int) -> AsyncIterator[bytes]:
+        raise AssertionError(f"Bambuddy was asked for file {file_id}")
+        yield b""  # pragma: no cover
+
+    async def library_file(self, file_id: int) -> LibraryFile:
+        found = next((file for file in self.files if file.id == file_id), None)
+        if found is None:
+            raise ApiError(404, f"library file {file_id} not found")
+        return found
+
+    async def upload_library_file(
+        self,
+        filename: str,
+        content: bytes | io.BufferedIOBase,
+        *,
+        folder_id: int | None = None,
+        media_type: str = "model/3mf",
+    ) -> LibraryFile:
+        if not isinstance(content, bytes):
+            content.seek(0)
+            content = content.read()
+        self.media_types.append(media_type)
+        return await super().upload_library_file(filename, content, folder_id=folder_id)
+
+    async def delete_library_file(self, file_id: int) -> None:
+        self.deleted.append(file_id)
+        self.files = [file for file in self.files if file.id != file_id]
+
+
+def _native_reads(tmp_path: Path) -> _NativeReads:
+    return _NativeReads(
+        {
+            NATIVE_ID: ("critter.3mf", "3mf", _scadbuddy_3mf(tmp_path)),
+            NATIVE_SLICED_ID: ("critter.gcode.3mf", "gcode.3mf", _sliced_3mf()),
+            NATIVE_BAD_STL_ID: ("lump.stl", "stl", b"solid lump\nnot a mesh at all\n"),
+        }
+    )
+
+
+async def _load_native(
+    file_id: int, native: _NativeReads, bambuddy: _NativeBambuddy, uploads: _Copies
+) -> LibrarySource:
+    return await LibrarySource.load(
+        cast(BambuddyClient, bambuddy),
+        file_id,
+        files=native,
+        uploads=uploads,  # type: ignore[arg-type]
+        settings=StoredSettings(library_folder_id=INBOX),
+    )
+
+
+async def test_a_native_source_reads_the_native_file_and_has_no_origin(tmp_path: Path) -> None:
+    native, bambuddy = _native_reads(tmp_path), _NativeBambuddy()
+    client = cast(BambuddyClient, bambuddy)
+
+    source = await _load_native(NATIVE_ID, native, bambuddy, _Copies())
+
+    assert source.origin_id is None and source.plates == [1]
+    assert source.colours == [UNKNOWN_COLOUR]
+    assert await source.fetch_3mf(client) == native.bytes_of(NATIVE_ID)
+    assert native.downloads == [NATIVE_ID]
+
+
+async def test_a_native_3mf_prints_a_laid_out_copy(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_ID, native, bambuddy, uploads)
+
+    printed = await _print(source, bambuddy)
+
+    [(filename, copy, folder)] = bambuddy.uploaded
+    assert (printed.id, folder, filename) == (101, INBOX, "critter (ScadBuddy).3mf")
+    assert _settings(copy)["nozzle_diameter"] == ["0.4"]
+
+
+async def test_a_native_gcode_3mf_queues_its_raw_copy(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+
+    printed = await _print(source, bambuddy)
+
+    [(filename, content, folder)] = bambuddy.uploaded
+    assert filename == "critter (ScadBuddy).gcode.3mf"
+    assert (content, folder) == (native.bytes_of(NATIVE_SLICED_ID), INBOX)
+    assert (printed.id, printed.folder_id) == (101, None)
+    [recorded] = uploads.copies[f"library:{NATIVE_SLICED_ID}"]
+    assert (recorded.id, recorded.folder_id, recorded.target_key) == (101, INBOX, "raw")
+
+    # A reprint reuses the copy while Bambuddy has it.
+    again = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    assert (await _print(again, bambuddy)).id == 101
+    assert len(bambuddy.uploaded) == 1
+
+
+async def test_a_native_raw_copy_deleted_in_bambuddy_is_uploaded_again(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    await _print(source, bambuddy)
+    bambuddy.files.clear()
+
+    again = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    assert (await _print(again, bambuddy)).id == 102
+    assert [copy.id for copy in uploads.copies[f"library:{NATIVE_SLICED_ID}"]] == [102]
+
+
+async def test_a_native_raw_copy_into_a_project_keeps_the_inbox_one(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    await _print(await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads), bambuddy)
+
+    filed = await _print(
+        await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads), bambuddy, project_id=5
+    )
+
+    assert (filed.id, filed.folder_id) == (102, FOLDER)
+    assert bambuddy.deleted == []
+    copies = uploads.copies[f"library:{NATIVE_SLICED_ID}"]
+    assert {(copy.id, copy.folder_id) for copy in copies} == {(101, INBOX), (102, FOLDER)}
+
+
+async def test_a_new_inbox_raw_copy_supersedes_the_last(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    client = cast(BambuddyClient, bambuddy)
+    first = await source.raw_copy(client, None)
+    # Recorded for another target, as a laid-out copy in the inbox is.
+    uploads.copies[f"library:{NATIVE_SLICED_ID}"][0] = uploads.copies[
+        f"library:{NATIVE_SLICED_ID}"
+    ][0].model_copy(update={"target_key": "other"})
+
+    second = await source.raw_copy(client, None)
+
+    assert second != first and bambuddy.deleted == [first]
+    assert [copy.id for copy in uploads.copies[f"library:{NATIVE_SLICED_ID}"]] == [second]
+
+
+async def test_a_native_stl_that_will_not_wrap_queues_its_raw_copy(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_BAD_STL_ID, native, bambuddy, uploads)
+
+    printed = await _print(source, bambuddy)
+
+    [(filename, content, _)] = bambuddy.uploaded
+    assert content == native.bytes_of(NATIVE_BAD_STL_ID)
+    assert filename == "lump (ScadBuddy).stl"
+    assert bambuddy.media_types == ["model/stl"]
+    assert printed.id == 101
+
+
+async def test_a_native_files_filament_step_reads_its_own_slots(tmp_path: Path) -> None:
+    """Slots read from the native file itself need no copy in Bambuddy to read them."""
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    local = LocalFilaments()
+    source = await LibrarySource.load(
+        cast(BambuddyClient, bambuddy),
+        NATIVE_ID,
+        files=native,
+        uploads=uploads,  # type: ignore[arg-type]
+        settings=StoredSettings(library_folder_id=INBOX),
+        filaments=given_filaments(local),
+    )
+    client = cast(BambuddyClient, bambuddy)
+
+    assert (await source.file_to_read(client)).id is None
+    assert (await source.file_read_already(client)) == print_source.ReadFile(None)
+    assert bambuddy.uploaded == []
+
+
+async def test_a_native_file_with_no_reads_given_is_a_404() -> None:
+    with pytest.raises(ApiError) as raised:
+        reads_for(NATIVE_ID, cast(BambuddyClient, _NativeBambuddy()), None)
+    assert raised.value.status == 404
+
+
+def test_reads_for_a_bambuddy_id_is_the_client() -> None:
+    client = cast(BambuddyClient, _NativeBambuddy())
+    native = cast(LibraryReads, object())
+    assert reads_for(ORIGIN, client, native) is client
+    assert reads_for(NATIVE_ID, client, native) is native
+
+
+async def test_a_raw_copy_is_only_of_a_native_file() -> None:
+    with pytest.raises(AssertionError):
+        await _library(_Copies()).raw_copy(cast(BambuddyClient, _NativeBambuddy()), None)
+
+
+class _RecordFailsOnce(_Copies):
+    """The first record fails, as an attempt that died after its upload did."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("the worker died")
+        await super().record(output_id, copy)
+
+
+async def test_a_raw_copy_an_attempt_left_unrecorded_is_taken(tmp_path: Path) -> None:
+    """#1145: the retry finds the first attempt's upload in the folder (same name, size
+    and hash, recorded by nothing) and records it rather than uploading twice."""
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _RecordFailsOnce()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    client = cast(BambuddyClient, bambuddy)
+    with pytest.raises(RuntimeError):
+        await source.raw_copy(client, None)
+    # Matched by name as `_left_unrecorded` matches, whatever its case.
+    [left] = bambuddy.files
+    bambuddy.files = [left.model_copy(update={"filename": left.filename.upper()})]
+
+    taken = await source.raw_copy(client, None)
+
+    assert taken == 101 and len(bambuddy.uploaded) == 1
+    assert [copy.id for copy in uploads.copies[f"library:{NATIVE_SLICED_ID}"]] == [101]
+
+
+async def test_a_raw_copy_takes_no_file_of_other_bytes(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    payload = native.bytes_of(NATIVE_SLICED_ID)
+    bambuddy.files.append(
+        LibraryFile(
+            id=90,
+            filename="critter (ScadBuddy).gcode.3mf",
+            folder_id=INBOX,
+            file_size=len(payload),
+            file_hash="0" * 64,
+        )
+    )
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+
+    assert await source.raw_copy(cast(BambuddyClient, bambuddy), None) == 101
+
+
+async def test_a_native_sliced_files_slots_unread_are_read_from_its_raw_copy(
+    tmp_path: Path,
+) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    assert source.local is None
+
+    read = await source.file_to_read(cast(BambuddyClient, bambuddy))
+
+    [(filename, _, folder)] = bambuddy.uploaded
+    assert (read.id, folder, filename) == (101, INBOX, "critter (ScadBuddy).gcode.3mf")
+
+
+async def test_a_native_3mf_past_the_download_cap_goes_raw_as_a_3mf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    monkeypatch.setattr(print_source, "MAX_DOWNLOAD_BYTES", 10)
+    source = await _load_native(NATIVE_ID, native, bambuddy, uploads)
+
+    printed = await _print(source, bambuddy)
+
+    [(filename, content, _)] = bambuddy.uploaded
+    assert (filename, content) == ("critter (ScadBuddy).3mf", native.bytes_of(NATIVE_ID))
+    assert bambuddy.media_types == ["model/3mf"] and printed.id == 101

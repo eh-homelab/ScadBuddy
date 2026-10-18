@@ -194,15 +194,20 @@ bytes as `library` blobs in the content store (a fifth `BlobKind`, never swept w
 ids the routes return are the native rows' ids on `native` and Bambuddy's on
 `bambuddy`; a client sees one id space at a time. Saved outputs, the sliced 3MFs the
 native slicer produces and the files a native print uploads are filed into it (the
-output's folder is `<Template title>/`, as the Bambuddy inbox layout is today), so what
+output's folder is the native library's own top-level `<Template title>/`; the Bambuddy
+inbox keeps a sent copy at its top level, `bambuddy/send.py` `upload_copy`), so what
 a person prints is what they can mount. `bambuddy-fs` needs no change: its README's
 "Mounts Bambuddy's print library" becomes "Mounts ScadBuddy's print library", and its
 mount tests run against both backends in CI.
 
 The native library does not replace Bambuddy's for a Bambuddy print: the Bambuddy path
-still uploads its copy to Bambuddy's library (`send.py`), as today. With
-`library_backend=native`, the Bambuddy inbox and `Work/` folders are no longer
-required for the store to start.
+still uploads its copy to Bambuddy's library (`send.py`), as today. The Bambuddy inbox
+is needed at start only by `store_backend=bambuddy` (`store/backends.py`
+`build_backend`); `library_backend=native` needs a content store (`s3` or `bambuddy`)
+and is refused over `local`, and with `s3` nothing at start needs Bambuddy. A user
+delete moves a native file to a trash first (the purge releases its blob), and
+`library_files` carries `deleted_at`, `output_id`, `filed`, `plates` and
+`has_thumbnail` beyond the columns above (plan 2026-10-17, Spec corrections).
 
 ### 4.6 What `local` does
 

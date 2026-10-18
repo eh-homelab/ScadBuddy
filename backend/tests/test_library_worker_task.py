@@ -240,6 +240,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 client=object(),
                 store=None,
                 index=SimpleNamespace(repair=_broken_async, prune=_broken_async),
+                serving_native=_broken_async,
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),

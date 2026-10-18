@@ -85,6 +85,14 @@ async def _no_lost_runs(*args: Any, **kwargs: Any) -> int:
 OPS = SimpleNamespace(store="operations", kinds={})
 
 
+async def _bambuddy_serves() -> None:
+    return None
+
+
+#: The print library on ``library_backend=bambuddy`` (#3827).
+BAMBUDDY_LIBRARY = SimpleNamespace(serving_native=_bambuddy_serves)
+
+
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
@@ -98,7 +106,7 @@ def _state() -> SimpleNamespace:
         print_follower=None,
         metrics=SimpleNamespace(print_follows_running=None),
         print_links=None,
-        components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else None),
+        components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else BAMBUDDY_LIBRARY),
         projection=SimpleNamespace(pool=None),
     )
 

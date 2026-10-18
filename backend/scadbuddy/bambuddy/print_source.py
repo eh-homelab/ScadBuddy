@@ -27,7 +27,7 @@ from typing import BinaryIO, Protocol
 import psycopg
 from fastapi import status
 
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE, BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
@@ -44,7 +44,9 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
     Printable,
+    Sink,
     copy_to_read,
+    ensure_raw_copy,
     ensure_uploaded,
     nozzles_stated,
     read_3mf,
@@ -61,6 +63,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.reads import LibraryReads, reads_of
 from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
 from scadbuddy.render.objects3mf import check_stl
 from scadbuddy.render.read_budget import ReadBudget
@@ -429,6 +433,10 @@ class PrintPipeline:
         if project_id is not None:
             folder_id = await folder_for(client, project_id)
         fetched = await PrintPipeline._fetch(self, client)
+        if fetched.payload is None and self.origin_id is None and isinstance(self, LibrarySource):
+            # A native file (#3827): Bambuddy has no file to take as it is, so the file's
+            # bytes go to it unchanged.
+            return PrintFile(await self.raw_copy(client, folder_id), folder_id)
         if self.origin_id is not None and (
             fetched.payload is None or (not fetched.stated and folder_id is None)
         ):
@@ -688,15 +696,15 @@ def given_filaments(local: LocalFilaments) -> FilamentReader:
 
 
 async def _requirements(
-    client: BambuddyClient, file: LibraryFile, read: FilamentReader | None
+    reads: LibraryReads, file: LibraryFile, read: FilamentReader | None
 ) -> tuple[FilamentRequirements, LocalFilaments | None]:
     """The whole file's slots: read from the file itself where ``read`` can, else
-    Bambuddy's ``filament-requirements``, which for a large unsliced 3MF can outlast the
-    request (#2550)."""
+    ``reads``' ``filament-requirements``: Bambuddy's, which for a large unsliced 3MF can
+    outlast the request (#2550), or the native library's, which reads none (#3827)."""
     local = await read(file) if read is not None else None
     if local is not None:
         return local.for_plate(None), local
-    return await client.filament_requirements(file.id), None
+    return await reads.filament_requirements(file.id), None
 
 
 def _file_stem(filename: str) -> str:
@@ -706,12 +714,20 @@ def _file_stem(filename: str) -> str:
     return filename
 
 
+#: A raw copy's ending and media type by the file's type (#3827): what it is, unchanged.
+_RAW_KINDS = {
+    SLICED_TYPE: (".gcode.3mf", THREE_MF_MEDIA_TYPE),
+    "stl": (".stl", "model/stl"),
+}
+
+
 @dataclass
 class LibrarySource(PrintPipeline):
-    """A file already in Bambuddy's library (#313), printed as any print is (#1752):
-    its bytes are downloaded and go through the same pipeline as an output's. The file
-    itself is never changed in place, moved or deleted; what is printed is a copy of it
-    (:attr:`origin_id` is never taken for one)."""
+    """A file already in Bambuddy's library (#313), or in ScadBuddy's own (#3827, read
+    through :attr:`files`), printed as any print is (#1752): its bytes are downloaded and
+    go through the same pipeline as an output's. The file itself is never changed in
+    place, moved or deleted; what is printed is a copy of it (:attr:`origin_id` is never
+    taken for one)."""
 
     file_id: int
     colours: list[str]
@@ -723,6 +739,9 @@ class LibrarySource(PrintPipeline):
     #: then reads too, rather than asking Bambuddy per plate (#2550). ``None`` when
     #: they came from Bambuddy.
     local: LocalFilaments | None = None
+    #: Where the file itself is read: the native library for a native file (#3827);
+    #: ``None`` reads it from Bambuddy, the client every call is given.
+    files: LibraryReads | None = None
 
     @classmethod
     async def load(
@@ -735,6 +754,7 @@ class LibrarySource(PrintPipeline):
         sends: PrintLinkStore | None = None,
         filaments: FilamentReader | None = None,
         read_own: bool = False,
+        files: LibraryReads | None = None,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read. The
@@ -742,8 +762,10 @@ class LibrarySource(PrintPipeline):
         are read from the file itself, and Bambuddy is asked only for one it cannot
         read (#2550). ``read_own`` reads them from the source's own download instead,
         the one its print uploads (:meth:`fetch_3mf`): where there is no cache to read,
-        as in the print worker, which mounts no volume."""
-        file = await client.library_file(file_id)
+        as in the print worker, which mounts no volume. ``files`` is where the file itself
+        is read, when not from Bambuddy (#3827)."""
+        reads: LibraryReads = files or client
+        file = await reads.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
         source = cls(
@@ -756,12 +778,13 @@ class LibrarySource(PrintPipeline):
             settings=settings,
             sends=sends,
             stem=_file_stem(file.filename),
+            files=files,
         )
         if filaments is None and read_own:
             filaments = partial(source._own_filaments, client)
         layout, read = await asyncio.gather(
-            client.library_plates(file_id),
-            _requirements(client, file, filaments),
+            reads.library_plates(file_id),
+            _requirements(reads, file, filaments),
             return_exceptions=True,
         )
         plates = sorted(plate.index for plate in settled(layout).plates)
@@ -839,7 +862,56 @@ class LibrarySource(PrintPipeline):
 
     @property
     def origin_id(self) -> int | None:
-        return self.file_id
+        """``None`` for a native file (#3827): Bambuddy has no file of that id."""
+        return None if is_native_id(self.file_id) else self.file_id
+
+    def _reads(self, client: BambuddyClient | None) -> LibraryReads:
+        return reads_of(self.files, client)
+
+    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+        """A native file's slots read from the file itself need no copy in Bambuddy (as
+        an output's, #2720); one with no 3MF to upload is read from its raw copy."""
+        if self.origin_id is None:
+            if self.local is not None:
+                return ReadFile(None)
+            if (await PrintPipeline._fetch(self, client)).payload is None:
+                return ReadFile(await self.raw_copy(client, None))
+        return await PrintPipeline.file_to_read(self, client)
+
+    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+        if self.origin_id is None and self.local is not None:
+            return ReadFile(None)
+        return await PrintPipeline.file_read_already(self, client)
+
+    async def raw_copy(self, client: BambuddyClient, folder_id: int | None) -> int:
+        """A native file's bytes uploaded to Bambuddy as they are, into ``folder_id`` or
+        the inbox (#3827): what prints a native file with no 3MF to lay out (a sliced
+        file, an STL that will not wrap, one past :data:`MAX_DOWNLOAD_BYTES`). Recorded
+        under the run subject, so a reprint reuses it while Bambuddy has it."""
+        if self.origin_id is not None:
+            raise AssertionError(f"library file {self.file_id} is Bambuddy's own: print it")
+        uploads, settings = PrintPipeline._stores(self)
+        ending, media_type = _RAW_KINDS.get(self.file_type, (".3mf", THREE_MF_MEDIA_TYPE))
+        stem = self.filename
+        if stem.lower().endswith(ending):
+            stem = stem[: -len(ending)]
+        reads = self._reads(client)
+
+        async def write(out: Sink) -> None:
+            async with aclosing(reads.download_library_file(self.file_id)) as chunks:
+                async for chunk in chunks:
+                    await asyncio.to_thread(out.write, chunk)
+
+        return await ensure_raw_copy(
+            client,
+            uploads,
+            self.subject.run_subject,
+            settings,
+            folder_id=folder_id,
+            filename=f"{stem or self.file_id} (ScadBuddy){ending}",
+            media_type=media_type,
+            write=write,
+        )
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
@@ -876,7 +948,7 @@ class LibrarySource(PrintPipeline):
 
     async def write_3mf(
         self,
-        client: BambuddyClient,
+        client: BambuddyClient | None,
         out: BinaryIO,
         budget: ReadBudget,
         room: Callable[[], bool] = lambda: True,
@@ -889,7 +961,7 @@ class LibrarySource(PrintPipeline):
         then both in memory, a peak ``budget`` bounds. The download stops, as
         :class:`SpoolFullError`, once ``room`` says the volume ``out`` is on is too full
         to go on. ``False`` for an STL that holds no mesh."""
-        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+        async with aclosing(self._reads(client).download_library_file(self.file_id)) as chunks:
             async for chunk in chunks:
                 if not await asyncio.to_thread(room):
                     raise SpoolFullError
@@ -921,11 +993,12 @@ class LibrarySource(PrintPipeline):
         out.truncate()
         out.write(wrapped)
 
-    async def download(self, client: BambuddyClient) -> bytes | None:
+    async def download(self, client: BambuddyClient | None) -> bytes | None:
         """The file's bytes, counted as they stream in; ``None`` past
-        :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept."""
+        :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept. ``client``
+        may be ``None`` for a source with ``files``."""
         data = bytearray()
-        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+        async with aclosing(self._reads(client).download_library_file(self.file_id)) as chunks:
             async for chunk in chunks:
                 data += chunk
                 if len(data) > MAX_DOWNLOAD_BYTES:

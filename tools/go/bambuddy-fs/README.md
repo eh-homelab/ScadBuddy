@@ -1,8 +1,11 @@
 # bambuddy-fs
 
-Mounts Bambuddy's print library, through ScadBuddy's API, as a FUSE filesystem, so
+Mounts ScadBuddy's print library, through ScadBuddy's API, as a FUSE filesystem, so
 folders and files can be browsed, copied in and out, renamed and deleted with ordinary
 tools (#2686). Design: `docs/superpowers/specs/2026-10-13-bambuddy-fs-design.md`.
+Which library that is depends on ScadBuddy's `library_backend` (#3827): Bambuddy's
+trash and external-file notes below apply to `bambuddy`, while on `native` every
+delete goes to ScadBuddy's trash for 30 days.
 
 It needs `fuse3` (`fusermount3`) and `/dev/fuse`. By default it sends traces and
 metrics, with the host's name, to eh-homelab's collector; `--no-telemetry` turns that
@@ -218,6 +221,10 @@ copy of what was written: cache cleaners may empty `~/.cache`. One mount at a ti
 a state directory (it holds `<state-dir>/lock`); a second fails to start. Records do not
 say which ScadBuddy they are for: a mount of another `--api` over the same state
 directory would send them there, so give each API its own `--state-dir`.
+After a `library_backend` flip, a queued write aimed at a folder of the other library
+lands at the top level of the new one: its folder ID is a 404 there, and a 404 whose
+folder the library no longer has sends the entry to the top level
+(`internal/fsys/unsent.go` `sendFailed`).
 
 `close()`, `fsync()` and `release` then succeed: the bytes are as safe on local disk as
 they would be in the library, and an app told its save failed would report it, or

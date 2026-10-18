@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import re
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,6 +22,7 @@ from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.client import connect, connect_lazily
@@ -48,6 +50,7 @@ DEFAULTS: dict[str, object] = {
     "has_render_api_key": False,
     "render_key_fallback": False,
     "store_backend": "local",
+    "library_backend": "bambuddy",
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
@@ -314,6 +317,16 @@ def test_a_field_never_stored_follows_the_environment_it_starts_with(
         assert client.get("/api/v1/settings").json()["public_url"] == "https://scad.example"
 
 
+def test_a_seeded_native_library_on_the_local_store_does_not_start(settings: Settings) -> None:
+    """Ruling 3 at start: the environment's seed is never checked by a save."""
+    native = settings.model_copy(update={"library_backend": "native"})
+    with (
+        pytest.raises(StoreNotReadyError, match=re.escape(RECOVER_BAMBUDDY_LIBRARY_SQL)),
+        TestClient(create_app(native)),
+    ):
+        pass
+
+
 @respx.mock
 def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
     client.put(
@@ -483,6 +496,15 @@ def test_choosing_the_bambuddy_store_without_an_inbox_is_refused(client: TestCli
     response = client.put("/api/v1/settings", json={"store_backend": "bambuddy"})
     assert response.status_code == 422
     assert "library folder" in response.json()["detail"]
+
+
+def test_settings_view_names_the_library_backend(client: TestClient) -> None:
+    assert client.get("/api/v1/settings").json()["library_backend"] == "bambuddy"
+
+
+def test_a_native_library_on_local_is_422(client: TestClient) -> None:
+    r = client.put("/api/v1/settings", json={"library_backend": "native"})
+    assert r.status_code == 422 and "store_backend to s3 or bambuddy" in r.json()["detail"]
 
 
 @pytest.mark.parametrize("cleared", ["bambuddy_url", "library_folder_id"])

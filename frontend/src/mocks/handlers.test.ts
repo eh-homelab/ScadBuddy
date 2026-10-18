@@ -983,6 +983,31 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect((await put({ store_s3_secret_access_key: '' })).status).toBe(422)
   })
 
+  it('refuses a native print library on the local store with the backend\u2019s wording', async () => {
+    const put = (body: Record<string, unknown>) =>
+      fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    expect((await api.getSettings()).library_backend).toBe('bambuddy')
+    const refused = await put({ library_backend: 'native' })
+    expect(refused.status).toBe(422)
+    expect(((await refused.json()) as { detail: string }).detail).toBe(
+      'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 or bambuddy first',
+    )
+    expect((await api.getSettings()).library_backend).toBe('bambuddy')
+    // Both ways: native first, then the store going back to local.
+    const fields = {
+      store_s3_endpoint: 'https://s3.example.test',
+      store_s3_bucket: 'renders',
+      store_s3_access_key_id: 'AKIA',
+      store_s3_secret_access_key: 'shh',
+    }
+    expect((await put({ store_backend: 's3', library_backend: 'native', ...fields })).status).toBe(200)
+    expect((await put({ store_backend: 'local' })).status).toBe(422)
+  })
+
   it('refuses an upload over the limit with a 413 naming it', async () => {
     const saved = (await api.getSettings()).media_upload_max_bytes
     try {
