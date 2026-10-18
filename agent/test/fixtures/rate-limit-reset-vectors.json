@@ -1,140 +1,167 @@
 {
-  "_comment": "The reset a rate limit's text names: agent/src/harness/credentialErrors.ts rateLimitResetFromText and agent-durable credentials.py rate_limit_reset are both held to these (#4121 review). `at` null means none, so the default cooldown.",
+  "_comment": "The reset a rate limit's text names: agent/src/harness/credentialErrors.ts rateLimitResetFromText and agent-durable credentials.py rate_limit_reset are both held to these (#4121 review). `at` null means none, so the default cooldown. `why` is the case's provenance, read by neither suite.",
   "cases": [
     {
       "text": "You've hit your weekly limit · resets 1pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-18T13:00:00Z"
+      "at": "2026-10-18T13:00:00Z",
+      "why": "#4088: measured in prod ai_credentials.last_error, 2026-10-17 22:16 UTC"
     },
     {
       "text": "You've hit your session limit · resets 10:30pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-17T22:30:00Z"
+      "at": "2026-10-17T22:30:00Z",
+      "why": "#4088: measured in prod ai_credentials.last_error, 2026-10-17 22:16 UTC"
     },
     {
       "text": "You've hit your weekly limit · resets 11pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-17T23:00:00Z"
+      "at": "2026-10-17T23:00:00Z",
+      "why": "#4088: measured in prod ai_credentials.last_error, 2026-10-17 22:16 UTC"
     },
     {
       "text": "You've hit your weekly limit · resets Oct 21, 4am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-21T04:00:00Z"
+      "at": "2026-10-21T04:00:00Z",
+      "why": "#4088: measured in prod ai_credentials.last_error, 2026-10-17 22:16 UTC"
     },
     {
       "text": "API Error: 429 · resets 12am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-18T00:00:00Z"
+      "at": "2026-10-18T00:00:00Z",
+      "why": "12am is midnight, 12pm noon; am/pm and UTC in any case"
     },
     {
       "text": "resets 12pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-18T12:00:00Z"
+      "at": "2026-10-18T12:00:00Z",
+      "why": "12am is midnight, 12pm noon; am/pm and UTC in any case"
     },
     {
       "text": "resets 9:30PM (utc)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-18T21:30:00Z"
+      "at": "2026-10-18T21:30:00Z",
+      "why": "12am is midnight, 12pm noon; am/pm and UTC in any case"
     },
     {
       "text": "resets 10pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": "2026-10-18T22:00:00Z"
+      "at": "2026-10-18T22:00:00Z",
+      "why": "past RESET_GRACE, a time alone is tomorrow's"
     },
     {
       "text": "resets 1:05am (UTC)",
       "now": "2026-12-31T23:50:00Z",
-      "at": "2027-01-01T01:05:00Z"
+      "at": "2027-01-01T01:05:00Z",
+      "why": "a time alone rolls past midnight"
     },
     {
       "text": "resets Jan 2, 4am (UTC)",
       "now": "2026-12-31T23:50:00Z",
-      "at": "2027-01-02T04:00:00Z"
+      "at": "2027-01-02T04:00:00Z",
+      "why": "a date just across the new year is next year's (within RESET_HORIZON)"
     },
     {
       "text": "resets Dec 31, 11:55pm (UTC)",
       "now": "2026-12-31T23:50:00Z",
-      "at": "2026-12-31T23:55:00Z"
+      "at": "2026-12-31T23:55:00Z",
+      "why": "a date later the same day is today's, not next year's"
     },
     {
       "text": "resets 10:16pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "#4093 review: the text names the minute, so one just passed is passing now, not tomorrow's"
     },
     {
       "text": "resets 10:15pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "#4093 review: the text names the minute, so one just passed is passing now, not tomorrow's"
     },
     {
       "text": "resets 10:02pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "#4093 review: the text names the minute, so one just passed is passing now, not tomorrow's"
     },
     {
       "text": "resets Oct 17, 10:15pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "#4093 review: the text names the minute, so one just passed is passing now, not tomorrow's"
     },
     {
       "text": "resets Oct 17, 10pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "#4093 review: the text names the minute, so one just passed is passing now, not tomorrow's"
     },
     {
       "text": "resets Sep 3, 4am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "a date earlier this year has passed; it is not next year's"
     },
     {
       "text": "resets Jan 2, 4am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "a date earlier this year has passed; it is not next year's"
     },
     {
       "text": "",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "API Error: 429 rate limited",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets soon",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets 1pm (PST)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets 13pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets 0am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets 10:75pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets Foo 21, 4am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     },
     {
       "text": "resets Feb 30, 4am (UTC)",
       "now": "2026-10-17T22:16:05Z",
-      "at": null
+      "at": null,
+      "why": "no reset named, or one that is not a time or date: the default cooldown"
     }
   ]
 }
