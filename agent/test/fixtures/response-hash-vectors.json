@@ -114,6 +114,19 @@
       },
       "canonical": "{\"kind\":\"answer\",\"text\":\"a\\udc00b\\ud83d\"}",
       "sha256": "c80099ae7d7e36594901a69d15e867ea25f2ef9f9343732c36a62355642b08bf"
+    },
+    {
+      "name": "a lone surrogate in a key is escaped and sorts by code unit",
+      "value": {
+        "kind": "answer",
+        "answers": {
+          "\udc00": "a",
+          "\ud800x": "b",
+          "z": "c"
+        }
+      },
+      "canonical": "{\"answers\":{\"z\":\"c\",\"\\ud800x\":\"b\",\"\\udc00\":\"a\"},\"kind\":\"answer\"}",
+      "sha256": "0478a2397d73a77cedfb30ade1a7e57f77efb3dcb2836dc2715607925d493bb9"
     }
   ]
 }
