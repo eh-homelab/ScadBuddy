@@ -320,6 +320,16 @@ async def test_the_bundled_claude_code_gives_the_server_to_the_subagent_only(
         log = await events(agent_db, sid)
         text = "".join(e["delta"] for e in log if e["type"] == "assistant.text.delta")
         assert "All done." in text
+        # The Agent call and its subagent's call reach the panel from inside the segment
+        # (runner.py SegmentCalls), before the answer, the subagent's under its Agent call.
+        calls = {e["name"]: e for e in log if e["type"] == "tool.call"}
+        agent, probe = calls["Agent"], calls["mcp__scadbuddy__probe_model"]
+        assert agent["risk"] == "read"
+        assert probe["parent"] == agent["id"]
+        results = {e["id"]: e for e in log if e["type"] == "tool.result"}
+        assert results[agent["id"]]["ok"] and results[probe["id"]]["ok"]
+        answer = next(i for i, e in enumerate(log) if e.get("delta") == "All done.")
+        assert log.index(results[agent["id"]]) < answer
     finally:
         fake.close()
         stand_in.close()

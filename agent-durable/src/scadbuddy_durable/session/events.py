@@ -33,7 +33,7 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
-from scadbuddy_durable.session import tools
+from scadbuddy_durable.session import subagents, tools
 from scadbuddy_durable.session.models import FollowArgs, FollowResult
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
@@ -53,6 +53,9 @@ FOLLOW_HEARTBEAT = timedelta(seconds=30)
 #: The panel's risk labels (agent harness/permissions.ts `RiskTier`). Both sides are
 #: pinned to agent/test/fixtures/risk-tiers.json, so neither drifts alone (#3144).
 RISK_TIERS = frozenset({"read", "write", "outward"})
+#: agent harness/ownPlugin.ts `ownPluginTierOf`: a skill is instructions, and a subagent
+#: calls only tools the session already has.
+READ_BUILTINS = frozenset({"Skill", "Agent", "Task"})
 
 
 def _blank(value: Any) -> Any:
@@ -75,6 +78,18 @@ def logged_input(raw: Any) -> dict[str, Any]:
     return {"truncated": True, "preview": text[: INPUT_MAX - 1] + "…"}
 
 
+def risk_of(name: str, tiers: Mapping[str, str]) -> str:
+    """A call's risk label: its tier, a subagent's ``mcp__scadbuddy__<tool>`` that tool's
+    (runner.py SegmentCalls), the own plugin's built-ins read, anything else outward."""
+    if name in tiers:
+        return tiers[name]
+    if name in READ_BUILTINS:
+        return "read"
+    if name.startswith(subagents.PREFIX):
+        return tiers.get(name.removeprefix(subagents.PREFIX), "outward")
+    return "outward"
+
+
 def translate(
     session_id: str, event: Mapping[str, Any], tiers: Mapping[str, str]
 ) -> list[dict[str, Any]]:
@@ -95,6 +110,7 @@ def translate(
         ]
     if kind == "tool_call":
         name = str(event.get("name", "unknown"))
+        parent = event.get("parent")
         return [
             {
                 **base,
@@ -102,7 +118,8 @@ def translate(
                 "id": str(event.get("id", "")),
                 "name": name,
                 "input": logged_input(event.get("input", {})),
-                "risk": tiers.get(name, "outward"),
+                "risk": risk_of(name, tiers),
+                **({"parent": parent} if isinstance(parent, str) and parent else {}),
             }
         ]
     if kind == "tool_result":
