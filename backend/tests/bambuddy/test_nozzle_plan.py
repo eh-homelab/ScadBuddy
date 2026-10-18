@@ -100,10 +100,12 @@ def test_a_plan_with_a_side_chosen_by_hand_states_a_pinned_map() -> None:
 
     assert chosen is not None and planned is not None
     assert chosen.by_hand
-    assert chosen.stated_map(2) == FilamentMap(("2", "1"), ("1", "1"), pinned=True)
+    assert chosen.stated_map(2, one_plate=True) == FilamentMap(("2", "1"), ("1", "1"), pinned=True)
     assert not planned.by_hand
-    stated = planned.stated_map(2)
+    stated = planned.stated_map(2, one_plate=True)
     assert stated is not None and not stated.pinned
+    # A file of more plates is sliced by plate, which cannot read a pinned map.
+    assert chosen.stated_map(2, one_plate=False) == FilamentMap(("2", "1"), ("1", "1"))
 
 
 def test_one_side_chosen_by_hand_pins_the_planned_rest_too() -> None:
@@ -113,7 +115,7 @@ def test_one_side_chosen_by_hand_pins_the_planned_rest_too() -> None:
 
     assert plan is not None
     assert [(slot.side, slot.by_hand) for slot in plan.slots] == [("R", False), ("L", True)]
-    assert plan.stated_map(2) == FilamentMap(("2", "1"), ("1", "1"), pinned=True)
+    assert plan.stated_map(2, one_plate=True) == FilamentMap(("2", "1"), ("1", "1"), pinned=True)
 
 
 def test_only_the_side_with_the_size_is_planned() -> None:

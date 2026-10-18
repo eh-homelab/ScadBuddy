@@ -1614,6 +1614,15 @@ async def plan_run(
     # No second round trip: `read` (read_once) answers again what supports just read.
     tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
     tower_dropped = template_keys_dropped(request.prime_tower)
+    # A side chosen by hand is kept only in a file of one plate (#3955 review): the map
+    # it pins is read by a slice of the whole file, which for more plates prints them all.
+    filament_map = _filament_map(
+        nozzle_plan,
+        len(source.colours),
+        one_plate=nozzle_plan is not None
+        and nozzle_plan.by_hand
+        and len(await source.plate_ids(client)) <= 1,
+    )
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -1632,7 +1641,7 @@ async def plan_run(
         tray_colours=tray_colours(
             [slot.spool_id for slot in request.filament_plan.slots], printer_status
         ),
-        filament_map=_filament_map(nozzle_plan, len(source.colours)),
+        filament_map=filament_map,
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -1675,7 +1684,7 @@ async def plan_run(
         plan = SlicePlan(
             # A map chosen by hand is read only by a slice of the whole file (#3955).
             whole_file=source.slices_whole_file
-            or (nozzle_plan is not None and nozzle_plan.by_hand),
+            or (filament_map is not None and filament_map.pinned),
             printer_preset=resolved.printer_preset,
             process_preset=resolved.process_preset,
             filament_presets=resolved.filament_presets,
@@ -1871,9 +1880,11 @@ async def _plan_sliced(
     )
 
 
-def _filament_map(plan: NozzlePlan | None, filaments: int) -> FilamentMap | None:
+def _filament_map(
+    plan: NozzlePlan | None, filaments: int, *, one_plate: bool
+) -> FilamentMap | None:
     """The plan as the 3MF states it, for a file of ``filaments`` filaments."""
-    return plan.stated_map(filaments) if plan is not None else None
+    return plan.stated_map(filaments, one_plate=one_plate) if plan is not None else None
 
 
 def finish_run(

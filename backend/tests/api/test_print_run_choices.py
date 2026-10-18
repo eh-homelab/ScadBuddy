@@ -1438,11 +1438,17 @@ def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
 
 
 def _sides_run(
-    client: TestClient, model: str, paths: DataPaths, **choices: Any
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    *plates: tuple[int, ...],
+    plate_id: int = 1,
+    **choices: Any,
 ) -> tuple[httpx.Response, respx.Route, respx.Route]:
     """A two-colour run on an H2C with a Standard 0.4 on each side, so both are offered
-    and the plan puts one colour on each; the upload and the slice it posted."""
-    output_id = two_colour_output(client, model, paths)
+    and the plan puts one colour on each; the upload and the slice it posted. ``plates``
+    as for :func:`two_colour_output`, printing ``plate_id``."""
+    output_id = two_colour_output(client, model, paths, *plates)
     upload = upload_route()
     run_routes()
     _status(**_mounted(("HS01", "0.4"), ("HS01", "0.4")))
@@ -1454,6 +1460,7 @@ def _sides_run(
         json={
             **body(tier="standard", nozzles=[{"size": "0.4"}], **choices),
             "filament_plan": BOTH_ON_RIGHT,
+            "plate_id": plate_id,
         },
     )
     return response, upload, sliced
@@ -1489,6 +1496,23 @@ def test_sides_chosen_by_hand_are_pinned_on_every_plate_and_sliced_whole(
     assert plate["filament_maps"] == "2 1"
     assert plate["filament_volume_maps"] == "0 0"
     assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [0]
+
+
+@respx.mock
+def test_sides_chosen_by_hand_in_a_file_of_more_plates_slice_only_the_plate_printed(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3955 review: a whole-file slice (``plate: 0``) slices every plate, so in a file
+    of two it would be reported and queued as plate 2's. Its map is left unpinned, as a
+    plate named in the slice cannot read a pinned one, and plate 2 is sliced alone."""
+    response, upload, sliced = _sides_run(
+        client, model, paths, (1, 2), (1, 2), plate_id=2, sides={"1": "R", "2": "L"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert "filament_nozzle_map" not in _uploaded_settings(upload)
+    assert all("filament_map_mode" not in plate for plate in _plate_metadata(upload))
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [2]
 
 
 @respx.mock

@@ -84,6 +84,7 @@ function sliceDepartures(
   plan: NozzlePlan | null,
   plateSlots: readonly SlotNeed[] | null,
   slice: SlicePreview | null,
+  keepsSides: boolean,
 ): string[] {
   const read = slice?.slots ?? []
   if (!plan || read.length === 0) return []
@@ -101,10 +102,11 @@ function sliceDepartures(
     } else if (got.side && got.side !== planned.side) {
       // #2703: with every side on Automatic the slicer groups filaments itself to cut
       // purging. A side chosen by hand pins the whole map (#3955), so a slice that departs
-      // from it is not expected: it is said plainly, with no reason given.
-      const moved = planned.by_hand
+      // from it is not expected: it is said plainly, with no reason given. Only in a file of
+      // one plate: one of more is sliced by plate and regrouped whatever was chosen.
+      const moved = planned.by_hand && keepsSides
         ? `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} you chose. Check the sides before printing.`
-        : `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned: it groups filaments itself to cut purging.`
+        : `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} ${planned.by_hand ? 'you chose' : 'as planned'}: it groups filaments itself to cut purging.`
       // #2737 review: without the Track Switch an AMS feeds one nozzle only, so a spool
       // moved off its planned side may have no path to the nozzle it was sliced for.
       notes.push(
@@ -145,6 +147,8 @@ type Props = {
    * these (`slicedPlateSlots`).
    */
   plateSlots?: readonly SlotNeed[] | null
+  /** Whether a side chosen by hand is kept: only in a file of one plate (#3955 review). */
+  keepsSides?: boolean
   stale: boolean
   slicing: boolean
   sliceError: string | null
@@ -168,6 +172,7 @@ export function PreviewPane({
   slice,
   nozzlePlan = null,
   plateSlots = null,
+  keepsSides = true,
   stale,
   slicing,
   sliceError,
@@ -186,7 +191,10 @@ export function PreviewPane({
   }, [colors, slots, tried])
   const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry]))
   const [thumbFailed, setThumbFailed] = useState(false)
-  const departures = useMemo(() => sliceDepartures(nozzlePlan, plateSlots, slice), [nozzlePlan, plateSlots, slice])
+  const departures = useMemo(
+    () => sliceDepartures(nozzlePlan, plateSlots, slice, keepsSides),
+    [nozzlePlan, plateSlots, slice, keepsSides],
+  )
 
   return (
     <aside className="flex min-w-0 flex-col gap-3" data-testid="preview-pane" aria-label="Preview">

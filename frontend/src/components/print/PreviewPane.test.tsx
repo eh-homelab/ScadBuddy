@@ -28,6 +28,7 @@ function pane(
   nozzlePlan: NozzlePlan | null = plan,
   plateSlots: readonly SlotNeed[] | null = slots,
   stale = false,
+  keepsSides = true,
 ) {
   render(
     <PreviewPane
@@ -41,6 +42,7 @@ function pane(
       nozzlePlan={nozzlePlan}
       plateSlots={plateSlots}
       stale={stale}
+      keepsSides={keepsSides}
       slicing={false}
       sliceError={null}
     />,
@@ -98,6 +100,24 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
       'The slicer put Indigo Purple (slot 1) on the right nozzle, not the left you chose. Check the sides before printing.',
     )
     expect(notes).not.toHaveTextContent('a side set by hand is not kept')
+  })
+
+  it('gives the regrouping as the reason in a file of more plates, where a side is not pinned (#3955 review)', () => {
+    const byHand = { ...plan, slots: plan.slots!.map((slot) => (slot.slot_id === 1 ? { ...slot, by_hand: true } : slot)) }
+    pane(
+      slice([
+        { slot_id: 1, grams: 14.5, side: 'R' },
+        { slot_id: 2, grams: 0.5, side: 'R' },
+        { slot_id: 3, grams: 4.8, side: 'R' },
+      ]),
+      byHand,
+      slots,
+      false,
+      false,
+    )
+    expect(screen.getByTestId('slice-departures')).toHaveTextContent(
+      'The slicer put Indigo Purple (slot 1) on the right nozzle, not the left you chose: it groups filaments itself to cut purging.',
+    )
   })
 
   it("warns that a spool moved to the other side may not reach it without the Track Switch (#2737 review)", () => {

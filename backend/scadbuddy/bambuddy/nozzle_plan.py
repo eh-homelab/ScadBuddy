@@ -56,7 +56,8 @@ CLI source (``src/BambuStudio.cpp``, the 02.08 tree the deployed
   pinned so came back ``2 1 2``. Only a slice of the whole file reads it: one naming a
   plate is refused. So a plan with a side chosen by hand states the pinned map
   (:meth:`NozzlePlan.stated_map`, :func:`~scadbuddy.render.bambu3mf._pin_plates`) and its
-  file is sliced as ``plate: 0``.
+  file is sliced as ``plate: 0``, but only a file of one plate: ``plate: 0`` slices every
+  plate, so a file with more names the plate printed and is left to regroup.
 """
 
 from __future__ import annotations
@@ -169,15 +170,15 @@ class NozzlePlan(BaseModel):
         plan, every filament where it puts it (#3955)."""
         return any(slot.by_hand for slot in self.slots)
 
-    def stated_map(self, filaments: int) -> FilamentMap | None:
+    def stated_map(self, filaments: int, *, one_plate: bool) -> FilamentMap | None:
         """The Manual map the 3MF states for a file of ``filaments`` filaments, pinned
-        when a side was chosen by hand."""
+        when a side was chosen by hand and the file has ``one_plate``."""
         if filaments < 1:
             return None
         return FilamentMap(
             tuple(self.filament_map(filaments)),
             tuple(self.volume_map(filaments)),
-            pinned=self.by_hand,
+            pinned=self.by_hand and one_plate,
         )
 
 
