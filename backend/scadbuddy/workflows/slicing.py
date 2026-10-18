@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import Any, NoReturn
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, VersioningBehavior
@@ -82,6 +82,13 @@ RECORD_RETRY = RetryPolicy(
 CANCELLED = "The slice was cancelled."
 
 
+def _cancelling(error: BaseException) -> bool:
+    """A cancel of this workflow, asked of the server. An activity reporting itself
+    cancelled with no such request (`sb-slicer` does on any cancel of its context) is
+    a failure, so the row and the execution agree (re-review N4)."""
+    return is_cancelled_exception(error) and workflow.cancellation_reason() is not None
+
+
 def _type(cause: BaseException | None) -> str:
     if isinstance(cause, ApplicationError):
         return cause.type or "ApplicationError"
@@ -118,17 +125,12 @@ def slice_failure(cause: BaseException | None, queue: str) -> str:
 class SliceWorkflow:
     @workflow.run
     async def run(self, input: SliceWorkflowInput) -> SliceWorkflowResult:
-        prepared: SlicePrepared | None = None
-        output: SlicePlateOutput | None = None
-        failure: str | None = None
-        cancelled: BaseException | None = None
         try:
             prepared, output, failure = await self._slice(input)
         except (ActivityError, asyncio.CancelledError) as error:
-            if not is_cancelled_exception(error):
+            if not _cancelling(error):
                 raise
-            # Recorded, then raised again, so the execution ends cancelled (review M4).
-            cancelled, prepared, output, failure = error, None, None, CANCELLED
+            return await self._cancelled(input, error)
         reused = prepared.reused_blob_key if prepared is not None and failure is None else None
         record = SliceRecordInput(
             slice_id=input.slice_id,
@@ -137,18 +139,42 @@ class SliceWorkflow:
             reused_blob_key=reused,
             failure=failure,
             reused_warnings=prepared.reused_warnings if reused is not None and prepared else [],
-            cancelled=cancelled is not None,
         )
-        result: SliceWorkflowResult = await workflow.execute_activity(
+        # Shielded: a cancel that lands while the record runs lets it finish, then
+        # records the slice cancelled (re-review N3), rather than leaving it running.
+        recording = workflow.start_activity(
             RECORD_ACTIVITY,
             record,
             start_to_close_timeout=SHORT,
             retry_policy=RECORD_RETRY,
             result_type=SliceWorkflowResult,
         )
-        if cancelled is not None:
-            raise cancelled
+        try:
+            result: SliceWorkflowResult = await asyncio.shield(recording)
+        except asyncio.CancelledError as error:
+            if not _cancelling(error):
+                raise
+            await recording
+            return await self._cancelled(input, error)
         return result
+
+    async def _cancelled(self, input: SliceWorkflowInput, error: BaseException) -> NoReturn:
+        """Record the slice cancelled (review M4), then end the execution cancelled."""
+        await workflow.execute_activity(
+            RECORD_ACTIVITY,
+            SliceRecordInput(
+                slice_id=input.slice_id,
+                put=None,
+                output=None,
+                reused_blob_key=None,
+                failure=CANCELLED,
+                cancelled=True,
+            ),
+            start_to_close_timeout=SHORT,
+            retry_policy=RECORD_RETRY,
+            result_type=SliceWorkflowResult,
+        )
+        raise error
 
     async def _slice(
         self, input: SliceWorkflowInput
@@ -171,7 +197,7 @@ class SliceWorkflow:
                 )
                 return prepared, output, None
             except ActivityError as error:
-                if is_cancelled_exception(error):
+                if _cancelling(error):
                     raise
                 cause = error.cause
                 if again and isinstance(cause, ApplicationError) and cause.type == TRANSFER_REFUSED:
@@ -191,7 +217,7 @@ class SliceWorkflow:
                 result_type=SlicePrepared,
             )
         except ActivityError as error:
-            if is_cancelled_exception(error):
+            if _cancelling(error):
                 raise
             return None, prepare_failure(error.cause)
         return prepared, None

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
@@ -711,3 +712,105 @@ def test_a_preset_that_needs_bambuddy_says_none_is_configured(
     file_id = _native_upload(native_alone_client, tmp_path)
     with pytest.raises(ProfileError, match="needs Bambuddy, and none is configured"):
         _start(native_alone_client, file_id, plan=LOCAL_PLAN)
+
+
+# -- re-review: the cancel's edges and a swept row ---------------------------------------
+
+
+def test_a_cancel_during_the_record_is_still_recorded_cancelled(
+    slice_client: TestClient, slicer: FakeSlicer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review N3: the cancel lands while the slice's own record runs."""
+    store = _slicing(slice_client).store
+    finish = store.finish
+    recording = threading.Event()
+    release = threading.Event()
+
+    async def held_finish(slice_id: int, **fields: Any) -> None:
+        if fields["status"] == "completed":
+            recording.set()
+            await asyncio.to_thread(release.wait, 30)
+        await finish(slice_id, **fields)
+
+    monkeypatch.setattr(store, "finish", held_finish)
+    row = _start(slice_client)
+    assert recording.wait(60), "the record never ran"
+
+    async def cancel() -> BaseException | None:
+        handle = _slicing(slice_client).temporal().get_workflow_handle(row.workflow_id)
+        await handle.cancel()
+        release.set()
+        try:
+            await handle.result()
+        except WorkflowFailureError as error:
+            return error.cause
+        return None
+
+    assert isinstance(_call(slice_client, cancel), CancelledError)
+    done = _row(slice_client, row)
+    assert (done.status, done.failure) == ("cancelled", "The slice was cancelled.")
+    assert _holds(slice_client, row) == set()
+
+
+def test_a_cancel_from_the_worker_alone_is_a_failure(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    """Re-review N4: no cancel was asked of the workflow, so the execution and the row
+    agree that the slice failed."""
+    slicer.self_cancel = True
+    row = _start(slice_client)
+
+    async def outcome() -> str:
+        handle = _slicing(slice_client).temporal().get_workflow_handle(row.workflow_id)
+        await handle.result()
+        status = (await handle.describe()).status
+        assert status is not None
+        return status.name
+
+    assert _call(slice_client, outcome) == "COMPLETED"
+    done = _row(slice_client, row)
+    assert done.status == "failed"
+    assert done.failure is not None and done.failure.startswith("The slicer worker failed")
+
+
+def test_an_execution_whose_row_was_swept_takes_no_hold(slice_client: TestClient) -> None:
+    """Re-review N2: the row is gone before the execution's first activity."""
+    slicing = _slicing(slice_client)
+    starter = slicing.starter
+    assert starter is not None
+
+    async def run() -> tuple[int, Any]:
+        row = await slicing.store.start(
+            workflow_id="slice-swept",
+            subject=SUBJECT,
+            library_file_id=COPY,
+            plate_id=1,
+            preset_key="k",
+        )
+        with slicing.store._pool.connection() as conn:
+            conn.execute("DELETE FROM native_slices WHERE id = %s", (row.id,))
+        handle = await slicing.temporal().start_workflow(
+            SliceWorkflow.run,
+            SliceWorkflowInput(
+                slice_id=row.id,
+                library_file_id=COPY,
+                plan=PLAN,
+                plate_id=1,
+                preset_key=native_preset_key(PLAN, 1, starter.profiles.version),
+                slicer_queue=starter.slicer_queue,
+            ),
+            id=row.workflow_id,
+            task_queue=starter.library_queue,
+        )
+        return row.id, await handle.result()
+
+    slice_id, result = _call(slice_client, run)
+
+    assert result.status == "failed"
+    assert result.failure == "The slice's record is gone: slice again."
+    with slicing.refs.pool.connection() as conn:
+        held = conn.execute(
+            "SELECT count(*) AS n FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (HOLDER, str(slice_id)),
+        ).fetchone()
+    assert held is not None and held["n"] == 0

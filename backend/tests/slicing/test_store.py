@@ -183,3 +183,61 @@ def test_native_workflow_id_names_the_copy_and_the_presets() -> None:
     assert native_workflow_id(7, "k") != native_workflow_id(7, "j")
     assert native_workflow_id(7, "k").startswith("slice-7-")
     assert len(native_workflow_id(7, "k")) == len("slice-7-") + 32
+
+
+async def test_a_stop_of_a_lost_row_spares_a_newer_execution(
+    store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
+) -> None:
+    """Re-review N1: the sweep listed the row, then a new execution started it again;
+    its stop must not write over the new run or drop its holds."""
+    slice_id = await _start(store)
+    assert await store.running(slice_id) is not None
+    (listed,) = await store.lost(timedelta(0))
+    restarted = await store.running(slice_id)
+    assert restarted is not None and restarted > listed.started_at
+    refs = BlobRefs(pool)
+    refs.add("slice-new-run", HOLDER, str(slice_id))
+
+    assert not await store.stop_lost(listed, "The slice stopped.")
+
+    found = await store.get(slice_id, "out-1")
+    assert found is not None and (found.status, found.failure) == ("running", None)
+    assert refs.referenced() == {"slice-new-run"}
+
+    (again,) = await store.lost(timedelta(0))
+    assert await store.stop_lost(again, "The slice stopped.")
+    found = await store.get(slice_id, "out-1")
+    assert found is not None and (found.status, found.failure) == ("failed", "The slice stopped.")
+    assert refs.referenced() == set()
+
+
+async def test_lost_reads_the_executions_start_not_the_rows(store: NativeSliceStore) -> None:
+    slice_id = await _start(store)
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE native_slices SET created_at = now() - interval '1 day' WHERE id = %s",
+            (slice_id,),
+        )
+    await store.running(slice_id)
+    assert await store.lost(timedelta(hours=1)) == []
+
+
+async def test_running_a_row_swept_away_says_so(store: NativeSliceStore) -> None:
+    """Re-review N2: an execution whose row the TTL sweep deleted takes no hold."""
+    assert await store.running(12345) is None
+
+
+async def test_a_restart_of_a_finished_row_keeps_it_from_the_ttl_sweep(
+    store: NativeSliceStore,
+) -> None:
+    slice_id = await _start(store)
+    await store.finish(slice_id, status="failed", sliced_blob_key=None, failure="x", warnings=[])
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE native_slices SET finished_at = now() - interval '2 days' WHERE id = %s",
+            (slice_id,),
+        )
+    again = await _start(store)
+    assert again == slice_id
+    assert await store.sweep(timedelta(days=1)) == []

@@ -44,6 +44,8 @@ from scadbuddy.workflows.slicing_models import (
 logger = logging.getLogger(__name__)
 
 _SCOPE = BlobScope(folder="work")
+#: An execution whose row is gone.
+GONE = "The slice's record is gone: slice again."
 #: The row's failure when the worker's PUT cannot be recorded.
 LOST_PUT = "The sliced 3MF was lost; slice again."
 
@@ -108,8 +110,10 @@ class SliceActivities:
 
     @activity.defn(name=PREPARE_ACTIVITY)
     async def slice_prepare(self, input: SliceWorkflowInput) -> SlicePrepared:
-        # Each execution owns its row's running state (review I2).
-        await self.slicing.store.running(input.slice_id)
+        # Each execution owns its row's running state (review I2). A row the TTL sweep
+        # deleted first is refused before any hold, which nothing would ever drop (N2).
+        if await self.slicing.store.running(input.slice_id) is None:
+            raise _refused(GONE)
         try:
             transfers = self.slicing.transfers()
         except RuntimeError as error:

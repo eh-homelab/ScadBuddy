@@ -21,7 +21,7 @@ HOLDER = "native_slice"
 
 _COLUMNS = (
     "id, workflow_id, subject, library_file_id, plate_id, preset_key, input_sha256, status,"
-    " failure, sliced_blob_key, warnings, created_at, finished_at"
+    " failure, sliced_blob_key, warnings, created_at, started_at, finished_at"
 )
 
 
@@ -38,6 +38,8 @@ class NativeSlice(BaseModel):
     sliced_blob_key: str | None
     warnings: list[str]
     created_at: datetime
+    #: When the execution writing the row started it (`NativeSliceStore.running`).
+    started_at: datetime
     finished_at: datetime | None
 
 
@@ -79,7 +81,12 @@ class NativeSliceStore:
                     "INSERT INTO native_slices"
                     " (workflow_id, subject, library_file_id, plate_id, preset_key)"
                     " VALUES (%s, %s, %s, %s, %s)"
-                    " ON CONFLICT (workflow_id) DO UPDATE SET workflow_id = EXCLUDED.workflow_id"
+                    # A finished row that did not complete is about to run again: its
+                    # finish is refreshed, so the TTL sweep does not delete it before its
+                    # execution starts it (re-review N2).
+                    " ON CONFLICT (workflow_id) DO UPDATE SET finished_at = CASE"
+                    " WHEN native_slices.status IN ('failed', 'cancelled') THEN now()"
+                    " ELSE native_slices.finished_at END"
                     f" RETURNING {_COLUMNS}",
                     (workflow_id, subject, library_file_id, plate_id, preset_key),
                 ).fetchone()
@@ -93,14 +100,22 @@ class NativeSliceStore:
             )
         return found
 
-    async def running(self, slice_id: int) -> None:
+    async def running(self, slice_id: int) -> datetime | None:
         """What each execution does first: the row running again, its last outcome
-        cleared."""
-        await self._execute(
-            "UPDATE native_slices SET status = 'running', failure = NULL, finished_at = NULL,"
-            " sliced_blob_key = NULL, warnings = '[]' WHERE id = %s",
-            (slice_id,),
-        )
+        cleared, its ``started_at`` now. None when there is no row (swept): the
+        execution then takes no hold (re-review N2)."""
+
+        def run() -> datetime | None:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "UPDATE native_slices SET status = 'running', failure = NULL,"
+                    " finished_at = NULL, sliced_blob_key = NULL, warnings = '[]',"
+                    " started_at = clock_timestamp() WHERE id = %s RETURNING started_at",
+                    (slice_id,),
+                ).fetchone()
+            return None if row is None else row["started_at"]
+
+        return await asyncio.to_thread(run)
 
     async def prepared(self, slice_id: int, input_sha256: str) -> None:
         await self._execute(
@@ -136,17 +151,39 @@ class NativeSliceStore:
         await asyncio.to_thread(run)
 
     async def lost(self, older_than: timedelta) -> list[NativeSlice]:
-        """Running rows created more than ``older_than`` ago: the sweep asks Temporal
-        whether each still has an execution."""
+        """Rows whose execution started them more than ``older_than`` ago and that read
+        running still: the sweep asks Temporal whether each has an execution."""
 
         def run() -> list[NativeSlice]:
             with self._pool.connection() as conn:
                 rows = conn.execute(
                     f"SELECT {_COLUMNS} FROM native_slices WHERE status = 'running'"
-                    " AND created_at <= now() - %s ORDER BY id",
+                    " AND started_at <= now() - %s ORDER BY id",
                     (older_than,),
                 ).fetchall()
             return [NativeSlice.model_validate(row) for row in rows]
+
+        return await asyncio.to_thread(run)
+
+    async def stop_lost(self, row: NativeSlice, failure: str) -> bool:
+        """Fail ``row``, as `lost` listed it, and drop its holds: only if it still reads
+        running from the same start, so an execution that started it since is left
+        alone (re-review N1). Whether it was stopped."""
+
+        def run() -> bool:
+            with self._pool.connection() as conn, conn.transaction():
+                stopped = conn.execute(
+                    "UPDATE native_slices SET status = 'failed', failure = %s,"
+                    " finished_at = now() WHERE id = %s AND status = 'running'"
+                    " AND started_at = %s",
+                    (failure, row.id, row.started_at),
+                ).rowcount
+                if stopped:
+                    conn.execute(
+                        "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+                        (HOLDER, str(row.id)),
+                    )
+            return bool(stopped)
 
         return await asyncio.to_thread(run)
 

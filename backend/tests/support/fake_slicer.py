@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 from fastapi.testclient import TestClient
 from temporalio import activity
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.worker import Worker
 
 from scadbuddy.api.deps import STATE_ATTR
@@ -51,6 +51,9 @@ class FakeSlicer:
         self.worker_errors = 0
         #: Refuse this many calls' URLs first as expired (`TransferRefused`).
         self.expire_times = 0
+        #: Fail as cancelled with no cancel asked of it, as `sb-slicer` returns
+        #: `ActivityError::cancelled()` whenever its context is cancelled.
+        self.self_cancel = False
         #: Report a digest other than the one it PUT.
         self.wrong_sha = False
         #: Waited on after the heartbeat, before the upload.
@@ -76,6 +79,8 @@ class FakeSlicer:
         if self.expire_times > 0:
             self.expire_times -= 1
             raise ApplicationError("expired", type=TRANSFER_REFUSED, non_retryable=True)
+        if self.self_cancel:
+            raise CancelledError("the worker is shutting down")
         if self.refuse_plate:
             raise ApplicationError(
                 "validation failed",

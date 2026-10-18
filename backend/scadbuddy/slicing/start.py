@@ -136,10 +136,8 @@ async def sweep_native_slices(
     for row in await store.lost(lost_after):
         if await _has_execution(temporal, row.workflow_id):
             continue
-        logger.warning("a native slice's execution is gone", extra={"slice_id": row.id})
-        await store.finish(
-            row.id, status="failed", sliced_blob_key=None, failure=STOPPED, warnings=[]
-        )
+        if await store.stop_lost(row, STOPPED):
+            logger.warning("a native slice's execution is gone", extra={"slice_id": row.id})
     return await store.sweep(finished_older_than)
 
 
