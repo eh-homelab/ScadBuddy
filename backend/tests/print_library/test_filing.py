@@ -40,6 +40,20 @@ async def test_filing_twice_files_once(native: NativeLibrary, three_mf: Path) ->
     assert (a.name, a.output_id, a.filed) == ("demo-sign.3mf", meta.id, True)
 
 
+async def test_a_retried_filing_after_the_copy_moved_files_nothing(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """A moved copy (`filed` cleared) keeps its `output_id`: the retry finds it."""
+    meta = _meta("d" * 32)
+    first = await file_output(native, meta, three_mf, "Name Sign")
+    await native.update_file(first.id, folder_id=None, filed=False)
+    keys = native.rows.live_file_keys()
+    again = await file_output(native, meta, three_mf, "Name Sign")
+    assert again.id == first.id
+    assert [f.id for f in native.rows.files(None, every_folder=True)] == [first.id]
+    assert native.rows.live_file_keys() == keys
+
+
 async def test_two_outputs_of_one_template_share_a_folder_under_a_race(
     native: NativeLibrary, three_mf: Path
 ) -> None:

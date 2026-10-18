@@ -20,8 +20,9 @@ async def file_output(
     row the first attempt made and uploads nothing. The upload holds no lock and no row
     connection; the check, the folder and the insert are one short transaction
     (`NativeLibraryStore.file_for_output`), and an attempt that overlapped one that filed
-    first releases its own upload."""
-    existing = await asyncio.to_thread(native.rows.filed_for_output, meta.id)
+    first releases its own upload. A copy the user moved (``filed`` cleared) still names its
+    output, so it counts: a retry after the move files no second one."""
+    existing = await asyncio.to_thread(native.rows.rows_for_output, meta.id)
     if existing:
         return existing[0]
     with model_3mf.open("rb") as data:
