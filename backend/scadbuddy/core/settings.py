@@ -302,6 +302,9 @@ class Settings(BaseSettings):
     # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5), and the
     # projects worker calls for a flow's render, print and arrange (#1057).
     api_internal_url: str | None = None
+    # SCADBUDDY_SLICER_PROFILES_DIR: Bambu Studio's BBL vendor profiles and the image's
+    # BAMBU_STUDIO_VERSION, which the native slicer's preset files are built from (#3822).
+    slicer_profiles_dir: Path = Path("/opt/slicer-profiles")
     # SCADBUDDY_TEMPORAL_UI_URL: the Temporal web UI, which Settings → Administration
     # links to (#668). Empty (the default) shows no link.
     temporal_ui_url: str | None = None
@@ -573,6 +576,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "api_internal_url": (
             "Where the print and projects workers reach the API inside the cluster: the"
             " deployment's Service, read only by those workers."
+        ),
+        "slicer_profiles_dir": (
+            "Where the image puts Bambu Studio's BBL profiles and their VERSION, copied from"
+            " the slicer's AppImage at build time: not a setting."
         ),
         "download_cache_dir": (
             "Where this process keeps whole Bambuddy downloads (#2788): a directory of the"

@@ -1,0 +1,11 @@
+{
+    "type": "process",
+    "name": "short_list",
+    "inherits": "fdm_process_root",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GP_SHORT",
+    "outer_wall_speed": [
+        "150"
+    ]
+}

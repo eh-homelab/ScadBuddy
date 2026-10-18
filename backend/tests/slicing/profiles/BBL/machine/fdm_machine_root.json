@@ -1,0 +1,10 @@
+{
+    "type": "machine",
+    "name": "fdm_machine_root",
+    "from": "system",
+    "instantiation": "false",
+    "printable_height": "250",
+    "nozzle_diameter": [
+        "0.4"
+    ]
+}

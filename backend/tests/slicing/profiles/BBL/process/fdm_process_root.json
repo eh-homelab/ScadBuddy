@@ -1,0 +1,14 @@
+{
+    "type": "process",
+    "name": "fdm_process_root",
+    "from": "system",
+    "instantiation": "false",
+    "layer_height": "0.2",
+    "wall_loops": "2",
+    "sparse_infill_density": "15%",
+    "outer_wall_speed": [
+        "200",
+        "200"
+    ],
+    "curr_bed_type": "Cool Plate"
+}
