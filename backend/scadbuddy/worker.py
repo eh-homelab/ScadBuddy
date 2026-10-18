@@ -140,7 +140,7 @@ MAKE_CURRENT_ERROR_AFTER = 60.0
 MAKE_CURRENT_ERROR_EVERY = 60.0
 #: How long a versioned worker that reports readiness (`/readyz`, #4146) waits, once its
 #: build is current, for its queue to route to it before it reports ready anyway, and
-#: how often it asks: as the API's library worker waits (`main.LIBRARY_ROUTED_WAIT`).
+#: how often it asks. The API's library worker waits as long (`main.LIBRARY_ROUTED_WAIT`).
 ROUTED_WAIT = 60.0
 ROUTED_POLL = 0.5
 
