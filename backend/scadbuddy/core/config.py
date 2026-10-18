@@ -94,6 +94,9 @@ StoreBackend = Literal["local", "bambuddy", "s3"]
 #: ScadBuddy's own over the blob store (`native`, which needs a `store_backend` that is
 #: not `local`).
 LibraryBackend = Literal["bambuddy", "native"]
+#: Who slices a print (spec 2026-10-16 §5): Bambuddy's slicer, or ScadBuddy's own
+#: `scadbuddy-slicer` worker (`native`, which needs a `store_backend` that is not `local`).
+Slicer = Literal["bambuddy", "native"]
 DEFAULT_STORE_MAX_TOTAL_BYTES = 50 * 1024**3
 DEFAULT_STORE_MAX_COUNT = 200_000
 #: A worker's local copy of pieces it fetched or rendered; least recently used goes first.

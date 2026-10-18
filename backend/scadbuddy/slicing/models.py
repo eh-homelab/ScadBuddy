@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 #: The ApplicationError type the worker raises for a failed slice.
 SLICER_ERROR = "SlicerError"
+#: The ApplicationError type of a URL the worker will never get through (expired,
+#: refused or missing, `sb-slicer` `error.rs`): the caller mints new ones.
+TRANSFER_REFUSED = "TransferRefused"
 #: Bambu Studio's exit code for a rejected input.
 VALIDATION_EXIT = 192
 
