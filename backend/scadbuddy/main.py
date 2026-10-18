@@ -95,6 +95,8 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
@@ -130,6 +132,7 @@ from scadbuddy.workflows.housekeeping import (
     FLOWS_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
@@ -572,6 +575,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_attachments() -> None:
         await _heartbeating(_sweep_print_attachments_logged(state))
 
+    @activity.defn(name=LIBRARY_SWEEP)
+    async def sweep_print_library() -> None:
+        await _heartbeating(_sweep_print_library_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -586,7 +593,25 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         maintain_models_git,
         sweep_activity,
         sweep_print_attachments,
+        sweep_print_library,
     ]
+
+
+async def _sweep_print_library_logged(state: AppState) -> None:
+    """#3827: the native library's old trash and orphan blobs; nothing on ``bambuddy``."""
+    try:
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
+        done = await sweep_library(native, now=datetime.now(UTC))
+    except Exception:
+        logger.exception("could not sweep the print library")
+        raise
+    if done.purged or done.orphans:
+        logger.info(
+            "swept the print library",
+            extra={"purged": done.purged, "orphans": done.orphans},
+        )
 
 
 async def _sweep_print_attachments_logged(state: AppState) -> None:

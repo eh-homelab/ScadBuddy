@@ -10,10 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import numpy as np
 import psycopg
 import pytest
-import trimesh
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.core.components import Components, Core
@@ -22,13 +20,10 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.print_library.component import COMPONENT, PrintLibrary
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads
-from scadbuddy.print_library.store import NativeFile, NativeLibraryStore
-from scadbuddy.render.bambu3mf import write_bambu_3mf
-from scadbuddy.render.split import ColourPart
-from scadbuddy.render.thumbnail import render_plate_thumbnails
+from scadbuddy.print_library.store import NativeFile
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.index import Pool
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.print_library.conftest import upload
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -37,35 +32,6 @@ _reads: type[LibraryReads] = BambuddyClient
 _listing: type[LibraryListingSource] = BambuddyClient
 _native_reads: type[LibraryReads] = NativeLibrary
 _native_listing: type[LibraryListingSource] = NativeLibrary
-
-
-def _moved(x: float, y: float, z: float) -> np.ndarray:
-    matrix = np.eye(4)
-    matrix[:3, 3] = (x, y, z)
-    return matrix
-
-
-@pytest.fixture
-def three_mf(tmp_path: Path) -> Path:
-    parts = [
-        ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(10, 10, 4))),
-        ColourPart(
-            2,
-            "Color 2",
-            "#1F6FEB",
-            trimesh.creation.box(extents=(2, 2, 2), transform=_moved(0, 0, 3)),
-        ),
-    ]
-    out = tmp_path / "bracket.3mf"
-    write_bambu_3mf(parts, out, thumbnails=render_plate_thumbnails(parts), model_name="bracket")
-    return out
-
-
-@pytest.fixture
-def native(pool: Pool, content: ContentStore, tmp_path: Path) -> NativeLibrary:
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    return NativeLibrary(NativeLibraryStore(pool), content, spool)
 
 
 class UploadSpy:
@@ -84,11 +50,6 @@ def spy_backend(content: ContentStore, monkeypatch: pytest.MonkeyPatch) -> Uploa
 
     monkeypatch.setattr(content.backend, "upload", counted)
     return spy
-
-
-async def upload(native: NativeLibrary, path: Path, folder_id: int | None = None) -> NativeFile:
-    with path.open("rb") as data:
-        return await native.upload(path.name, data, folder_id)
 
 
 async def downloaded(native: NativeLibrary, file_id: int) -> bytes:
