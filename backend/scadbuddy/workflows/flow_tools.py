@@ -1193,6 +1193,10 @@ def trigger_tool(event: dict[str, Any] | None = None) -> Any:
 #: Every host function a script of a flow without inputs may call, as the type check and
 #: the editor see them.
 HOST_FUNCTIONS: list[Any] = [*SCRIPT_TOOLS, trigger_tool()]
+#: The name of every host function a script may call on this build, `inputs()` included
+#: (#4146): what the API stamps on a run it starts (`FlowStart.host_functions`), and what
+#: the ``projects`` worker says it serves (`registered.RegisteredActivities`).
+HOST_FUNCTION_NAMES: frozenset[str] = frozenset([*(fn.__name__ for fn in HOST_FUNCTIONS), "inputs"])
 
 
 def run_flow_tool(

@@ -662,6 +662,9 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   operations still in flight deferred (their record `running`) until a build with it is
   current again; terminate them in the Temporal UI to end them, and the reconciler
   records them lost.
+- **Readiness (#4146):** `/readyz` on 9090 answers 503 until the `bambuddy` queue routes
+  to this build (`/healthz` never waits on it). Point a rolling update's
+  `readinessProbe` at it, so the old pod stops only once the new build takes the queue.
 - **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
   still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
@@ -742,12 +745,62 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 - **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does
   not fall back after a large script; the homelab Deployment requests 256 Mi with a
   1 Gi limit (eh-homelab/clusters#2123).
-- **Unversioned** (a flow may run for weeks): every change to `ProjectWorkflow`, its host
-  functions or the harness pin must replay `backend/tests/fixtures/project_workflow_histories/`,
-  or go behind `workflow.patched`. It stops without a drain; a run in flight resumes on
-  the next worker from its history.
+- **Versioned, auto-upgrade (#4146):** the worker is its build's version of the Worker
+  Deployment `scadbuddy-projects` (build id `SCADBUDDY_REVISION`, stamped in the image;
+  nothing to set in the manifest). It makes its build current once at start, retrying as
+  the render and print workers do, and its `/readyz` on 9090 answers 503 until the queue
+  routes to that build (`/healthz` never waits on it). Every workflow on it
+  (`ProjectWorkflow`, the `flow_*` `Operation`) is auto-upgrade by the deployment's
+  default (`client.projects_deployment`), never pinned, because a flow may run for weeks
+  (plan 2026-10-09 Ruling 13). An open run moves to the current build at its next task
+  and replays there, so every change to `ProjectWorkflow`, its host functions or the
+  harness pin must still replay `backend/tests/fixtures/project_workflow_histories/`, or
+  go behind `workflow.patched`. It stops without a drain.
+- **Rolling it:** with the API's new pods starting runs and operations while the old
+  build may still be current, the old build waits rather than fails:
+  - A `flow_*` operation of a kind it does not register is deferred (#4139, as on the
+    `bambuddy` queue).
+  - A run whose start names a host function it does not have (the API stamps its own
+    build's on each start, `FlowStart.host_functions`) is recorded and then waits before
+    its script starts. Its workflow task fails until a build with the function is
+    current: at once, then about every 10 s (measured,
+    `tests/flows/test_projects_versioning.py`). The check comes after the run's first
+    task (`flow_record`), because a failed first task loses the start's `execute`
+    Update and the run would wait for a script forever.
+  - The cross-queue calls still route: `ProjectWorkflow`'s `tool`/`agent` activities
+    reach the agent's unversioned `agent-tools` worker, and the agent's session
+    workflows' `flow_grant_check` reaches the versioned `projects` queue (both in the
+    same test file).
+  - Not covered: a new workflow type on the queue, which still needs a `Recreate`
+    rollout.
+- **The first deploy of #4146** goes from an unversioned worker to a versioned one.
+  Deploy it with the `Recreate` the manifest has today. The new pod makes
+  `scadbuddy-projects` current, and from then on unversioned workers get no tasks. Open
+  runs, all of them started unversioned, move to the versioned build at their next task
+  ([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)):
+  they are the replay-compatible runs an unversioned worker would have replayed anyway.
+  The agent needs nothing: its `agent-tools` worker stays unversioned.
+- **Then, in clusters**, once a build with #4146 runs: in `scadbuddy-projects.yaml`,
+  set `strategy: RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`) and point the
+  `readinessProbe` at `/readyz` (the liveness and startup probes stay on `/healthz`).
+  In the PostSync promote hook (`temporal-promote-workers.yaml`), add
+  `scadbuddy-projects=${PROJECTS_BUILD_ID}` to its targets, with a `replacements` entry
+  in `kustomization.yaml` that copies the `scadbuddy-projects` Deployment's
+  `scadbuddy.eh-homelab.io/revision` annotation into `PROJECTS_BUILD_ID`, as
+  clusters#2499 does for `scadbuddy-library`, and raise `activeDeadlineSeconds` by
+  400 s for the extra deployment. Added before this release runs, the hook would wait
+  400 s for a build nothing polls and fail the sync.
+- **Rolling back to an image from before #4146** stops the `projects` queue: unversioned
+  workers get no tasks while `scadbuddy-projects` has a current version, and the old
+  image never clears it. Before the old pod starts, run
+  `temporal worker deployment set-current-version --deployment-name scadbuddy-projects --unversioned`
+  (or set it in the Temporal UI), and take `scadbuddy-projects` out of the promote
+  hook's targets, which would otherwise try to make the old revision current and fail
+  the sync. Rolling back to any build from #4146 on needs nothing: its pod makes its own
+  build current.
 - **Without the Deployment**, `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS=true` serves
-  the queue from the API; with neither, flow runs wait on the queue.
+  the queue from the API, unversioned (as the print worker's in-process one); with
+  neither, flow runs wait on the queue.
 
 ### Blob store and render workers (#426)
 

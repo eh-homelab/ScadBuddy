@@ -322,8 +322,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   tiers and names the queue of, as the run's starter;
   `flow_activities.py`, `flow_models.py`,
   `projects_worker.py`, on the `projects` queue
-  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
-  `tests/fixtures/project_workflow_histories/`. A flow's payloads are sealed per run
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), versioned AUTO_UPGRADE in its own
+  Deployment (#4146, `client.projects_deployment`, never pinned; unversioned in-process),
+  so a run moves to each new build and a change must replay
+  `tests/fixtures/project_workflow_histories/`. A run whose start names a host function
+  (`FlowStart.host_functions`) its worker lacks waits after `flow_record` for a build
+  that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
@@ -424,8 +428,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
   unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
   `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`. `--queue projects`
-  (`run_projects_worker`, #1057) serves flow runs, unversioned: Postgres and the KEK
-  only, and it refuses to start without the KEK.
+  (`run_projects_worker`, #1057) serves flow runs, deployment `scadbuddy-projects`
+  (#4146; `/readyz` once the queue routes to it, as the print worker's): Postgres and the
+  KEK only, and it refuses to start without the KEK.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
