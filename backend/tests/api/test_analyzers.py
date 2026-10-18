@@ -313,24 +313,39 @@ def test_an_uploaded_output_is_judged_on_the_inventory_too(
 
 @pytest.mark.requires_postgres
 @respx.mock
-@pytest.mark.parametrize(("all_plates", "short"), [(True, True), (False, False)])
+@pytest.mark.parametrize(
+    ("plates", "read", "short"),
+    [
+        ({"all_plates": True}, [1, 2, 3], True),
+        ({}, [1], False),
+        ({"plate_ids": [3, 1]}, [1, 3], True),
+    ],
+)
 def test_an_all_plates_print_is_judged_on_every_plates_filament(
-    client: TestClient, model: str, app: FastAPI, paths: DataPaths, all_plates: bool, short: bool
+    client: TestClient,
+    model: str,
+    app: FastAPI,
+    paths: DataPaths,
+    plates: dict[str, object],
+    read: list[int],
+    short: bool,
 ) -> None:
-    """The silk spool has ~965 g left: plate 1's 600 g fits, both plates' 1200 g do not,
-    as the print dialog's filament step sums them for "All plates" (#198)."""
+    """The silk spool has ~965 g left: plate 1's 600 g fits, every plate's 1800 g does
+    not, as the print dialog's filament step sums them for "All plates" (#198). Chosen
+    plates (#3652) are judged on just theirs: plates 1 and 3's 1200 g, never plate 2's."""
     configure(client)
     routes = bambuddy_routes()
     output_id = make_output(client, model)
     [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
     add_plate(path, 2)
+    add_plate(path, 3)
     uploads = getattr(app.state, STATE_ATTR).uploads
     asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
-    plates: list[int] = []
+    asked: list[int] = []
 
     def requirements(request: httpx.Request) -> httpx.Response:
         plate = int(request.url.params["plate_id"])
-        plates.append(plate)
+        asked.append(plate)
         return httpx.Response(
             200,
             json={
@@ -354,11 +369,9 @@ def test_an_all_plates_print_is_judged_on_every_plates_filament(
         ),
     }
 
-    report = _run(
-        client, output_id, request={**SILK_REQUEST, "all_plates": all_plates}, detail="advanced"
-    )
+    report = _run(client, output_id, request={**SILK_REQUEST, **plates}, detail="advanced")
     found = {row["key"]: row for row in report["diagnostics"]}
-    assert sorted(plates) == ([1, 2] if all_plates else [1])
+    assert sorted(asked) == read
     # Only the slots are a plate's own: the inventory is read once for every plate
     # (the spools twice, once more for the filaments input's own read of the plan).
     assert {name: route.call_count for name, route in shared.items()} == {
@@ -370,7 +383,7 @@ def test_an_all_plates_print_is_judged_on_every_plates_filament(
     assert ("SB3002:slot-1" in found) is short
     if short:
         evidence = {e["label"]: e["value"] for e in found["SB3002:slot-1"]["evidence"]}
-        assert evidence["needed per copy"] == 1200
+        assert evidence["needed per copy"] == 600 * len(read)
 
 
 def _strip_plater_id(path: Path, index: int) -> None:

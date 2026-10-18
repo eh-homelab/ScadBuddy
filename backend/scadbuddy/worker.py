@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import faulthandler
 import logging
 import os
 import signal
@@ -46,6 +47,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
+from scadbuddy.core.loop_watch import LoopWatch
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -761,7 +763,8 @@ async def run_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
+            async with LoopWatch(deps.metrics):
+                await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -926,15 +929,16 @@ async def run_print_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _serve_versioned(
-                client,
-                workers,
-                stop,
-                build_id=build_id,
-                deployment_name=PRINT_DEPLOYMENT_NAME,
-                drain_timeout=None,
-                stop_now=stop_now,
-            )
+            async with LoopWatch(deps.metrics):
+                await _serve_versioned(
+                    client,
+                    workers,
+                    stop,
+                    build_id=build_id,
+                    deployment_name=PRINT_DEPLOYMENT_NAME,
+                    drain_timeout=None,
+                    stop_now=stop_now,
+                )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -1012,7 +1016,7 @@ async def run_projects_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            async with worker:
+            async with LoopWatch(metrics), worker:
                 await stop.wait()
         finally:
             if server is not None and serving is not None:
@@ -1082,6 +1086,9 @@ def main() -> None:
         # Not an assert, which python -O strips (#3020 review).
         raise SystemExit(f"queue {queue!r} has no service name")
     configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
+    # `kill -USR1 1` in the pod writes every thread's stack to stderr (#3788): the
+    # loop watch logs a stall by itself, this is for a hang it does not see.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     asyncio.run(_main(settings, queue))
 
 

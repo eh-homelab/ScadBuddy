@@ -170,9 +170,9 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     order and spacing do not matter.
 
     ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm``,
-    ``filament_profiles``, ``supports`` (#1899), ``prime_tower`` (#3628) and
-    ``plate_ids`` (#3652) are part of it when sent; without them the key is what it was
-    before the fields existed.
+    ``filament_profiles``, ``supports`` (#1899), ``prime_tower`` (#3628), ``plate_ids``
+    (#3652) and ``folder_id`` (#3651) are part of it when sent; without them the key is
+    what it was before the fields existed.
     """
     optional = (
         "request_id",
@@ -182,6 +182,7 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "supports",
         "prime_tower",
         "plate_ids",
+        "folder_id",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
     # #717: no profiles is the key from before the field existed.

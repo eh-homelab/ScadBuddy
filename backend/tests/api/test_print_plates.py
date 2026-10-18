@@ -234,6 +234,24 @@ def test_a_chosen_plate_the_3mf_does_not_have_is_refused_by_name(
     assert not queue.called
 
 
+@respx.mock
+@pytest.mark.parametrize("plate_ids", [3, "1,3", [1, "x"], [0], []])
+def test_plate_ids_that_are_not_plate_numbers_are_a_422(
+    client: TestClient, model: str, plate_ids: object
+) -> None:
+    """#3762 review: whatever a flow or another caller sends as `plate_ids`, the run
+    answers 422 before anything is uploaded, never a 500."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload = upload_route()
+    queue = queue_route()
+
+    run = run_print(client, output_id, json=run_request(plate_ids=plate_ids))
+
+    assert run.status_code == 422, run.text
+    assert not upload.called and not queue.called
+
+
 @pytest.mark.requires_postgres
 @respx.mock
 def test_plates_queued_before_a_later_plate_fails_are_still_recorded(

@@ -2022,18 +2022,14 @@ describe('CustomizePage, project file (#317)', () => {
     expect(await remembered[0]).toEqual({ preset_id: null, preset_name: null, project_id: 1 })
   })
 
-  it("opens on no project rather than another model's last one", async () => {
-    // The 2026-10-11 QA report: a project chosen on another model filed an apple into it.
+  it('opens on the Settings default project when the model has none of its own', async () => {
+    // The 2026-10-11 QA report filed an apple into a project chosen on another model;
+    // since #3188 `last_project_id` is the Settings default, which no choice changes.
     server.use(
       http.get('/api/v1/print/projects', () => HttpResponse.json({ projects: projectViews, last_project_id: 1 })),
     )
-    const filed = watchBodies('POST', '/project-file')
-    const { user } = render()
-    await firstRender()
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(pickerValue(pagePicker())).toBe('')
-    await generate(user)
-    expect(filed).toHaveLength(0)
+    render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
   })
 
   it("opens on the model's remembered project over the last one", async () => {

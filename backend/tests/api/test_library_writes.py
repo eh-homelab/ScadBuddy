@@ -18,7 +18,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from tests.api.test_library_delete import API, files, queue
 from tests.api.test_send import configure
-from tests.support.operations import press
+from tests.support.operations import press, subjects
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -118,6 +118,9 @@ def test_mkdir_and_folder_rename(client: TestClient) -> None:
     )
     assert renamed.status_code == 200, renamed.text
     assert renamed.json()["name"] == "Bits"
+    # #3856: a new folder has no id yet; an existing one is named by its id.
+    assert subjects(client, "library_folder_create") == ["library-files"]
+    assert subjects(client, "library_folder_update") == ["library-folder:9"]
 
 
 class FakeLibrary:
@@ -326,6 +329,7 @@ def test_folder_delete_takes_its_files_and_subfolders(client: TestClient) -> Non
     for file_id in (10, 12):
         assert bambuddy.files[file_id] == {"folder_id": None, "external": False, "trashed": True}
     assert 11 not in bambuddy.files
+    assert subjects(client, "library_folder_delete") == ["library-folder:4"]
 
 
 @respx.mock

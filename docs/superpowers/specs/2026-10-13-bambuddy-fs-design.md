@@ -196,12 +196,23 @@ identical.
    - `git add -A` the generated paths and commit `chore: regenerate Kiota client`.
    - Push with the `RUNNER_APP` token, and fail so the next run verifies.
    - Fork and Dependabot PRs get no token: they fail with the command to run.
-   - The job's permissions become `contents: write`.
+   - The job's permissions become `contents: write`, and the token asks for
+     `permission-contents: write`. The `RUNNER_APP` installation must hold
+     `contents: write` on this repo, checked before the job is enabled: until now
+     the job used the token only to comment.
 3. **The diff comment.** The edited-in-place `<!-- scadbuddy-api-diff -->` comment
    gains a **Go client** section: "up to date", or "regenerated in `<sha>`" with a
    `git diff --stat`.
 
 With no API change and no client change, the steps are skipped.
+
+**After the merge (#3053).** `freshness` runs only on a PR, against the PR merged
+into its base as that base stood then. Required checks are not strict, so two PRs
+that each regenerate cleanly can land a combined client that matches neither spec.
+A `go-client` job ("Go client is fresh") runs `scripts/generate-go-client.sh
+--check` on every run that is not a PR (a push to main, a merge queue's commit if
+one is enabled again, the schedule), and
+`CI Summary` requires it there.
 
 **The `go` job.** It calls `go-module-ci.yml`, copied from forge's: for each
 `tools/go/*` module, gofmt, vet, build, `test -race`, and the module-mode vendor
@@ -288,7 +299,9 @@ such as the host and other containers, see the files.
 - **Vendor autofix for Dependabot.** A gomod bump changes a `require`, and with one
   root `vendor/`, `go` then refuses with "inconsistent vendoring".
   `.github/workflows/vendor-autofix.yml` is copied from gooey:
-  - it runs on `pull_request_target` from `dependabot[bot]` on this repo;
+  - it runs on `pull_request_target` for a PR that `dependabot[bot]` opened on this
+    repo: the guard checks `github.event.pull_request.user.login`, the PR's author,
+    not only `github.actor`, which is whoever triggered the run;
   - it runs `go work vendor` (and `GOWORK=off go mod vendor` in the client module);
   - it commits `build(deps): go work vendor` and pushes.
 
@@ -346,7 +359,8 @@ operation ID.
   - `--all` and `--ro`;
   - errno mapping;
   - 202 polling;
-  - upload on `release` and replace-by-name;
+  - upload on `flush`, whose error fails `close()` (`release` sends only what is
+    still unsent), and replace-by-name;
   - `rmdir` of a non-empty folder.
 - **Mount tests** use go-fuse's test helpers on a real mount, and skip without
   `/dev/fuse` (CI installs `fuse3`).

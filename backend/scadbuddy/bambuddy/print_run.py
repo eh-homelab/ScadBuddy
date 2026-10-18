@@ -14,10 +14,10 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, Self
 
 from fastapi import status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.clearance import (
@@ -61,6 +61,7 @@ from scadbuddy.bambuddy.filaments import (
     check,
     every_plate,
     family,
+    fold_plates,
     gather_plate_options,
     plates_named,
     queue_filaments,
@@ -98,6 +99,7 @@ from scadbuddy.bambuddy.print_source import (
     OutputSource,
     PrintSource,
 )
+from scadbuddy.bambuddy.projects import require_destination_folder
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -193,6 +195,9 @@ class PrintRunRequest(BaseModel):
     #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
     #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
+    #: A library folder of no project to put the 3MF in (#3651), in place of a project:
+    #: sent, the print is filed under no project. Refused together with ``project_id``.
+    folder_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
     #: alongside it.
@@ -236,6 +241,19 @@ class PrintRunRequest(BaseModel):
     def _plates_in_order(cls, ids: list[int] | None) -> list[int] | None:
         # Each once and in plate order, so the same plates are the same run's key.
         return None if ids is None else sorted(set(ids))
+
+    @model_validator(mode="after")
+    def _one_destination(self) -> Self:
+        if self.folder_id is not None and self.project_id is not None:
+            raise ValueError("choose a project or a library folder, not both")
+        return self
+
+    @model_validator(mode="after")
+    def _one_plate_is_plate_id(self) -> PrintRunRequest:
+        # One chosen plate is that plate's print, under the key `plate_id` gives it
+        # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run.
+        fold_plates(self)
+        return self
 
     def asked_plates(self) -> list[int] | None:
         """The plates asked for, in plate order; ``None`` for every plate."""
@@ -444,10 +462,46 @@ class ChoosesProject(Protocol):
 
 def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
     """The request's ``project_id`` when it sent one, ``null`` included ("No project");
-    the default project (``last_project_id``) only when it left the field out (#317)."""
+    when it left the field out, none if it chose a library folder instead (#3651), else
+    the default project (``last_project_id``, #317), which only Settings changes (#3188)."""
     if "project_id" in request.model_fields_set:
         return request.project_id
+    if getattr(request, "folder_id", None) is not None:
+        return None
     return settings.last_project_id
+
+
+class ResolvedProject(BaseModel):
+    """:func:`resolve_project`'s answer, carried from a run's check to its plan so the
+    project list is read once (#3790 review); ``None`` is "No project"."""
+
+    project_id: int | None = None
+
+
+async def resolve_project(
+    client: BambuddyClient, request: ChoosesProject, settings: StoredSettings
+) -> int | None:
+    """:func:`chosen_project`, with a project left out resolved only to one Bambuddy still
+    has, as ``destinations.default_destination`` does: a default project that was deleted
+    falls through to none rather than failing the print on its folder (#3651 review). A
+    project the request names is used as sent."""
+    project_id = chosen_project(request, settings)
+    if project_id is None or "project_id" in request.model_fields_set:
+        return project_id
+    known = {project.id for project in await client.projects()}
+    return project_id if project_id in known else None
+
+
+async def planned_project(
+    client: BambuddyClient,
+    request: PrintRunRequest,
+    settings: StoredSettings,
+    prepared: PreparedPlates,
+) -> int | None:
+    """The project the check resolved, else :func:`resolve_project` now."""
+    if prepared.project is not None:
+        return prepared.project.project_id
+    return await resolve_project(client, request, settings)
 
 
 async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
@@ -1155,6 +1209,9 @@ class PreparedRun:
     warnings: list[FilamentWarning] = field(default_factory=list)
     #: The resolved printer's model, which the plate warnings are judged against (#2858).
     printer_model: str | None = None
+    #: The project the caller resolved already, if it did; :func:`plan_run` reads it
+    #: rather than Bambuddy's project list again.
+    project: ResolvedProject | None = None
 
 
 async def prepare_run(
@@ -1165,6 +1222,7 @@ async def prepare_run(
     *,
     rack: RackUsage | None = None,
     refuse_manual_pick: bool = True,
+    project: ResolvedProject | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -1178,6 +1236,8 @@ async def prepare_run(
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
+    if request.folder_id is not None:
+        await require_destination_folder(client, request.folder_id, settings.library_folder_id)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()
     plate_ids = laid_out if asked is None else asked
@@ -1189,7 +1249,7 @@ async def prepare_run(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
     plate_warnings: list[FilamentWarning] = []
-    missing = [plate for plate in plate_ids if laid_out and plate not in laid_out]
+    missing = [plate for plate in plate_ids if plate not in laid_out] if laid_out else []
     if source.is_sliced and missing:
         # A sliced file is never refused (#2671): the dialog offers only its plates, so
         # a request for another one prints the rest, or the file's first, and says so.
@@ -1236,6 +1296,7 @@ async def prepare_run(
             printer_model=printer.model,
             warnings=plate_warnings
             + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
+            project=project,
         )
     printer = await _require_resolvable_printer(client, printer_id)
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
@@ -1264,6 +1325,7 @@ async def prepare_run(
         printer_status=printer_status,
         printer_name=printer.name,
         printer_model=printer.model,
+        project=project,
     )
 
 
@@ -1282,6 +1344,12 @@ class PreparedPlates(BaseModel):
     #: As :attr:`PreparedRun.printer_model`. ``None`` in a run accepted before it was
     #: carried, which then says nothing of an unlisted plate.
     printer_model: str | None = None
+    #: As :attr:`PreparedRun.project`. ``None`` in a run accepted before it was carried,
+    #: whose plan resolves the project itself. The plan trusts it: a default project
+    #: deleted between the check and the plan fails the run on its folder rather than
+    #: falling through to "No project", a window of seconds accepted for one read
+    #: (#4008 review).
+    project: ResolvedProject | None = None
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1299,6 +1367,7 @@ class PreparedPlates(BaseModel):
             printer_status=prepared.printer_status,
             warnings=prepared.warnings,
             printer_model=prepared.printer_model,
+            project=prepared.project,
         )
 
 
@@ -1442,7 +1511,7 @@ async def plan_run(
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
-    project_id = chosen_project(request, settings)
+    project_id = await planned_project(client, request, settings, prepared)
     # ScadBuddy plans each filament's nozzle (#2166) and states it in the 3MF.
     # One read of the inventory for the plan and every plate's options (#480).
     inventory = await read_inventory(client)
@@ -1469,6 +1538,7 @@ async def plan_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
+        folder_id=request.folder_id,
         # Only the sides the plan uses, or else the sides with the nozzle, are offered
         # to the slicer (#834, #2181), and each side states the flow chosen for it (#484).
         nozzle_stats=(
@@ -1664,7 +1734,7 @@ async def _plan_sliced(
     for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
     it as soon as the printer is idle, before anyone read the warning."""
     printer_id = prepared.printer_id
-    project_id = chosen_project(request, settings)
+    project_id = await planned_project(client, request, settings, prepared)
     profile = source.sliced_profile
     nozzle_size = sliced_nozzle_size(profile, prepared, request)
     printed = await source.file_to_print(
@@ -1673,6 +1743,7 @@ async def _plan_sliced(
         nozzle_size=nozzle_size,
         plan=request.filament_plan,
         project_id=project_id,
+        folder_id=request.folder_id,
     )
     per_plate = await gather_plate_options(
         client,

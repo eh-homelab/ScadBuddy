@@ -78,6 +78,7 @@ with workflow.unsafe.imports_passed_through():
         PROJECTS_QUEUE,
         SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
+        SEGMENT_TIMEOUT,
         SEND_MESSAGE_UPDATE,
         TOOLS_QUEUE,
         TURN_QUERY,
@@ -300,6 +301,7 @@ class DurableSession:
             auto_continue_as_new=True,
             continue_as_new_args=self._next_run,
             live_output=True,
+            segment_timeout=SEGMENT_TIMEOUT,
             segment_retry_policy=RetryPolicy(
                 maximum_interval=timedelta(seconds=100), maximum_attempts=SEGMENT_ATTEMPTS
             ),

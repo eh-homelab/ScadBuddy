@@ -11,8 +11,10 @@ again, after a crash or a transient Bambuddy failure (#1144).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
 
+import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
@@ -24,7 +26,7 @@ from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
 from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.print_run import PrintRunRequest, chosen_project
+from scadbuddy.bambuddy.print_run import PrintRunRequest, resolve_project
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
@@ -48,6 +50,8 @@ from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bam
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
+
+logger = logging.getLogger(__name__)
 
 #: Bambuddy's queue page, as a reprint answers it.
 QUEUE_PAGE = "/queue"
@@ -108,9 +112,19 @@ def bambuddy_kinds_over(
                 uploads,
                 meta,
                 settings,
-                request["project_id"],
+                request.get("project_id"),
                 stem=checked["stem"],
+                folder_id=request.get("folder_id"),
             )
+        # The destination picker's "last touched" order (#3651). Best effort: the file
+        # is filed whether or not this lands.
+        try:
+            if filed.project_id is not None:
+                await uploads.touch_destination("project", filed.project_id)
+            else:
+                await uploads.touch_destination("folder", filed.folder_id)
+        except psycopg.Error:
+            logger.warning("could not touch the destination of %s", meta.id, exc_info=True)
         return _json(filed)
 
     async def create_project_run(
@@ -129,7 +143,9 @@ def bambuddy_kinds_over(
         if not library:
             await require(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
-        project_id = chosen_project(body, await asyncio.to_thread(settings_store.load))
+        settings = await asyncio.to_thread(settings_store.load)
+        async with client_for(settings) as client:
+            project_id = await resolve_project(client, body, settings)
         if project_id is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,

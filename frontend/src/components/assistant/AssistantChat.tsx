@@ -257,6 +257,7 @@ export function AssistantChat({
   const filterId = useId()
   /** #1885 — a refused Archive (#3738) or Unarchive, shown for that chat only. */
   const [archiveError, setArchiveError] = useState<{ id: string; message: string } | null>(null)
+  const [doneError, setDoneError] = useState<{ id: string; message: string } | null>(null)
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
   const busy = isBusy(active) || state.awaitingStart
@@ -545,6 +546,15 @@ export function AssistantChat({
       return false
     }
   }
+  // The open chat's Done, beside Archive: a refusal is shown for that chat only.
+  const finish = async (id: string) => {
+    setDoneError(null)
+    try {
+      await updateSession(id, { done: true })
+    } catch (caught) {
+      setDoneError({ id, message: caught instanceof Error ? caught.message : String(caught) })
+    }
+  }
   // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
   const cancelOffer = async (id: string) => {
     try {
@@ -756,6 +766,15 @@ export function AssistantChat({
           </Tip>
           {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
               went unfound. Offered as there, to the owner, while no turn runs or waits (`isBusy`). */}
+          {/* Done beside it, on the same terms, for a chat not already done: it too was only
+              behind the "…", and a long title could push that off the panel. */}
+          {owned && !busy && !archived && active.status !== 'done' && (
+            <Tip content="End this chat: it takes no more messages, and Fork still continues it">
+              <Button variant="ghost" size="sm" data-agent-user-only="" onClick={() => void finish(active.id)}>
+                Done
+              </Button>
+            </Tip>
+          )}
           {owned && !busy && !archived && (
             <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
               <Button
@@ -818,6 +837,11 @@ export function AssistantChat({
           {!archived && archiveError?.id === active.id && (
             <p role="alert" className="w-full text-warn">
               The chat was not archived: {archiveError.message}
+            </p>
+          )}
+          {doneError?.id === active.id && active.status !== 'done' && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not marked done: {doneError.message}
             </p>
           )}
           {forkError?.session === active.id && (

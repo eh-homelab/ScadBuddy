@@ -10,7 +10,9 @@ runtime (``api/components.py``).
 
 import asyncio
 import contextlib
+import logging
 import math
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any
@@ -29,7 +31,13 @@ from scadbuddy.activity.index import (
 from scadbuddy.activity.kinds import KindRegistry
 from scadbuddy.activity.models import STATUSES, ActivityRow, ActivityStatus, Facet, FacetType
 from scadbuddy.api.components import component_dep
+from scadbuddy.api.deps import CatalogueDep, OutputsDep
+from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -122,6 +130,9 @@ class KindOut(BaseModel):
 class CountOut(BaseModel):
     value: str
     count: int
+    #: How a subject reads, where ScadBuddy knows it (#3856): the model's name for a
+    #: slug, the output's for ``output:<id>``. The value stays the filter.
+    label: str | None = None
 
 
 class ActivityFacets(BaseModel):
@@ -250,13 +261,70 @@ async def list_activity(
     return ActivityPage(items=[_item(r, advanced) for r in rows], next_cursor=next_cursor)
 
 
-def _counts(counts: list[Count]) -> list[CountOut]:
-    return [CountOut(value=c.value, count=c.count) for c in counts]
+def _counts(counts: list[Count], labels: Mapping[str, str] | None = None) -> list[CountOut]:
+    return [
+        CountOut(value=c.value, count=c.count, label=(labels or {}).get(c.value)) for c in counts
+    ]
+
+
+#: How many subjects (the most frequent) the facets look up a name for (#3856).
+LABELLED_SUBJECTS = 100
+
+
+def _subject_labels(
+    subjects: list[Count], catalogue: Catalogue, outputs: OutputStore
+) -> dict[str, str]:
+    """The names ScadBuddy holds for the subjects: a model's, and an output's (its own
+    name, else its model's). A library file or project is Bambuddy's, so it has none."""
+    # The most frequent first: past them a chip shows its reference, and the facets
+    # stay one catalogue read and a bounded number of output reads.
+    values = {c.value for c in subjects[:LABELLED_SUBJECTS]}
+    metas: dict[str, tuple[str | None, str]] = {}
+    for value in values:
+        if not value.startswith("output:"):
+            continue
+        output_id = value.removeprefix("output:")
+        if not re.fullmatch(OUTPUT_ID_PATTERN, output_id):
+            continue  # not an id at all: never let it near the store's paths
+        try:
+            metas[value] = outputs.name_and_slug(output_id)
+        except (OutputNotFoundError, OSError, ValueError):
+            continue  # deleted (even mid-read), or its meta unreadable: the chip keeps its id
+    wanted = values | {slug for _, slug in metas.values()}
+    names: dict[str, str] = {}
+    # A model's id is a bare slug or a built-in's `builtin:<slug>`; every other subject
+    # holds a ':' of its own. With no model among them there is nothing to ask the
+    # catalogue, and the page refetches facets often.
+    if any(":" not in value or is_builtin(value) for value in wanted):
+        try:
+            slugs = [slug for slug in catalogue.slugs() if slug in wanted]
+            names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+        except Exception:  # the facets are the activity index's; a name is only a nicety
+            logger.warning("activity facets: no model names from the catalogue", exc_info=True)
+    # An output's model is looked up only to name the output; it is no chip of its own.
+    labels = {value: name for value, name in names.items() if value in values}
+    return labels | _output_labels(metas, names)
+
+
+def _output_labels(
+    metas: Mapping[str, tuple[str | None, str]], names: Mapping[str, str]
+) -> dict[str, str]:
+    """Each output's own name, else its model's."""
+    labels: dict[str, str] = {}
+    for value, (own, slug) in metas.items():
+        name = own or names.get(slug)
+        if name:
+            labels[value] = name
+    return labels
 
 
 @router.get("/facets", response_model=ActivityFacets)
 async def activity_facets(
-    request: Request, activity: ActivityDep, since: datetime | None = None
+    request: Request,
+    activity: ActivityDep,
+    catalogue: CatalogueDep,
+    outputs: OutputsDep,
+    since: datetime | None = None,
 ) -> ActivityFacets:
     """What the filter bar offers: every kind with its facets, the statuses, and the
     principals, tools and subjects present since ``since`` (default the last 7 days)."""
@@ -279,7 +347,10 @@ async def activity_facets(
         statuses=list(STATUSES),
         principals=_counts(counts.principals),
         tools=_counts(counts.tools),
-        subjects=_counts(counts.subjects),
+        subjects=_counts(
+            counts.subjects,
+            await asyncio.to_thread(_subject_labels, counts.subjects, catalogue, outputs),
+        ),
     )
 
 

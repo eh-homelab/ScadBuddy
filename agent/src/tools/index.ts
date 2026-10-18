@@ -22,6 +22,7 @@ import type { Tool } from './registry.js'
 import { sessionTools } from './sessions.js'
 import { settingsTools } from './settings.js'
 import { sourceFileTools } from './sourceFiles.js'
+import { storeTools } from './store.js'
 import { templateTools } from './templates.js'
 import { workspaceTools } from './workspace.js'
 
@@ -48,6 +49,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...guideTools,
   ...libraryTools,
   ...settingsTools,
+  ...storeTools,
   ...printTools,
   ...printHistoryTools,
   ...printMediaTools,

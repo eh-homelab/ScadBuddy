@@ -108,6 +108,77 @@ describe('ProjectPicker', () => {
     window.localStorage.clear()
   })
 
+  it('offers library folders beside projects, each labelled, and chooses one (#3651)', async () => {
+    const chosen: { project: number | null; folder: number | null }[] = []
+    function Harness() {
+      const [value, setValue] = useState<number | null>(null)
+      const [folderId, setFolderId] = useState<number | null>(null)
+      return (
+        <ProjectPicker
+          value={value}
+          onChange={(projectId) => {
+            setValue(projectId)
+            chosen.push({ project: projectId, folder: folderId })
+          }}
+          folder={{
+            value: folderId,
+            onChange: (next) => {
+              setFolderId(next)
+              if (next !== null) setValue(null)
+            },
+          }}
+        />
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await listed()
+    const list = await openPicker(user, select())
+
+    expect(within(list).getByTestId('project-option-1')).toHaveTextContent('Project · Raegan')
+    expect(within(list).getByTestId('folder-option-4')).toHaveTextContent(/Supplies › Storage.*Folder · 1 file/)
+    await user.type(within(list).getByPlaceholderText('Search projects and folders…'), 'storag')
+    await waitFor(() => expect(within(list).queryByTestId('project-option-1')).toBeNull())
+    await user.click(within(list).getByTestId('folder-option-4'))
+
+    expect(pickerValue(select())).toBe('folder-4')
+    expect(select()).toHaveTextContent('Folder: Supplies › Storage')
+    // A project chosen after it clears the folder.
+    await chooseProject(user, select(), 2)
+    expect(pickerValue(select())).toBe('2')
+  })
+
+  it('opens sorted as Settings says, last touched first by default (#3651)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({
+          // Touched later than any choice this page made in another test.
+          projects: [
+            { ...fixtures.projectViews[0]!, touched_at: '2099-01-01T00:00:00Z' },
+            { ...fixtures.projectViews[1]!, touched_at: '2099-02-01T00:00:00Z' },
+          ],
+          folders: fixtures.destinationFolders,
+          last_project_id: null,
+          sort: 'modified',
+        }),
+      ),
+    )
+    const { user } = mount()
+    await listed()
+    const list = await openPicker(user, select())
+    const order = () =>
+      within(list)
+        .getAllByRole('option')
+        .map((option) => option.getAttribute('data-testid'))
+        .filter((testId) => testId?.startsWith('project-option-') && testId !== 'project-option-none')
+
+    // Reagan Keychain's folder was written to after Gridfinity Bins was made.
+    expect(within(list).getByRole('radio', { name: 'Modified' })).toHaveAttribute('aria-checked', 'true')
+    expect(order()).toEqual(['project-option-1', 'project-option-2'])
+    // Gridfinity Bins was printed into more recently.
+    await user.click(within(list).getByRole('radio', { name: 'Last touched' }))
+    expect(order()).toEqual(['project-option-2', 'project-option-1'])
+  })
+
   it('warns before the send when the chosen project has no folder yet', async () => {
     const { user } = mount()
     await listed()

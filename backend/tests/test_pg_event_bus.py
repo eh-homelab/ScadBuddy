@@ -291,6 +291,7 @@ async def test_an_event_is_readable_in_the_log_when_it_is_heard(
     bus = await make_bus()
     subscription = bus.subscribe()
     positions: list[int] = []
+    ids: list[str] = []
 
     for n in range(5):
         bus.publish(_model(f"m{n}"))
@@ -300,8 +301,11 @@ async def test_an_event_is_readable_in_the_log_when_it_is_heard(
         seq = await bus.position(event.id)
         assert seq is not None
         positions.append(seq)
+        ids.append(event.id)
 
     assert positions == sorted(positions)
+    # #1039: the same places in one query, an unknown id left out.
+    assert await bus.positions([*ids, "0" * 32]) == dict(zip(ids, positions, strict=True))
 
 
 @pytest.mark.requires_postgres
@@ -376,13 +380,17 @@ async def test_a_dropped_listener_resyncs_its_subscribers_and_events_keep_flowin
     assert isinstance(marker, BusResync)
     assert marker.kind == "bus.resync"
     assert marker.last_event_id == before.id
+    # #1039: what was heard before the gap no longer vouches for what followed it.
+    assert bus.last_event_id == before.id and bus.live_event_id is None
     assert bus.listener.backend_pid not in (None, dropped)
     assert _sample(bus.metrics, "scadbuddy_events_resyncs_total") == 1
     # The first connect sent none, and the publisher's own listener saw no gap.
     assert _sample(publisher.metrics, "scadbuddy_events_resyncs_total") == 0
 
-    publisher.publish(_model("after"))
+    after = _model("after")
+    publisher.publish(after)
     assert _slugs([await _next(subscription)]) == ["after"]
+    assert bus.live_event_id == after.id
     # What the marker names is where to replay from.
     seq = await bus.position(before.id)
     assert seq is not None
@@ -570,3 +578,27 @@ def test_retention_settings_come_from_the_environment(monkeypatch: pytest.Monkey
     settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
     assert settings.event_log_retention_seconds == 120
     assert settings.event_log_retention_rows == 0
+
+
+@pytest.mark.requires_postgres
+async def test_a_listener_runs_before_its_event_becomes_the_cursor(make_bus: BusFactory) -> None:
+    """#1039: a listener that applies an event later takes `settle` before a read could
+    be stamped with that event."""
+    bus = await make_bus()
+    subscription = bus.subscribe()
+    seen: list[tuple[str | None, int]] = []
+    releases: list[Callable[[], None]] = []
+
+    def listener(event: Event) -> None:
+        seen.append((bus.last_event_id, bus.settling))
+        releases.append(bus.settle())
+
+    bus.add_listener(listener)
+    event = _model("held")
+    bus.publish(event)
+    await _next(subscription)
+    assert seen == [(None, 0)]
+    assert bus.last_event_id == event.id and bus.settling == 1
+    releases[0]()
+    releases[0]()  # releasing twice counts once
+    assert bus.settling == 0

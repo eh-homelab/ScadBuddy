@@ -308,7 +308,12 @@ short "continue" prompt, so no tool runs twice and the prompt is not sent twice.
 credential is tried at most once per turn. In a durable session, while another
 credential could still take the segment over, the assistant's text reaches the
 transcript only at the next tool call or at the end of the segment, not block by
-block, so a refused credential's notice never shows (#2945). Every disable, cooldown,
+block, so a refused credential's notice never shows (#2945). A durable segment records
+what its credential met as a classic turn does, so Settings shows the same "used" time
+and state in both modes (#2320): an answer stamps it used, a 429 cools it down for the
+default 60 s, and a refusal or a 5xx is its `last_error`. It runs no probe, so it never
+disables a key and never learns a rate limit's real reset time; a classic turn's probe
+does both. Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one

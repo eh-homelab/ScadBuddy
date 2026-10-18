@@ -24,7 +24,8 @@ Three details of Bambuddy's shape are load-bearing:
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
+from datetime import UTC, datetime
 from typing import Protocol
 
 import psycopg
@@ -37,9 +38,14 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.linking import link_item
 from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCreate
 from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.uploads import DestinationKind
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import DestinationSort
 
 logger = logging.getLogger(__name__)
+
+#: Joins a folder's path (#3651), as the frontend's ``breadcrumbs`` joins a project's.
+PATH_SEPARATOR = " \N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
 
 
 class ProjectView(BaseModel):
@@ -61,12 +67,38 @@ class ProjectView(BaseModel):
     queue_count: int = 0
     folder_id: int | None = None
     folder_name: str | None = None
+    #: When a file in its folder last changed in Bambuddy, else when the project was
+    #: made (#3651): the picker's "modified" order.
+    modified_at: datetime | None = None
+    #: The later of ``modified_at`` and the last print or filing into it from
+    #: ScadBuddy (#3651): the picker's "last touched" order, its default.
+    touched_at: datetime | None = None
+
+
+class FolderView(BaseModel):
+    """A library folder of no project, offered as a destination of its own (#3651)."""
+
+    id: int
+    name: str
+    #: Its parents and its name, as the picker shows it, so two folders of one name can
+    #: be told apart.
+    path: str
+    parent_id: int | None = None
+    file_count: int | None = None
+    modified_at: datetime | None = None
+    touched_at: datetime | None = None
 
 
 class ProjectChoices(BaseModel):
     projects: list[ProjectView] = Field(default_factory=list)
+    #: #3651 — the library folders a print or Generate may be filed into instead of a
+    #: project: every folder of no project, except external ones and the inbox (from
+    #: Settings) with what ScadBuddy keeps under it.
+    folders: list[FolderView] = Field(default_factory=list)
     #: The default project (Settings' `last_project_id`), which only Settings changes (#3188).
     last_project_id: int | None = None
+    #: How Settings says the picker opens sorted (#3651).
+    sort: DestinationSort = "touched"
 
 
 class ProjectRequest(BaseModel):
@@ -92,7 +124,24 @@ class ProjectRequest(BaseModel):
     folder_id: int | None = None
 
 
-def _view(project: Project, folder: Folder | None) -> ProjectView:
+#: When ScadBuddy last touched each project and folder (``BambuddyUploadStore``).
+Touches = Mapping[tuple[DestinationKind, int], datetime]
+
+
+def _utc(moment: datetime | None) -> datetime | None:
+    """Bambuddy's timestamps are naive UTC; Postgres's are aware. One kind to compare."""
+    if moment is None or moment.tzinfo is not None:
+        return moment
+    return moment.replace(tzinfo=UTC)
+
+
+def _latest(*moments: datetime | None) -> datetime | None:
+    known = [moment for moment in moments if moment is not None]
+    return max(known) if known else None
+
+
+def _view(project: Project, folder: Folder | None, touched: datetime | None = None) -> ProjectView:
+    modified = _utc(folder.latest_activity_at if folder else None) or _utc(project.created_at)
     return ProjectView(
         id=project.id,
         name=project.name,
@@ -104,30 +153,95 @@ def _view(project: Project, folder: Folder | None) -> ProjectView:
         queue_count=project.queue_count,
         folder_id=folder.id if folder else None,
         folder_name=folder.name if folder else None,
+        modified_at=modified,
+        touched_at=_latest(modified, touched),
     )
 
 
+def _destination_folders(
+    tops: list[Folder], touches: Touches, inbox_id: int | None
+) -> list[FolderView]:
+    """Every folder a send may go to that is not a project's (:class:`ProjectChoices`).
+
+    A folder linked to a project is offered as that project, and its sub-folders
+    (``Media/``, #309) are the project's own. Under the inbox is ScadBuddy's: the inbox
+    itself is "No project", and the blob store keeps its files beneath it.
+    """
+    found: list[FolderView] = []
+
+    def visit(folder: Folder, path: list[str]) -> None:
+        if folder.id == inbox_id or folder.is_external or folder.project_id is not None:
+            return
+        if folder.archive_id is not None:
+            return
+        here = [*path, folder.name]
+        modified = _utc(folder.latest_activity_at)
+        found.append(
+            FolderView(
+                id=folder.id,
+                name=folder.name,
+                path=PATH_SEPARATOR.join(here),
+                parent_id=folder.parent_id,
+                file_count=folder.file_count,
+                modified_at=modified,
+                touched_at=_latest(modified, touches.get(("folder", folder.id))),
+            )
+        )
+        for child in folder.children:
+            visit(child, here)
+
+    for top in tops:
+        visit(top, [])
+    return found
+
+
+async def require_destination_folder(
+    client: BambuddyClient, folder_id: int, inbox_id: int | None
+) -> None:
+    """Refuse a library folder the picker would not offer (#3651 review): the inbox,
+    a project's folder or anything under one, an external folder, or one that is gone.
+    The picker hides them; an API or agent caller is told the same with a 422."""
+    offered = _destination_folders(await client.folders(), {}, inbox_id)
+    if all(folder.id != folder_id for folder in offered):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"folder {folder_id} is not a library folder a print can be filed in: pick"
+            " one from GET /api/v1/print/projects, or a project",
+        )
+
+
 async def describe_projects(
-    client: BambuddyClient, *, last_project_id: int | None = None
+    client: BambuddyClient,
+    *,
+    last_project_id: int | None = None,
+    sort: DestinationSort = "touched",
+    touches: Touches | None = None,
+    inbox_id: int | None = None,
 ) -> ProjectChoices:
-    """Every project, with the folder it owns.
+    """Every project, with the folder it owns, and the folders of no project (#3651).
 
     The folders are read once and matched on ``project_id`` rather than asking
     ``/library/folders/by-project/{id}`` per project: that is one request instead of one
     per row, and the flat list already carries the link.
     """
+    touched = touches or {}
     projects = await client.projects()
+    tops = await client.folders()
     # Flattened, because `/library/folders` answers with a *tree*: a sub-folder arrives
     # inside its parent's `children`, so a project folder nested under another one is
     # invisible to a scan of the top level.
-    folders = [row for top in await client.folders() for row in top.walk()]
     by_project: dict[int, Folder] = {}
-    for folder in folders:
+    for folder in (row for top in tops for row in top.walk()):
         if folder.project_id is not None:
             by_project.setdefault(folder.project_id, folder)
     return ProjectChoices(
-        projects=[_view(project, by_project.get(project.id)) for project in projects],
+        projects=[
+            _view(project, by_project.get(project.id), touched.get(("project", project.id)))
+            for project in projects
+        ],
+        folders=_destination_folders(tops, touched, inbox_id),
         last_project_id=last_project_id,
+        sort=sort,
     )
 
 

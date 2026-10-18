@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import dataclasses
 import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import psycopg
 import pytest
-from session_support import MANIFEST, Conn, events, insert_session
+from session_support import MANIFEST, Conn, events, insert_session, until
+from temporalio import workflow
+
+# The plugin's stream topic, which follow_agent reads: the package exports no name for it.
+from temporalio.claude_agent_sdk._events import TOPIC
 from temporalio.client import Client
-from temporalio.exceptions import ApplicationError
-from temporalio.testing import ActivityEnvironment
+from temporalio.common import RetryPolicy
+from temporalio.contrib.workflow_streams import WorkflowStream
+from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
+from temporalio.worker import Worker
+from temporalio.workflow import ActivityCancellationType
 
 from scadbuddy_durable.session import events as events_module
 from scadbuddy_durable.session import tools
@@ -28,7 +39,7 @@ from scadbuddy_durable.session.events import (
     logged_input,
     translate,
 )
-from scadbuddy_durable.session.models import FinishTurn, FollowArgs
+from scadbuddy_durable.session.models import FinishTurn, FollowArgs, FollowResult
 from scadbuddy_durable.worker import config_from_env
 
 SID = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
@@ -482,9 +493,259 @@ async def test_a_listed_tier_that_is_not_a_tier_overrides_the_manifests_with_out
     assert risks == {read.name: "outward"}
 
 
+def test_the_streams_topic_is_the_plugins() -> None:
+    """The private TOPIC the stream tests publish on: a pin bump that changes it fails here."""
+    assert TOPIC == "claude"
+
+
 def test_risk_tiers_are_the_agents() -> None:
     """#3144: `RISK_TIERS` copies the agent's `RiskTier`; both are pinned to one file."""
     fixture = (
         Path(__file__).resolve().parents[2] / "agent" / "test" / "fixtures" / "risk-tiers.json"
     )
     assert frozenset(json.loads(fixture.read_text())) == events_module.RISK_TIERS
+
+
+@workflow.defn(sandboxed=False)
+class Streamed:
+    """A session's stream alone: what a test publishes, until it is told to close."""
+
+    @workflow.init
+    def __init__(self) -> None:
+        self._topic = WorkflowStream().topic(TOPIC)
+        self._closed = False
+
+    @workflow.signal
+    def emit(self, event: dict[str, Any]) -> None:
+        self._topic.publish(event)
+
+    @workflow.signal
+    def close(self) -> None:
+        self._closed = True
+
+    @workflow.query
+    def polled(self) -> bool:
+        """A subscriber's poll is waiting here: its client is in the poll update's
+        start or result, where a cancel becomes WorkflowUpdateRPCTimeoutOrCancelledError."""
+        return not workflow.all_handlers_finished()
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._closed)
+
+
+@workflow.defn(sandboxed=False)
+class Follows:
+    """Starts follow_session as DurableSession does, on a queue a test can stop."""
+
+    @workflow.run
+    async def run(self, args: FollowArgs, queue: str) -> str:
+        result: FollowResult = await workflow.execute_activity(
+            "follow_session",
+            args,
+            result_type=FollowResult,
+            task_queue=queue,
+            start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(milliseconds=100), maximum_interval=timedelta(seconds=1)
+            ),
+        )
+        return result.ended
+
+
+@workflow.defn(sandboxed=False)
+class CancelsFollow:
+    """Cancels its follower when told, as DurableSession does past FOLLOW_DRAIN."""
+
+    def __init__(self) -> None:
+        self._stop = False
+
+    @workflow.signal
+    def stop(self) -> None:
+        self._stop = True
+
+    @workflow.run
+    async def run(self, args: FollowArgs, queue: str) -> str:
+        follow = workflow.start_activity(
+            "follow_session",
+            args,
+            task_queue=queue,
+            start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=30),
+            cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+        )
+        await workflow.wait_condition(lambda: self._stop)
+        follow.cancel()
+        try:
+            await follow
+        except ActivityError as err:
+            return type(err.cause).__name__
+        return "completed"
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_stream_dropped_by_a_worker_shutdown_is_followed_again(
+    agent_db: Conn, connect: object, temporal_env: WorkflowEnvironment
+) -> None:
+    """#4019: a rollout shut down the follower's worker mid-turn. Its subscription
+    ended as if the workflow had closed, the activity completed, and nothing wrote the
+    rest of the turn. It must fail instead, so a retry on another worker resumes from
+    the offset: every event written once and in order, and the turn's end still ends it."""
+    client = temporal_env.client
+    sid = await insert_session(agent_db)
+    streamed, queue, follower = f"session-{sid}", f"wf-{sid}", f"follow-{sid}"
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+
+    async def written() -> list[str]:
+        return [e["delta"] for e in await events(agent_db, sid) if "delta" in e]
+
+    async def wrote(*want: str) -> bool:
+        return await written() == list(want)
+
+    async with Worker(client, task_queue=queue, workflows=[Streamed, Follows]):
+        stream = await client.start_workflow(Streamed.run, id=streamed, task_queue=queue)
+        args = FollowArgs(session_id=sid, workflow_id=streamed, prompted=True, since=_now())
+        follows = await client.start_workflow(
+            Follows.run, args=[args, follower], id=f"follows-{sid}", task_queue=queue
+        )
+        first = Worker(client, task_queue=follower, activities=[acts.follow_session])
+        running = asyncio.create_task(first.run())
+        await stream.signal(Streamed.emit, {"type": "prompt", "text": "hi", "at": _now()})
+        await stream.signal(Streamed.emit, {"type": "text", "text": "one", "at": _now()})
+        await until(lambda: wrote("one"))
+        # The subscriber waiting in its next poll, as an idle turn's is (a tool call
+        # running): the shutdown's cancel ends the stream there, not in its cooldown.
+        await until(lambda: stream.query(Streamed.polled))
+        await first.shutdown()
+        await running
+        await stream.signal(Streamed.emit, {"type": "text", "text": "two", "at": _now()})
+        async with Worker(client, task_queue=follower, activities=[acts.follow_session]):
+            await stream.signal(Streamed.emit, {"type": "text", "text": "three", "at": _now()})
+            await stream.signal(Streamed.emit, {"type": "done", "result": "x", "at": _now()})
+            assert await asyncio.wait_for(follows.result(), 60) == "done"
+        await stream.signal(Streamed.close)
+        await stream.result()
+    assert await written() == ["one", "two", "three"]
+    # The first attempt failed as a stream that ended early, not as core's WorkerShutdown
+    # (a cancel outside the poll), and the second ended the turn.
+    history = await follows.fetch_history()
+    [retried] = [
+        e.activity_task_started_event_attributes
+        for e in history.events
+        if e.HasField("activity_task_started_event_attributes")
+    ]
+    assert retried.attempt == 2
+    assert retried.last_failure.application_failure_info.type == "StreamEndedError"
+    assert not retried.last_failure.application_failure_info.non_retryable
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+# The workflow closes with the subscriber's poll waiting: that is the case under test.
+@pytest.mark.filterwarnings("ignore::temporalio.workflow.UnfinishedUpdateHandlersWarning")
+async def test_a_stream_whose_workflow_closed_completes(
+    agent_db: Conn, connect: object, temporal_env: WorkflowEnvironment
+) -> None:
+    """#4019: the stream ending because the workflow closed is still the end."""
+    client = temporal_env.client
+    sid = await insert_session(agent_db)
+    streamed, queue = f"session-{sid}", f"wf-{sid}"
+    env = ActivityEnvironment(client=client)
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+
+    async def wrote() -> bool:
+        return [e["delta"] for e in await events(agent_db, sid) if "delta" in e] == ["bye"]
+
+    async with Worker(client, task_queue=queue, workflows=[Streamed]):
+        stream = await client.start_workflow(Streamed.run, id=streamed, task_queue=queue)
+        follow = asyncio.create_task(
+            env.run(
+                acts.follow_session,
+                FollowArgs(session_id=sid, workflow_id=streamed, prompted=True),
+            )
+        )
+        await stream.signal(Streamed.emit, {"type": "text", "text": "bye", "at": _now()})
+        await until(wrote)
+        await stream.signal(Streamed.close)
+        await stream.result()
+        result = await asyncio.wait_for(follow, 60)
+    assert result.ended == "closed"
+    assert await wrote()
+
+
+@pytest.mark.requires_postgres
+async def test_a_retry_past_its_prompt_skips_an_earlier_turns_end(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4019: a retry resumes past its turn's prompt, so it tells an earlier turn's end,
+    left unread, by its time: written, but the turn ends on its own end only."""
+    sid = await insert_session(agent_db)
+    since = "2026-10-17T12:00:00+00:00"
+    stream = [
+        {"type": "done", "result": "old", "at": "2026-10-17T11:59:58+00:00", "offset": 4},
+        {"type": "text", "text": "hello", "at": "2026-10-17T12:00:03+00:00", "offset": 5},
+        {"type": "done", "result": "hello", "at": "2026-10-17T12:00:04+00:00", "offset": 6},
+    ]
+    read: list[int] = []
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            read.append(int(e["offset"]))  # type: ignore[call-overload]
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    env.info = dataclasses.replace(env.info, attempt=2)
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    result = await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True, since=since),
+    )
+    assert result.ended == "done"
+    assert read == [4, 5, 6]
+    assert [e["type"] for e in await events(agent_db, sid)] == [
+        "assistant.text.delta",
+        "assistant.text.done",
+    ]
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+# The stream's workflow closes with the next poll waiting, as in the closed case.
+@pytest.mark.filterwarnings("ignore::temporalio.workflow.UnfinishedUpdateHandlersWarning")
+async def test_the_workflows_own_cancel_is_a_cancel(
+    agent_db: Conn, connect: object, temporal_env: WorkflowEnvironment
+) -> None:
+    """#4019: the workflow cancelling its follower (past FOLLOW_DRAIN) ends the stream as
+    a shutdown does, in the poll; that is reported as cancelled, neither completed nor a
+    failure to retry."""
+    client = temporal_env.client
+    sid = await insert_session(agent_db)
+    streamed, queue, follower = f"session-{sid}", f"wf-{sid}", f"follow-{sid}"
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    async with (
+        Worker(client, task_queue=queue, workflows=[Streamed, CancelsFollow]),
+        Worker(client, task_queue=follower, activities=[acts.follow_session]),
+    ):
+        stream = await client.start_workflow(Streamed.run, id=streamed, task_queue=queue)
+        args = FollowArgs(session_id=sid, workflow_id=streamed, prompted=True, since=_now())
+        cancels = await client.start_workflow(
+            CancelsFollow.run, args=[args, follower], id=f"cancels-{sid}", task_queue=queue
+        )
+        await until(lambda: stream.query(Streamed.polled))
+        await cancels.signal(CancelsFollow.stop)
+        # The cancel reaches the activity with its next heartbeat (every 10 s).
+        assert await asyncio.wait_for(cancels.result(), 60) == "CancelledError"
+        await stream.signal(Streamed.close)
+        await stream.result()
+    history = await cancels.fetch_history()
+    kinds = {e.WhichOneof("attributes") for e in history.events}
+    assert "activity_task_canceled_event_attributes" in kinds
+    assert "activity_task_completed_event_attributes" not in kinds
+    assert "activity_task_failed_event_attributes" not in kinds

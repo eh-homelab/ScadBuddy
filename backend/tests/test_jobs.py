@@ -29,7 +29,7 @@ from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
 from scadbuddy.render.bambu3mf import plates_of, single_plate
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.jobs import (
     LAYOUT_NAME,
     MISSING_FILE_FAILED_WARNING,
@@ -1708,3 +1708,53 @@ def test_a_layout_part_without_paint_is_saved_as_before(tmp_path: Path) -> None:
     entry = json.loads((tmp_path / LAYOUT_NAME).read_text())["plates"][0]["parts"][0]
     assert "paint" not in entry
     assert PlateLayout.load(tmp_path / LAYOUT_NAME).plates[0].parts[0].paint is None
+
+
+@pytest.mark.parametrize(("drawn", "plates", "hollow"), STAGE_CASES)
+async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
+    paths: DataPaths,
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
+    plates: int | None,
+    hollow: frozenset[str],
+) -> None:
+    """#3788: the worker's loop runs every workflow task and every activity, and a
+    split held it long enough to time workflow tasks out at 10 s. Each mesh parse
+    and the preview's GLB run in a thread."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    params: dict[str, ParamValue] = {}
+    assets = AssetStore(paths.assets)
+    work = paths.root / "blob"
+    loop_thread = threading.get_ident()
+    on_loop: list[str] = []
+
+    def watched[**P, T](name: str, fn: Callable[P, T]) -> Callable[P, T]:
+        def call(*args: P.args, **kwargs: P.kwargs) -> T:
+            if threading.get_ident() == loop_thread:
+                on_loop.append(name)
+            return fn(*args, **kwargs)
+
+        return call
+
+    with (
+        _stage_patches(_stage_openscad(drawn, plates, hollow)),
+        mock.patch.object(jobs, "split_by_material", watched("split", split_by_material)),
+        mock.patch.object(jobs, "write_glb", watched("write_glb", write_glb)),
+    ):
+        prepared, config = await prepare_source(
+            "demo", None, config=CONFIG, paths=paths, history=None, fetcher=None
+        )
+        output = await render_main(
+            prepared, params, work, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        await render_solids_stage(
+            prepared,
+            params,
+            work,
+            output,
+            config=config,
+            assets=assets,
+            checkouts=None,
+            holder="piece",
+        )
+    assert on_loop == []

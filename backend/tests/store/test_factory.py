@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -10,15 +11,18 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.settings_store import (
     RenderStoreSettings,
+    S3Settings,
     StoreNotReadyError,
     load_render_store_settings,
 )
 from scadbuddy.store import factory
+from scadbuddy.store.backends import build_backend
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import RECOVER_LOCAL_SQL, build_store, store_health, store_usage
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store.s3 import S3ContentBackend
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
@@ -26,6 +30,17 @@ pytestmark = pytest.mark.requires_postgres
 
 READY = RenderStoreSettings(
     store_backend="bambuddy", bambuddy_url="http://bambuddy.test", library_folder_id=7
+)
+#: Never contacted: building a store opens no connection.
+S3_READY = RenderStoreSettings(
+    store_backend="s3",
+    s3=S3Settings(
+        endpoint="http://127.0.0.1:1",
+        bucket="b",
+        prefix="p",
+        access_key_id="a",
+        secret_access_key="s",
+    ),
 )
 
 
@@ -116,6 +131,39 @@ async def test_bambuddy_puts_a_cache_in_front_of_the_remote(tmp_path: Path, pool
     assert bundle.content is not None and bundle.content.name == "bambuddy"
     assert (await store_health(bundle)).multi_worker is True
     await bundle.aclose()
+
+
+async def test_s3_builds_the_content_bundle(tmp_path: Path, pool: Pool) -> None:
+    _, bundle = _build(tmp_path, pool, "s3", S3_READY)
+    assert bundle.backend == "s3" and isinstance(bundle.blobs, CachedBlobStore)
+    assert isinstance(bundle.remote, S3ContentBackend) and bundle.snapshots is not None
+    assert bundle.content is not None and bundle.content.name == "s3"
+    assert (await store_health(bundle)).multi_worker is True
+    await bundle.aclose()
+
+
+def test_s3_without_its_settings_refuses_to_start(tmp_path: Path, pool: Pool) -> None:
+    with pytest.raises(StoreNotReadyError, match=re.escape(RECOVER_LOCAL_SQL)):
+        _build(tmp_path, pool, "s3", RenderStoreSettings(store_backend="s3"))
+
+
+def test_s3_with_an_empty_prefix_refuses_to_start(tmp_path: Path, pool: Pool) -> None:
+    """The prefix is required: without one the sweep would list the whole bucket."""
+    assert S3_READY.s3 is not None
+    current = S3_READY.model_copy(update={"s3": S3_READY.s3.model_copy(update={"prefix": ""})})
+    with pytest.raises(StoreNotReadyError, match="prefix"):
+        _build(tmp_path, pool, "s3", current)
+
+
+def test_build_backend_builds_the_named_backend_not_the_stored_one(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A migration builds its target while `store_backend` still names the old one."""
+    _, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    current = S3_READY.model_copy(update={"store_backend": "local"})
+    assert isinstance(build_backend("s3", current, bundle.source, pool), S3ContentBackend)
+    with pytest.raises(ValueError, match="local"):
+        build_backend("local", current, bundle.source, pool)
 
 
 @pytest.mark.parametrize(

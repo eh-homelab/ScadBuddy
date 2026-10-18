@@ -356,6 +356,10 @@ def test_attach_without_a_project_id_files_under_the_remembered_project(
     configure(client, last_project_id=7)
     output_id = make_output(client, model)
     add_queue = _attach_routes()
+    # Resolved only to a project Bambuddy still has (#3651 review).
+    respx.get(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "name": "Kids", "status": "active"}])
+    )
 
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/project",

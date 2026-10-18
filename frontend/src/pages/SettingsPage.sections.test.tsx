@@ -1052,6 +1052,98 @@ describe('SettingsPage blob store (#426)', () => {
   })
 })
 
+// The S3 store: its fields under the Blob store choice, the choice offered once they are saved.
+describe('SettingsPage S3 store', () => {
+  const s3 = {
+    store_s3_endpoint: 'https://s3.example.test',
+    store_s3_bucket: 'renders',
+    store_s3_access_key_id: 'AKIA',
+  }
+
+  it('offers the S3 store once its endpoint, bucket and keys are saved', async () => {
+    setMockSettings({ ...mockSettings(), ...s3 })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const store = screen.getByLabelText('Blob store')
+    expect(await optionDisabled(user, store, /S3-compatible object store/)).toBe(true)
+    expect(screen.getByTestId('store-s3-hint')).toHaveTextContent(
+      'The S3 store needs its endpoint, bucket and keys saved first.',
+    )
+    const secret = screen.getByLabelText('Secret access key')
+    expect(secret).toHaveAttribute('type', 'password')
+    expect(secret).toHaveAttribute('placeholder', 'Paste the key')
+    await enter(user, secret, 'shh')
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(async () =>
+      expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /S3-compatible object store/)).toBe(false),
+    )
+    expect(mockSettings().has_store_s3_secret_access_key).toBe(true)
+    expect(screen.queryByTestId('store-s3-hint')).toBeNull()
+    expect(screen.getByLabelText('Secret access key')).toHaveValue('')
+    expect(screen.getByLabelText('Secret access key')).toHaveAttribute(
+      'placeholder',
+      expect.stringContaining('A key is stored'),
+    )
+    await choose(user, screen.getByLabelText('Blob store'), /S3-compatible object store/)
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(() => expect(mockSettings().store_backend).toBe('s3'))
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('S3-compatible object store')
+  })
+
+  it('sends the S3 fields and the path-style switch with Projects & files', async () => {
+    const bodies: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PUT' && new URL(request.url).pathname === '/api/v1/settings') {
+        bodies.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.getByLabelText('Region')).toHaveValue('us-east-1')
+    expect(screen.getByLabelText('Prefix')).toHaveValue('scadbuddy')
+    expect(screen.getByLabelText('Path-style addressing')).toBeChecked()
+    await enter(user, screen.getByLabelText('Endpoint'), 'https://s3.example.test')
+    await enter(user, screen.getByLabelText('Bucket'), 'renders')
+    await user.click(screen.getByLabelText('Path-style addressing'))
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    server.events.removeAllListeners()
+    expect(bodies[0]).toEqual({
+      store_s3_endpoint: 'https://s3.example.test',
+      store_s3_bucket: 'renders',
+      store_s3_path_style: false,
+    })
+  })
+
+  it('refuses to switch to S3 without its fields', async () => {
+    // Ready as saved, but the same save removes the secret: the server refuses the switch.
+    setMockSettings({ ...mockSettings(), ...s3, has_store_s3_secret_access_key: true })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await choose(user, screen.getByLabelText('Blob store'), /S3-compatible object store/)
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Remove key' }))
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
+    expect(
+      await within(region('Projects & files')).findByText(
+        'the S3 store needs its endpoint, bucket, access key id and secret access key saved first',
+      ),
+    ).toBeInTheDocument()
+    expect(mockSettings().has_store_s3_secret_access_key).toBe(true)
+    expect(mockSettings().store_backend).toBe('local')
+  })
+
+  it('says where an S3 store is', async () => {
+    server.use(
+      http.get('/api/v1/store/usage', () =>
+        HttpResponse.json({ backend: 's3', by_kind: {}, count: 2, bytes: 640, max_count: 0, max_total_bytes: 0 }),
+      ),
+    )
+    renderPage(<SettingsPage />)
+    const usage = await screen.findByTestId('store-usage')
+    expect(within(usage).getByText('Where').nextElementSibling).toHaveTextContent(/^S3 object store$/)
+  })
+})
+
 describe('SettingsPage Administration (#668)', () => {
   it('shows no Temporal UI link while its URL is empty', async () => {
     renderPage(<SettingsPage />)

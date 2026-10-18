@@ -1,11 +1,12 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { useLocation, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { server } from "../mocks/server";
 import { fakeRealtime } from "../lib/realtime.fake";
-import { seedActivity, setActivityFacets } from "../mocks/features/activity";
+import { getRealtime } from "../lib/realtime";
+import { seedActivity, setActivityFacets, setActivityListCursor } from "../mocks/features/activity";
 import { resetMockState } from "../mocks/handlers";
 import { renderPage } from "../test/utils";
 import type { Activity } from "../api/types";
@@ -133,6 +134,29 @@ describe("ActivityPage", () => {
     expect(within(group).getAllByRole("radio")).toHaveLength(CHIPS_SHOWN + 5);
     await user.click(screen.getByRole("button", { name: "Subject: show fewer" }));
     expect(within(group).getAllByRole("radio")).toHaveLength(CHIPS_SHOWN + 1);
+  });
+
+  it("names a subject chip, and filters by its reference (#3856)", async () => {
+    const facets = await (await fetch("/api/v1/activity/facets")).json();
+    setActivityFacets({
+      ...facets,
+      subjects: [
+        { value: "keychain", count: 4, label: "Name Keychain" },
+        { value: "library:89", count: 3 },
+        { value: "project:7", count: 2 },
+        { value: `output:${"a".repeat(32)}`, count: 1 },
+      ],
+    });
+    const { user } = render();
+    const group = await screen.findByLabelText("Subject");
+    const names = await waitFor(() => {
+      const radios = within(group).getAllByRole("radio");
+      expect(radios).toHaveLength(4);
+      return radios.map((r) => r.textContent);
+    });
+    expect(names).toEqual(["Name Keychain4", "Library file 893", "Project 72", "Output aaaaaaaa1"]);
+    await user.click(within(group).getByRole("radio", { name: /^Library file 89/ }));
+    expect(screen.getByTestId("location").textContent).toContain("subject=library%3A89");
   });
 
   it("filters by status and keeps it in the URL", async () => {
@@ -369,3 +393,65 @@ describe("ActivityPage", () => {
     expect(screen.queryByText(/Live updates paused/)).toBeNull();
   }, 60_000);
 });
+
+describe("ActivityPage's first read and the subscription's confirmation (#1039)", () => {
+  beforeEach(() => {
+    resetMockState();
+    window.localStorage.clear();
+    setActivityListCursor("e5");
+  });
+  let started: (({ request }: { request: Request }) => void) | undefined;
+  afterEach(() => {
+    vi.useRealTimers();
+    if (started) server.events.removeListener("request:start", started);
+    started = undefined;
+  });
+
+  /** How many times the list itself is read. */
+  function countLists() {
+    let reads = 0;
+    started = ({ request }) => {
+      if (new URL(request.url).pathname === "/api/v1/activity") reads += 1;
+    };
+    server.events.on("request:start", started);
+    return () => reads;
+  }
+
+  async function settle() {
+    await screen.findAllByTestId(/^activity-row-/);
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  }
+
+  it("reads the list once when its first read saw the server's last event", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fakeRealtime({ confirmation: { last: "e5" } });
+    const check = vi.spyOn(getRealtime(), "check");
+    const reads = countLists();
+    render();
+    await settle();
+    expect(reads()).toBe(1);
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("asks the server otherwise, and reads again only when it names the topic", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fakeRealtime({ confirmation: { last: "e9" } });
+    const check = vi.spyOn(getRealtime(), "check").mockResolvedValue([]);
+    const reads = countLists();
+    render();
+    await settle();
+    expect(check).toHaveBeenCalledWith(["e5"], ["activity"]);
+    expect(reads()).toBe(1);
+  });
+
+  it("reads again when the server names the topic", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fakeRealtime({ confirmation: { last: "e9" } });
+    vi.spyOn(getRealtime(), "check").mockResolvedValue(["activity"]);
+    const reads = countLists();
+    render();
+    await settle();
+    expect(reads()).toBe(2);
+  });
+});
+

@@ -14,14 +14,17 @@ groups of the state less 3: ``1111`` for each 15 of it, then the rest. Every fou
 are one hex digit, least significant bit first, and the string holds the digits last
 first.
 
-Only the leaves' states are read or rewritten here; the split, and so where on the
-triangle each colour is, passes through untouched. A file is untrusted, so a code that
+`remap` and `states` read or rewrite only the leaves' states; the split, and so where on
+the triangle each colour is, passes through untouched. `pieces` follows the split too,
+for a preview that shows where each colour prints (#3956). A file is untrusted, so a code that
 does not parse is :class:`PaintCodeError`, never a guess.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+
+import numpy as np
 
 #: The longest code read, in hex digits. A triangle's code grows with how finely its
 #: painting split it: the longest in a real two-colour Bambu Studio project (Bambuddy
@@ -159,3 +162,65 @@ def remap(code: str, mapping: Mapping[int, int]) -> str:
         for at in range(0, len(bits), 4)
     ]
     return "".join(reversed(digits))
+
+
+def _children(corners: np.ndarray, sides: int, special: int) -> list[np.ndarray]:
+    """The triangles Bambu Studio splits ``corners`` into (`TriangleSelector::perform_split`):
+    its corners from the special side's on, each split side's midpoint inserted, in its
+    children's order."""
+    v0, v1, v2 = (corners[(special + offset) % 3] for offset in range(3))
+    if sides == 1:
+        m12 = (v1 + v2) / 2
+        return [np.array([v0, v1, m12]), np.array([m12, v2, v0])]
+    if sides == 2:
+        m01, m02 = (v0 + v1) / 2, (v0 + v2) / 2
+        return [np.array([v0, m01, m02]), np.array([m01, v1, m02]), np.array([v1, v2, m02])]
+    m01, m12, m20 = (v0 + v1) / 2, (v1 + v2) / 2, (v2 + v0) / 2
+    return [
+        np.array([v0, m01, m20]),
+        np.array([m01, v1, m12]),
+        np.array([m12, v2, m20]),
+        np.array([m01, m12, m20]),
+    ]
+
+
+def pieces(code: str, corners: np.ndarray) -> list[tuple[np.ndarray, int]]:
+    """Each leaf of ``code``'s painting of the triangle ``corners`` (3x3) as its own
+    triangle and the extruder that prints it (0: the part's own), where Bambu Studio puts
+    it: a split node's children are its sides' midpoints' triangles, read last first
+    (`TriangleSelector::deserialize` fills ``children[total - processed - 1]``), so they
+    go on the stack first to last and the last is popped first."""
+    if not code:
+        return [(corners, 0)]
+    bits = _bits(code)
+    at = 0
+
+    def take(count: int) -> int:
+        nonlocal at
+        if at + count > len(bits):
+            raise PaintCodeError(f"paint code {code!r} ends inside a triangle")
+        value = sum(bits[at + bit] << bit for bit in range(count))
+        at += count
+        return value
+
+    found: list[tuple[np.ndarray, int]] = []
+    # The triangles still to read, the next on top: a split one's children are pushed
+    # first to last, so its last is read first, as the code holds them.
+    pending = [corners]
+    while pending:
+        triangle = pending.pop()
+        sides = take(2)
+        if sides:
+            pending.extend(_children(triangle, sides, take(2)))
+            continue
+        state = take(2)
+        if state == 3:
+            while (group := take(4)) == 0b1111:
+                state += 15
+                if state > MAX_STATE:
+                    raise PaintCodeError(f"paint code {code!r} names an extruder past {MAX_STATE}")
+            state += group
+        found.append((triangle, state))
+    if any(bits[at:]):
+        raise PaintCodeError(f"paint code {code!r} runs on past its triangle")
+    return found

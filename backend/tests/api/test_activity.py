@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
 import psycopg
 from fastapi.testclient import TestClient
 
-from scadbuddy.activity.index import ActivityIndex
-from tests.api.conftest import AgentTables, SeedActivity
+from scadbuddy.activity.index import ActivityIndex, Count
+from scadbuddy.api.activity import _subject_labels
+from scadbuddy.library.outputs import OutputNotFoundError
+from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
+from tests.api.test_send import make_output
 from tests.support.operations import press
 
 ADVANCED = {"workflow_id", "run_id", "traceparent", "source", "source_id", "facets"}
@@ -101,9 +105,9 @@ def test_unknown_param_is_400(client: TestClient) -> None:
 def test_facets_from_data(client: TestClient, seed_activity: SeedActivity) -> None:
     seed_activity(id="render:a", principal="token:t1", via_tool="render_model", subject="box")
     body = client.get("/api/v1/activity/facets").json()
-    assert {"value": "token:t1", "count": 1} in body["principals"]
-    assert {"value": "render_model", "count": 1} in body["tools"]
-    assert {"value": "box", "count": 1} in body["subjects"]
+    assert {"value": "token:t1", "count": 1, "label": None} in body["principals"]
+    assert {"value": "render_model", "count": 1, "label": None} in body["tools"]
+    assert {"value": "box", "count": 1, "label": None} in body["subjects"]
     render = next(k for k in body["kinds"] if k["key"] == "render")
     assert {"name": "slug", "type": "keyword", "label": "Model", "filterable": True} in render[
         "facets"
@@ -111,6 +115,100 @@ def test_facets_from_data(client: TestClient, seed_activity: SeedActivity) -> No
     assert body["statuses"] == ["queued", "running", "waiting", "succeeded", "failed", "cancelled"]
     later = client.get("/api/v1/activity/facets", params={"since": "2999-01-01T00:00:00Z"}).json()
     assert later["principals"] == []
+
+
+def test_a_model_subject_is_labelled_with_its_name(
+    client: TestClient, seed_activity: SeedActivity, model: str
+) -> None:
+    """#3856: a chip reads as the model's name; the value it filters on stays the slug.
+    A subject ScadBuddy holds no name for (a library file, an output gone) has none."""
+    seed_activity(id="render:a", subject=model)
+    seed_activity(id="render:b", subject="library:296")
+    seed_activity(id="render:c", subject="output:" + "0" * 32)
+    subjects = {s["value"]: s for s in client.get("/api/v1/activity/facets").json()["subjects"]}
+    assert subjects[model]["label"] == "Demo"
+    assert subjects["library:296"]["label"] is None
+    assert subjects["output:" + "0" * 32]["label"] is None
+
+
+def test_an_output_subject_is_labelled_from_the_store(
+    client: TestClient, seed_activity: SeedActivity, model: str
+) -> None:
+    """#3856 through the real store and catalogue: a named output reads as its name, an
+    unnamed one as its model's."""
+    named = make_output(client, model, name="Kai's tag")
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+    unnamed = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    ).json()["id"]
+    seed_activity(id="render:a", subject=f"output:{named}")
+    seed_activity(id="render:b", subject=f"output:{unnamed}")
+    subjects = {s["value"]: s for s in client.get("/api/v1/activity/facets").json()["subjects"]}
+    assert subjects[f"output:{named}"]["label"] == "Kai's tag"
+    assert subjects[f"output:{unnamed}"]["label"] == "Demo"
+
+
+def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> None:
+    """A malformed subject never reaches the store's paths, and a corrupt meta.json
+    leaves its chip unnamed rather than failing the facets."""
+    asked: list[str] = []
+
+    def get(output_id: str) -> tuple[str | None, str]:
+        asked.append(output_id)
+        if output_id == "d" * 32:
+            raise ValueError("meta.json does not validate")
+        raise FileNotFoundError(output_id)  # deleted between the lookup and the read
+
+    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    subjects = [
+        Count(value, 1) for value in ("output:*/../x", "output:" + "d" * 32, "output:" + "e" * 32)
+    ]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
+    assert labels == {}
+    assert sorted(asked) == ["d" * 32, "e" * 32]
+
+
+def test_subjects_with_no_slug_never_read_the_catalogue() -> None:
+    """#3856: the Activity page refetches facets often; with only library, project and
+    gone output subjects there is no model to name."""
+
+    def unused(*_: object) -> list[str]:
+        raise AssertionError("the catalogue was read")
+
+    def gone(output_id: str) -> tuple[str | None, str]:
+        raise OutputNotFoundError(output_id)
+
+    catalogue = SimpleNamespace(slugs=unused, list_models=unused)
+    subjects = [Count(v, 1) for v in ("library:12", "project:5", "output:" + "a" * 32)]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=gone))  # type: ignore[arg-type]
+    assert labels == {}
+
+
+def test_a_built_in_model_alone_is_still_named() -> None:
+    """A built-in's id holds a ':' (`builtin:<slug>`), yet it is a model to name."""
+    record = SimpleNamespace(slug="builtin:box", name="Box")
+    catalogue = SimpleNamespace(slugs=lambda: ["builtin:box"], list_models=lambda slugs: [record])
+    outputs = SimpleNamespace(name_and_slug=lambda output_id: (None, "builtin:box"))
+    subjects = [Count("builtin:box", 2), Count("output:" + "a" * 32, 1)]
+    labels = _subject_labels(subjects, catalogue, outputs)  # type: ignore[arg-type]
+    assert labels == {"builtin:box": "Box", "output:" + "a" * 32: "Box"}
+
+
+def test_a_failing_catalogue_leaves_the_facets_their_output_names() -> None:
+    """#3856: the facets are the activity index's; a catalogue that fails costs only the
+    model names, not the filter bar."""
+
+    def broken() -> list[str]:
+        raise OSError("catalogue unreadable")
+
+    catalogue = SimpleNamespace(slugs=broken, list_models=lambda slugs: [])
+    outputs = SimpleNamespace(name_and_slug=lambda output_id: ("Mine", "demo"))
+    subjects = [Count("demo", 2), Count("output:" + "a" * 32, 1)]
+    labels = _subject_labels(subjects, catalogue, outputs)  # type: ignore[arg-type]
+    assert labels == {"output:" + "a" * 32: "Mine"}
 
 
 def test_facets_without_agent_tables(client: TestClient) -> None:

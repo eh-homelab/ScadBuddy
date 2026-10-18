@@ -93,6 +93,9 @@ jobs:
       # write (GitHub-hosted runner only, see ci.yml).
       - uses: docker/setup-buildx-action@v4
         if: ${{ steps.key.outputs.present == 'true' }}
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Build the test image (for its Temporal CLI)
         if: ${{ steps.key.outputs.present == 'true' }}

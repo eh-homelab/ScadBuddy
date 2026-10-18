@@ -5,6 +5,7 @@ import type {
   PrintOptions,
   PrintOptionsState,
   ProjectView,
+  FolderView,
   BoundingBox,
   CatalogueFont,
   CustomizerSchema,
@@ -956,6 +957,12 @@ export const settingsDefaults = {
   store_max_total_bytes: 53_687_091_200,
   store_max_count: 200_000,
   worker_cache_max_bytes: 10_737_418_240,
+  store_s3_endpoint: null,
+  store_s3_region: 'us-east-1',
+  store_s3_bucket: null,
+  store_s3_prefix: 'scadbuddy',
+  store_s3_access_key_id: null,
+  store_s3_path_style: true,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
@@ -986,6 +993,13 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   store_max_total_bytes: 'restart',
   store_max_count: 'restart',
   worker_cache_max_bytes: 'restart',
+  store_s3_endpoint: 'restart',
+  store_s3_region: 'restart',
+  store_s3_bucket: 'restart',
+  store_s3_prefix: 'restart',
+  store_s3_access_key_id: 'restart',
+  store_s3_secret_access_key: 'restart',
+  store_s3_path_style: 'restart',
 }
 
 export const settings: Settings = {
@@ -1003,12 +1017,14 @@ export const settings: Settings = {
   print_run_retention_seconds: null,
   operation_retention_seconds: null,
   last_project_id: null,
+  destination_sort: 'touched',
   render_timeout: 300,
   job_ttl: 3600,
   activity_follow: null,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
+  has_store_s3_secret_access_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
     bambuddy_url: 'stored',
@@ -1105,6 +1121,8 @@ export const projectViews: ProjectView[] = [
     queue_count: 0,
     folder_id: 2,
     folder_name: 'Raegan',
+    modified_at: '2026-09-22T12:45:36Z',
+    touched_at: '2026-09-22T12:45:36Z',
   },
   {
     id: 2,
@@ -1116,7 +1134,24 @@ export const projectViews: ProjectView[] = [
     queue_count: 3,
     folder_id: null,
     folder_name: null,
+    modified_at: '2026-09-10T09:00:00Z',
+    touched_at: '2026-09-30T18:00:00Z',
   },
+]
+
+/**
+ * #3651 — the library folders of no project the destination picker offers, as the mocked
+ * library (`features/library.ts`) has them: its project folder (Lamp) and the inbox are left
+ * out, as the backend leaves them out.
+ */
+export const destinationFolders: FolderView[] = [
+  { id: 1, name: 'MakerWorld', path: 'MakerWorld', parent_id: null, file_count: 2, modified_at: '2026-09-23T08:04:19Z', touched_at: '2026-10-02T08:00:00Z' },
+  { id: 3, name: 'Supplies', path: 'Supplies', parent_id: null, file_count: 0, modified_at: '2026-09-24T04:43:16Z', touched_at: '2026-09-24T04:43:16Z' },
+  { id: 4, name: 'Storage', path: 'Supplies › Storage', parent_id: 3, file_count: 1, modified_at: '2026-09-24T04:43:16Z', touched_at: '2026-09-24T04:43:16Z' },
+  { id: 9, name: 'Bulk', path: 'Bulk', parent_id: null, file_count: 300, modified_at: '2026-09-01T10:00:00Z', touched_at: '2026-09-01T10:00:00Z' },
+  { id: 10, name: 'Spec', path: 'Spec', parent_id: null, file_count: 0, modified_at: null, touched_at: null },
+  { id: 11, name: 'MakerWorld', path: 'Spec › MakerWorld', parent_id: 10, file_count: 0, modified_at: null, touched_at: null },
+  { id: 12, name: 'Work', path: 'Spec › MakerWorld › Work', parent_id: 11, file_count: 3, modified_at: '2026-09-20T12:00:00Z', touched_at: '2026-09-20T12:00:00Z' },
 ]
 
 /** Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults, as the backend serves them. */
