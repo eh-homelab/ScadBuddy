@@ -108,7 +108,12 @@ class Printer(BambuddyModel):
 
     ``access_code`` is deliberately absent: Bambuddy withholds it from API-keyed
     callers, so a model that carried it would be null in production and populated
-    only when auth is disabled.
+    only when auth is disabled. The serial is not withheld (``printers.json`` and
+    ``printer.json`` carry it, redacted): it is what links a Bambuddy printer to the
+    printer registry (#3823). ``GET /printers/{id}/status`` has no top-level serial (the
+    ``serial_number`` keys in the status recordings are the AMS units' and hotends'), so
+    ``PrinterStatus`` carries none. A serial Bambuddy sends empty reads as ``None``: that
+    printer cannot be linked by serial.
     """
 
     id: int
@@ -116,6 +121,16 @@ class Printer(BambuddyModel):
     model: str | None = None
     is_active: bool = True
     nozzle_count: int | None = None
+    serial_number: str | None = Field(default=None, repr=False)
+    ip_address: str | None = None
+
+    @field_validator("serial_number", "ip_address", mode="before")
+    @classmethod
+    def _blank_is_none(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class Archive(BambuddyModel):
