@@ -177,12 +177,12 @@ async fn slice(
         return Err(error::slicer(outcome.exit_code, &outcome.stderr_tail));
     }
     // Bambu Studio can exit 0 without exporting a plate; that is the slicer's failure,
-    // with its stderr, not a transfer's.
+    // with its stderr, not a transfer's, and the same input fails the same way again.
     if !tokio::fs::try_exists(&out_3mf)
         .await
         .map_err(error::local)?
     {
-        return Err(error::slicer(0, &outcome.stderr_tail));
+        return Err(error::no_output(&outcome.stderr_tail));
     }
 
     let sliced = unless_cancelled(cancel, acts.transfer.put(&input.sliced_3mf, &out_3mf)).await?;

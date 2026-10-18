@@ -54,6 +54,17 @@ pub(crate) fn slicer(exit_code: i32, stderr_tail: &str) -> ActivityError {
     )
 }
 
+/// The CLI exited 0 without the sliced 3MF (a plate with nothing to slice): the same
+/// input does the same again, so no retry helps.
+pub(crate) fn no_output(stderr_tail: &str) -> ActivityError {
+    failure(
+        "the slicer exited 0 without the sliced 3MF".to_owned(),
+        SLICER_ERROR,
+        true,
+        Some(json!({"exit_code": 0, "stderr_tail": stderr_tail})),
+    )
+}
+
 /// The worker's own failure (a temp dir, the fifo, starting the CLI): retryable, under a
 /// type of its own so a `SlicerError` always has its details.
 pub(crate) fn local(e: impl std::fmt::Display) -> ActivityError {
@@ -122,6 +133,11 @@ mod tests {
         let details = json!({"exit_code": 192, "stderr_tail": ""});
         assert_eq!(
             on_the_wire(slicer(VALIDATION_EXIT, "")),
+            (SLICER_ERROR.to_owned(), true, Some(details))
+        );
+        let details = json!({"exit_code": 0, "stderr_tail": "empty plate"});
+        assert_eq!(
+            on_the_wire(no_output("empty plate")),
             (SLICER_ERROR.to_owned(), true, Some(details))
         );
     }
