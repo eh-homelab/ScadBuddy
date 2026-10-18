@@ -406,6 +406,54 @@ def centre_on_plate(bounds: np.ndarray, plate: PlateGeometry) -> Placement:
     )
 
 
+def _tower_inset(plate: PlateGeometry) -> Rect:
+    """The reachable area less :data:`EDGE_MARGIN`, where a tower and its brim go."""
+    area = plate.usable
+    return Rect(
+        area.min_x + EDGE_MARGIN,
+        area.min_y + EDGE_MARGIN,
+        area.max_x - EDGE_MARGIN,
+        area.max_y - EDGE_MARGIN,
+    )
+
+
+def tower_beside(object_rect: Rect, plate: PlateGeometry) -> tuple[float, float] | None:
+    """The ``wipe_tower_x``/``_y`` of a tower against the first edge of the reachable
+    area it fits on clear of ``object_rect`` (:data:`TOWER_CLEARANCE`) and of the
+    plate's cutouts, as :func:`place_on_plate` puts one beside a centred object; None
+    when no edge has room."""
+    reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+    for side, strip, _remainder in _tower_sides(_tower_inset(plate), plate.usable, reserved):
+        corner = _tower_corner(side, strip, object_rect, plate, reserved)
+        if corner is not None:
+            return corner
+    return None
+
+
+def tower_reaches(
+    corner: tuple[float, float], plate: PlateGeometry, side: float = PRIME_TOWER_SIDE
+) -> bool:
+    """Whether a tower ``side`` wide at ``wipe_tower_x``/``_y`` ``corner`` lies, brim
+    included, where every extruder reaches, clear of the plate's cutouts. ``side`` is
+    the file's own ``prime_tower_width`` where it states one: judged by the square
+    :func:`place_on_plate` reserves, an A1 mini's own tower at (15, 145) would not fit
+    the A1 mini."""
+    reserved = side + 2 * PRIME_TOWER_BRIM
+    x, y = corner[0] - PRIME_TOWER_BRIM, corner[1] - PRIME_TOWER_BRIM
+    footprint = Rect(x, y, x + reserved, y + reserved)
+    inset = _tower_inset(plate)
+    if (
+        footprint.min_x < inset.min_x
+        or footprint.min_y < inset.min_y
+        or footprint.max_x > inset.max_x
+        or footprint.max_y > inset.max_y
+    ):
+        return False
+    return not any(
+        footprint.overlaps(zone) for zone in (*plate.exclusions, *plate.wrapping_exclusions)
+    )
+
+
 def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = True) -> Placement:
     """Centre ``bounds`` on ``plate`` and pick a prime-tower corner clear of it.
 
@@ -459,22 +507,15 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
         return Placement(offset=_offset(centre), tower=None)
 
     reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
-    inset = Rect(
-        area.min_x + EDGE_MARGIN,
-        area.min_y + EDGE_MARGIN,
-        area.max_x - EDGE_MARGIN,
-        area.max_y - EDGE_MARGIN,
-    )
+    inset = _tower_inset(plate)
 
     # First choice: the object stays centred and the tower takes whichever edge
     # it fits against. Only if none does is the object moved.
     object_centre = _clear_of_exclusions(area.centre, width, depth, plate)
     if object_centre is not None:
-        centred = _rect_at(object_centre)
-        for side, strip, _remainder in _tower_sides(inset, area, reserved):
-            corner = _tower_corner(side, strip, centred, plate, reserved)
-            if corner is not None:
-                return Placement(offset=_offset(object_centre), tower=corner)
+        corner = tower_beside(_rect_at(object_centre), plate)
+        if corner is not None:
+            return Placement(offset=_offset(object_centre), tower=corner)
 
     for side, strip, remainder in _tower_sides(inset, area, reserved):
         if width > remainder.width or depth > remainder.depth:
