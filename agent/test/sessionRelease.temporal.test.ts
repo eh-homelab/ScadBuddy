@@ -489,4 +489,39 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     expect(JSON.stringify(resumed.body?.messages ?? [])).toContain('It was approved and ScadBuddy ran it once.')
     expect(b.m.warm.size()).toBe(1)
   })
+
+  it('a Stop while the turn runs ends it within 2 s, on its replica`s next read of the row', async () => {
+    let answer: () => void = () => {}
+    script = () =>
+      new Promise<Reply>((resolve) => {
+        answer = () => resolve({ text: 'too late' })
+      })
+    const started = await m.start(browser, { origin: 'chat', prompt: 'think hard' })
+    await pollUntil(() => fake.messageCalls().length, 1)
+    const asked = Date.now()
+    expect(await m.interrupt(started.session.id, browser)).toBe(true)
+    expect(await started.turn!.done).toMatchObject({ kind: 'interrupted' })
+    expect(Date.now() - asked).toBeLessThan(2_000)
+    answer()
+    // The process stays: a Stop ends the turn, not the process.
+    expect(m.warm.size()).toBe(1)
+  })
+
+  it('a Stop while a call is held ends the turn and keeps the process: the entry is cancelled, and the model is not asked again', async () => {
+    holdSeconds = 600
+    script = shipsTheBox('unreached')
+    const started = await m.start(browser, { origin: 'chat', prompt: 'ship the box' })
+    await pollUntil(async () => (await listed()).length, 1)
+    const [entry] = await listed()
+    const asked = fake.messageCalls().length
+    expect(await m.interrupt(started.session.id, browser)).toBe(true)
+    expect(await started.turn!.done).toMatchObject({ kind: 'interrupted' })
+    expect(await listed()).toEqual([])
+    const [response] = await db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_input_responses WHERE request_id = ${entry!.id}`
+    expect(response?.outcome).toBe('cancelled')
+    expect(effects).toEqual([])
+    expect(fake.messageCalls()).toHaveLength(asked)
+    expect(m.warm.size()).toBe(1)
+    expect(spawned).toBe(1)
+  })
 })

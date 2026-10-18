@@ -297,6 +297,7 @@ export class DurableTurns {
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(),
+         interrupt_requested = false,
          runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 AND $6::boolean THEN 'unified' ELSE 'durable' END)
        FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
@@ -553,17 +554,25 @@ export class DurableTurns {
    * yet is left to it.
    */
   async interrupt(session: SessionRecord, reason: string): Promise<boolean> {
-    const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean })[]>`
-      SELECT id, status, event_seq, durable_offset,
+    const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean; runtime: SessionRuntime | null })[]>`
+      SELECT id, status, event_seq, durable_offset, runtime,
         updated_at < now() - make_interval(secs => ${RUNNING_GRACE_MS / 1000}) AS settled
       FROM ai_sessions WHERE id = ${session.id}`
     if (!row || !RUNNING.includes(row.status)) return false
-    try {
-      await this.#gate.cancelInput(session.id, reason)
-    } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
-      // Unanswered: the Signal stops the turn and its parked calls all the same.
-      if (!(err instanceof DurableUnavailable)) throw err
+    if (row.runtime === 'unified') {
+      // The fast path (spec §5.6): the turn's replica reads the flag on its next tick and stops
+      // the turn there, a held call included, with no further model request. Its parked
+      // entries are not cancelled first (a cancelled one is a refusal the model would answer):
+      // the Signal below cancels them as the turn ends, and is the backstop for a missed tick.
+      await this.#sql`UPDATE ai_sessions SET interrupt_requested = true WHERE id = ${session.id} AND durable_turn_id IS NOT NULL`
+    } else {
+      try {
+        await this.#gate.cancelInput(session.id, reason)
+      } catch (err) {
+        if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
+        // Unanswered: the Signal stops the turn and its parked calls all the same.
+        if (!(err instanceof DurableUnavailable)) throw err
+      }
     }
     try {
       await this.#gate.interrupt(session.id, reason)
@@ -603,9 +612,16 @@ export class DurableTurns {
    * goes unanswered, the `interrupt` Signal (recorded even while no worker runs) ends
    * them and the turn; a session with no workflow has nothing parked.
    */
-  async handoff(session: SessionRecord, reason: string): Promise<void> {
+  async handoff(session: SessionRecord, reason: string, to: Owner): Promise<void> {
+    const [row] = await this.#sql<{ runtime: SessionRuntime | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${session.id}`
     try {
       await this.#gate.cancelInput(session.id, reason)
+      // An AgentSession's gate checks each later response against the new owner (§5.6).
+      if (row?.runtime === 'unified') {
+        await this.#gate.ownerChanged(session.id, to).catch(() => {
+          console.warn(`durable handoff: session ${session.id}'s workflow could not be told its new owner; it is told at its next turn`)
+        })
+      }
       return
     } catch (err) {
       if (err instanceof WorkflowNotFoundError) return

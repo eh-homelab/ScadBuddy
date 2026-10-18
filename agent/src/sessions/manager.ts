@@ -2182,7 +2182,7 @@ export class SessionManager {
     // A durable session's parked calls were asked for the previous owner's turn: ended
     // only once the owner change above applied, with no lock held, best-effort (the
     // interrupt Signal when cancel_input goes unanswered).
-    await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`)
+    await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`, to)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)

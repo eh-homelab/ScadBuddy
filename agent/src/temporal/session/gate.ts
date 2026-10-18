@@ -150,7 +150,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 export class SessionGate {
-  readonly #opts: SessionGateOptions
+  #opts: SessionGateOptions
   readonly #parked = new Map<string, Parked>()
   readonly #resolutions = new Map<string, { promise: Promise<Resolution>; resolve: (r: Resolution) => void }>()
   readonly #seen = new Set<string>()
@@ -416,6 +416,11 @@ export class SessionGate {
   }
 
   /** Whether the entry is parked here (not yet resolved); a call settled at once never was. */
+  /** The session's owner from now on (a handoff, §5.6): what each later entry names, and a response is checked against. */
+  setOwner(owner: Owner): void {
+    this.#opts = { ...this.#opts, owner }
+  }
+
   isParked(requestId: string): boolean {
     return this.#parked.has(requestId)
   }

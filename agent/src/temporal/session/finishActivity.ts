@@ -54,7 +54,7 @@ export function sessionFinishActivities(sql: Sql, events: EventLog) {
           ? wordTail(args.tail, { spentUsd: spent, budgetUsd: budget, turns: Number(row.turns) })
           : turnEvents(sessionId, args, spent, budget, Number(row.turns))
         const last = tail.at(-1) as Extract<ServerEvent, { type: 'session.status' }>
-        await tx`UPDATE ai_sessions SET status = ${last.status}, durable_turn_id = NULL, updated_at = now() WHERE id = ${sessionId}`
+        await tx`UPDATE ai_sessions SET status = ${last.status}, durable_turn_id = NULL, interrupt_requested = false, updated_at = now() WHERE id = ${sessionId}`
         return { tail, seqs: await events.append(sessionId, tail, tx) }
       })
       if (!written) return false

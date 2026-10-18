@@ -365,11 +365,16 @@ export class TurnHost {
         return written !== undefined
       },
     })
-    // The fence: still the row's placement and turn, and what it has spent so far written.
+    // The fence: still the row's placement and turn, and what it has spent so far written. A
+    // Stop's flag (DurableTurns.interrupt) ends the turn here, on this tick: the workflow's
+    // Signal is the backstop.
     const fence = setInterval(() => {
       void this.#holds(id, turnId, attempt).then(
         (holds) => {
-          if (holds !== 'yes') cutOff(holds)
+          if (holds === 'interrupted') {
+            if (!controller.signal.aborted) controller.abort(new Error('the turn was interrupted'))
+            spend.flush(core.runningUsd())
+          } else if (holds !== 'yes') cutOff(holds)
           else spend.flush(core.runningUsd())
         },
         () => {},
@@ -637,13 +642,17 @@ export class TurnHost {
     return row?.landed === true
   }
 
-  /** Whether the row still runs this turn on this placement: `moved` when another placement holds it, `ended` when the turn is over. */
-  async #holds(id: string, turnId: string, attempt: string): Promise<'yes' | 'moved' | 'ended'> {
-    const [row] = await this.#deps.sql<{ turn_attempt: string | null; durable_turn_id: string | null }[]>`
-      SELECT turn_attempt, durable_turn_id FROM ai_sessions WHERE id = ${id}`
+  /**
+   * Whether the row still runs this turn on this placement: `moved` when another placement holds
+   * it, `ended` when the turn is over, `interrupted` when a Stop has asked it to end (§5.6).
+   */
+  async #holds(id: string, turnId: string, attempt: string): Promise<'yes' | 'moved' | 'ended' | 'interrupted'> {
+    const [row] = await this.#deps.sql<{ turn_attempt: string | null; durable_turn_id: string | null; interrupt_requested: boolean }[]>`
+      SELECT turn_attempt, durable_turn_id, interrupt_requested FROM ai_sessions WHERE id = ${id}`
     if (!row) return 'ended'
     if (row.turn_attempt !== attempt) return 'moved'
-    return row.durable_turn_id === turnId ? 'yes' : 'ended'
+    if (row.durable_turn_id !== turnId) return 'ended'
+    return row.interrupt_requested ? 'interrupted' : 'yes'
   }
 
   async #images(id: string, refs: readonly { name: string }[]) {

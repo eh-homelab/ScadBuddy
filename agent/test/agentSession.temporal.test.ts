@@ -21,6 +21,7 @@ import type { FinishTurnInput, Message, OpenInputArgs, SessionStart, SessionTurn
 import {
   ACQUIRE_WORKER_ACTIVITY,
   OPEN_INPUT_UPDATE,
+  OWNER_CHANGED_SIGNAL,
   SESSION_GATE_ACTIVITIES as GATE,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
@@ -553,6 +554,47 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     // Nothing was left to cancel.
     expect(resolved).toHaveLength(2)
     await record('park_respond', id, turnRun)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
+  it('a handoff tells the gate its new owner: a grant from that owner may no longer approve the session`s own calls, in this run or the next', async () => {
+    const id = randomUUID()
+    const NEXT = { kind: 'bearer', id: 'token:next', label: 'Next agent' } as const
+    let turnHold = held()
+    let rid = ''
+    runTurn = async (input) => {
+      const handle = env.client.workflow.getHandle(sessionWorkflowId(input.sessionId))
+      rid = (
+        await handle.executeUpdate<{ request_id: string }, [OpenInputArgs]>(OPEN_INPUT_UPDATE, {
+          args: [{ turn_id: input.turnId, call: { id: `toolu_${input.turnId}`, name: 'print_output', input: { output_id: input.turnId } } }],
+        })
+      ).request_id
+      await turnHold.promise
+      return { status: 'done', hostQueue: '' }
+    }
+    const grant = (requestId: string) =>
+      handleOf(id)
+        .executeUpdate(RESPOND_UPDATE, { args: [{ request_id: requestId, response: { kind: 'approval', decision: 'approve' }, responder: NEXT, role: 'grant' }] })
+        .then(
+          () => 'approved',
+          (err: unknown) => (err instanceof WorkflowUpdateFailedError ? String((err.cause as ApplicationFailure | undefined)?.message) : String(err)),
+        )
+    // Before: NEXT is nobody in this session, so its grant may approve the call.
+    await send(env.client, id, message('t1'))
+    await poll(() => rid.endsWith('toolu_t1'), true)
+    expect(await grant(rid)).toBe('approved')
+    // The handoff: NEXT owns the session now, and a grant is never for its own session's calls.
+    await handleOf(id).signal(OWNER_CHANGED_SIGNAL, { owner: NEXT })
+    turnHold.release()
+    await poll(() => finished.map((f) => f.turnId), ['t1'])
+    // The next run starts with the new owner (continue-as-new carries it).
+    turnHold = held()
+    await handleOf(id).executeUpdate(SEND_MESSAGE_UPDATE, { args: [message('t2')] })
+    await poll(() => rid.endsWith('toolu_t2'), true)
+    expect(await grant(rid)).toMatch(/never your own/)
+    turnHold.release()
+    await poll(() => finished.map((f) => f.turnId), ['t1', 't2'])
     await handleOf(id).signal('end')
     await handleOf(id).result()
   })

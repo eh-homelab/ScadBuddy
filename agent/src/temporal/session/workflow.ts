@@ -46,6 +46,7 @@ import {
   ACQUIRE_WORKER_ACTIVITY,
   NO_CAPACITY,
   OPEN_INPUT_UPDATE,
+  OWNER_CHANGED_SIGNAL,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
@@ -68,9 +69,10 @@ import {
 //
 //   open_input (Update, a call of the running turn)  <- new (§5.4): SessionGate.open
 //   withdraw_input (Update, a call it gave up on)    <- new: SessionGate.cancelCall
+//   owner_changed (Signal, a handoff)                <- new (§5.6): SessionGate.setOwner
 //
-// Not here: `fork_point` (forking an AgentSession session is refused until phase 6),
-// `segment_context` (no segment runner) and `owner_changed` (Task 5.6).
+// Not here: `fork_point` (forking an AgentSession session is refused until phase 6) and
+// `segment_context` (no segment runner).
 //
 // The loop: wait for a message or `end`; read the runtime settings and the gate's
 // (`gate.settings`, so a Settings change reaches the next turn); run `session_turn`;
@@ -107,6 +109,7 @@ const PLACEMENTS = 3
 const sendUpdate = defineUpdate<SendAnswer, [Message]>(SEND_MESSAGE_UPDATE)
 const interruptSignal = defineSignal<[{ reason?: string }?]>(INTERRUPT_SIGNAL)
 const endSignal = defineSignal<[unknown?]>(END_SIGNAL)
+const ownerChangedSignal = defineSignal<[{ owner: Owner }]>(OWNER_CHANGED_SIGNAL)
 const turnQuery = defineQuery<string | null>(TURN_QUERY)
 const openInputUpdate = defineUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPUT_UPDATE)
 const withdrawInputUpdate = defineUpdate<boolean, [WithdrawInputArgs]>(WITHDRAW_INPUT_UPDATE)
@@ -164,7 +167,8 @@ function failureText(err: unknown): string {
   return text.slice(0, MESSAGE_MAX)
 }
 
-export async function AgentSession(start: SessionStart): Promise<void> {
+export async function AgentSession(started: SessionStart): Promise<void> {
+  let start = started
   let message: Message | undefined
   let turn: TurnStart | undefined = start.turn ?? undefined
   // From a message's acceptance until its turn's end is written.
@@ -220,6 +224,12 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   )
   setHandler(endSignal, () => {
     ended = true
+  })
+  // A handoff (§5.6): the gate checks each later response against the new owner, and the next
+  // run starts with it. The handoff cancelled the parked entries itself (cancel_input).
+  setHandler(ownerChangedSignal, ({ owner }) => {
+    start = { ...start, owner }
+    gate.setOwner(owner)
   })
   setHandler(interruptSignal, () => {
     if (!inTurn) return
