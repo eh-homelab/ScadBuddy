@@ -216,7 +216,7 @@ pub async fn run(
     };
     // Whatever the CLI left in its group dies now, once (`kill` clears the guard, so the
     // group is never signalled again). The leader is reaped, but the kernel hands out a pid
-    // only while no process group has it as its id: if stragglers exist, the id is still
+    // only when no process group has it as its id: if stragglers exist, the id is still
     // their group's and this reaches only them; if none do, killpg fails with ESRCH. Only
     // a process given the freed pid in the microseconds since `wait` returned that also
     // made itself a group leader in them could be hit, and only by this one signal.
