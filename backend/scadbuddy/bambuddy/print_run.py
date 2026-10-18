@@ -1430,25 +1430,34 @@ class SlicedRequirements(Protocol):
 async def sliced_as_planned(
     client: SlicedRequirements, *, sliced: int, plate_id: int, colours: Sequence[str]
 ) -> None:
-    """Refuse a slice whose filaments are not the ones sent for it (#4013), before it is
-    queued: each slot the plate prints with must come back in the colour chosen for it.
+    """Refuse a slice that gave a slot another slot's filament (#4013), before it is
+    queued: a slot the plate prints with that comes back in the colour chosen for
+    another slot, not its own.
 
-    Bambuddy can rewrite a slot it thinks the plate leaves unused with another's preset
-    and colour (``substitute_unused_plate_filaments``), and the slice still succeeds: a
-    black spool then ran a glow profile, and the run said it had printed what was
-    chosen. A slot with no colour chosen, or none read back, is not judged."""
+    That is what Bambuddy's ``substitute_unused_plate_filaments`` does to a slot it
+    thinks the plate leaves unused: it takes another slot's preset and colour, and the
+    slice still succeeds. A black spool then ran a glow profile, and the run said it had
+    printed what was chosen. Only that is judged: a colour that is no other slot's (one
+    Bambuddy spells or rounds otherwise, or a slot with none chosen or read back) is not
+    evidence of a swap, and refusing on it would refuse prints that are right."""
     requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+    chosen = [normalise_colour(colour) for colour in colours]
     for filament in requirements.filaments:
         slot = filament.slot_id
-        if not filament.used_in_plate or not 1 <= slot <= len(colours):
+        if not filament.used_in_plate or not 1 <= slot <= len(chosen):
             continue
-        chosen, got = normalise_colour(colours[slot - 1]), normalise_colour(filament.color)
-        if chosen is not None and got is not None and chosen != got:
+        own, got = chosen[slot - 1], normalise_colour(filament.color)
+        others = {
+            colour
+            for index, colour in enumerate(chosen, start=1)
+            if index != slot and colour is not None and colour != own
+        }
+        if own is not None and got is not None and got != own and got in others:
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,
-                f"Bambuddy sliced plate {plate_id} with filament {slot} in {got}, not the"
-                f" {chosen} chosen for it, so it was not queued: the slice would print"
-                " that spool with another filament's profile.",
+                f"Bambuddy sliced plate {plate_id} with filament {slot} in {got}, the colour"
+                f" chosen for another filament, not its own {own}, so it was not queued: the"
+                " slice would print that spool with another filament's profile.",
                 sliced_library_file_id=sliced,
             )
 

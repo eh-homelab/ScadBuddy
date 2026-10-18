@@ -47,7 +47,9 @@ async def test_a_slot_sliced_in_another_slots_colour_is_refused_naming_it() -> N
         await sliced_as_planned(sliced, sliced=4223, plate_id=2, colours=[GLOW, BLACK])
 
     assert raised.value.status == 502
-    assert "plate 2 with filament 2 in #D3CFB5, not the #27272C" in raised.value.detail
+    assert "plate 2 with filament 2 in #D3CFB5, the colour chosen for another filament," in (
+        raised.value.detail
+    )
     assert sliced.reads == [(4223, 2)]
 
 
@@ -59,6 +61,13 @@ async def test_the_filaments_sent_pass_whatever_their_spelling() -> None:
 async def test_a_slot_the_plate_leaves_unused_or_with_no_colour_is_not_judged() -> None:
     sliced = Sliced(slot(1, GLOW), slot(2, GLOW, used=False), slot(3, None), slot(4, GLOW))
     await sliced_as_planned(sliced, sliced=1, plate_id=1, colours=[GLOW, BLACK, BLACK, ""])
+
+
+async def test_a_colour_that_is_no_other_slots_is_not_a_swap() -> None:
+    """Only another slot's colour says Bambuddy gave the slot another's filament; one
+    that is none of the chosen colours says nothing about which profile it sliced with."""
+    sliced = Sliced(slot(1, "#0047BB"), slot(2, BLACK))
+    await sliced_as_planned(sliced, sliced=77, plate_id=1, colours=["#688197", BLACK])
 
 
 async def test_queueing_a_swapped_slice_stops_before_the_queue() -> None:
