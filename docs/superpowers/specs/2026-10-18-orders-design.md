@@ -308,7 +308,23 @@ accepted quote's sliced file (its digest must match, else the print is refused w
 each slot to a spool of the slot's filament, and `copies` is the quantity still to
 print. A flow reaches it as `queue_print({"order_item_id": id}, request)` (§7.2), so
 the grant's `printers`, `max_prints` and `max_filament_g` bounds apply as they do to
-any print. The run's
+any print.
+
+**Spools.** A quote names a filament per slot (§3.3), never a spool, so the print fills
+`filament_plan.slots` (F7) when it starts, on the printer it runs on:
+
+- With Bambuddy configured, a slot's spool is the one loaded on that printer whose
+  `_filament_key` is the slot's filament's (§5.1); with none loaded, the unarchived
+  spool of that filament with the most grams left, as the print dialog's spool-first
+  choice makes it (`bambuddy/filaments.py`). No spool of that filament at all refuses
+  the print with `needs_spool_choice` naming the slot, which the flow's
+  `wait_for_human` or the dialog answers.
+- The request may supply `filament_plan` itself, as a narrowing: each spool named must
+  be of its slot's filament, else the print is refused with `spool_not_filament`. A
+  different filament is a change to the quote (§3.3 `colours`), never to the print.
+- On the native path (#3823) there is no spool inventory yet (§1.2): the plan carries
+  the filament's slicer profile per slot and no spool, and the person loads the
+  printer. A ScadBuddy inventory is a later design. The run's
 `subject` is `order_item:<id>`, which is how the outcome finds its way back (§6.1).
 The item's status follows the run: `queued` when the run succeeds (F7: queued, not
 printed), `printing` on the first `print.progress` for its send, `printed` or `failed`
@@ -463,7 +479,7 @@ What this relies on, and what the design adds for it:
 - `queue_print`'s source gains a third kind, `{"order_item_id"}`: the call is sent to
   `order_item_print` (§5.4), which fills the request from the accepted quote, checks
   the file's digest and sets the run's subject; the request argument may only narrow
-  it (a printer, fewer copies). The item's status then follows the print with no
+  it (a printer, fewer copies, a spool of the slot's own filament, §5.4). The item's status then follows the print with no
   further script work, and a stale quote comes back as `requote_needed`, never as a
   print of the wrong file (Ruling 2).
 - A person is asked only where the grant does not cover the call: `queue_print` is
