@@ -28,6 +28,7 @@ from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.client import connect, connect_lazily
 from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
+from tests.bambuddy.conftest import recording
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
@@ -325,6 +326,34 @@ def test_a_seeded_native_library_on_the_local_store_does_not_start(settings: Set
         TestClient(create_app(native)),
     ):
         pass
+
+
+@respx.mock
+def test_no_settings_route_returns_a_printers_serial_or_address(client: TestClient) -> None:
+    """Security review of #3823 Task 1: `Printer` parses Bambuddy's serial and address
+    for the registry, but neither reaches a response that embeds a `Printer`."""
+    client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": "https://bambuddy.test/", "bambuddy_api_key": "s3cret"},
+    )
+    rows = recording("printers.json")
+    assert rows[0]["serial_number"] and rows[0]["ip_address"]
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(200, json=rows))
+    respx.get("https://bambuddy.test/api/v1/library/folders").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    tested = client.post("/api/v1/settings/test")
+    targets = client.get("/api/v1/settings/targets")
+
+    for response in (tested, targets):
+        assert response.status_code == 200, response.text
+        printers = response.json()["printers"]
+        assert printers
+        for printer in printers:
+            assert "serial_number" not in printer and "ip_address" not in printer
+        assert rows[0]["serial_number"] not in response.text
+        assert rows[0]["ip_address"] not in response.text
 
 
 @respx.mock

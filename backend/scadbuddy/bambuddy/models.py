@@ -114,6 +114,11 @@ class Printer(BambuddyModel):
     ``serial_number`` keys in the status recordings are the AMS units' and hotends'), so
     ``PrinterStatus`` carries none. A serial Bambuddy sends empty reads as ``None``: that
     printer cannot be linked by serial.
+
+    Both are ``exclude=True`` (security review of Task 1): read server-side only, never
+    in the JSON of a response that embeds a ``Printer`` (``ConnectionTest``,
+    ``BambuddyTargets``, ``ChoicesView``). The registry's own routes carry the serial in
+    their own models; nothing returns the address.
     """
 
     id: int
@@ -121,8 +126,8 @@ class Printer(BambuddyModel):
     model: str | None = None
     is_active: bool = True
     nozzle_count: int | None = None
-    serial_number: str | None = Field(default=None, repr=False)
-    ip_address: str | None = None
+    serial_number: str | None = Field(default=None, repr=False, exclude=True)
+    ip_address: str | None = Field(default=None, repr=False, exclude=True)
 
     @field_validator("serial_number", "ip_address", mode="before")
     @classmethod
