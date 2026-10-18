@@ -18,7 +18,11 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
-from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
+from temporalio.api.errordetails.v1 import (
+    MultiOperationExecutionFailure,
+    NamespaceNotFoundFailure,
+    WorkflowNotReadyFailure,
+)
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import (
     Client,
@@ -125,6 +129,26 @@ def execution_gone(error: RPCError) -> bool:
     """A NOT_FOUND about the execution, not about the namespace: a mistyped or
     unregistered namespace answers NOT_FOUND too (review #1066 (7) 2)."""
     return error.status == RPCStatusCode.NOT_FOUND and not namespace_not_found(error)
+
+
+def workflow_not_ready(error: RPCError) -> bool:
+    """Temporal refused an Update because the execution's workflow task is failing
+    (`WorkflowNotReadyFailure`, "Workflow Task in failed state"), on its own or inside an
+    update-with-start's `MultiOperationExecutionFailure`, whose details the SDK keeps on
+    the error it raises. An ``Operation`` whose kind its build does not register fails
+    its task until a build that has it is current (#4139): the execution exists and
+    goes on, so this is still accepting, not a refusal."""
+    for detail in error.grpc_status.details:
+        if detail.Is(WorkflowNotReadyFailure.DESCRIPTOR):
+            return True
+        multi = MultiOperationExecutionFailure()
+        if detail.Unpack(multi) and any(
+            inner.Is(WorkflowNotReadyFailure.DESCRIPTOR)
+            for status in multi.statuses
+            for inner in status.details
+        ):
+            return True
+    return False
 
 
 def temporal_failure(error: BaseException, id: str) -> Exception | None:
@@ -261,6 +285,9 @@ async def start_command[T](
         if isinstance(error, RPCError) and execution_gone(error):
             # USE_EXISTING never misses an execution, so it closed under the Update.
             raise CommandClosingError(id) from error
+        if isinstance(error, RPCError) and workflow_not_ready(error):
+            # The execution exists, and its task waits for a build with its kind (#4139).
+            raise CommandStillAcceptingError(id) from error
         if (failure := temporal_failure(error, id)) is None:
             raise
         raise failure from error

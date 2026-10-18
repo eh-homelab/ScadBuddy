@@ -216,9 +216,10 @@ on shutdown.
     is auto-upgrade (Housekeeping, the preview backfill, library commands, flow trigger
     fires, the store migration): an open run moves to the current build at its next
     task and replays there, so a change to one goes behind `workflow.patched`, and
-    nothing is drained on stop. What is left: a request served by the new replica in
-    the second or two before its build is current may start a command of a kind only
-    it has on the old build, which refuses it as unregistered. The sweep notes below
+    nothing is drained on stop. A request served by the new replica in the second or
+    two before its build is current may start a command of a kind only it has: the old
+    build defers it until the new one is current, rather than failing it as
+    unregistered (#4139, see "Rolling it" under the `bambuddy` queue). The sweep notes below
     say what a `Recreate` rollout guarded against before #4090; none needs one now.
   - **This release adds a sweep**, `housekeeping_attach_backfills` (#902's backstop:
     an output re-render whose `job.done` no API replica heard), so it needed, before
@@ -628,6 +629,36 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   stopped, it stopped without draining, and every run pinned to it waited forever.
   So every change to them goes behind `workflow.patched`, and `tests/test_print_replay.py`
   replays committed `PrintRun` histories to hold that.
+- **Rolling it (#4139):** `scadbuddy-print` may roll with `RollingUpdate`
+  (`maxSurge: 1`, `maxUnavailable: 0`) beside the API's own rolling update. The hazard
+  that kept it on `Recreate` (eh-homelab/clusters#2530) was the API's new pods starting
+  operations of a kind only the new build has while the old print build is still
+  current: the old build failed the kind's activities as unregistered, each failure an
+  attempt spent. Now an `Operation` defers a kind its build does not register: before
+  it schedules `op.<kind>.check`, and again before `op.<kind>.run`, it asks its worker
+  which activities it registers (`workflows/registered.py`), and for a kind it lacks it
+  fails its *workflow task* (`operation.UnregisteredKindError`), which schedules
+  nothing and spends no attempt. Temporal retries the task, and an auto-upgrade run's
+  retry goes to the current build, which the new build becomes as it starts.
+  Measured on the dev server (Temporal CLI 1.8.2, server 1.31.2;
+  `tests/test_operation_deferral.py`): the first failure is retried at once, then
+  about every 10 s (attempt 4 after 25 s), because the SDK lets a repeated failure time
+  out at the 10 s workflow task timeout rather than report it; the server logs it once.
+  While the task fails, Temporal refuses an Update on that execution ("Workflow Task in
+  failed state"); `start_command` answers that as still accepting (the route's 202 to
+  follow, or 503 to send again), not as a refusal, and the re-send attaches to the
+  execution, or answers from its record once it ran.
+  A new activity in `PrintRun` or `FollowPrint` (behind `patched`) needs nothing
+  either: its name comes from the workflow's own code, which the old build runs only
+  while it is current, and the new build schedules it only once it is. Not covered: a
+  new workflow type on the queue (the API starts it while the old build, which does not
+  register it, is current; the SDK fails that as a task, not a workflow, but this was
+  not measured, so such a release still rolls `scadbuddy-print` with `Recreate`), and a
+  prelude kind on another queue (`output_inbox_delete`, which a library `Operation`
+  runs on `bambuddy`). **Rolling back** to a build without a kind leaves that kind's
+  operations still in flight deferred (their record `running`) until a build with it is
+  current again; terminate them in the Temporal UI to end them, and the reconciler
+  records them lost.
 - **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
   still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
@@ -665,9 +696,11 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   execution would answer 409 "may have been done" instead of its outcome. Raising the
   namespace's retention after the save is not re-checked.
 - **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched` (see
-  "Versioning" above); a release that adds a workflow or activity type to the queue says
-  so here, and where the API still serves the queue itself (unversioned) needs the same
-  `Recreate` rollout.
+  "Versioning" above). A new operation kind or a new activity needs nothing more
+  ("Rolling it"); a release that adds a workflow type to the queue says so here and
+  needs a `Recreate` rollout of `scadbuddy-print`. Where the API still serves the queue
+  itself (unversioned), a new activity in `PrintRun` or `FollowPrint` needs the API
+  rolled out with `Recreate` too: there any replica takes any task.
 
 ### Flow runs on the `projects` queue (#1057)
 
