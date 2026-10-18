@@ -31,8 +31,12 @@ describe('buildQueryOptions', () => {
     // `env` REPLACES the subprocess environment (sdk.d.ts), so only the keys
     // listed here reach Claude Code; the database URL must not be one.
     expect(Object.keys(options.env ?? {}).sort()).toEqual(
-      ['CLAUDE_CONFIG_DIR', 'HOME', ...(process.env.PATH === undefined ? [] : ['PATH'])].sort(),
+      ['CLAUDE_CONFIG_DIR', 'HOME', 'TZ', ...(process.env.PATH === undefined ? [] : ['PATH'])].sort(),
     )
+  })
+
+  it('runs Claude Code in UTC, so a limit names its reset in the zone the parse reads (#4107)', () => {
+    expect(options.env?.TZ).toBe('UTC')
   })
 
   it('turns off inline shell execution in skills and commands', () => {

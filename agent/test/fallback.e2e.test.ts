@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
@@ -34,6 +35,7 @@ try {
 
 const TOKEN_A = 'gw-fallback-first-token-aaaa'
 const TOKEN_B = 'gw-fallback-second-token-bbbb'
+const OAUTH_A = 'sk-ant-oat01-fallback-first-token-aaaa'
 /** A wall-clock step tolerated between two Date.now() reads (#1485). */
 const WALL_CLOCK_SLACK_MS = 60_000
 
@@ -48,7 +50,9 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     stateDir = await mkdtemp(path.join(os.tmpdir(), 'fallback-'))
     await ensureStateDirs({ stateDir })
     handled = []
-    fake = await startFakeAnthropic((r) => (r.headers.authorization === `Bearer ${TOKEN_A}` ? forA(r) : forB(r)))
+    fake = await startFakeAnthropic((r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}` || r.headers.authorization === `Bearer ${OAUTH_A}` ? forA(r) : forB(r),
+    )
   })
   afterEach(async () => {
     await fake.close()
@@ -176,6 +180,69 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(until).toBeLessThan(Date.now() + 601_000 + WALL_CLOCK_SLACK_MS)
     // The probe was one more request with that key, for one token.
     expect(callsWith(TOKEN_A).at(-1)?.body).toMatchObject({ max_tokens: 1, model: 'claude-sonnet-4-5' })
+  }, 60_000)
+
+  it('cools a subscription key down until the reset its limit text names (#4107)', async () => {
+    // A subscription (OAuth) key's 429 as Anthropic's unified limiter answers it. Claude
+    // Code turns these headers into "You've hit your session limit · resets 6:35pm (UTC)",
+    // in the zone it runs in (TZ, options.ts), and the probe asks an OAuth key nothing,
+    // so that text's reset is the cooldown.
+    const reset = Math.floor(Date.now() / 60_000) * 60_000 + 5 * 3_600_000
+    const seconds = String(reset / 1000)
+    forA = () => ({
+      error: {
+        status: 429,
+        type: 'rate_limit_error',
+        message: 'Rate limited',
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-reset': seconds,
+          'anthropic-ratelimit-unified-representative-claim': 'five_hour',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-reset': seconds,
+        },
+      },
+    })
+    forB = () => ({ text: 'Box made.' })
+    const subscription: PooledCredential = {
+      id: 'a',
+      epoch: 0,
+      label: 'credential a',
+      credential: { kind: 'claude_oauth_token', secret: OAUTH_A },
+    }
+    const reports: { id: string; outcome: AttemptOutcome; next: string | undefined }[] = []
+    const messages: SDKMessage[] = []
+    for await (const m of runWithFallback(
+      {
+        paths: { stateDir },
+        prompt: 'Make a box',
+        model: 'claude-sonnet-4-5',
+        maxTurns: 4,
+        sessionId: randomUUID(),
+        // An OAuth key's requests go to api.anthropic.com; this sends them to the fake.
+        spawnClaudeCodeProcess: (o) =>
+          spawn(o.command, o.args, { cwd: o.cwd, env: { ...o.env, ANTHROPIC_BASE_URL: fake.url }, stdio: ['pipe', 'pipe', 'ignore'] }),
+      },
+      {
+        candidates: [subscription, pooled('b', TOKEN_B)],
+        report: (attempt, outcome, next) => {
+          reports.push({ id: attempt.id, outcome, next: next?.id })
+          return Promise.resolve()
+        },
+      },
+    )) {
+      messages.push(m)
+    }
+    expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'success', is_error: false, result: 'Box made.' })
+    expect(callsWith(OAUTH_A)).toHaveLength(1)
+    // The probe's `unknown` leaves the named reset standing: one report for the key.
+    expect(reports.map((r) => [r.id, r.outcome.class, r.next])).toEqual([
+      ['a', 'rate_limited', 'b'],
+      ['b', 'ok', undefined],
+    ])
+    const cooled = reports[0]!.outcome
+    expect(cooled).toMatchObject({ reason: expect.stringMatching(/^You've hit your session limit · resets \d{1,2}(:\d{2})?[ap]m \(UTC\)$/) })
+    expect(cooled.class === 'rate_limited' ? cooled.until.getTime() : 0).toBe(reset)
   }, 60_000)
 
   it('retries an overloaded endpoint a bounded number of times, then falls back for this turn only', async () => {
