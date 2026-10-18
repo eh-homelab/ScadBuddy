@@ -451,6 +451,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(session.mode).toBe('durable')
     expect(await m.interrupt(session.id, browser)).toBe(ended)
     expect(await status(session.id)).toBe(after)
+    // Past the grace it is ended as not found, which the failed describe stood for.
+    const errors = (await m.events.read(session.id)).filter((e) => e.event.type === 'error').map((e) => e.event)
+    expect(errors).toEqual(ended ? [expect.objectContaining({ code: 'turn_failed', message: expect.stringMatching(/could not be found/) })] : [])
   }, 60_000)
 
   it("hands off, then ends the old owner's parked calls with cancel_input, or the interrupt Signal when it goes unanswered", async () => {
