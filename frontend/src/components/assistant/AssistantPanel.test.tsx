@@ -237,6 +237,31 @@ describe('assistant panel', () => {
     expect(within(send!).getByTestId('agent-tool-status')).toHaveTextContent('Waiting for approval')
   })
 
+  // #4149 — the chat's per-session strips keep their identity while a turn streams: two
+  // of them once shared a key, so the panel's flow runs were mounted afresh, and read
+  // `GET /workflow-runs?session=` again, on every render of the chat.
+  it("reads the session's flow runs once while a turn streams, not once per render", async () => {
+    const reads: string[] = []
+    const count = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/workflow-runs' && url.searchParams.has('session')) reads.push(url.search)
+    }
+    server.events.on('request:start', count)
+    try {
+      const { user } = await openAndSend()
+      await screen.findByRole('button', { name: /2 steps/ })
+      await waitFor(() => expect(reads.length).toBeGreaterThan(0))
+      const before = reads.length
+      // Each keystroke renders the chat again.
+      await user.type(screen.getByRole('textbox', { name: 'Message the assistant' }), 'twelve chars')
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      expect(new Set(reads).size).toBe(1)
+      expect(reads.length).toBe(before)
+    } finally {
+      server.events.removeListener('request:start', count)
+    }
+  })
+
   it('shows tool arguments only in Advanced, and remembers the switch per browser', async () => {
     window.localStorage.removeItem('scadbuddy.assistant.advanced')
     const { user } = await openAndSend()

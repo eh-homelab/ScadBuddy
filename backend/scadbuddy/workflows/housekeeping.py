@@ -53,6 +53,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
+    from scadbuddy.workflows.registered import RegisteredActivities
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +293,9 @@ def library_worker(
         workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=deployment_config,
+        # A library command of a kind this build lacks waits for the build that has it
+        # (#4139): a new API replica's request in the second before its build is current.
+        interceptors=[RegisteredActivities(activities)],
     )
 
 

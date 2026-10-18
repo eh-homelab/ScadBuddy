@@ -121,6 +121,8 @@ from scadbuddy.worker import (
     MAKE_CURRENT_ERROR_AFTER,
     MAKE_CURRENT_ERROR_EVERY,
     MAKE_CURRENT_EVERY,
+    ROUTED_POLL,
+    ROUTED_WAIT,
     deployment_writes,
     make_current_until_polled,
     run_inprocess_worker,
@@ -1141,9 +1143,10 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
 
 
 #: How long the library Schedules wait for this build to route the queue before they
-#: are set up anyway (Temporal refusing the build, say), and how often it is asked.
-LIBRARY_ROUTED_WAIT = 60.0
-LIBRARY_ROUTED_POLL = 0.5
+#: are set up anyway (Temporal refusing the build, say), and how often it is asked: as
+#: long as a versioned worker waits to report ready (`worker.ROUTED_WAIT`).
+LIBRARY_ROUTED_WAIT = ROUTED_WAIT
+LIBRARY_ROUTED_POLL = ROUTED_POLL
 
 
 async def _make_library_current(

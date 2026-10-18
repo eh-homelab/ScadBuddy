@@ -208,14 +208,18 @@ class Outward(Flows):
         return call_id
 
 
+def outward_activities(store: FlowStore, api: httpx.AsyncClient | None) -> list[Any]:
+    """The activities of `outward_worker`'s `projects` worker."""
+    routes = FlowRoutes(api)
+    grants = FlowGrants(store, api, HASH_KEY)
+    return [*FlowActivities(store).all(), *routes.all(), *grants.all()]
+
+
 async def outward_worker(
     temporal_address: str, jobs: JobProjection, api: httpx.AsyncClient | None
 ) -> AsyncIterator[Outward]:
     client = await connect_flows(temporal_address, "default", Keys())
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
-    routes = FlowRoutes(api)
-    grants = FlowGrants(store, api, HASH_KEY)
-    activities = [*FlowActivities(store).all(), *routes.all(), *grants.all()]
-    async with projects_worker(client, queue, activities):
+    async with projects_worker(client, queue, outward_activities(store, api)):
         yield Outward(client, queue, store)

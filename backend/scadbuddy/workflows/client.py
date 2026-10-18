@@ -47,6 +47,7 @@ from scadbuddy.workflows.pipelines import (
 from scadbuddy.workflows.printer_watch import PrinterWatch
 from scadbuddy.workflows.printing import PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
+from scadbuddy.workflows.registered import RegisteredActivities
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -55,6 +56,8 @@ PRINT_DEPLOYMENT_NAME = "scadbuddy-print"
 #: The API's ``library`` worker's deployment (#4090): housekeeping, the preview
 #: backfill, the library commands, flow trigger fires and the store migration.
 LIBRARY_DEPLOYMENT_NAME = "scadbuddy-library"
+#: The flow runs' worker's deployment (#4146): `--queue projects`.
+PROJECTS_DEPLOYMENT_NAME = "scadbuddy-projects"
 RPC_TIMEOUT = timedelta(seconds=10)
 
 logger = logging.getLogger(__name__)
@@ -155,13 +158,18 @@ def bambuddy_worker(
     the same way.
 
     Versioned, a run moves to the new build on its next workflow task, so the new build
-    replays every open run: a change to a workflow's commands goes behind ``patched``,
-    and a new workflow type or activity name is only safe once no old build polls. The
-    ``Recreate`` rollout is the usual one and gives that: the old pod stops before the
-    new one starts, and the runs wait for it rather than land on a build without them.
-    Rolled instead, an old replica fails an activity it does not register, and that
-    failure counts against its retry policy: an effect that runs once is recorded
-    ``failed`` ("may have been done") without reaching Bambuddy."""
+    replays every open run: a change to a workflow's commands goes behind ``patched``.
+    An auto-upgrade run's activities start on the current build, so the old build is
+    handed only what its own code scheduled, except an ``Operation``'s kind, which the
+    API names: a new API pod starts a kind only the new build has while the old build
+    is still current (the API rolls with ``RollingUpdate``). Failed there as
+    unregistered, each failure would spend an attempt, and a run-once effect would be
+    recorded ``failed`` ("may have been done") without reaching Bambuddy. So
+    ``Operation`` defers a kind its worker does not register (#4139): it fails its
+    workflow task, which Temporal retries on the current build, and that is told it by
+    `RegisteredActivities`. The Deployment may then roll with ``RollingUpdate``. A new
+    workflow type is still only safe once no old build is current (README, "Rolling
+    it")."""
     return Worker(
         client,
         task_queue=task_queue,
@@ -176,6 +184,7 @@ def bambuddy_worker(
         workflow_runner=sandboxed_runner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),
+        interceptors=[RegisteredActivities(activities)],
     )
 
 
@@ -213,6 +222,22 @@ def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
         return None
     return WorkerDeploymentConfig(
         version=WorkerDeploymentVersion(deployment_name=PRINT_DEPLOYMENT_NAME, build_id=build_id),
+        use_worker_versioning=True,
+        default_versioning_behavior=VersioningBehavior.AUTO_UPGRADE,
+    )
+
+
+def projects_deployment(build_id: str) -> WorkerDeploymentConfig:
+    """``scadbuddy-projects`` at ``build_id`` (#4146), workflows AUTO_UPGRADE by default,
+    as ``scadbuddy-print``'s. Never pinned (plan 2026-10-09 Ruling 13): a flow may run for
+    weeks, and its build would have to drain that long. A default rather than a behavior
+    on each class, as the library's: ``ProjectWorkflow`` is the harness's ``agent.defn``,
+    and the in-process worker, unversioned, could not complete a workflow that declares
+    one."""
+    return WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion(
+            deployment_name=PROJECTS_DEPLOYMENT_NAME, build_id=build_id
+        ),
         use_worker_versioning=True,
         default_versioning_behavior=VersioningBehavior.AUTO_UPGRADE,
     )
@@ -321,6 +346,7 @@ __all__ = [
     "DEPLOYMENT_NAME",
     "LIBRARY_DEPLOYMENT_NAME",
     "PRINT_DEPLOYMENT_NAME",
+    "PROJECTS_DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
     "connect",
@@ -330,6 +356,7 @@ __all__ = [
     "is_current",
     "library_deployment",
     "make_current",
+    "projects_deployment",
     "pydantic_data_converter",
     "render_worker",
     "routes_to",

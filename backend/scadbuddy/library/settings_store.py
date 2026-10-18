@@ -33,7 +33,7 @@ import json
 import logging
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
@@ -116,6 +116,8 @@ RENDER_FIELDS = (
     "bambuddy_api_key",
     "library_folder_id",
     *S3_FIELDS,
+    # The worker runs the per-colour solids: a live setting it applies per job.
+    "solid_concurrency",
 )
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
@@ -1163,6 +1165,9 @@ class RenderStoreSettings(BaseModel):
     key_is_fallback: bool = False
     library_folder_id: int | None = None
     s3: S3Settings | None = None
+    #: The per-job colour slots in effect: the Settings page's, else the environment's;
+    #: 0 derives them from the worker's CPUs (`Config.solid_slots`).
+    solid_concurrency: int = 0
 
 
 def load_render_store_settings(
@@ -1191,4 +1196,14 @@ def load_render_store_settings(
         key_is_fallback=fallback,
         library_folder_id=stored.library_folder_id,
         s3=stored.s3_settings(),
+        solid_concurrency=_runtime_value("solid_concurrency", values, defaults),
     )
+
+
+def _runtime_value(name: str, values: Mapping[str, Any], defaults: Settings) -> Any:
+    """An env-seeded field as the API's `snapshot` resolves it: a cleared or refused
+    value is the environment's."""
+    try:
+        return check_value(name, values[name])
+    except ValueError:
+        return getattr(defaults, name)
