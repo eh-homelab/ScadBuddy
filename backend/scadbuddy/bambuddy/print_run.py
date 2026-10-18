@@ -33,7 +33,7 @@ from scadbuddy.bambuddy.dispatch import (
     enqueue_plate,
     slice_request,
 )
-from scadbuddy.bambuddy.errors import not_configured
+from scadbuddy.bambuddy.errors import is_transient, not_configured
 from scadbuddy.bambuddy.extruders import (
     RACK_SIDE,
     VOLUME_TYPE,
@@ -585,20 +585,28 @@ def rack_chooser(
     manual_position: int | None,
     rack: RackUsage | None,
     warnings: list[FilamentWarning],
+    requirements: FilamentRequirements | None = None,
 ) -> ChooseRack:
     """The plate's ``choose_rack`` (spec 2026-10-01 §5). It reads the sliced file's
     requirements for ``plate_id`` and then, only when a group prints from the rack, a
     fresh status, once per plate and never ``PreparedRun.printer_status``. It ranks, and
     appends its warnings to ``warnings``, the plate's list. It **never raises**: the whole
     body is one ``try``, and on any exception it logs a fixed message with the exception's
-    type, appends ``rack-left-to-bambuddy`` and returns ``None``, so Bambuddy picks."""
+    type, appends ``rack-left-to-bambuddy`` and returns ``None``, so Bambuddy picks.
+    ``requirements``, when the run already read the slice's (#4013), is used instead."""
+
+    known = requirements
 
     async def choose(sliced: int) -> RackChoice | None:
         stage = "requirements unreadable"
         try:
-            requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+            read = (
+                known
+                if known is not None
+                else await client.filament_requirements(sliced, plate_id=plate_id)
+            )
             stage = "rack pick failed"
-            groups = rack_groups(requirements.filaments, spools)
+            groups = rack_groups(read.filaments, spools)
             manual, notes = manual_for(groups, manual_position, algorithm)
             if not groups:
                 warnings.extend(notes)
@@ -633,7 +641,7 @@ def rack_chooser(
                             group_id=group_id,
                             position=pick.position,
                             serial=pick.serial,
-                            spools=group_spools(requirements.filaments, spools, group_id),
+                            spools=group_spools(read.filaments, spools, group_id),
                         )
                         for group_id, pick in ordered
                     ],
@@ -1429,7 +1437,7 @@ class SlicedRequirements(Protocol):
 
 async def sliced_as_planned(
     client: SlicedRequirements, *, sliced: int, plate_id: int, colours: Sequence[str]
-) -> None:
+) -> FilamentRequirements | None:
     """Refuse a slice that gave a slot another slot's filament (#4013), before it is
     queued: a slot the plate prints with that comes back in the colour chosen for
     another slot, not its own.
@@ -1439,8 +1447,23 @@ async def sliced_as_planned(
     slice still succeeds. A black spool then ran a glow profile, and the run said it had
     printed what was chosen. Only that is judged: a colour that is no other slot's (one
     Bambuddy spells or rounds otherwise, or a slot with none chosen or read back) is not
-    evidence of a swap, and refusing on it would refuse prints that are right."""
-    requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+    evidence of a swap, and refusing on it would refuse prints that are right.
+
+    Returns what it read, for the rack pick to rank from rather than read again, or
+    ``None`` when Bambuddy did not answer."""
+    try:
+        requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+    except ApiError as error:
+        if not is_transient(error):
+            raise
+        # A large 3MF can outlast this read (#2550), and the run is built to go ahead
+        # without one: not answering is no evidence of a swap.
+        logger.warning(
+            "could not check sliced file %s's filaments, queueing it unchecked: %s",
+            sliced,
+            error.detail,
+        )
+        return None
     chosen = [normalise_colour(colour) for colour in colours]
     for filament in requirements.filaments:
         slot = filament.slot_id
@@ -1460,6 +1483,7 @@ async def sliced_as_planned(
                 " slice would print that spool with another filament's profile.",
                 sliced_library_file_id=sliced,
             )
+    return requirements
 
 
 async def queue_plate(
@@ -1475,10 +1499,13 @@ async def queue_plate(
     (#1073). The pick and the save never raise (spec 2026-10-01 §5): only the check that
     the slice holds the filaments sent for it (:func:`sliced_as_planned`, #4013) and the
     queue call can fail."""
-    if plate.plan is not None:
+    read = (
         await sliced_as_planned(
             client, sliced=sliced, plate_id=plate.plate_id, colours=plate.plan.filament_colours
         )
+        if plate.plan is not None
+        else None
+    )
     notes: list[FilamentWarning] = []
     choice = (
         await rack_chooser(
@@ -1490,6 +1517,7 @@ async def queue_plate(
             manual_position=planned.rack_position,
             rack=rack,
             warnings=notes,
+            requirements=read,
         )(sliced)
         if planned.has_rack
         else None

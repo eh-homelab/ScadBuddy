@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import cast
 
+import httpx
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan
+from scadbuddy.bambuddy.errors import map_transport
 from scadbuddy.bambuddy.models import FilamentRequirement, FilamentRequirements, PresetRef
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, queue_plate, sliced_as_planned
@@ -68,6 +70,18 @@ async def test_a_colour_that_is_no_other_slots_is_not_a_swap() -> None:
     that is none of the chosen colours says nothing about which profile it sliced with."""
     sliced = Sliced(slot(1, "#0047BB"), slot(2, BLACK))
     await sliced_as_planned(sliced, sliced=77, plate_id=1, colours=["#688197", BLACK])
+
+
+class Unanswered(Sliced):
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements:
+        raise map_transport(httpx.ReadTimeout("slicing a preview"), what="read them")
+
+
+async def test_a_bambuddy_that_does_not_answer_lets_the_slice_through() -> None:
+    """#2550: a large 3MF outlasts the read, and the run goes ahead without it."""
+    await sliced_as_planned(Unanswered(), sliced=77, plate_id=1, colours=[GLOW, BLACK])
 
 
 async def test_queueing_a_swapped_slice_stops_before_the_queue() -> None:

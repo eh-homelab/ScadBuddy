@@ -778,7 +778,8 @@ def test_an_unreadable_usage_still_previews_the_rack_without_logging_a_serial(
 def test_a_printer_without_a_rack_makes_no_rack_pick(client: TestClient, model: str) -> None:
     """claude-review on #1043, finding 3.1: a readable status with no nozzle rack (an X1C,
     a P1S) reads no sliced requirements for the rack and carries no rack warning, even
-    when that read would have failed."""
+    when that read would have failed. The slice check's one read (#4013) is all there
+    is, and its failure only goes unchecked."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -802,7 +803,7 @@ def test_a_printer_without_a_rack_makes_no_rack_pick(client: TestClient, model: 
     response = run_print(client, output_id, json=body(**CHECK_04))
 
     assert response.status_code == 200, response.text
-    assert not [c for c in sliced_reads.calls if "/library/files/77/" in c.request.url.path]
+    assert len([c for c in sliced_reads.calls if "/library/files/77/" in c.request.url.path]) == 1
     assert not [w for w in response.json()["warnings"] if w["kind"].startswith("rack-")]
 
 
