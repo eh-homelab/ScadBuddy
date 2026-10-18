@@ -123,6 +123,7 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
@@ -724,15 +725,25 @@ async def get_library_preview(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     plate: Annotated[int, Query(ge=1)] = 1,
 ) -> Response:
     """Plate ``plate`` of the file, read from the 3MF a print of it slices (#1753), as an
     output's ``preview.glb`` is read from its own: its parts in their colours, where the
     file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,
     damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404."""
+    native = await library.serving_native()
     async with client_for(store.load()) as client:
         try:
-            data = await library_preview(client, paths.cache, file_id, plate, budget, downloads)
+            data = await library_preview(
+                client,
+                paths.cache,
+                file_id,
+                plate,
+                budget,
+                downloads,
+                files=reads_for(file_id, client, native),
+            )
         except NotViewableError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except NoSuchPlateError as error:
@@ -1013,6 +1024,7 @@ async def get_library_choices(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
@@ -1021,7 +1033,9 @@ async def get_library_choices(
     ScadBuddy cannot read them from (#2550)."""
     settings = store.load()
     remembered = store.library_choices(file_id)
+    native = await library.serving_native()
     async with client_for(settings) as client:
+        files = reads_for(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
         source = LibrarySource.load(
             client,
@@ -1029,8 +1043,14 @@ async def get_library_choices(
             uploads=uploads,
             settings=settings,
             filaments=partial(
-                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+                library_filaments,
+                client,
+                paths.cache,
+                budget=budget,
+                downloads=downloads,
+                files=files,
             ),
+            files=files,
         )
         return await choices_for(
             client,
@@ -1068,6 +1088,7 @@ async def get_library_filaments(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
@@ -1076,7 +1097,9 @@ async def get_library_filaments(
     ] = None,
 ) -> FilamentOptions:
     settings = store.load()
+    native = await library.serving_native()
     async with client_for(settings) as client:
+        files = reads_for(file_id, client, native)
         return await filament_options_for_library(
             client,
             uploads,
@@ -1087,8 +1110,14 @@ async def get_library_filaments(
             all_plates=all_plates,
             plate_ids=plate_ids,
             filaments=partial(
-                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+                library_filaments,
+                client,
+                paths.cache,
+                budget=budget,
+                downloads=downloads,
+                files=files,
             ),
+            files=files,
         )
 
 
@@ -1117,6 +1146,7 @@ async def post_library_run(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
 ) -> PrintRun | JSONResponse:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
@@ -1137,6 +1167,7 @@ async def post_library_run(
         downloads=downloads,
         response=response,
         http=http,
+        native=await library.serving_native(),
     )
 
 
@@ -1152,16 +1183,18 @@ async def start_library_run(
     downloads: DownloadCache | None,
     response: Response | None = None,
     http: Request | None = None,
+    native: LibraryReads | None = None,
 ) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
     signature (#2718 review). ``response`` takes the route's status code; a caller with
     no response of its own reads the run's ``status`` instead. Only ``http`` asking for
     ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
-    calls it, the answer is always the run."""
+    calls it, the answer is always the run. ``native`` is the native library that serves,
+    if one does (#3827)."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
-        filaments = await _run_filaments(store, paths, budget, file_id, downloads)
+        filaments = await _run_filaments(store, paths, budget, file_id, downloads, native)
         return source.model_copy(update={"filaments": filaments})
 
     return await accept_run(
@@ -1183,6 +1216,7 @@ async def _run_filaments(
     budget: ReadBudget,
     file_id: int,
     downloads: DownloadCache | None,
+    native: LibraryReads | None = None,
 ) -> LocalFilaments | None:
     """The slots a run of library file ``file_id`` reads (#2550): from the cache the
     dialog filled, or a download of the file that fills it. Only for a file Bambuddy
@@ -1192,10 +1226,13 @@ async def _run_filaments(
     why a file cannot print."""
     try:
         async with client_for(store.load()) as client:
-            file = await client.library_file(file_id)
+            files = reads_for(file_id, client, native)
+            file = await files.library_file(file_id)
             if not file.file_hash:
                 return None
-            return await library_filaments(client, paths.cache, file, budget, downloads)
+            return await library_filaments(
+                client, paths.cache, file, budget, downloads, files=files
+            )
     except ApiError:
         return None
 
@@ -1340,11 +1377,14 @@ async def post_library_check(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550)."""
     settings = store.load()
+    native = await library.serving_native()
     async with client_for(settings) as client:
+        files = reads_for(file_id, client, native)
         return await check_for_library(
             client,
             uploads,
@@ -1353,6 +1393,12 @@ async def post_library_check(
             body,
             rack=rack,
             filaments=partial(
-                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+                library_filaments,
+                client,
+                paths.cache,
+                budget=budget,
+                downloads=downloads,
+                files=files,
             ),
+            files=files,
         )

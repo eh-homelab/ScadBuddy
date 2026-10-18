@@ -5,7 +5,9 @@ satisfy these, structurally."""
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from fastapi import status
 
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
@@ -14,6 +16,11 @@ from scadbuddy.bambuddy.models import (
     LibraryListRow,
     LibraryPlates,
 )
+from scadbuddy.core.problems import ApiError
+from scadbuddy.print_library.ids import is_native_id
+
+if TYPE_CHECKING:
+    from scadbuddy.bambuddy.client import BambuddyClient
 
 
 class LibraryListingSource(Protocol):
@@ -30,3 +37,16 @@ class LibraryReads(Protocol):
     async def filament_requirements(
         self, file_id: int, *, plate_id: int | None = None
     ) -> FilamentRequirements: ...
+
+
+def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None) -> LibraryReads:
+    """Where file ``file_id`` is read: ``native`` for a native id, Bambuddy for any other.
+    A native id with no native library to read it (``library_backend=bambuddy``) is the
+    404 a missing file is."""
+    if not is_native_id(file_id):
+        return client
+    if native is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"library file {file_id} not found", file_id=file_id
+        )
+    return native

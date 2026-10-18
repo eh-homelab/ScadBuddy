@@ -1017,6 +1017,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
         links=state.print_links,
+        # This process's own native library when it serves (#3827).
+        library=await state.components.get(PRINT_LIBRARY).serving_native(),
     )
     ops = state.components.get(OPERATIONS)
     activities = [

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -47,6 +48,8 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -62,15 +65,26 @@ def _json(model: Any) -> dict[str, Any]:
     return dumped
 
 
+#: The native library a kind reads a native file from (#3827), asked when the kind runs:
+#: the kinds are built before the settings say which library serves.
+NativeReads = Callable[[], Awaitable[LibraryReads | None]]
+
+
 def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
-    """The Bambuddy kinds, bound to this process's stores and its volume."""
+    """The Bambuddy kinds, bound to this process's stores, its volume and its own native
+    library when that serves (#3827)."""
     return bambuddy_kinds_over(
         settings_store=core.settings_store,
         outputs=LocalOutputs(core.outputs, core.catalogue),
         uploads=core.uploads,
         links=core.print_links,
         archive_cache=components.get(ARCHIVE_CACHE),
+        library=components.get(PRINT_LIBRARY).serving_native,
     )
+
+
+async def _no_native() -> LibraryReads | None:
+    return None
 
 
 def bambuddy_kinds_over(
@@ -80,9 +94,10 @@ def bambuddy_kinds_over(
     uploads: BambuddyUploadStore,
     links: PrintLinkStore,
     archive_cache: ArchiveCache,
+    library: NativeReads = _no_native,
 ) -> list[OperationKind]:
     """The Bambuddy kinds over these stores: the API's, or the print worker's, which
-    reads its outputs through the API (#1060)."""
+    reads its outputs (#1060) and native library files (#3827) through the API."""
     cache = archive_cache
 
     async def no_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -323,14 +338,16 @@ def bambuddy_kinds_over(
             source: PrintSource
             subject: str
             if request.get("library_file_id") is not None:
-                subject = PrintSubject.library(request["library_file_id"]).run_subject
+                file_id = request["library_file_id"]
+                subject = PrintSubject.library(file_id).run_subject
                 # Its slots from the download it uploads (#2550).
                 source = await LibrarySource.load(
                     client,
-                    request["library_file_id"],
+                    file_id,
                     uploads=uploads,
                     settings=settings,
                     read_own=True,
+                    files=reads_for(file_id, client, await library()),
                 )
             else:
                 meta = await require(outputs, request["output_id"])

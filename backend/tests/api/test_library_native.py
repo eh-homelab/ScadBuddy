@@ -5,30 +5,41 @@ with an `Idempotency-Key`, so the operation kinds really run."""
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+import httpx
 import numpy as np
 import pytest
+import respx
 import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import ReuseLostError
+from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_library import flow_copy_routes, run_library, uploaded_name
+from tests.api.test_print_run_choices import body as run_body
+from tests.api.test_print_run_choices import run_routes
+from tests.api.test_send import configure
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -557,3 +568,142 @@ def test_a_full_store_is_507(tiny_store_client: TestClient, three_mf: Path) -> N
     assert (
         tiny_store_client.get("/api/v1/print/library", params={"all": True}).json()["files"] == []
     )
+
+
+# --- Task 7a: printing a native file ------------------------------------------------------
+
+
+def _one_colour(path: Path) -> Path:
+    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(10, 10, 4)))]
+    write_bambu_3mf(parts, path, thumbnails=None, model_name="plug")
+    return path
+
+
+def _asked_bambuddy_for(file_id: int) -> list[str]:
+    return [
+        call.request.url.path
+        for call in respx.calls
+        if call.request.url.path.startswith(f"/api/v1/library/files/{file_id}")
+    ]
+
+
+def _settled(client: TestClient, started: httpx.Response) -> dict[str, Any]:
+    assert started.status_code == 202, started.text
+    op: dict[str, Any] = started.json()
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    return op
+
+
+SLOT_1 = {"slots": [{"slot_id": 1, "spool_id": 9}]}
+
+
+@respx.mock
+def test_print_dialog_choices_for_a_native_file(native_client: TestClient, tmp_path: Path) -> None:
+    configure(native_client)
+    run_routes()
+    plug = _upload(native_client, _one_colour(tmp_path / "plug.3mf"))
+
+    choices = native_client.get(f"/api/v1/print/library/{plug.id}/choices")
+
+    assert choices.status_code == 200, choices.text
+    # Its slots are read from the file itself; Bambuddy never hears of the file.
+    assert [slot["slot_id"] for slot in choices.json()["filaments"]["slots"]] == [1]
+    assert _asked_bambuddy_for(plug.id) == []
+
+
+@respx.mock
+def test_the_print_check_and_filaments_of_a_native_file(
+    native_client: TestClient, tmp_path: Path
+) -> None:
+    configure(native_client)
+    run_routes()
+    plug = _upload(native_client, _one_colour(tmp_path / "plug.3mf"))
+
+    filaments = native_client.get(f"/api/v1/print/library/{plug.id}/filaments")
+    check = native_client.post(
+        f"/api/v1/print/library/{plug.id}/check", json={**run_body(), "filament_plan": SLOT_1}
+    )
+
+    assert filaments.status_code == 200, filaments.text
+    assert [slot["slot_id"] for slot in filaments.json()["slots"]] == [1]
+    assert check.status_code == 200, check.text
+    assert _asked_bambuddy_for(plug.id) == []
+
+
+@respx.mock
+def test_a_preview_slice_of_a_native_file_starts(native_client: TestClient, tmp_path: Path) -> None:
+    configure(native_client)
+    upload = flow_copy_routes()
+    run_routes()
+    sliced = slice_routes()
+    plug = _upload(native_client, _one_colour(tmp_path / "plug.3mf"))
+
+    started = native_client.post(
+        f"/api/v1/print/library/{plug.id}/preview-slice",
+        json={**run_body(), "filament_plan": SLOT_1},
+        headers=press(),
+    )
+
+    op = _settled(native_client, started)
+    assert op["status"] == "succeeded", op
+    assert uploaded_name(upload) == "plug (ScadBuddy).3mf"
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+    assert _asked_bambuddy_for(plug.id) == []
+
+
+@respx.mock
+def test_a_native_file_prints_through_the_run(native_client: TestClient, tmp_path: Path) -> None:
+    """The run on the in-process print worker reads the native file from the API's own
+    library, and slices and queues its laid-out copy."""
+    configure(native_client)
+    upload = flow_copy_routes()
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    plug = _upload(native_client, _one_colour(tmp_path / "plug.3mf"))
+
+    response = run_library(native_client, plug.id, json={**run_body(), "filament_plan": SLOT_1})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["library_file_id"] == 141
+    assert upload.call_count == 1
+    assert json.loads(queued.calls.last.request.content)["library_file_id"] == 77
+    assert _asked_bambuddy_for(plug.id) == []
+
+
+def test_the_internal_routes_read_a_native_file(
+    native_client: TestClient, uploaded: NativeFile, tmp_path: Path
+) -> None:
+    """What the print worker's `RemoteLibrary` reads, through the API's hidden routes."""
+
+    async def read() -> tuple[Any, ...]:
+        http = httpx.AsyncClient(transport=httpx.ASGITransport(app=native_client.app))
+        remote = RemoteLibrary("http://scadbuddy", http)
+        try:
+            file = await remote.library_file(uploaded.id)
+            plates = await remote.library_plates(uploaded.id)
+            data = b"".join([c async for c in remote.download_library_file(uploaded.id)])
+            with pytest.raises(ApiError) as missing:
+                await remote.library_file(uploaded.id + 1)
+        finally:
+            await remote.aclose()
+        return file, plates, data, missing.value
+
+    assert native_client.portal is not None
+    file, plates, data, missing = native_client.portal.call(read)
+
+    assert file.filename == "bracket.3mf"
+    assert [plate.index for plate in plates.plates] == [1]
+    assert data == (tmp_path / "bracket.3mf").read_bytes()
+    assert missing.status == 404
+    paths = native_client.get("/openapi.json").json()["paths"]
+    assert not [path for path in paths if path.startswith("/api/v1/internal/library")]
+
+
+def test_the_internal_routes_on_bambuddy_answer_404(client: TestClient) -> None:
+    response = client.get("/api/v1/internal/library/1000000001")
+    assert response.status_code == 404
+    assert response.json()["file_id"] == 1000000001

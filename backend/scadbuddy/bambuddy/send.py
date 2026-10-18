@@ -13,11 +13,12 @@ import hashlib
 import io
 import json
 import logging
+import tempfile
 import weakref
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, NamedTuple
+from typing import BinaryIO, Literal, NamedTuple
 
 from fastapi import status
 from pydantic import BaseModel
@@ -973,6 +974,50 @@ async def _still_there(
         await uploads.forget(key, copy.id)
         return None
     return CopyFound(filename=found.filename)
+
+
+#: The ``target_key`` of a copy uploaded as the file is, with nothing laid out (#3827).
+RAW_TARGET = "raw"
+
+
+async def ensure_raw_copy(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    settings: StoredSettings,
+    *,
+    folder_id: int | None,
+    filename: str,
+    media_type: str,
+    write: Callable[[BinaryIO], Awaitable[None]],
+) -> int:
+    """A copy of a file Bambuddy does not hold, uploaded as it is into ``folder_id`` (the
+    inbox when ``None``) and recorded under ``key`` as :data:`RAW_TARGET` (#3827): a
+    native library file with no 3MF to lay out. One recorded there is reused while
+    Bambuddy still has it; else ``write`` spools the bytes and they are uploaded. In the
+    inbox the new copy supersedes the key's others there, as :func:`upload_copy`'s does.
+    Held under the copy's folder lock, as :func:`ensure_uploaded` is."""
+    folder = folder_id if folder_id is not None else settings.library_folder_id
+    lock = _copy_lock_key(key, folder, settings)
+    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0] or ''}:{lock[1]}"):
+        for copy in await uploads.for_output(key):
+            if copy.folder_id != folder or copy.target_key != RAW_TARGET:
+                continue
+            if await _still_there(client, uploads, key, copy, tolerate_errors=True) is not None:
+                return copy.id
+        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+            await write(spool)
+            uploaded = await upload_into(
+                client, filename, spool, folder_id=folder, media_type=media_type
+            )
+        await uploads.record(
+            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET)
+        )
+        if is_inbox(folder, settings):
+            for copy in await uploads.for_output(key):
+                if copy.id != uploaded.id and copy.folder_id == folder:
+                    await _delete_copy(client, uploads, key, copy.id, strict=False)
+    return uploaded.id
 
 
 @dataclass(frozen=True)

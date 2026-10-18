@@ -42,6 +42,8 @@ from scadbuddy.batches.store import (
     PrintBatchStore,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.reads import LibraryReads
 
 ActivityDep = Annotated[ActivityComponent, component_dep(ACTIVITY)]
 
@@ -269,6 +271,7 @@ async def post_batch_queue(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    library: PrintLibraryDep,
     from_position: Annotated[int, Query(ge=0)] = 0,
 ) -> PrintBatch | JSONResponse:
     """Starts each file's library run, in order, and records what happened to each: the
@@ -295,6 +298,7 @@ async def post_batch_queue(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Every file is skipped or removed, so there is nothing to queue.",
         )
+    native = await library.serving_native()
     began, sent, slowest = time.monotonic(), 0, ACCEPT_BUDGET
     for item in batch.items:
         if item.position < from_position or item.skipped or item.removed:
@@ -322,7 +326,7 @@ async def post_batch_queue(
             continue  # its choices changed since the read: the next Queue all sends them
         starting = time.monotonic()
         outcome = await _queue_one(
-            batch_id, item, attempt, runs, activity, store, paths, budget, downloads
+            batch_id, item, attempt, runs, activity, store, paths, budget, downloads, native
         )
         slowest = max(slowest, time.monotonic() - starting)
         await batches.record_outcome(batch_id, item.position, outcome)
@@ -354,6 +358,7 @@ async def _queue_one(
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
+    native: LibraryReads | None = None,
 ) -> BatchOutcome:
     if item.request is None:
         return UNCHOSEN
@@ -369,6 +374,7 @@ async def _queue_one(
             paths=paths,
             budget=budget,
             downloads=downloads,
+            native=native,
         )
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
