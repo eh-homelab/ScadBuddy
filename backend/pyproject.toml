@@ -69,6 +69,8 @@ dev = [
     "types-regex>=2026.9.29.20261005",
     "moto[server]>=5.1",
     "types-aiobotocore[s3]>=2.21,<3",
+    "aiomqtt>=2.3,<3",
+    "pyftpdlib[ssl]>=2.2",
 ]
 
 [tool.ruff]

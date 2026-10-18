@@ -1,0 +1,129 @@
+{
+  "about": "The fake printer's report (e2e-stack/fake-printer/printer.py): the shape of OpenBambuAPI mqtt.md's pushing.pushall example (Doridian/OpenBambuAPI cc383a2c), with an H2C's units: AMS 0 (tray 0 tagged, tray 1 untagged, tray 2 empty, tray 3 untagged), one AMS-HT (128) and the external holder. Every value is made up; the one non-zero tray_uuid/tag_uid is the Bambuddy recorder's tagged spool (e2e-stack/bambuddy-recorder/recorder.py).",
+  "print": {
+    "command": "push_status",
+    "sequence_id": "0",
+    "gcode_state": "IDLE",
+    "gcode_file": "",
+    "mc_percent": 0,
+    "mc_remaining_time": 0,
+    "mc_print_stage": "1",
+    "layer_num": 0,
+    "total_layer_num": 0,
+    "subtask_name": "",
+    "subtask_id": "",
+    "task_id": "",
+    "project_id": "",
+    "profile_id": "",
+    "print_type": "",
+    "print_error": 0,
+    "hms": [],
+    "sdcard": true,
+    "nozzle_diameter": "0.4",
+    "nozzle_temper": 25.0,
+    "nozzle_target_temper": 0.0,
+    "bed_temper": 25.0,
+    "bed_target_temper": 0.0,
+    "chamber_temper": 24.0,
+    "wifi_signal": "-45dBm",
+    "ams": {
+      "ams": [
+        {
+          "id": "0",
+          "humidity": "4",
+          "temp": "22.7",
+          "tray": [
+            {
+              "id": "0",
+              "cols": ["F5547CFF"],
+              "tray_color": "F5547CFF",
+              "tray_type": "PLA",
+              "tray_sub_brands": "PLA Basic",
+              "tray_id_name": "A00-P0",
+              "tray_info_idx": "GFA00",
+              "remain": 80,
+              "nozzle_temp_min": "190",
+              "nozzle_temp_max": "240",
+              "state": 11,
+              "tag_uid": "FA4E0DE1C0FFEE01",
+              "tray_uuid": "5CADB0DDF1A7E5000000000000000001"
+            },
+            {
+              "id": "1",
+              "cols": ["FFFFFFFF"],
+              "tray_color": "FFFFFFFF",
+              "tray_type": "PLA",
+              "tray_sub_brands": "",
+              "tray_id_name": "",
+              "tray_info_idx": "GFL99",
+              "remain": -1,
+              "nozzle_temp_min": "190",
+              "nozzle_temp_max": "240",
+              "state": 11,
+              "tag_uid": "0000000000000000",
+              "tray_uuid": "00000000000000000000000000000000"
+            },
+            {"id": "2"},
+            {
+              "id": "3",
+              "cols": ["000000FF"],
+              "tray_color": "000000FF",
+              "tray_type": "PETG",
+              "tray_sub_brands": "",
+              "tray_id_name": "",
+              "tray_info_idx": "GFG99",
+              "remain": -1,
+              "nozzle_temp_min": "220",
+              "nozzle_temp_max": "260",
+              "state": 11,
+              "tag_uid": "0000000000000000",
+              "tray_uuid": "00000000000000000000000000000000"
+            }
+          ]
+        },
+        {
+          "id": "128",
+          "humidity": "3",
+          "temp": "24.1",
+          "tray": [
+            {
+              "id": "0",
+              "cols": ["F95959FF"],
+              "tray_color": "F95959FF",
+              "tray_type": "PETG",
+              "tray_sub_brands": "",
+              "tray_id_name": "",
+              "tray_info_idx": "GFG00",
+              "remain": -1,
+              "nozzle_temp_min": "220",
+              "nozzle_temp_max": "260",
+              "state": 11,
+              "tag_uid": "0000000000000000",
+              "tray_uuid": "00000000000000000000000000000000"
+            }
+          ]
+        }
+      ],
+      "ams_exist_bits": "10001",
+      "tray_exist_bits": "b",
+      "tray_now": "255",
+      "tray_pre": "255",
+      "tray_tar": "255",
+      "version": 4
+    },
+    "vt_tray": {
+      "id": "254",
+      "cols": ["00000000"],
+      "tray_color": "00000000",
+      "tray_type": "",
+      "tray_sub_brands": "",
+      "tray_id_name": "",
+      "tray_info_idx": "",
+      "remain": 0,
+      "nozzle_temp_min": "0",
+      "nozzle_temp_max": "0",
+      "tag_uid": "0000000000000000",
+      "tray_uuid": "00000000000000000000000000000000"
+    }
+  }
+}
