@@ -131,10 +131,37 @@ def _number(value: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
+def _mirror_plane(part: ColourPart) -> float | None:
+    """For a part whose painting's corners run against its faces (`Paint.reversed`,
+    #4015): twice the x of the plane through its box's centre, which its object file is
+    stored mirrored about and its component mirrors it back about. ``None`` for any
+    other part, stored as it is with an identity component.
+
+    Bambu Studio keeps a mirror in a transform and paints the mesh as stored, so a part
+    stored mirrored back has its faces in its codes' corner order, facing out, and the
+    component puts it where it prints. About its own box's centre, so the stored box is
+    the part's box: what the placement and :func:`_written_extents` read."""
+    if part.paint is None or not part.paint.reversed or not len(part.mesh.vertices):
+        return None
+    xs = np.asarray(part.mesh.vertices)[:, 0]
+    return float(xs.min() + xs.max())
+
+
+def _component_transform(part: ColourPart) -> str:
+    plane = _mirror_plane(part)
+    return IDENTITY if plane is None else f"-1 0 0 0 1 0 0 0 1 {_number(plane)} 0 0"
+
+
 def object_model(part: ColourPart, object_id: int) -> str:
+    points = np.asarray(part.mesh.vertices)
+    faces = np.asarray(part.mesh.faces)
+    plane = _mirror_plane(part)
+    if plane is not None:
+        points = points * np.array([-1.0, 1.0, 1.0]) + np.array([plane, 0.0, 0.0])
+        faces = faces[:, ::-1]
     vertices = "".join(
         f'\n     <vertex x="{_number(v[0])}" y="{_number(v[1])}" z="{_number(v[2])}"/>'
-        for v in part.mesh.vertices
+        for v in points
     )
     codes = part.paint.codes if part.paint is not None else ("",) * len(part.mesh.faces)
     if len(codes) != len(part.mesh.faces):
@@ -143,7 +170,7 @@ def object_model(part: ColourPart, object_id: int) -> str:
         f'\n     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"'
         + (f' {PAINT_ATTRIBUTE}="{code}"' if code else "")
         + "/>"
-        for f, code in zip(part.mesh.faces, codes, strict=True)
+        for f, code in zip(faces, codes, strict=True)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -323,8 +350,9 @@ def root_model(
         for assembly in assemblies:
             components = "".join(
                 f'\n    <component p:path="/3D/Objects/object_{index}.model" objectid="{index}"'
-                f' p:UUID="{_uuid(model_name, f"component-{index}")}" transform="{IDENTITY}"/>'
-                for index in assembly.part_ids
+                f' p:UUID="{_uuid(model_name, f"component-{index}")}"'
+                f' transform="{_component_transform(part)}"/>'
+                for index, part in zip(assembly.part_ids, assembly.parts, strict=True)
             )
             name = assembly.name(model_name, len(plates))
             objects.append(
@@ -976,7 +1004,8 @@ def _plate_geometry(
     (#1965): what a plate's tower counts beside its parts' extruders (#2108), which
     ``model_settings.config`` does not state.
 
-    The component transforms this writer emits are the identity, so the vertex
+    The component transforms this writer emits are the identity, or a mirror about
+    the part's own box centre (`_mirror_plane`, #4015), so the vertex
     extents *are* the assembly's extents; the build item carries the whole
     placement. Reading them back rather than trusting a recorded plate size keeps
     :func:`replate_3mf` correct for files written before plates were per printer.

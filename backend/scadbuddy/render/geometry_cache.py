@@ -265,7 +265,11 @@ def recolour_piece(
                 # (#3956), as an arranged copy's are (`workflows/outputs.py`).
                 None
                 if part.paint is None
-                else Paint(part.paint.codes, tuple(_swap(c, mapping) for c in part.paint.colours)),
+                else Paint(
+                    part.paint.codes,
+                    tuple(_swap(c, mapping) for c in part.paint.colours),
+                    part.paint.reversed,
+                ),
                 negative=part.negative,
             )
             for part in parts

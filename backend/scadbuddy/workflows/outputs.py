@@ -318,6 +318,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                         paint = Paint(
                             paint.codes,
                             tuple(swap.get(c.upper(), c.upper()) for c in paint.colours),
+                            paint.reversed,
                         )
                     for used in [colour, *(paint.used() if paint is not None else [])]:
                         if used.upper() not in colours:

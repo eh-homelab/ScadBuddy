@@ -107,6 +107,13 @@ def scene_from_objects(
             path = f"{stem}-p{number}.3mf"
             files[path] = part_mesh_3mf(mesh)
             painted = colour_part.paint is not None
+            if colour_part.paint is not None and colour_part.paint.reversed:
+                # Its codes are in the reverse of its faces' corner order, which the
+                # editor's carrying of a painting across an edit does not follow.
+                raise UnreadableObjectsError(
+                    f"{obj.name} is painted and mirrored, which a mesh model cannot open"
+                    " yet; Arrange can carry it to a printer"
+                )
             if colour_part.paint is not None:
                 files[f"{stem}-p{number}.paint.json"] = json.dumps(
                     dataclasses.asdict(colour_part.paint)
