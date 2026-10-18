@@ -95,7 +95,7 @@
       "text": "resets Oct 17, 10pm (UTC)",
       "now": "2026-10-17T22:16:05Z",
       "at": null,
-      "why": "#4093 review: a date that just passed is not next year's, even within RESET_GRACE (a dated reset has no grace)"
+      "why": "#4093 review: a date that just passed is not next year's (a dated reset has no grace)"
     },
     {
       "text": "resets Sep 3, 4am (UTC)",
