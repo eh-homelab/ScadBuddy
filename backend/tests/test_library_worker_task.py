@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +18,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.batches.store import Pruned
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.housekeeping import (
@@ -307,6 +309,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         await asyncio.sleep(0.1)
         return 0
 
+    async def slow_batches(older_than: timedelta, *, pending_older_than: timedelta) -> Pruned:
+        await asyncio.sleep(0.1)
+        return Pruned(count=0, pending=[])
+
     monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
     monkeypatch.setattr(main, "client_for", _a_client)
     monkeypatch.setattr(main, "sweep_lost_slices", slow_previews)
@@ -316,7 +322,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
         # #2718: the claims sweep prunes batch prints too.
-        components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_previews)),
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_batches)),
     )
     state.paths.claims = None
 
@@ -331,7 +337,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
     state.components = SimpleNamespace(
-        get=lambda key: SimpleNamespace(index=SlowIndex(), prune=slow_previews)
+        get=lambda key: SimpleNamespace(index=SlowIndex(), prune=slow_batches)
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []

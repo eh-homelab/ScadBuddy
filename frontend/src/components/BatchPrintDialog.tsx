@@ -473,14 +473,15 @@ function ReviewRow({
 function overridesOf(request: NonNullable<BatchItem['request']>): string[] {
   const shown: string[] = []
   const supports = request.supports
-  if (supports) {
-    shown.push(
-      !supports.enabled
-        ? 'No supports'
-        : supports.type
-          ? `${supports.type === 'tree' ? 'Tree' : 'Normal'} supports`
-          : 'Supports on',
-    )
+  if (supports && !supports.enabled) shown.push('No supports')
+  else if (supports) {
+    // The angle and build-plate-only are step choices over the template too (#3932 review).
+    const parts = [supports.type ? `${supports.type === 'tree' ? 'Tree' : 'Normal'} supports` : 'Supports on']
+    if (supports.threshold_angle != null) parts.push(`${supports.threshold_angle}° threshold`)
+    if (supports.on_build_plate_only != null) {
+      parts.push(supports.on_build_plate_only ? 'on the build plate only' : 'everywhere')
+    }
+    shown.push(parts.join(', '))
   }
   const tower = request.prime_tower
   if (tower) {

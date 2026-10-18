@@ -616,6 +616,8 @@ function batchHandlers() {
       const choice = (await request.json()) as BatchChoice
       // A refusal of other choices than these says so, and one edited back to the
       // choices it refused does not, as the backend marks it (#3798, #3932 review).
+      // JSON text compares key order too, where jsonb does not: both sides here come
+      // from the client's one serializer, so they agree; a request from elsewhere may not.
       if (item.outcome?.status === 'refused') {
         const refused = refusedRequests.get(itemKey(batch.id, item.position)) ?? null
         item.outcome = { ...item.outcome, stale: JSON.stringify(choice.request ?? null) !== refused }

@@ -210,7 +210,7 @@ describe('BatchPrintDialog (#2672)', () => {
     await api.putPrintBatchItem(batch.id, 0, {
       request: {
         ...REQUEST,
-        supports: { enabled: true, type: 'tree' },
+        supports: { enabled: true, type: 'tree', threshold_angle: 25, on_build_plate_only: true },
         prime_tower: { enabled: false },
         print_sequence: 'by object',
         filament_profiles: ['silk-pla'],
@@ -239,7 +239,7 @@ describe('BatchPrintDialog (#2672)', () => {
     await screen.findByRole('dialog', { name: 'Review 2 files' })
 
     expect(screen.getByTestId('batch-overrides-0')).toHaveTextContent(
-      'Tree supports · No prime tower · By object · Filament profile: silk-pla',
+      'Tree supports, 25° threshold, on the build plate only · No prime tower · By object · Filament profile: silk-pla',
     )
     expect(screen.queryByTestId('batch-overrides-1')).toBeNull()
     const edited = screen.getByTestId('batch-outcome-1')

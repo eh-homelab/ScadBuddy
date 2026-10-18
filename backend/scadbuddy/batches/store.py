@@ -199,7 +199,10 @@ class PrintBatchStore:
 
     async def delete(self, batch_id: str) -> Deleted:
         """``pending`` refuses it: a file still being checked is followed by the batch,
-        and a new one would send it again (#3798). One statement, so it cannot race."""
+        and a new one would send it again (#3798). One statement, so the check and the
+        delete read one snapshot; a Queue all that commits ``pending`` after that
+        snapshot is not seen, and its batch goes (#3932 review). The window is the
+        statement's own few milliseconds, and the run itself is untouched."""
         return await asyncio.to_thread(self._delete, batch_id)
 
     def _create(self, files: list[NewBatchFile]) -> PrintBatch:
