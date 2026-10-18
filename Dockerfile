@@ -415,7 +415,8 @@ RUN apt-get update \
 
 # Extracted, never run: the AppImage is an x86-64 ELF runtime followed by a squashfs
 # image, which starts where the ELF's section header table ends (e_shoff at byte 40 plus
-# e_shnum at 60 times e_shentsize at 58, little-endian), so unsquashfs reads it on any
+# e_shnum at 60 times e_shentsize at 58, little-endian, ELF64 only: EI_CLASS, byte 4, is
+# checked to be 2), so unsquashfs reads it on any
 # build host, where `--appimage-extract` would have to execute the runtime. AppRun
 # sets LD_LIBRARY_PATH to the bundled bin/ and LC_ALL=C, then execs
 # bin/bambu-studio. `profiles` is the vendor profile tree (profiles/BBL/),
@@ -431,6 +432,8 @@ RUN curl --fail --silent --show-error --location --output bambu-studio.AppImage 
     && printf '%s  bambu-studio.AppImage\n' "$BAMBU_STUDIO_SHA256_AMD64" > bambu-studio.sha256 \
     && sha256sum --check --strict bambu-studio.sha256 \
     && le() { od -An -t "u$2" -j "$1" -N "$2" --endian=little bambu-studio.AppImage; } \
+    && { [ $(( $(le 4 1) )) -eq 2 ] \
+         || { echo "ERROR: the AppImage runtime is not a 64-bit ELF; re-measure the squashfs offset." >&2; exit 1; }; } \
     && offset=$(( $(le 40 8) + $(le 60 2) * $(le 58 2) )) \
     && unsquashfs -quiet -no-progress -offset "$offset" -dest bambu-studio bambu-studio.AppImage \
     && ln -s resources/profiles bambu-studio/profiles \
