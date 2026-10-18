@@ -11,6 +11,7 @@ that owns the route's behaviour.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import time
@@ -352,6 +353,31 @@ def test_a_resolver_error_is_a_422_before_anything_is_sliced(
     assert response.status_code == 422
     assert "different sizes" in response.json()["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_the_check_reads_every_spools_presets_together(client: TestClient, model: str) -> None:
+    """#4196: spool 5's presets answer only once spool 9's read has started, so a check
+    that read them one after the other would time out here."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    asked = asyncio.Event()
+
+    async def presets(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/spools/9/filament-presets"):
+            asked.set()
+        else:
+            await asyncio.wait_for(asked.wait(), timeout=5)
+        return httpx.Response(200, json=[])
+
+    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
+        side_effect=presets
+    )
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
 
 
 @respx.mock

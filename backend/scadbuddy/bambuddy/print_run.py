@@ -689,11 +689,18 @@ async def resolve_plates(
     are not read: Bambuddy would answer for a spool it does not have with an error."""
     inventory = {spool.spool_id for options in per_plate for spool in options.spools}
     # Read once for every plate: the plan's spools are the same on every plate.
-    spool_presets = {
-        spool_id: await client.spool_filament_presets(spool_id)
-        # A tray chosen for itself (#2164) has no spool, so no presets of its own.
+    # A tray chosen for itself (#2164) has no spool, so no presets of its own.
+    spool_ids = [
+        spool_id
         for spool_id in sorted({slot.spool_id for slot in plan.slots} & inventory)
         if spool_id > 0
+    ]
+    # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
+    read = await asyncio.gather(
+        *(client.spool_filament_presets(spool_id) for spool_id in spool_ids), return_exceptions=True
+    )
+    spool_presets = {
+        spool_id: settled(result) for spool_id, result in zip(spool_ids, read, strict=True)
     }
     every: list[Resolved] = []
     errors: list[str] = []
