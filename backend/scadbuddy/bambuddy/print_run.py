@@ -700,9 +700,9 @@ async def resolve_plates(
         if spool_id > 0
     ]
     # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
-    # A body's plan is not capped, only matched to the inventory, so this one call
-    # reads at most SPOOL_PRESET_READS at a time: Bambuddy is one process. Per call,
-    # not across checks and runs.
+    # A body's plan is not capped, only matched to the inventory, so one plan's fan-out
+    # is: at most SPOOL_PRESET_READS at a time for this call. Not a bound on Bambuddy's
+    # load, which every API replica and the print worker share (#4213).
     gate = asyncio.Semaphore(SPOOL_PRESET_READS)
 
     async def presets(spool_id: int) -> list[SpoolFilamentPreset]:
