@@ -767,6 +767,96 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     return PlateRead(found, count)
 
 
+def plate_boxes(
+    payload: bytes | BinaryIO, budget: ReadBudget | None = None
+) -> dict[int, np.ndarray]:
+    """Each plate's ``(2, 3)`` box where the file places its objects, by plate index
+    (one plate, 1, for a file that lists none): the corners of each mesh's own box
+    carried through its transforms, so it may be larger than the objects' tight box,
+    never smaller. A box needs no faces, so a painted or mirrored object, which
+    :func:`read_objects` refuses, is boxed like any other (#4014). Refused as
+    :func:`read_objects` refuses, within ``budget``."""
+    spend = budget or ReadBudget()
+    return _opened(payload, spend, _plate_boxes)
+
+
+def _plate_boxes(archive: _Archive) -> dict[int, np.ndarray]:
+    model = _root_model_name(archive)
+    plates = _plates(_model_settings(archive))
+    instances: dict[str, int] = {}
+    corners: dict[int, list[np.ndarray]] = {}
+    visits = [0]
+    for item in _build_items(archive, model):
+        object_id = item.get("objectid", "")
+        instance = instances.get(object_id, 0)
+        instances[object_id] = instance + 1
+        on = [index for index, pairs in plates.items() if (object_id, instance) in pairs]
+        if not plates:
+            on = [1]
+        if not on:
+            continue
+        path = (item.get(_PATH) or "").lstrip("/") or model
+        found = _object_corners(archive, path, object_id, _matrix(item.get("transform")), 0, visits)
+        for index in on:
+            corners.setdefault(index, []).extend(found)
+    return {
+        index: np.array([stacked.min(axis=0), stacked.max(axis=0)])
+        for index, points in corners.items()
+        if points
+        for stacked in (np.vstack(points),)
+    }
+
+
+def _object_corners(
+    archive: _Archive,
+    path: str,
+    object_id: str,
+    matrix: np.ndarray,
+    depth: int,
+    visits: list[int],
+) -> list[np.ndarray]:
+    """The corners of each mesh box of ``object_id`` in ``path``, placed by ``matrix``.
+    Each object visited is counted in ``visits`` against the budget's ``max_visits``,
+    as :func:`read_objects` counts them, so components fanning out cost a refusal."""
+    if depth > _MAX_DEPTH:
+        raise UnreadableObjectsError("the 3MF's components nest too deep")
+    visits[0] += 1
+    if visits[0] > archive.budget.max_visits:
+        raise OverBudgetError(archive.budget.refusal("max_visits"))
+    _, objects, scale = archive.model(path)
+    obj = objects.get(object_id)
+    if obj is None:
+        raise UnreadableObjectsError(f"the 3MF places an object it lacks ({object_id})")
+    found: list[np.ndarray] = []
+    mesh = obj.find(f"{_CORE}mesh")
+    arrays = archive.meshes.get(mesh) if mesh is not None else None
+    if arrays is not None and len(arrays.vertices):
+        low, high = arrays.vertices.min(axis=0) * scale, arrays.vertices.max(axis=0) * scale
+        box = np.array(
+            [
+                [x, y, z, 1.0]
+                for x in (low[0], high[0])
+                for y in (low[1], high[1])
+                for z in (low[2], high[2])
+            ]
+        )
+        found.append((_combine(matrix, box.T).T)[:, :3])
+    components = obj.find(f"{_CORE}components")
+    for component in components if components is not None else []:
+        inner = (component.get(_PATH) or "").lstrip("/") or path
+        found.extend(
+            _object_corners(
+                archive,
+                inner,
+                component.get("objectid", ""),
+                _combine(matrix, _matrix(component.get("transform"))),
+                depth + 1,
+                visits,
+            )
+        )
+    return [corners for corners in found if np.isfinite(corners).all()]
+
+
 def _joined_paint(parts: list[ColourPart]) -> Paint | None:
     """The painting of ``parts`` joined in order (an unpainted part's faces unpainted),
     or None when none is painted: a preview draws each colour where its painting puts

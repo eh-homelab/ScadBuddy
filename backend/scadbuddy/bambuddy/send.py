@@ -39,11 +39,23 @@ from scadbuddy.render.bambu3mf import (
     ArchiveTooLargeError,
     FilamentMap,
     layout_of,
+    plate_origin,
+    plates_of,
     replate_3mf,
+    rezipped,
     state_nozzles,
 )
+from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
-from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
+from scadbuddy.render.plate import (
+    PRIME_TOWER_SIDE,
+    PlateFitError,
+    PlateGeometry,
+    Rect,
+    plate_for,
+    tower_beside,
+    tower_reaches,
+)
 from scadbuddy.render.provenance import content_key
 from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import normalise_colour
@@ -279,12 +291,15 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return state_nozzles(
-                payload,
-                nozzle_stats=target.nozzle_stats,
-                nozzle_volume_type=target.nozzle_volume_type,
-                filament_colour=colours,
-                filament_map=target.filament_map,
+            return towers_within_reach(
+                state_nozzles(
+                    payload,
+                    nozzle_stats=target.nozzle_stats,
+                    nozzle_volume_type=target.nozzle_volume_type,
+                    filament_colour=colours,
+                    filament_map=target.filament_map,
+                ),
+                target.plate,
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -304,6 +319,93 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
     return recolour_3mf(payload, colours) if colours is not None else payload
+
+
+def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
+    """The bed the file was laid out on, from its ``printable_area`` (``["0x0",
+    "180x0", ...]``): what its plates' origins are spaced by."""
+    area = settings.get("printable_area")
+    if not isinstance(area, list) or not area:
+        return None
+    try:
+        points = [tuple(float(v) for v in str(point).split("x")) for point in area]
+    except ValueError:
+        return None
+    if any(len(point) != 2 for point in points):
+        return None
+    return (max(x for x, _ in points), max(y for _, y in points))
+
+
+def _tower_value(value: float) -> str:
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
+    """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
+    reach moved beside that plate's objects, by #105's rule (:func:`tower_beside`),
+    else unchanged (#4014).
+
+    An author's file keeps the tower where its printer put it: library file 2440, laid
+    out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
+    below x 25, so every slice failed with "Found G-code in unprintable area". Only an
+    unreachable tower moves; a plate whose objects cannot be read, or that leaves no
+    room, keeps its own, and the slicer says why. The objects are read where the file
+    places them, less their plate's origin on the file's own bed."""
+    if plate.model is None:
+        return payload  # no printer chosen: nothing to judge a tower against
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    xs, ys = settings.get("wipe_tower_x"), settings.get("wipe_tower_y")
+    bed = _source_bed(settings)
+    if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) != len(ys) or bed is None:
+        return payload
+    try:
+        towers = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
+        count = len(plates_of(io.BytesIO(payload))) or 1
+    except (ValueError, zipfile.BadZipFile):
+        return payload
+    try:
+        side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
+    except (TypeError, ValueError):
+        side = PRIME_TOWER_SIDE
+    unreachable = [
+        index
+        for index in range(1, min(count, len(towers)) + 1)
+        if not tower_reaches(towers[index - 1], plate, side)
+    ]
+    if not unreachable:
+        return payload
+    try:
+        boxes = plate_boxes(payload)
+    except UnreadableObjectsError:
+        return payload
+    source = PlateGeometry(
+        model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
+    )
+    moved = list(towers)
+    for index in unreachable:
+        if index not in boxes:
+            continue
+        low, high = boxes[index]
+        ox, oy = plate_origin(index, count, source)
+        corner = tower_beside(
+            Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)),
+            plate,
+        )
+        if corner is not None:
+            moved[index - 1] = corner
+    if moved == towers:
+        return payload
+    settings["wipe_tower_x"] = [_tower_value(x) for x, _ in moved]
+    settings["wipe_tower_y"] = [_tower_value(y) for _, y in moved]
+    logger.info(
+        "moved the file's prime tower where every extruder reaches",
+        extra={"printer_model": plate.model, "towers": len(moved)},
+    )
+    return rezipped(
+        payload, {PROJECT_SETTINGS_NAME: (json.dumps(settings, indent=4) + "\n").encode()}
+    )
 
 
 def nozzles_stated(payload: bytes) -> bool:
