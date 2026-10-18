@@ -167,8 +167,14 @@ template's gallery with defaults. The agent makes one with `order_item_add` (§7
 `manual`), `accepted` (boolean; at most one accepted per item, enforced by a partial
 unique index), the measured facts and the arithmetic:
 
-- `sliced_sha256`, `plates` (jsonb: per plate `{index, print_seconds, filaments:
-  [{slot, used_g}]}` as `read_sliced` gives them, §5.2);
+- `sliced_sha256` and `sliced_blob_key`: the sliced file the quote was read from,
+  kept as a `library` blob with a `blob_refs` row named `order_item_quote:<id>` from
+  the moment the quote is recorded, so the bytes an accepted quote names are there
+  when the print starts, days later; the row is released when a later quote is
+  accepted in its place or the item is cancelled, and §6.1's attempt takes a ref of
+  its own on the same key (so neither outlives the other by accident);
+- `plates` (jsonb: per plate `{index, print_seconds, filaments: [{slot, used_g}]}`
+  as `read_sliced` gives them, §5.2);
 - `lines` (jsonb): the priced lines, each `{kind, label, quantity, unit_minor,
   amount_minor}` with `kind` one of `filament` (one per slot: grams × price per g),
   `machine_time`, `setup`, `labour`, `markup`, `manual`;
@@ -275,7 +281,8 @@ The `order_item_quote` operation, on the `library` queue, as activities of one
 2. **Slice.** Slice the output's 3MF with the item's colours mapped to the chosen
    filaments' slicer profiles, through the slicer the stack has: the print dialog's
    background slice (`housekeeping_sweep_preview_slices`' path) today, the native
-   `slice_plate` activity once #3822 lands. The quote records `sliced_sha256`.
+   `slice_plate` activity once #3822 lands. The quote keeps the sliced file
+   (`sliced_blob_key`, §3.4) and records its `sliced_sha256`.
 3. **Read usage.** For each plate, `slice_info.read_sliced(payload, plate_id)` (F4):
    `print_time_seconds` and `grams_by_slot`, from the sliced 3MF's
    `Metadata/slice_info.config`. It sits over the parser the Bambuddy path reads
@@ -461,7 +468,7 @@ for item in order["items"]:
     if item["status"] != "approved":
         continue
     out = queue_print({"order_item_id": item["id"]}, {})   # §5.4: the accepted quote's file
-    if out["error"] == "requote_needed":                    # its sliced file is gone or stale
+    if out["error"] == "requote_needed":   # PrintOutcome always carries error (None when it queued)
         quote = tool("order_item_quote", {"order_id": order["id"], "item_id": item["id"]})
         # in a flow the tool follows its operation to the answer (§7.3); this is the quote
         rise = quote["total_minor"] - item["accepted_quote"]["total_minor"]
