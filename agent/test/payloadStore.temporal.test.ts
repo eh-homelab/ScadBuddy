@@ -59,8 +59,10 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
       expect(await client.workflow.execute('toolInput', { workflowId: tool, taskQueue, args: [words.length] })).toBe(words.length)
       // The activity's input is what history holds by reference, named, not inferred from files.
       const { history } = await env.client.workflowService.getWorkflowExecutionHistory({ namespace: 'default', execution: { workflowId: tool } })
-      const scheduled = history?.events?.find((e) => e.activityTaskScheduledEventAttributes)?.activityTaskScheduledEventAttributes
-      expect(scheduled?.input?.payloads?.map((p) => referenceOf(p))).toEqual([{ subject: tool, digest: expect.stringMatching(/^[0-9a-f]{64}$/) }])
+      const scheduled = (history?.events ?? []).flatMap((e) => e.activityTaskScheduledEventAttributes ?? [])
+      // Exactly the one lengthOf call: if the stand-in grows, this says so rather than picking the first.
+      expect(scheduled.map((a) => a.activityType?.name)).toEqual(['lengthOf'])
+      expect(scheduled[0]?.input?.payloads?.map((p) => referenceOf(p))).toEqual([{ subject: tool, digest: expect.stringMatching(/^[0-9a-f]{64}$/) }])
     })
     // Both by reference, not inline: each subject's payloads are files on the share
     // (`tool`'s only large payload is its activity's input).
