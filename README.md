@@ -218,30 +218,29 @@ on shutdown.
     task and replays there, so a change to one goes behind `workflow.patched`, and
     nothing is drained on stop. What is left: a request served by the new replica in
     the second or two before its build is current may start a command of a kind only
-    it has on the old build, which refuses it as unregistered. The release notes below
-    that say a release "needs a `Recreate` rollout" were written before #4090; they
-    need none now.
+    it has on the old build, which refuses it as unregistered. The sweep notes below
+    say what a `Recreate` rollout guarded against before #4090; none needs one now.
   - **This release adds a sweep**, `housekeeping_attach_backfills` (#902's backstop:
-    an output re-render whose `job.done` no API replica heard), so it needs that
-    `Recreate` rollout. Each replica attaches a finished re-render to its output when
-    it hears the job settle, and every API start runs one backstop pass whatever the
-    interval, so with 0 a re-render missed while every replica was down waits for the
-    next start.
+    an output re-render whose `job.done` no API replica heard), so it needed, before
+    #4090, a `Recreate` rollout. Each replica attaches a finished re-render to its
+    output when it hears the job settle, and every API start runs one backstop pass
+    whatever the interval, so with 0 a re-render missed while every replica was down
+    waits for the next start.
   - **This release adds a sweep**, `housekeeping_reap_output_holds` (#1007): it releases
     the Parts holds of an output whose `meta.json` is gone (a delete that raced a
-    write), once the hold is an hour old. It needs the same `Recreate` rollout. It
-    releases nothing when it finds no output at all, so an unmounted data volume
-    cannot hand every Part to the blob sweep.
+    write), once the hold is an hour old. Before #4090 it needed the same `Recreate`
+    rollout. It releases nothing when it finds no output at all, so an unmounted data
+    volume cannot hand every Part to the blob sweep.
   - **This release adds a sweep**, `housekeeping_maintain_models_git` (#2289): it runs
     `git gc` on `/data/models` once it holds 256 loose objects or 20 packs, since git's
-    own `gc --auto` waits for 6700 and every model listing walks the whole history. It
-    needs the same `Recreate` rollout. Its first run is the boot's.
+    own `gc --auto` waits for 6700 and every model listing walks the whole history.
+    Before #4090 it needed the same `Recreate` rollout. Its first run is the boot's.
   - **This release adds a sweep**, `housekeeping_sweep_lost_slices`: the files of print
     runs' lost slice starts (#2715), split out of `housekeeping_sweep_preview_slices`
-    so it stays on the prune Schedule while the background-slice sweep obeys 0. It
-    needs the same `Recreate` rollout: until it finishes, a prune run whose sweep an
-    old replica takes fails `housekeeping_sweep_lost_slices` as unregistered, and that
-    sweep waits for the next tick (300 s).
+    so it stays on the prune Schedule while the background-slice sweep obeys 0. Before
+    #4090 it needed the same `Recreate` rollout: until it finished, a prune run whose
+    sweep an old replica took failed `housekeeping_sweep_lost_slices` as unregistered,
+    and that sweep waited for the next tick (300 s).
   - **This release adds a sweep**, `housekeeping_sweep_print_attachments` (#3047): it
     forgets the attachment rows of a print whose archive was deleted in Bambuddy. The
     archive photos went with it; the copies in the project's `Media/` folder stay in
@@ -249,7 +248,7 @@ on shutdown.
     forgets an archive only on Bambuddy's own 404, `{"detail": "Archive not found"}`;
     any other 404 (a wrong URL, a proxy) or an outage forgets nothing for that archive,
     and the sweep goes on to the next and fails at the end. It runs on the first
-    Schedule, so 0 leaves the rows. It needs the same `Recreate` rollout.
+    Schedule, so 0 leaves the rows. Before #4090 it needed the same `Recreate` rollout.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
