@@ -272,6 +272,32 @@ async def test_a_copied_object_deleted_since_does_not_make_the_source_look_dead(
         await target.aclose()
 
 
+async def test_a_first_batch_of_misses_alone_is_forgotten_by_the_next_run(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    """The README's retry: the oldest rows go first and are the likeliest gone, so a
+    healthy source can fail a first batch of misses; once the run has copied
+    something, a new run forgets them."""
+    src = local_content(tmp_path / "a", pool)
+    gone = await src.put("piece", b"gone", name="g", scope=SCOPE)
+    kept = await src.put("piece", b"kept", name="k", scope=SCOPE)
+    assert isinstance(src.backend, LocalContentBackend)
+    (src.backend.root / gone.backend_id).unlink()
+    key = f"piece-{gone.sha256}"
+    index = BlobIndex(pool)
+    try:
+        started = index.now()
+        first = await _batch(index, src.backend, target, limit=1, started=started)
+        assert first.failed == [key] and first.forgotten == []
+        second = await _batch(index, src.backend, target, limit=1, started=started)
+        assert second.moved == 1 and _copy(pool, f"piece-{kept.sha256}")[0] == "s3"
+        again = await _batch(index, src.backend, target, started=index.now())
+        assert again == MigrationBatch(moved=0, remaining=0, failed=[], forgotten=[key])
+        assert index.migration_failures("local", "s3", limit=10) == []
+    finally:
+        await target.aclose()
+
+
 async def test_forgetting_a_missing_object_spares_a_row_put_again_meanwhile(
     pool: Pool, tmp_path: Path
 ) -> None:

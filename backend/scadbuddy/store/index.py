@@ -368,13 +368,15 @@ class BlobIndex:
             )
 
     def copied_refs(self, source: str, target: str, *, limit: int) -> list[BlobRef]:
-        """Up to ``limit`` rows on ``source`` already copied to ``target``, any of them
-        (no order, so no sort): objects the source served this migration, to ask it
-        about again."""
+        """Up to ``limit`` rows on ``source`` already copied to ``target``, most recently
+        touched first: objects the source served this migration, to ask it about again.
+        A copy takes the least recently touched rows first, so these are the latest
+        copies, and the ones in use, the least likely to have been deleted since. The
+        sort runs only for a batch of misses alone (#4114)."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s AND migrated_backend = %s"
-                " LIMIT %s",
+                " ORDER BY touched_at DESC LIMIT %s",
                 (source, target, limit),
             ).fetchall()
         return [_stat(row).ref for row in rows]
