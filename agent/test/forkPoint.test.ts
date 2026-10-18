@@ -1,5 +1,6 @@
+import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
-import { blobNames, DURABLE_TEXT_MAX, durableReplies, entriesThrough, transcriptCut } from '../src/sessions/forkPoint.js'
+import { blobNames, DURABLE_TEXT_MAX, durableReplies, entriesThrough, transcriptCut, unansweredCalls } from '../src/sessions/forkPoint.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // Fork from a message (#793): the panel's assistant message id (`<API message id>:<block>`,
@@ -124,5 +125,21 @@ describe('durableReplies (#2688)', () => {
     expect(entriesThrough(transcript, 'a4')?.map((e) => e.uuid)).toEqual([undefined, 'u1', 'a1', 'a2', 'a3', 'u2', 'a4'])
     expect(entriesThrough(transcript, 's1')).toBeUndefined()
     expect(entriesThrough(transcript, 'nope')).toBeUndefined()
+  })
+})
+
+describe('unansweredCalls (#4173)', () => {
+  const e = (uuid: string, type: string, content: unknown, isSidechain?: boolean) =>
+    ({ type, uuid, ...(isSidechain ? { isSidechain } : {}), message: { content } }) as unknown as SessionStoreEntry
+  it('names a main-chain call with no result, and only that', () => {
+    const entries = [
+      e('a1', 'assistant', [{ type: 'tool_use', id: 'toolu_1', name: 'x', input: {} }]),
+      e('r1', 'user', [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }]),
+      e('a2', 'assistant', [{ type: 'text', text: 'now' }, { type: 'tool_use', id: 'toolu_2', name: 'y', input: {} }]),
+      // A subagent's own call and result are not the main chain's.
+      e('s1', 'assistant', [{ type: 'tool_use', id: 'toolu_s', name: 'z', input: {} }], true),
+    ]
+    expect(unansweredCalls(entries)).toEqual(['toolu_2'])
+    expect(unansweredCalls(entries.slice(0, 2))).toEqual([])
   })
 })

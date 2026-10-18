@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto'
 import type { AttachmentStore } from '../attachments/store.js'
 import type { StoredBlob } from '../sessions/blobs.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
@@ -147,6 +148,16 @@ export type FlowImages = { get(name: string): Promise<StoredBlob | undefined> }
 /** A flow run's step that sends a session's turn (#2481; agent-durable models.py `FlowTurn`). */
 export type FlowTurn = { run_id: string; call_id: string }
 
+/**
+ * The Idempotency-Key a call's command sends: a digest of its `callKey` (64 hex characters, which
+ * the backend's follow URL can carry, operations.py `_URL_SAFE_KEY`; a request id's colons it
+ * cannot), else a fresh one. A call that sends several commands sends one key: the backend keys
+ * an operation by its kind, subject and body as well (`operation_key`).
+ */
+export function idempotencyKey(ctx: Pick<ToolContext, 'callKey'>): string {
+  return ctx.callKey ? createHash('sha256').update(ctx.callKey).digest('hex') : randomUUID().replaceAll('-', '')
+}
+
 export type ToolContext = ToolServices & {
   principal: Principal
   /** In a flow run's call only: that run's images, by name. */
@@ -161,6 +172,14 @@ export type ToolContext = ToolServices & {
   session?: string | undefined
   /** The harness call's tool_use id, when Claude Code sent one (`_meta`, projections.ts). */
   toolUseId?: string | undefined
+  /**
+   * One model call's key, the same on every host path that runs it (unified runtime spec
+   * 2026-10-13 §7): `call:<session>:<tool_use id>` from the harness server, or the gate's
+   * request id for a call a released turn runs once it was approved. A command the call sends
+   * carries it as its Idempotency-Key (`idempotencyKey`), so a second run of the same call is
+   * answered from the backend's operation record. Absent, each call gets a fresh key.
+   */
+  callKey?: string | undefined
   progress: Progress
   signal: AbortSignal
   /** The projection's own tools by name, so `confirm_action` can run the approved one. */
@@ -289,6 +308,12 @@ export type Tool = {
  */
 export const TOOL_DEADLINE_MS = 5 * 60_000
 
+/**
+ * A tool's commands all send the call's one Idempotency-Key (`idempotencyKey`): two commands of
+ * one call with the same kind, subject and body are one operation, and the second gets the
+ * first's record back. A tool that means to run the same command twice in a call sends
+ * something in its body that tells them apart.
+ */
 export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
   const readOnly = spec.readOnly ?? spec.risk === 'read'
   const gated = spec.risk === 'outward' && spec.approval !== 'none'

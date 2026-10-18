@@ -16,7 +16,7 @@ import type { Credential } from '../credentials.js'
 import { RESTORED_EPSILON } from '../harness/fallback.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
-import type { PostgresSessionStore } from './store.js'
+import type { AppendFence, PostgresSessionStore } from './store.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -111,6 +111,12 @@ const MIN_CAP_USD = 0.000001
  * those are lost (the flake behind #1093's fallback test).
  */
 const DRAIN_MS = 2_000
+/**
+ * How long a reservation (`reserve`) is its session's alone: its `session_turn` may still be
+ * on its way (the workflow's 5 s schedule-to-start, then the spawn), so it is not given up for
+ * another session's until then (spec 2026-10-13 §5.2).
+ */
+export const RESERVATION_HOLD_MS = 30_000
 
 /** `acquire` while a turn holds the session's entry: the caller runs one turn per session at a time, so this is its bug. */
 export class WarmBusyError extends Error {
@@ -156,6 +162,14 @@ class MirroredTranscript {
    */
   onLoaded: (restoredUsd: number) => void = () => {}
   private loaded = false
+  /** Cut off (`WarmSessions.cut`): a placement the workflow gave up on; nothing more of it is written. */
+  fenced = false
+  /**
+   * The condition the turn holding the process writes under (`WarmSessions.fence`), checked in
+   * each append's own transaction: an AgentSession placement that still holds its turn. Once an
+   * append is refused, the process writes nothing more.
+   */
+  fence: AppendFence | undefined
 
   constructor(
     inner: SessionStore,
@@ -170,7 +184,14 @@ class MirroredTranscript {
       if ((key.subpath ?? '') === '') {
         for (const entry of entries) if (typeof entry.uuid === 'string') this.own.add(entry.uuid)
       }
-      const write = this.pending.then(() => inner.append(key, entries))
+      const write = this.pending.then(async () => {
+        if (this.fenced) return
+        const fence = this.fence
+        const fenced = fence && 'appendIf' in inner ? (inner as PostgresSessionStore).appendIf.bind(inner) : undefined
+        if (fence && fenced) {
+          if (!(await fenced(key, entries, fence))) this.fenced = true
+        } else await inner.append(key, entries)
+      })
       // A failed append is the SDK's to retry.
       this.pending = write.then(
         () => {},
@@ -241,6 +262,12 @@ export class WarmSessions {
   private readonly closing = new Map<string, Promise<void>>()
   /** Each session's acquire, one at a time: two would spawn two processes. */
   private readonly acquiring = new Map<string, Promise<unknown>>()
+  /**
+   * Places `reserve` promised to sessions that have no process here yet (spec 2026-10-13 §5.2,
+   * `acquire_worker`), by when: each counts against `maxEntries` until its session's process
+   * spawns, it is released, or it lapses after `idleMs` like an idle process.
+   */
+  private readonly reserved = new Map<string, number>()
 
   constructor(deps: WarmSessionsDeps) {
     this.deps = deps
@@ -407,12 +434,92 @@ export class WarmSessions {
     }
   }
 
+  /**
+   * A place for the session's process on this replica (`acquire_worker`, spec §5.2): kept for a
+   * session that has one already, else taken, evicting the least recently used idle process or
+   * reservation when the cache is full. `full` only when every process here is running a turn.
+   */
+  reserve(sessionId: string): 'reserved' | 'full' {
+    // No warm processes at all (`warm_max_per_replica` 0): every turn runs cold, and is admitted;
+    // the session host worker's slots bound how many run at once.
+    if (this.maxEntries <= 0) return 'reserved'
+    this.sweepIdle()
+    const now = this.now()
+    for (const [id, at] of [...this.reserved]) if (now - at >= this.idleMs || this.slots.has(id)) this.reserved.delete(id)
+    if (this.slots.has(sessionId)) return 'reserved'
+    if (!this.reserved.has(sessionId)) {
+      while (this.slots.size + this.reserved.size >= this.maxEntries) {
+        let lru: Slot | undefined
+        for (const slot of this.slots.values()) {
+          if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot
+        }
+        // A reservation still being placed (its turn on the way) is not given up.
+        let oldest: [string, number] | undefined
+        for (const held of this.reserved) if (now - held[1] >= RESERVATION_HOLD_MS && (!oldest || held[1] < oldest[1])) oldest = held
+        if (!lru && !oldest) return 'full'
+        if (oldest && (!lru || oldest[1] < lru.entry.lastUsedAt)) this.reserved.delete(oldest[0])
+        else void this.drop(lru!, 'lru')
+      }
+    }
+    this.reserved.set(sessionId, now)
+    return 'reserved'
+  }
+
+  /** Frees the session's place here (`release_worker`, spec §5.2): its reservation, and its process, once no turn runs on it. */
+  release(sessionId: string): Promise<void> {
+    this.reserved.delete(sessionId)
+    return this.evict(sessionId, 'released')
+  }
+
   size(): number {
     return this.slots.size
   }
 
+  /** Whether a turn holds the session's process here now. */
+  busy(sessionId: string): boolean {
+    return this.slots.get(sessionId)?.busy === true
+  }
+
+  /**
+   * What the process's transcript appends are written under from now on (an AgentSession
+   * placement's hold on its turn, sessions/turnHost.ts): each append checks it in its own
+   * transaction, so a placement another has replaced writes nothing even before it is cut.
+   */
+  fence(entry: WarmEntry, fence: AppendFence | undefined): void {
+    const slot = this.slots.get(entry.sessionId)
+    if (slot?.entry === entry && slot.mirror) slot.mirror.fence = fence
+  }
+
+  /**
+   * Cuts off a placement the workflow gave up on (spec §5.2, a stalled heartbeat): its
+   * transcript appends from now on are dropped, and its process is closed at once, busy or not.
+   */
+  cut(entry: WarmEntry, reason: string): Promise<void> {
+    const slot = this.slots.get(entry.sessionId)
+    if (!slot || slot.entry !== entry) return Promise.resolve()
+    if (slot.mirror) slot.mirror.fenced = true
+    return this.drop(slot, `cut off: ${reason}`, 'close')
+  }
+
+  /**
+   * Once the session's closed process has ended and every append of it has landed: the closing results a
+   * process writes as it ends (a released turn's synthetic tool results), which the next
+   * placement's transcript mark must come after. A spawn waits for the same (acquireNow).
+   */
+  async landed(sessionId: string): Promise<void> {
+    await this.closing.get(sessionId)
+    for (;;) {
+      const mirror = this.draining.get(sessionId)
+      if (!mirror) return
+      const pending = mirror.pending
+      await pending
+      if (mirror.pending === pending) return
+    }
+  }
+
   /** Closes every process (shutdown): an idle one may end on its own first; a running turn's is closed at once. */
   async close(): Promise<void> {
+    this.reserved.clear()
     const slots = [...this.slots.values()]
     await Promise.all(slots.map((slot) => this.drop(slot, 'shutdown', slot.busy ? 'close' : 'drain')))
     await Promise.all(slots.map((slot) => slot.mirror?.pending))
@@ -537,7 +644,9 @@ export class WarmSessions {
     }
     const hash = credentialHash(credential)
     const on = turn.candidates.find((c) => credentialHash(c.credential) === hash)
-    this.slots.set(sessionId, {
+    // Its reserved place (`reserve`) is the process's now.
+    this.reserved.delete(sessionId)
+    const slot: Slot = {
       entry,
       credential: hash,
       candidate: on ? { id: on.id, epoch: on.epoch } : undefined,
@@ -545,7 +654,8 @@ export class WarmSessions {
       settled: false,
       busy: true,
       closed: false,
-    })
+    }
+    this.slots.set(sessionId, slot)
     return entry
   }
 
@@ -571,9 +681,9 @@ export class WarmSessions {
     }
   }
 
-  /** Past `maxEntries`, the least recently used idle entries go; never one with a turn running. */
+  /** Past `maxEntries` (reserved places counted), the least recently used idle entries go; never one with a turn running. */
   private trim(): void {
-    while (this.slots.size > this.maxEntries) {
+    while (this.slots.size + this.reserved.size > this.maxEntries) {
       let lru: Slot | undefined
       for (const slot of this.slots.values()) {
         if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot

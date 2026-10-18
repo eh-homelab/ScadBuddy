@@ -1196,14 +1196,15 @@ def load_render_store_settings(
         key_is_fallback=fallback,
         library_folder_id=stored.library_folder_id,
         s3=stored.s3_settings(),
-        solid_concurrency=_runtime_value("solid_concurrency", values, defaults),
+        solid_concurrency=_solid_concurrency(values, defaults),
     )
 
 
-def _runtime_value(name: str, values: Mapping[str, Any], defaults: Settings) -> Any:
-    """An env-seeded field as the API's `snapshot` resolves it: a cleared or refused
+def _solid_concurrency(values: Mapping[str, Any], defaults: Settings) -> int:
+    """`solid_concurrency` as the API's `snapshot` resolves it: a cleared or refused
     value is the environment's."""
     try:
-        return check_value(name, values[name])
+        value = check_value("solid_concurrency", values["solid_concurrency"])
     except ValueError:
-        return getattr(defaults, name)
+        return defaults.solid_concurrency
+    return int(value)

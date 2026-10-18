@@ -133,12 +133,12 @@ The `PrintRunWorkflow`/`bambuddy/print_run.py` overlap is the big one: slicer Ta
 - Consumes: the shared span exporter (`tests/conftest.py:60` `_SPANS`, fixture `spans` `:84`), the client span name `f"bambuddy.{operation}"` with `SpanKind.CLIENT` (`bambuddy/client.py:200-211`), respx (as `tests/api/test_print_run_choices.py` uses it).
 - Produces:
   ```python
-  class BambuddyCalled(AssertionError): ...      # names each span and each request
+  class BambuddyCalledError(Exception): ...      # names each span and each request (ruff N818; an Exception so pytest.raises(AssertionError) cannot swallow it)
   @contextmanager
   def forbid_bambuddy(spans: InMemorySpanExporter, base_url: str) -> Iterator[BambuddyRecord]:
       # clears the exporter, mounts a respx router that records and answers 599 for every request
       # whose URL starts with base_url (assert_all_called=False, assert_all_mocked=False so other
-      # hosts pass through), and on exit raises BambuddyCalled if any request was recorded or any
+      # hosts pass through), and on exit raises BambuddyCalledError if any request was recorded or any
       # finished span's name starts with "bambuddy." — listing the span names and request paths
   class BambuddyRecord: requests: list[httpx.Request]; spans: list[str]
   ```
@@ -148,13 +148,13 @@ The `PrintRunWorkflow`/`bambuddy/print_run.py` overlap is the big one: slicer Ta
 
 ```python
 async def test_a_bambuddy_request_is_named(spans):
-    with pytest.raises(BambuddyCalled, match="/api/v1/printers/"):
+    with pytest.raises(BambuddyCalledError, match="/api/v1/printers/"):
         with forbid_bambuddy(spans, "http://bambuddy.test"):
             async with httpx.AsyncClient() as http:
                 await http.get("http://bambuddy.test/api/v1/printers/")
 
 async def test_a_bambuddy_span_is_named(spans):
-    with pytest.raises(BambuddyCalled, match="bambuddy.printers"):
+    with pytest.raises(BambuddyCalledError, match="bambuddy.printers"):
         with forbid_bambuddy(spans, "http://unused.test"):
             with span("bambuddy.printers", kind=SpanKind.CLIENT): pass
 
@@ -615,7 +615,7 @@ async def test_a_stale_report_runs_the_bambuddy_path(native_app, ...):   # prefe
     # the run's PlannedRun.path == "bambuddy"; Bambuddy's routes are called (respx), no forbid_bambuddy
 ```
 
-- [ ] **Step 2: Run it to verify it fails** — `cd backend && uv run --frozen pytest tests/api/test_hot_path_native.py -v` → `BambuddyCalled` listing every remaining span (keep that list in the task's notes: it is the work list for Step 3).
+- [ ] **Step 2: Run it to verify it fails** — `cd backend && uv run --frozen pytest tests/api/test_hot_path_native.py -v` → `BambuddyCalledError` listing every remaining span (keep that list in the task's notes: it is the work list for Step 3).
 - [ ] **Step 3: Implement** until the list is empty, one call site at a time; `uv run --frozen mypy` after making each signature optional finds the callers.
 - [ ] **Step 4: Run the whole print suite and the replay** — `uv run --frozen pytest tests/api/test_hot_path_native.py tests/test_print_replay.py tests/bambuddy tests/printers $(ls tests/api/test_print*.py | tr '\n' ' ') -n auto` → PASS; every recorded history replays.
 - [ ] **Step 5: Commit** — `git commit -am "feat(print): a native run never builds a Bambuddy client, render to follow (#3818)"`
@@ -727,6 +727,7 @@ No compose file exists in the repo today (`git ls-files | grep -i compose` lists
 - Create: `frontend/e2e/real-hot-path.spec.ts`
 - Create: `.github/workflows/hot-path-e2e.yml`
 - Modify: `.github/scripts/` shellcheck coverage is automatic (`shellcheck .github/scripts/*.sh`); add `e2e-stack/*.sh` to the `lint` job's shellcheck line in `ci.yml`
+- Decide and do #4187 (Task 12's fake-printer and recorder tests run in no CI job, and `e2e-stack/*.py` is never linted): either mount `e2e-stack/` into the backend-pytest run and give the test image mosquitto, or run both test files and `ruff check e2e-stack` in `hot-path-e2e.yml`
 
 **Interfaces:**
 - `compose.yaml` services, every image pinned by digest except the two built here:

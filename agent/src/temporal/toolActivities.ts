@@ -395,6 +395,45 @@ async function runAsActivity(
     if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
     caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps), turnId }
   }
+  const { session } = caller
+  const run = await runGated(tool, input, deps, lookup, caller, {
+    toolUseId,
+    flow,
+    signal: context.cancellationSignal,
+    heartbeat: (details) => context.heartbeat(details),
+  })
+  if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
+  if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
+  if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+  return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs, toolUseId } : undefined)
+}
+
+/** How a gated call is run: its tool_use id, its flow if any, and its activity's signal and heartbeat. */
+type GatedRun = {
+  toolUseId: string
+  flow?: string | undefined
+  signal: AbortSignal
+  heartbeat: (details?: unknown) => void
+  /** The name the call was described under (describe_call's hash); the tool's own by default. */
+  describedAs?: string
+  /** ToolContext.callKey: the call's Idempotency-Key. */
+  callKey?: string
+}
+
+/**
+ * A call the gate let through, run once: refused (thrown, non-retryable) when its tool is
+ * disabled, or gated with no approval recorded for this very call; else run with the turn's
+ * tiers, and its audit row written. What it returns is the run, whatever its outcome.
+ */
+async function runGated(
+  tool: Tool,
+  input: unknown,
+  deps: ToolActivityDeps,
+  lookup: (name: string) => Tool | undefined,
+  caller: Caller,
+  call: GatedRun,
+): Promise<ToolRun> {
+  const { toolUseId, flow } = call
   const { owner, session, requestId } = caller
   // `gate: 'workflow'` below skips preparing an approval because the workflow parked
   // the call and a person approved it. That is checked here, not assumed: any client of
@@ -436,7 +475,7 @@ async function runAsActivity(
   }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
   // describe_call gave the parked call, computed again from what this call was given.
-  const binding = deps.audit ? { inputHash: deps.audit.hash(tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
+  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
     if (await caller.approvals?.lapsed?.(requestId, binding)) {
       await refuse(
@@ -453,7 +492,7 @@ async function runAsActivity(
   }
   const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
   const services = deps.services
-  const heartbeat = setInterval(() => context.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
+  const heartbeat = setInterval(() => call.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
   const startedAt = new Date()
   let run: ToolRun
   try {
@@ -467,8 +506,9 @@ async function runAsActivity(
       ...(flow !== undefined ? { flowTurn: { run_id: flow, call_id: toolUseId } } : {}),
       principal,
       ...(session === undefined ? {} : { session }),
-      progress: async (progress, total, message) => context.heartbeat({ progress, total, message }),
-      signal: context.cancellationSignal,
+      ...(call.callKey === undefined ? {} : { toolUseId, callKey: call.callKey }),
+      progress: async (progress, total, message) => call.heartbeat({ progress, total, message }),
+      signal: call.signal,
       lookup,
       gate: 'workflow',
       effective,
@@ -496,10 +536,78 @@ async function runAsActivity(
     startedAt,
     finishedAt: new Date(),
   })
-  if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
-  if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
-  if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
-  return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs, toolUseId } : undefined)
+  return run
+}
+
+/** A released turn's approved call (unified runtime spec §5.4 step 5), as its continuation names it. */
+export type DecidedCall = {
+  sessionId: string
+  requestId: string
+  toolUseId: string
+  /** The name it parked under: `mcp__scadbuddy__<tool>`. */
+  tool: string
+  input: unknown
+  signal: AbortSignal
+  heartbeat: () => void
+}
+
+/** How it went: run (`ok` or not) with what the model reads of it, or refused unrun, and why. */
+export type DecidedRun = { ran: true; ok: boolean; text: string } | { ran: false; text: string }
+
+const HARNESS_PREFIX = 'mcp__scadbuddy__'
+
+/**
+ * Runs a released turn's approved call once, outside the model, through the same gated path as
+ * a durable session's tool activity: the approval is checked against this call's request id and
+ * the hash describe_call gave it, the tool's Settings state is read as it runs, the turn's tiers
+ * apply, and its audit row is written. Its Idempotency-Key is the request id (spec §7), so a
+ * placement retried after the call ran is answered from the backend's operation record. A call
+ * to anything but a ScadBuddy tool (a plugin's, http_request) cannot be run here and says so.
+ */
+export function decidedCalls(tools: readonly Tool[], deps: ToolActivityDeps): (call: DecidedCall) => Promise<DecidedRun> {
+  const byName = new Map(tools.map((t) => [t.name, t]))
+  const lookup = (name: string): Tool | undefined => byName.get(name)
+  return async (call) => {
+    const tool = call.tool.startsWith(HARNESS_PREFIX) ? lookup(call.tool.slice(HARNESS_PREFIX.length)) : undefined
+    if (!tool || DURABLE_ONLY_NAMES.has(tool.name)) {
+      return { ran: false, text: `${call.tool} cannot be run outside the conversation, so it was not run` }
+    }
+    // The approval is looked up by request id, so the id must be this session's entry for this
+    // call (gate/ids.ts durableRequestId), as runAsActivity derives it: another session's approval
+    // of the same tool and input authorises nothing here.
+    const prefix = `durable:${call.sessionId.toLowerCase()}:`
+    const runId = call.requestId.startsWith(prefix) ? call.requestId.slice(prefix.length, -(call.toolUseId.length + 1)) : ''
+    if (!runId || runId.includes(':') || call.requestId !== durableRequestId(call.sessionId, runId, call.toolUseId)) {
+      return { ran: false, text: `request ${call.requestId} is not session ${call.sessionId}'s entry for call ${call.toolUseId}, so ${call.tool} was not run` }
+    }
+    const owner = await deps.sessions.ownerOf(call.sessionId)
+    if (owner === undefined) return { ran: false, text: `session ${call.sessionId} is no durable session, so ${call.tool} was not run` }
+    const { turnTiers: sent, turnId, ...who } = owner
+    const caller: Caller = {
+      owner: who,
+      session: call.sessionId,
+      requestId: call.requestId,
+      approvals: deps.approvals,
+      tiers: await turnTiers(who, sent ?? undefined, deps),
+      turnId: turnId ?? undefined,
+    }
+    let run: ToolRun
+    try {
+      run = await runGated(tool, call.input, deps, lookup, caller, {
+        toolUseId: call.toolUseId,
+        signal: call.signal,
+        heartbeat: call.heartbeat,
+        describedAs: call.tool,
+        callKey: call.requestId,
+      })
+    } catch (err) {
+      if (err instanceof ApplicationFailure && err.nonRetryable) return { ran: false, text: err.message }
+      throw err
+    }
+    if (run.outcome !== 'ok') return { ran: true, ok: false, text: failureText(run) }
+    const keep = deps.blobs ? { session: call.sessionId, blobs: deps.blobs, toolUseId: call.toolUseId } : undefined
+    return { ran: true, ok: true, text: await resultText(run.result.content, keep) }
+  }
 }
 
 /**

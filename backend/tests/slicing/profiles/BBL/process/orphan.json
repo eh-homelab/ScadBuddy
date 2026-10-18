@@ -1,0 +1,7 @@
+{
+    "type": "process",
+    "name": "orphan",
+    "inherits": "no_such_parent",
+    "from": "system",
+    "instantiation": "true"
+}
