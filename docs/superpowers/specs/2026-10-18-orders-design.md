@@ -44,7 +44,7 @@ missing but those mirrors.
   never move.
 - Fulfilment records provenance ScadBuddy owns: the sliced file's digest, the print
   run, the outcome, the photos and the timelapse as blobs in ScadBuddy's own store.
-- The whole process is a flow, started by an `order.accepted` trigger, written and
+- The whole process is a flow, started by a trigger on the `order.changed` event, written and
   changed in the Flows tab like any other flow. ScadBuddy ships one as a built-in.
 - The orders API is tools for the agent, routes for the browser, and host calls for
   flows, in that order of design.
@@ -186,7 +186,7 @@ Line item: `draft` → `quoted` → `approved` → `queued` → `printing` → `
 attempt, §6.1). `approved` means its quote is accepted.
 
 Order: `draft` → `quoted` (every item has an accepted quote) → `accepted` (the person
-or the customer said yes; sets `accepted_at` and publishes `order.accepted`, §7.1) →
+or the customer said yes; sets `accepted_at` and publishes `order.changed`, §7.1) →
 `in_production` (any item past `approved`) → `ready` (every item `fulfilled` or
 `cancelled`, at least one fulfilled) → `shipped` (a shipment exists covering every
 fulfilled item, §6.3) → `closed`; `cancelled` from any state before `shipped`;
@@ -379,23 +379,39 @@ own `cost` (F8) is shown alongside when an archive is linked, corrected as
 ### 7.1 Events and the trigger
 
 Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`) and
-`order_item.changed` (`order_id`, `item_id`, `status`). The trigger amendment (10-11
-§12.3) gains:
+`order_item.changed` (`order_id`, `item_id`, `status`, `attempt`). **A trigger's event
+kind is the bus event's own name.** The existing two kinds are renamings
+(`render.finished` for `job.done`, `model.changed` for `version.committed`, F12); the
+orders kinds are not, and the trigger amendment (10-11 §12.3) gains:
 
 | Trigger event | Bus event | Event key | Subject |
 |---|---|---|---|
-| `order.accepted` | `order.changed` with `status: accepted` | `order:<id>:accepted` | an order |
-| `order_item.printed` | `order_item.changed` with `status: printed` or `failed` | `order_item:<id>:<attempt>` | an order item |
+| `order.changed` | `order.changed` | `order:<id>:<status>` | an order |
+| `order_item.changed` | `order_item.changed` | `order_item:<id>:<status>:<attempt>` | an order item |
+
+What narrows a trigger is a **filter**, not a kind: `EventTiming` gains `match`, an
+object of the event's own fields and the values each may take (`{"status":
+["accepted"]}`), checked against the event at fire time; an event matching no entry
+starts nothing. So "when an order is accepted" is `{kind: "order.changed", match:
+{status: ["accepted"]}}`, and "when an item's print settles" is `{kind:
+"order_item.changed", match: {status: ["printed", "failed"]}}`. The key carries the
+status, so one trigger fires once per transition, not once per order.
 
 `EventTiming.slug` becomes `subject: {kind, id?}` with `kind` one of `template`,
 `order`, `order_item` (the slug form stays accepted and is read as
-`{kind: "template", id: slug}`), `_event_triggers`' SQL matches on it, and `trigger()`
-returns an `OrderAccepted{order_id, customer_id}` or `OrderItemPrinted{order_id,
-item_id, attempt, outcome}`; the fall-through at `flow_tools.py:1188` becomes a
-dispatch on `kind`. Both are read from the order at fire time, never from the event,
-as §12.1 requires. The agent's `create_flow_trigger` and the Triggers tab list the two
-new kinds. Each is a change to the unversioned `ProjectWorkflow`'s host surface and
-replays the fixtures (F11).
+`{kind: "template", id: slug}`), and `_event_triggers`' SQL matches on it. `trigger()`
+returns the event as it is, `OrderChanged{order_id, status, customer_id}` or
+`OrderItemChanged{order_id, item_id, status, attempt}`, and the fall-through at
+`flow_tools.py:1188` becomes a dispatch on `kind`. The facts come from the order's row
+at fire time, never from the event, as §12.1 requires. The agent's
+`create_flow_trigger` and the Triggers tab list the kinds by their bus names and offer
+`match` for the ones with a `status`. Each is a change to the unversioned
+`ProjectWorkflow`'s host surface and replays the fixtures (F11).
+
+The two existing kinds are kept as they are; the same change may accept `job.done`
+and `version.committed` as their bus names and read the old names as aliases, so a new
+trigger is written in bus names only. That is a ruling for the plan, not a rename of
+stored triggers.
 
 Rate and overlap apply as they do: `overlap: skip` on an order trigger means a second
 acceptance of the same order while its run is open starts nothing, and the 60-per-hour
@@ -411,7 +427,7 @@ text is never rewritten by a later build (a new built-in is a new name). Its scr
 in Code Mode over the host functions, does what a person would:
 
 ```python
-ev = trigger()                       # OrderAccepted
+ev = trigger()                       # OrderChanged, status "accepted" by the trigger's match
 order = tool("order_get", {"id": ev.order_id})
 for item in order["items"]:
     if item["status"] != "approved":
@@ -603,6 +619,8 @@ menu "Order this"; the print detail page "Attach to order item".
 11. **Money is integer minor units; rates are decimals.** Floats never enter a quote.
 12. **No body names a principal.** `created_by`, `by` and the run's starter come from
     the author header, as flows' do.
+13. **A trigger kind is a bus event's name.** Narrowing is a `match` on the event's
+    fields; no kind is invented for one value of a field.
 
 ## 11. Phases
 
@@ -617,7 +635,7 @@ usable on its own.
    Depends on nothing in #3818; moves onto the native slicer when #3822 lands.
 3. **Fulfilment and provenance** (§6): attempts from the print path (`subject`
    `order_item:<id>`), the `attachments` table and routes, shipments, costs.
-4. **Flows** (§7): the two trigger kinds and the subject generalisation, `trigger()`
+4. **Flows** (§7): the two bus-named trigger kinds, `match`, the subject generalisation, `trigger()`
    models, the `orders` grant bound, `parent_run_id`, the built-in `order-fulfilment`
    flow, `order_notify_customer`. Needs #2484's trigger work, which is in.
 5. **Bambuddy mirrors** (§8): the seam, nested projects, archive copy-in, spool import.
