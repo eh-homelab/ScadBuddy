@@ -879,6 +879,13 @@ The `browser_*` tools act in the user's own tab. How they are built is
 - **Limitation.** A tab id is a random 128-bit value, but anything already on the UI's
   origin could open a socket claiming one it learned; the tab id is not a secret
   against script in the page, which can drive the page anyway.
+- **Accepted risk: the server cannot tell a person's click from the bridge's** (#2653).
+  The bridge acts in the user's own tab with their cookies. So an approval, a
+  pending-input answer, a grant or a delete confirmation that it triggers reaches the
+  backend exactly as the person's own would. The only barrier is the page's
+  `data-agent-user-only` marker, which the bridge honours. No server-side
+  human-gesture check is planned: turning on the browser tools (WebMCP, opt-in per
+  browser) accepts that the agent drives the tab as the person.
 
 ## Event-log scrubbing (#377)
 
