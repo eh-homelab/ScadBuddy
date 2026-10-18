@@ -408,7 +408,7 @@ def test_the_spools_read_together_are_capped(
     check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
 
     assert check.status_code == 200, check.text
-    assert route.call_count >= 2
+    assert route.call_count == 2  # spools 5 and 9, once each
     assert most == 1
 
 

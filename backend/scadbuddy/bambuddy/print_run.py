@@ -166,7 +166,7 @@ RACK_FALLBACKS = frozenset({RACK_PICK_FALLBACK, RACK_PREVIEW_FALLBACK, RACK_USAG
 
 QUEUE_PATH = "/queue"
 
-#: The most spools whose presets a check or a run reads at once (#4196).
+#: The most spools whose presets one check or run reads at once (#4196).
 SPOOL_PRESET_READS = 4
 
 
@@ -700,8 +700,9 @@ async def resolve_plates(
         if spool_id > 0
     ]
     # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
-    # A body's plan is not capped, only matched to the inventory, so at most
-    # SPOOL_PRESET_READS at a time: Bambuddy is one process.
+    # A body's plan is not capped, only matched to the inventory, so this one call
+    # reads at most SPOOL_PRESET_READS at a time: Bambuddy is one process. Per call,
+    # not across checks and runs.
     gate = asyncio.Semaphore(SPOOL_PRESET_READS)
 
     async def presets(spool_id: int) -> list[SpoolFilamentPreset]:
