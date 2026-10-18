@@ -1,0 +1,77 @@
+{
+    "name": "Bambulab",
+    "version": "02.08.00.05",
+    "force_update": "0",
+    "description": "ScadBuddy's test vendor tree",
+    "machine_model_list": [],
+    "process_list": [
+        {
+            "name": "fdm_process_root",
+            "sub_path": "process/fdm_process_root.json"
+        },
+        {
+            "name": "mid",
+            "sub_path": "process/mid.json"
+        },
+        {
+            "name": "leaf",
+            "sub_path": "process/leaf.json"
+        },
+        {
+            "name": "short_list",
+            "sub_path": "process/short_list.json"
+        },
+        {
+            "name": "loop_a",
+            "sub_path": "process/loop_a.json"
+        },
+        {
+            "name": "loop_b",
+            "sub_path": "process/loop_b.json"
+        },
+        {
+            "name": "orphan",
+            "sub_path": "process/orphan.json"
+        },
+        {
+            "name": "with_includes",
+            "sub_path": "process/with_includes.json"
+        }
+    ],
+    "filament_list": [
+        {
+            "name": "fdm_filament_root",
+            "sub_path": "filament/fdm_filament_root.json"
+        },
+        {
+            "name": "Test PLA @base",
+            "sub_path": "filament/Test PLA @base.json"
+        },
+        {
+            "name": "Test PLA",
+            "sub_path": "filament/Test PLA.json"
+        },
+        {
+            "name": "Test PETG",
+            "sub_path": "filament/Test PETG.json"
+        },
+        {
+            "name": "Test PA-CF",
+            "sub_path": "filament/Test PA-CF.json"
+        },
+        {
+            "name": "Test Short",
+            "sub_path": "filament/Test Short.json"
+        }
+    ],
+    "machine_list": [
+        {
+            "name": "fdm_machine_root",
+            "sub_path": "machine/fdm_machine_root.json"
+        },
+        {
+            "name": "Test Printer 0.4 nozzle",
+            "sub_path": "machine/Test Printer 0.4 nozzle.json"
+        }
+    ]
+}

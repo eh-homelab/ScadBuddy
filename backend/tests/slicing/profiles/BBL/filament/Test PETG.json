@@ -1,0 +1,11 @@
+{
+    "type": "filament",
+    "name": "Test PETG",
+    "inherits": "fdm_filament_root",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GF_PETG",
+    "filament_type": [
+        "PETG"
+    ]
+}

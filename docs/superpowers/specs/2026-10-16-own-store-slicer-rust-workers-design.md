@@ -271,6 +271,10 @@ depend on tier 1, and the only credentials outside Python are the API's internal
 the print worker already holds. The caller records the `store_blobs` row for the
 output after the worker reports its sha256 and size (`slicing/transfer.py`:
 `mint_get`, `mint_put`, `finish_put`). A new `BlobKind`, `slice`, swept like `piece`.
+Every transfer URL is a bearer credential (the internal route's token in a header, or
+S3's signature in the query) valid for two hours (`slicing/transfer.py` `TRANSFER_TTL`),
+and it crosses the `library` queue's Temporal history in plaintext, since that queue has
+no payload codec: whoever reads that history can read or write the blob until it expires.
 
 The worker's whole configuration is its environment: `SCADBUDDY_TEMPORAL_ADDRESS`,
 `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER`,
