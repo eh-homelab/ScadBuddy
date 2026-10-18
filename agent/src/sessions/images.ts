@@ -101,7 +101,7 @@ export function checkedImages(images: unknown): { ok: true; images: UserImage[] 
  * The SDK boundary (#2479): the SDK takes an image in a user message only as a
  * base64 source, which Claude Code puts in the Messages API request.
  */
-export function userPrompt(text: string, images: readonly UserImage[]): AsyncIterable<SDKUserMessage> {
+export function userPrompt(text: string, images: readonly Pick<UserImage, 'mediaType' | 'bytes'>[]): AsyncIterable<SDKUserMessage> {
   const message: SDKUserMessage = {
     type: 'user',
     session_id: '',

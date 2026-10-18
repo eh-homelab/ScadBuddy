@@ -33,7 +33,7 @@ import { durableHealthPort, notStarted } from '../test/support/durableHealth.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/temporal.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
 import { collectRenders, type CollectOptions, type ScenarioBackend } from './render.js'
-import { DURABLE_EVAL_TOOL_PREFIX as DURABLE_TOOL_PREFIX, type Outcome, type RunResult, type Scenario, type ScriptedTurn, type ToolCall } from './runner.js'
+import { DURABLE_EVAL_TOOL_PREFIX as DURABLE_TOOL_PREFIX, EVAL_TOOL_PREFIX, type Outcome, type RunResult, type Scenario, type ScriptedTurn, type ToolCall } from './runner.js'
 
 // The evals in a durable session (#2320): the same scenarios and checks as the classic
 // run (runner.ts `runScenario`), answered through the stack a durable chat runs on. A
@@ -336,6 +336,9 @@ export function timedOut(polled: Polled): string {
 }
 
 
+/** The own plugin's built-ins, which run inside a segment (harness/ownPlugin.ts). */
+const IN_SEGMENT_BUILTINS: ReadonlySet<string> = new Set(['Skill', 'Agent', 'Task'])
+
 /** The session's events as an Outcome's tool calls, final text and result. */
 export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<Outcome, 'toolCalls' | 'finalText' | 'result'> {
   const toolCalls: ToolCall[] = []
@@ -352,9 +355,16 @@ export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<O
   let turnResult = false
   for (const e of log) {
     if (e.type === 'tool.call' && typeof e.id === 'string' && typeof e.name === 'string') {
+      // A subagent's call is not the agent's, as foldMessages counts only the main
+      // thread's: one under an Agent call, or one on the server only subagents have
+      // (agent-durable runner.py SegmentCalls, which can leave `parent` off).
+      if (typeof e.parent === 'string' || e.name.startsWith(EVAL_TOOL_PREFIX)) continue
+      // A call Claude Code ran inside the segment keeps its own name (Skill, Agent, an
+      // MCP tool); the workflow's calls carry the registry name.
+      const own = e.name.startsWith('mcp__') || IN_SEGMENT_BUILTINS.has(e.name)
       toolCalls.push({
         id: e.id,
-        name: `${DURABLE_TOOL_PREFIX}${e.name}`,
+        name: own ? e.name : `${DURABLE_TOOL_PREFIX}${e.name}`,
         tool: e.name,
         input: (e.input as Record<string, unknown> | undefined) ?? {},
         tier: (e.risk as RiskTier | undefined) ?? 'outward',

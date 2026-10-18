@@ -34,6 +34,7 @@ backend/scadbuddy/flows/operations.py	return base64.b64encode\(seal_bytes	a seal
 backend/scadbuddy/library/settings_store.py	"(secret|dek)": base64.b64encode\(envelope	a sealed secret, not an image
 frontend/src/agent/tabId.ts	return btoa\(binary\)	the bridge tab id: random bytes as base64url, not an image
 backend/scadbuddy/activity/index.py	return base64.urlsafe_b64encode\(raw.encode\(\)\)	the activity list's opaque cursor (created_at|id), not an image
+backend/scadbuddy/slicing/transfer_token.py	return base64.urlsafe_b64encode\(data\)	the slicer's transfer token (method, key, expiry and its HMAC) as base64url, not an image
 agent/src/tools/catalogue.ts	(png|content)_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/customizer.ts	content_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/outputs.ts	png_base64: z.string	#2510: binary tool inputs by pointer

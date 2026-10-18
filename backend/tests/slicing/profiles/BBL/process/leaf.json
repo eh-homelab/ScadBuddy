@@ -1,0 +1,12 @@
+{
+    "type": "process",
+    "name": "leaf",
+    "inherits": "mid",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GP_LEAF",
+    "layer_height": "0.16",
+    "inner_wall_speed": [
+        "300"
+    ]
+}

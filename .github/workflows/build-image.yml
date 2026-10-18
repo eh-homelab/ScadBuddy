@@ -427,8 +427,9 @@ jobs:
   #
   # `continue-on-error` for the reason the agent jobs have it: a first publish of
   # a new package (private until its visibility is changed, see the header) must
-  # not hold back a backend deploy. Drop it in the change that pins this image in
-  # eh-homelab/clusters.
+  # not hold back a backend deploy. It stays after deploy.reusable.yml pins this
+  # image (#3822): a build with no slicer image keeps clusters' current slicer
+  # pin and warns, rather than failing the deploy of the others.
   slicer:
     name: Build and push slicer (amd64)
     runs-on: ubuntu-latest

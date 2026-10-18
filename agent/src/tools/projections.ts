@@ -66,6 +66,11 @@ function toolUseIdFrom(extra: unknown): string | undefined {
   return typeof id === 'string' && id ? id : undefined
 }
 
+/** The call's tool_use id, and its key (ToolContext.callKey) when it is a session's. */
+export function callIds(session: string | undefined, toolUseId: string | undefined): { toolUseId: string | undefined; callKey?: string } {
+  return { toolUseId, ...(session !== undefined && toolUseId !== undefined ? { callKey: `call:${session}:${toolUseId}` } : {}) }
+}
+
 function signalFrom(extra: unknown): AbortSignal {
   return (extra as ExtraLike | undefined)?.signal ?? new AbortController().signal
 }
@@ -118,7 +123,7 @@ export function createHarnessServer(
               ...services,
               principal,
               session,
-              toolUseId: toolUseIdFrom(extra),
+              ...callIds(session, toolUseIdFrom(extra)),
               progress: progressFrom(extra),
               signal: signalFrom(extra),
               lookup,

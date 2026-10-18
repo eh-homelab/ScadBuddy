@@ -14,7 +14,7 @@ import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -92,6 +92,7 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
     PRINT_DEPLOYMENT_NAME,
+    PROJECTS_DEPLOYMENT_NAME,
     bambuddy_worker,
     connect,
     current_routing,
@@ -99,7 +100,9 @@ from scadbuddy.workflows.client import (
     follow_worker,
     is_current,
     make_current,
+    projects_deployment,
     render_worker,
+    routes_to,
 )
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_grants import FlowGrants
@@ -135,6 +138,22 @@ MAKE_CURRENT_ERROR_AFTER = 60.0
 #: How often a make-current that is still refused past `MAKE_CURRENT_ERROR_AFTER` tries
 #: again, and so logs its error: once a minute, not every `MAKE_CURRENT_EVERY` (#2538).
 MAKE_CURRENT_ERROR_EVERY = 60.0
+#: How long a versioned worker that reports readiness (`/readyz`, #4146) waits, once its
+#: build is current, for its queue to route to it before it reports ready anyway, and
+#: how often it asks. The API's library worker waits as long (`main.LIBRARY_ROUTED_WAIT`).
+ROUTED_WAIT = 60.0
+ROUTED_POLL = 0.5
+
+
+def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Awaitable[int]]:
+    """The Settings page's per-job colour slots, through the `render_settings` view on
+    ``source``'s TTL: a worker holds no settings store, so this is how the live setting
+    reaches it (#601). ``deps.config`` is the one read at start."""
+
+    async def current() -> int:
+        return (await source.current()).solid_concurrency
+
+    return current
 
 
 def build_worker_deps(
@@ -142,7 +161,8 @@ def build_worker_deps(
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``stopping`` ends the wait for the API's schema and grants
     (`WorkerStoppedError`)."""
-    config = settings.to_config()
+    # Editor checks run in the API, never here: no CPU is kept back for them.
+    config = replace(settings.to_config(), serves_checks=False)
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
     # The image's libraries (#169), as the API's boot seeds them: a worker on an
@@ -224,6 +244,7 @@ def build_worker_deps(
         snapshots=store.snapshots,
         fonts_mirror=store.fonts,
         remote_assets=store.remote_assets,
+        stored_solid_concurrency=stored_solid_concurrency(store.source),
     )
     return deps, store
 
@@ -251,6 +272,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
         openscad_version=state.openscad_version or "",
+        stored_solid_concurrency=stored_solid_concurrency(state.store.source),
     )
 
 
@@ -398,6 +420,37 @@ async def make_current_until_polled(
             return
 
 
+async def wait_until_routed(
+    client: Client,
+    task_queue: str,
+    *,
+    deployment_name: str,
+    build_id: str,
+    timeout: float | None = None,
+    poll: float | None = None,
+) -> bool:
+    """Ask `routes_to` until ``task_queue`` routes to this build (True), or ``timeout``
+    (`ROUTED_WAIT`) passes (False, logged as an error: Temporal took the build but its
+    queue still sends new work elsewhere). A version is current a moment before its
+    queues hear of it (#4090). An `RPCError` is a no, asked again."""
+    timeout = ROUTED_WAIT if timeout is None else timeout
+    poll = ROUTED_POLL if poll is None else poll
+    loop = asyncio.get_running_loop()
+    until = loop.time() + timeout
+    while loop.time() < until:
+        with contextlib.suppress(RPCError):
+            if await routes_to(
+                client, task_queue, deployment_name=deployment_name, build_id=build_id
+            ):
+                return True
+        await asyncio.sleep(poll)
+    logger.error(
+        "the queue does not route to this build yet; reporting ready anyway",
+        extra={"build_id": build_id, "task_queue": task_queue},
+    )
+    return False
+
+
 async def _poll(
     settings: Settings,
     deps: WorkerDeps,
@@ -446,10 +499,13 @@ async def _serve_versioned(
     deployment_name: str,
     drain_timeout: float | None,
     stop_now: asyncio.Event | None = None,
+    ready: tuple[str, asyncio.Event] | None = None,
 ) -> None:
     """Run ``workers`` (one deployment version) until ``stop``, making the build current
     beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs.
-    ``stop_now`` cuts the drain short (#605)."""
+    ``stop_now`` cuts the drain short (#605). With ``ready`` (a task queue and an
+    event), the event is set once that queue routes to this build (`wait_until_routed`),
+    for `/readyz` (#4146)."""
 
     async def is_drained() -> bool:
         try:
@@ -481,8 +537,9 @@ async def _serve_versioned(
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
         set_current, read_current = deployment_writes(client, build_id, deployment_name)
-        current = asyncio.create_task(
-            make_current_until_polled(
+
+        async def make_current_then_routed() -> None:
+            await make_current_until_polled(
                 set_current,
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
@@ -491,7 +548,14 @@ async def _serve_versioned(
                 error_every=MAKE_CURRENT_ERROR_EVERY,
                 current=read_current,
             )
-        )
+            if ready is not None:
+                queue, routed = ready
+                await wait_until_routed(
+                    client, queue, deployment_name=deployment_name, build_id=build_id
+                )
+                routed.set()
+
+        current = asyncio.create_task(make_current_then_routed())
         stopped = asyncio.create_task(stop.wait())
         try:
             done, _ = await asyncio.wait({current, stopped}, return_when=asyncio.FIRST_COMPLETED)
@@ -622,16 +686,33 @@ def _health_app(
     store: StoreBundle | None,
     task_queue: str,
     sdk_port: int | None = None,
+    ready: asyncio.Event | None = None,
 ) -> Starlette:
     """``store`` is the render worker's; the print worker holds none (#1060). With
-    ``sdk_port``, ``/metrics`` carries the Temporal SDK's own series too (#3788)."""
+    ``sdk_port``, ``/metrics`` carries the Temporal SDK's own series too (#3788).
+
+    ``/readyz`` (#4146) answers 503 until ``ready`` is set: for a rolling update's
+    readiness probe, so the old pod is stopped only once the queue routes to this build.
+    Without ``ready`` it answers as ``/healthz``. ``/healthz`` never waits on it: a
+    liveness probe must not kill a worker whose Temporal is slow to take its build."""
     data = _DataUsage(settings.data_dir)
 
+    def _body() -> dict[str, Any]:
+        return {"ok": True, "build_id": settings.revision, "task_queue": task_queue}
+
     async def healthz(_: Request) -> JSONResponse:
-        body: dict[str, Any] = {"ok": True, "build_id": settings.revision, "task_queue": task_queue}
+        body = _body()
         if store is not None:
             body["store"] = (await store_health(store)).model_dump()
         return JSONResponse(body)
+
+    async def readyz(_: Request) -> JSONResponse:
+        if ready is not None and not ready.is_set():
+            return JSONResponse(
+                {**_body(), "ok": False, "reason": "the queue does not route to this build yet"},
+                status_code=503,
+            )
+        return JSONResponse(_body())
 
     async def exposition(_: Request) -> Response:
         if store is not None:
@@ -657,7 +738,12 @@ def _health_app(
     # none when the worker serves no SDK series.
     sdk_reader = httpx.AsyncClient(timeout=SDK_READ_TIMEOUT) if sdk_port is not None else None
     return Starlette(
-        routes=[Route("/healthz", healthz), Route("/metrics", exposition)], lifespan=lifespan
+        routes=[
+            Route("/healthz", healthz),
+            Route("/readyz", readyz),
+            Route("/metrics", exposition),
+        ],
+        lifespan=lifespan,
     )
 
 
@@ -704,8 +790,9 @@ def _health_server(
     listen: HealthListen,
     task_queue: str,
     sdk_port: int | None = None,
+    ready: asyncio.Event | None = None,
 ) -> _HealthServer:
-    app = _health_app(settings, metrics, store, task_queue, sdk_port)
+    app = _health_app(settings, metrics, store, task_queue, sdk_port, ready)
     if isinstance(listen, socket.socket):
         config = uvicorn.Config(app, log_config=None, access_log=False)
         return _HealthServer(config, listen)
@@ -997,8 +1084,9 @@ async def run_print_worker(
             bambuddy_worker(client, queue, deps.activities, build_id=build_id),
             follow_worker(client, queue, deps.follow_print, build_id=build_id),
         ]
+        routed = asyncio.Event()
         server = (
-            _health_server(settings, deps.metrics, None, health_port, queue, sdk_port)
+            _health_server(settings, deps.metrics, None, health_port, queue, sdk_port, routed)
             if health_port is not None
             else None
         )
@@ -1013,6 +1101,7 @@ async def run_print_worker(
                     deployment_name=PRINT_DEPLOYMENT_NAME,
                     drain_timeout=None,
                     stop_now=stop_now,
+                    ready=(queue, routed),
                 )
         finally:
             if server is not None and serving is not None:
@@ -1034,8 +1123,11 @@ async def run_projects_worker(
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
     §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
-    runs unsealed. Unversioned (plan 2026-10-09 Ruling 13), so it stops without a drain;
-    a run in flight resumes on the next worker from its history."""
+    runs unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
+    ``SCADBUDDY_REVISION``, its build made current once at start and `/readyz` ready once
+    the queue routes to it, as the print worker. Every workflow on it is AUTO_UPGRADE
+    (`client.projects_deployment`), never pinned (plan 2026-10-09 Ruling 13), so it stops
+    without a drain; a run in flight moves to the current build at its next task."""
     stop = stop or asyncio.Event()
     keys = payload_keys(settings)
     if keys is None:
@@ -1080,20 +1172,31 @@ async def run_projects_worker(
         api = api_client(settings.api_internal_url)
         routes = FlowRoutes(api)
         grants = FlowGrants(store, api, approval_key(settings))
+        build_id = settings.revision
         worker = projects_worker(
             client,
             queue,
             [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
+            deployment_config=projects_deployment(build_id),
         )
+        routed = asyncio.Event()
         server = (
-            _health_server(settings, metrics, None, health_port, queue, sdk_port)
+            _health_server(settings, metrics, None, health_port, queue, sdk_port, routed)
             if health_port is not None
             else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            async with LoopWatch(metrics), worker:
-                await stop.wait()
+            async with LoopWatch(metrics):
+                await _serve_versioned(
+                    client,
+                    [worker],
+                    stop,
+                    build_id=build_id,
+                    deployment_name=PROJECTS_DEPLOYMENT_NAME,
+                    drain_timeout=None,
+                    ready=(queue, routed),
+                )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True

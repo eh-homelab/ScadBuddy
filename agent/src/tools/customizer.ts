@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ACCEPTING_MS, command, type CommandHeaders, reattachFollowing, RESPOND_ASYNC } from './command.js'
@@ -6,7 +5,7 @@ import { binary } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
-import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
+import { blob, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER, renderPrincipal } from './renderLimits.js'
 import { validateParams } from './validate.js'
 import { page, PAGED, pageInput } from './pagination.js'
@@ -243,7 +242,7 @@ export const customizerTools: Tool[] = [
       try {
         // One `Idempotency-Key` (#1053): the backend counts a re-send as this one
         // request's claim. A start still accepting is a 202 followed to its job (#2795).
-        const headers: CommandHeaders = { 'Idempotency-Key': randomUUID().replaceAll('-', ''), ...RESPOND_ASYNC }
+        const headers: CommandHeaders = { 'Idempotency-Key': idempotencyKey(ctx), ...RESPOND_ASYNC }
         const accepted = await reattachFollowing(
           ctx,
           () =>

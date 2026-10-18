@@ -345,3 +345,29 @@ describe('the durable run: gate failures and turn errors (#2465)', () => {
     }
   })
 })
+
+describe("the durable run: a segment's own calls (agent-durable runner.py SegmentCalls)", () => {
+  const base = { v: 1, sessionId: 's' }
+  const call = (id: string, name: string, more: Record<string, unknown> = {}): Logged => ({
+    ...base,
+    type: 'tool.call',
+    id,
+    name,
+    input: {},
+    risk: 'read',
+    ...more,
+  })
+
+  it("counts the agent's own calls by the names a classic run uses, never a subagent's", () => {
+    const log = [
+      call('1', 'render_model'),
+      call('2', 'Skill'),
+      call('3', 'Agent'),
+      call('4', 'mcp__scadbuddy__get_model', { parent: '3' }),
+      call('5', 'mcp__scadbuddy__get_model'),
+      call('6', 'mcp__scadbuddy_images__view_images'),
+    ]
+    const names = foldEvents(log, new Map()).toolCalls.map((c) => c.name)
+    expect(names).toEqual(['mcp__durable__render_model', 'Skill', 'Agent', 'mcp__scadbuddy_images__view_images'])
+  })
+})

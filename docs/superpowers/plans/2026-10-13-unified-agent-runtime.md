@@ -541,13 +541,13 @@ CREATE TABLE ai_plugin_sessions (
 
 ## Phase 5: `AgentSession` behind a flag (PR 5, `feat(agent): AgentSession runs the classic turn durably (flag)`)
 
-`ai_settings.session_runtime`: `'unified'` routes new **durable** sessions to `AgentSession`. Unset keeps today's behaviour. Evals run both until Phase 6.
+`ai_settings.unified_sessions`: `true` routes new **durable** sessions to `AgentSession`. Unset keeps today's behaviour. Evals run both until Phase 6.
 
 ### Task 5.1: The workflow: send, end, continue-as-new
 
 **Files:**
 - Create: `agent/src/temporal/session/workflow.ts`
-- Modify: `agent/src/temporal/workflows.ts` (export `AgentSession`), `agent/src/temporal/worker.ts` (accept `workerDeploymentOptions`), `agent/src/main.ts` (a third worker on `agent-sessions`, deployment `scadbuddy-agent`, build id from `SCADBUDDY_BUILD_ID` or the image tag, `defaultVersioningBehavior: 'AUTO_UPGRADE'`), `agent/src/sessions/durable.ts` (workflow type and queue by `session_runtime`)
+- Modify: `agent/src/temporal/workflows.ts` (export `AgentSession`), `agent/src/temporal/worker.ts` (accept `workerDeploymentOptions`), `agent/src/main.ts` (a third worker on `agent-sessions`, deployment `scadbuddy-agent`, build id from `SCADBUDDY_BUILD_ID` or the image tag, `defaultVersioningBehavior: 'AUTO_UPGRADE'`), `agent/src/sessions/durable.ts` (workflow type and queue by `unified_sessions`)
 - Create: `agent/test/fixtures/agent_session_histories/` (recorded by the test below with `UPDATE_SESSION_HISTORIES=1`)
 - Test: `agent/test/agentSession.temporal.test.ts`
 

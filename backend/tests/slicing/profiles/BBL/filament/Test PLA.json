@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "Test PLA",
+    "inherits": "Test PLA @base",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GF_PLA"
+}

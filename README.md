@@ -165,9 +165,15 @@ on shutdown.
   editor still works, without completion and hover.
   A render's closed parts take one more `openscad` run per colour, and
   `SCADBUDDY_SOLID_CONCURRENCY` of those run at once per render. Left at 0 it is
-  the CPUs the container may use (a cgroup v1 or v2 CPU limit counts), less
-  `SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, between
-  1 and 8, so renders and checks together stay at one process per CPU. If no
+  the CPUs the container running the renders may use (a cgroup v1 or v2 CPU limit
+  counts), less `SCADBUDDY_CHECK_CONCURRENCY` where that container also serves the
+  editor checks (the API; not a separate render worker), divided by
+  `SCADBUDDY_RENDER_CONCURRENCY`, between 1 and 8, so renders and checks together
+  stay at one process per CPU. A value saved in Settings reaches a separate render
+  worker within 30 seconds (its settings cache), at its next per-colour stage. An
+  in-process worker (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) on the replica that took
+  the save sees it at once, since the save invalidates that cache; on another
+  replica, within the same 30 seconds. If no
   cgroup CPU controller is readable, a warning is logged at the first render and it
   sizes for every CPU it can see; set it by hand there. It reads no memory limit:
   size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
@@ -653,12 +659,16 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   while it is current, and the new build schedules it only once it is. Not covered: a
   new workflow type on the queue (the API starts it while the old build, which does not
   register it, is current; the SDK fails that as a task, not a workflow, but this was
-  not measured, so such a release still rolls `scadbuddy-print` with `Recreate`), and a
+  not measured, so such a release still rolls `scadbuddy-print` with `Recreate`: see
+  "A release that needs `Recreate`" below), and a
   prelude kind on another queue (`output_inbox_delete`, which a library `Operation`
   runs on `bambuddy`). **Rolling back** to a build without a kind leaves that kind's
   operations still in flight deferred (their record `running`) until a build with it is
   current again; terminate them in the Temporal UI to end them, and the reconciler
   records them lost.
+- **Readiness (#4146):** `/readyz` on 9090 answers 503 until the `bambuddy` queue routes
+  to this build (`/healthz` never waits on it). Point a rolling update's
+  `readinessProbe` at it, so the old pod stops only once the new build takes the queue.
 - **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
   still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
@@ -698,9 +708,17 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
 - **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched` (see
   "Versioning" above). A new operation kind or a new activity needs nothing more
   ("Rolling it"); a release that adds a workflow type to the queue says so here and
-  needs a `Recreate` rollout of `scadbuddy-print`. Where the API still serves the queue
+  needs a `Recreate` rollout of `scadbuddy-print`, done as below. Where the API still serves the queue
   itself (unversioned), a new activity in `PrintRun` or `FollowPrint` needs the API
   rolled out with `Recreate` too: there any replica takes any task.
+- **A release that needs `Recreate`:** the deploy PR cannot carry it, because the deploy
+  pipeline (`deploy.reusable.yml`'s `pin` step) rewrites only the image and the
+  `scadbuddy.eh-homelab.io/*` annotation lines. Open a clusters PR of its own that sets
+  `strategy: {type: Recreate}` on the affected Deployment (`scadbuddy-print` or
+  `scadbuddy-projects`) and removes its `rollingUpdate:` block, which the API server
+  refuses beside `Recreate`. Merge it before the release's deploy PR, and restore
+  `RollingUpdate` once the release has rolled out. The clusters manifests' comments
+  describe the same steps (eh-homelab/clusters#2557).
 
 ### Flow runs on the `projects` queue (#1057)
 
@@ -739,12 +757,64 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 - **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does
   not fall back after a large script; the homelab Deployment requests 256 Mi with a
   1 Gi limit (eh-homelab/clusters#2123).
-- **Unversioned** (a flow may run for weeks): every change to `ProjectWorkflow`, its host
-  functions or the harness pin must replay `backend/tests/fixtures/project_workflow_histories/`,
-  or go behind `workflow.patched`. It stops without a drain; a run in flight resumes on
-  the next worker from its history.
+- **Versioned, auto-upgrade (#4146):** the worker is its build's version of the Worker
+  Deployment `scadbuddy-projects` (build id `SCADBUDDY_REVISION`, stamped in the image;
+  nothing to set in the manifest). It makes its build current once at start, retrying as
+  the render and print workers do, and its `/readyz` on 9090 answers 503 until the queue
+  routes to that build (`/healthz` never waits on it). Every workflow on it
+  (`ProjectWorkflow`, the `flow_*` `Operation`) is auto-upgrade by the deployment's
+  default (`client.projects_deployment`), never pinned, because a flow may run for weeks
+  (plan 2026-10-09 Ruling 13). An open run moves to the current build at its next task
+  and replays there, so every change to `ProjectWorkflow`, its host functions or the
+  harness pin must still replay `backend/tests/fixtures/project_workflow_histories/`, or
+  go behind `workflow.patched`. It stops without a drain.
+- **Rolling it:** with the API's new pods starting runs and operations while the old
+  build may still be current, the old build waits rather than fails:
+  - A `flow_*` operation of a kind it does not register is deferred (#4139, as on the
+    `bambuddy` queue).
+  - A run whose start names a host function it does not have (the API stamps its own
+    build's on each start, `FlowStart.host_functions`) is recorded and then waits before
+    its script starts. Its workflow task fails until a build with the function is
+    current: at once, then about every 10 s (measured,
+    `tests/flows/test_projects_versioning.py`). The check comes after the run's first
+    task (`flow_record`), because a failed first task loses the start's `execute`
+    Update and the run would wait for a script forever.
+  - The cross-queue calls still route: `ProjectWorkflow`'s `tool`/`agent` activities
+    reach the agent's unversioned `agent-tools` worker, and the agent's session
+    workflows' `flow_grant_check` reaches the versioned `projects` queue (both in the
+    same test file).
+  - Not covered: a new workflow type on the queue, which still needs a `Recreate`
+    rollout of `scadbuddy-projects`, done through a clusters PR merged before the deploy
+    PR ("A release that needs `Recreate`" under the `bambuddy` queue).
+- **The first deploy of #4146** goes from an unversioned worker to a versioned one.
+  It was deployed with `Recreate`, before eh-homelab/clusters#2557 moved the worker to
+  `RollingUpdate`. The new pod makes
+  `scadbuddy-projects` current, and from then on unversioned workers get no tasks. Open
+  runs, all of them started unversioned, move to the versioned build at their next task
+  ([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)):
+  they are the replay-compatible runs an unversioned worker would have replayed anyway.
+  The agent needs nothing: its `agent-tools` worker stays unversioned.
+- **Then, in clusters**, once a build with #4146 runs: in `scadbuddy-projects.yaml`,
+  set `strategy: RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`) and point the
+  `readinessProbe` at `/readyz` (the liveness and startup probes stay on `/healthz`).
+  In the PostSync promote hook (`temporal-promote-workers.yaml`), add
+  `scadbuddy-projects=${PROJECTS_BUILD_ID}` to its targets, with a `replacements` entry
+  in `kustomization.yaml` that copies the `scadbuddy-projects` Deployment's
+  `scadbuddy.eh-homelab.io/revision` annotation into `PROJECTS_BUILD_ID`, as
+  clusters#2499 does for `scadbuddy-library`, and raise `activeDeadlineSeconds` by
+  400 s for the extra deployment. Added before this release runs, the hook would wait
+  400 s for a build nothing polls and fail the sync.
+- **Rolling back to an image from before #4146** stops the `projects` queue: unversioned
+  workers get no tasks while `scadbuddy-projects` has a current version, and the old
+  image never clears it. Before the old pod starts, run
+  `temporal worker deployment set-current-version --deployment-name scadbuddy-projects --unversioned`
+  (or set it in the Temporal UI), and take `scadbuddy-projects` out of the promote
+  hook's targets, which would otherwise try to make the old revision current and fail
+  the sync. Rolling back to any build from #4146 on needs nothing: its pod makes its own
+  build current.
 - **Without the Deployment**, `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS=true` serves
-  the queue from the API; with neither, flow runs wait on the queue.
+  the queue from the API, unversioned (as the print worker's in-process one); with
+  neither, flow runs wait on the queue.
 
 ### Blob store and render workers (#426)
 
