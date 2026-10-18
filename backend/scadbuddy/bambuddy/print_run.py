@@ -1448,6 +1448,9 @@ async def sliced_as_planned(
     printed what was chosen. Only that is judged: a colour that is no other slot's (one
     Bambuddy spells or rounds otherwise, or a slot with none chosen or read back) is not
     evidence of a swap, and refusing on it would refuse prints that are right.
+    The plan pads a slot with no colour chosen as ``#FFFFFF`` (``resolver``), so a
+    slot coming back white counts as another's only where white was really chosen or
+    padded; both are slots the plan sliced in white.
 
     Returns what it read, for the rack pick to rank from rather than read again, or
     ``None`` when Bambuddy did not answer."""

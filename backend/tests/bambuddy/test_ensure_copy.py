@@ -289,6 +289,49 @@ async def test_a_two_filament_copy_from_before_slot_hints_is_not_reused(
     assert (filed.created, filed.library_file_id) == (False, printed.library_file_id)
 
 
+async def test_an_uncoloured_copy_from_before_slot_hints_is_not_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The copy Generate filed for a two-filament output before #4013, in the model's
+    own colours, has no hint marker either: a print in those colours uploads a new one,
+    rather than reusing one whose slice comes back swapped and is refused every time
+    (claude-review on #4056). The new one is reused, and a one-filament copy keeps its
+    key."""
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy = SlowBambuddy()
+    uploads = MemoryUploads()
+    meta = output("h").model_copy(update={"colors": ["#FF0000", "#00FF00"]})
+    own = Target(DEFAULT_PLATE, "0.2", colours=("#ff0000", "#00ff00"))
+    bambuddy.uploaded.append("Demo.3mf")
+    before = LibraryCopy(
+        id=1, folder_id=FOLDER, target_key=own.uncoloured_key, sliced=[SlicedCopy(id=98)]
+    )
+    uploads.copies[meta.id] = [before]
+
+    async def ensure(target: Target, subject: OutputMeta = meta) -> send.EnsuredCopy:
+        return await ensure_copy(
+            cast(BambuddyClient, bambuddy),
+            cast(OutputStore, None),
+            cast(BambuddyUploadStore, uploads),
+            subject,
+            StoredSettings(library_folder_id=2),
+            target=target,
+            folder_id=FOLDER,
+            stem="Demo",
+        )
+
+    printed = await ensure(own)
+    filed = await ensure(Target(DEFAULT_PLATE, "0.2"))
+
+    assert printed.created and printed.library_file_id != before.id
+    assert (filed.created, filed.library_file_id) == (False, printed.library_file_id)
+    single = output("s").model_copy(update={"colors": ["#FF0000"]})
+    uploads.copies[single.id] = [LibraryCopy(id=1, folder_id=FOLDER, target_key=own.uncoloured_key)]
+    kept = await ensure(Target(DEFAULT_PLATE, "0.2"), single)
+    assert (kept.created, kept.library_file_id) == (False, 1)
+
+
 @pytest.mark.requires_postgres
 async def test_two_replicas_filing_and_printing_at_once_upload_one_copy(
     monkeypatch: pytest.MonkeyPatch, pg_conninfo: str, tmp_path: Path

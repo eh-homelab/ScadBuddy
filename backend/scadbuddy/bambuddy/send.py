@@ -168,6 +168,16 @@ _SLOT_HINTS = ";slots"
 _STANDARD = VOLUME_TYPE["standard"]
 
 
+def _hinted(key: str, filaments: int) -> str:
+    """``key`` as a copy of a model of ``filaments`` filaments is recorded under: with
+    :data:`_SLOT_HINTS` from two filaments up, in the model's own colours too, so the
+    uncoloured copy Generate filed before #4013 is not reused either (claude-review on
+    #4056). A recoloured key of two or more colours carries it already."""
+    if filaments > 1 and not key.endswith(_SLOT_HINTS):
+        return f"{key}{_SLOT_HINTS}"
+    return key
+
+
 @dataclass(frozen=True)
 class Target:
     """What the 3MF is laid out for: the target's plate and, when known, its nozzle."""
@@ -332,6 +342,8 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
     payload = recolour_3mf(payload, colours) if colours is not None else payload
     # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
+    # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
+    # which hint_painted_slots answers with the payload unchanged.
     return hint_painted_slots(payload)
 
 
@@ -567,13 +579,14 @@ async def upload_copy(
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
 
+    target_key = _hinted(target.key, len(printable.colours))
     content = (
         await asyncio.to_thread(content_key, payload)
         if project_stem is not None and folder is not None
         else None
     )
     if content is not None:
-        same = await _same_content(client, uploads, printable.key, folder, target.key, content)
+        same = await _same_content(client, uploads, printable.key, folder, target_key, content)
         if same is not None:
             return same.id, same.filename, False
     listed = await _listing(client, folder)
@@ -591,7 +604,7 @@ async def upload_copy(
         uploaded = await upload_into(client, filename, payload, folder_id=folder)
     await uploads.record(
         printable.key,
-        LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key, content_key=content),
+        LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target_key, content_key=content),
     )
     if is_inbox(folder, settings):
         for copy in await uploads.for_output(printable.key):
@@ -926,15 +939,16 @@ async def _reusable(
     colours (a print whose spools matched the model), so a later filing with no spools
     reuses it rather than uploading a duplicate.
     """
-    keys = [target.key]
     own = [normalise_colour(colour) for colour in printable.colours]
+    uncoloured = _hinted(target.uncoloured_key, len(own))
+    keys = [_hinted(target.key, len(own))]
     own_colours = (
         target.colours is None or [normalise_colour(colour) for colour in target.colours] == own
     )
     recoloured = f"{target.uncoloured_key}{_RECOLORED}"
     extended = not is_inbox(folder, settings) and own_colours
-    if extended and target.uncoloured_key != target.key:
-        keys.append(target.uncoloured_key)
+    if extended and uncoloured != keys[0]:
+        keys.append(uncoloured)
 
     def rank(copy: LibraryCopy) -> int | None:
         if copy.target_key in keys:
