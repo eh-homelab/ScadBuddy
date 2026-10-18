@@ -172,3 +172,43 @@ def test_a_move_inside_a_subtree_being_deleted_does_not_deadlock(
     trashed, folders = done
     assert [t.id for t in trashed] == [f.id] and set(folders) == {a.id, b.id, c.id}
     assert rows.files(None) == [] and rows.file(f.id, trashed=True) is not None
+
+
+def test_a_bulk_trash_overlapping_a_folder_delete_does_not_deadlock(
+    rows: NativeLibraryStore, pg_pool: PgPool
+) -> None:
+    # The folder delete locks its file rows by id; a trash that locked them in the order
+    # its scan met them would hold f2 while waiting on f1, which the delete takes first.
+    # Rewriting f1 puts its live tuple after f2's, so a scan meets f2 first.
+    a = rows.create_folder("a", None)
+    f1 = stored(rows, folder_id=a.id)
+    f2 = stored(rows, folder_id=a.id)
+    rows.update_file(f1.id, name="f1.3mf", folder_id=Unset, filed=None)
+    with pg_pool.connection() as conn:
+        conn.execute("ANALYZE library_files")
+    with ThreadPoolExecutor(2) as pool:
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT id FROM library_files WHERE id = %s FOR UPDATE", (f1.id,))
+            deleting = pool.submit(rows.delete_folder_tree, a.id)
+            _wait_for_a_lock_wait(pg_pool)
+            trashing = pool.submit(rows.trash, [f1.id, f2.id])
+            _wait_for_lock_waits(pg_pool, 2)
+        done = deleting.result(timeout=30)
+        trashed = trashing.result(timeout=30)
+    assert done is not None
+    assert sorted(f.id for f in done[0]) == [f1.id, f2.id]
+    assert trashed == []
+
+
+def _wait_for_lock_waits(pool: PgPool, n: int) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()
+        if row is not None and row["n"] >= n:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"fewer than {n} backends ever waited on a lock")

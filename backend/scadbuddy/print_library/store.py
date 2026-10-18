@@ -216,11 +216,20 @@ class NativeLibraryStore:
         return found[0] if found else None
 
     def trash(self, ids: list[int]) -> list[NativeFile]:
-        return self._files(
-            f"UPDATE library_files SET deleted_at = now(), updated_at = now()"
-            f" WHERE id = ANY(%s) AND deleted_at IS NULL RETURNING {_FILE_COLUMNS}",
-            (list(ids),),
-        )
+        """The rows are locked by id first, as `delete_folder_tree` locks them: an UPDATE
+        alone locks them in the order its scan meets them, and would deadlock with it."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT id FROM library_files WHERE id = ANY(%s) AND deleted_at IS NULL"
+                " ORDER BY id FOR UPDATE",
+                (list(ids),),
+            )
+            rows = conn.execute(
+                f"UPDATE library_files SET deleted_at = now(), updated_at = now()"
+                f" WHERE id = ANY(%s) AND deleted_at IS NULL RETURNING {_FILE_COLUMNS}".encode(),
+                (list(ids),),
+            ).fetchall()
+        return [NativeFile.model_validate(r) for r in rows]
 
     def restore(self, ids: list[int]) -> list[int]:
         """A file whose folder is gone comes back with `folder_id` NULL, by the FK."""
