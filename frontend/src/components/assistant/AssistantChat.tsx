@@ -908,10 +908,13 @@ export function AssistantChat({
       )}
 
       <RunsWaiting />
-      {active && <SessionFlowRuns key={active.id} sessionId={active.id} />}
+      {/* #4149 — siblings: each key names its strip as well as the session. Two children
+          with one key are reconciled unpredictably; here the first was mounted afresh on
+          every render of the chat, and read its flow runs each time. */}
+      {active && <SessionFlowRuns key={`flow-runs:${active.id}`} sessionId={active.id} />}
 
       {active && (
-        <SessionBackgroundTasks key={active.id} sessionId={active.id} refreshKey={`${active.status}:${finishedTools}`} canWrite={canSend} />
+        <SessionBackgroundTasks key={`background-tasks:${active.id}`} sessionId={active.id} refreshKey={`${active.status}:${finishedTools}`} canWrite={canSend} />
       )}
 
       <div

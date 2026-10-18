@@ -29,6 +29,8 @@ export interface AsyncState<T> {
 
 /** How long a first read left to the subscription's resync waits for it (#1039). */
 export const RESYNC_WAIT_MS = 500
+/** The least time between two reads a hook's topic signals start (#4149). */
+export const SIGNAL_READ_MIN_MS = 250
 
 interface Snapshot<T> {
   key: string
@@ -141,6 +143,8 @@ export function useAsync<T>(
   const queued = useRef(false)
   const accepting = useRef<((data: T) => boolean) | undefined>(undefined)
   const failing = useRef<(() => void)[]>([])
+  /** Settles when the newest background read does, answered or not (#4149). */
+  const reading = useRef<Promise<void>>(Promise.resolve())
   const refresh = useCallback((accept?: (data: T) => boolean, failed?: () => void) => {
     // Signals that arrive together are read once, deciding by the latest `accept`; each
     // caller's `failed` is kept, so none misses the failure of the read it was merged into.
@@ -148,12 +152,15 @@ export function useAsync<T>(
     if (failed) failing.current.push(failed)
     if (queued.current) return
     queued.current = true
+    let settle: () => void = () => {}
+    reading.current = new Promise((resolve) => (settle = resolve))
     queueMicrotask(() => {
       queued.current = false
       if (!mounted.current) {
         // Gone: the callers' closures are let go now, not when the hook is collected.
         accepting.current = undefined
         failing.current = []
+        settle()
         return
       }
       const { load: current, key: at } = latest.current
@@ -162,7 +169,9 @@ export function useAsync<T>(
       failing.current = []
       const mine = ++sequence.current
       const scope = new ReadScope()
-      inReadScope(scope, current).then(
+      const answered = inReadScope(scope, current)
+      void answered.then(settle, settle)
+      answered.then(
         (data) => {
           if (!mounted.current || sequence.current !== mine) return
           if (decide && !decide(data)) return
@@ -182,6 +191,38 @@ export function useAsync<T>(
     })
   }, [])
 
+  /**
+   * #4149 — a topic's signal reads through here, never straight through `refresh`: at
+   * most one such read in flight and one waiting behind it, which every signal meanwhile
+   * joins, and each started at least `SIGNAL_READ_MIN_MS` after the last. However often a
+   * topic is signalled (or a bug signals it), this hook reads it a few times a second at most.
+   */
+  const signals = useRef<{ waiting: boolean; last: number; timer?: ReturnType<typeof setTimeout> }>({
+    waiting: false,
+    last: -Infinity,
+  })
+  const signalled = useCallback(() => {
+    const state = signals.current
+    if (state.waiting) return
+    state.waiting = true
+    const start = () => {
+      state.timer = undefined
+      void reading.current.then(() => {
+        if (!mounted.current) return
+        state.waiting = false
+        state.last = Date.now()
+        refresh()
+      })
+    }
+    const wait = state.last + SIGNAL_READ_MIN_MS - Date.now()
+    if (wait > 0) state.timer = setTimeout(start, wait)
+    else start()
+  }, [refresh])
+  useEffect(() => {
+    const state = signals.current
+    return () => clearTimeout(state.timer)
+  }, [])
+
   const staleFor = useCallback(
     (topic: string, confirmation: Confirmation) => readAgain(shownRead.current, topic, confirmation),
     [],
@@ -190,10 +231,10 @@ export function useAsync<T>(
   const confirmed = useCallback(
     (topic: string, confirmation: Confirmation) => {
       void staleFor(topic, confirmation).then((stale) => {
-        if (stale) refresh()
+        if (stale) signalled()
       })
     },
-    [refresh, staleFor],
+    [signalled, staleFor],
   )
 
   useEffect(() => {
@@ -203,7 +244,7 @@ export function useAsync<T>(
       realtime.subscribe(topic, (signal, confirmation) => {
         if (isNews.current && !isNews.current(signal)) return
         if (confirmation) confirmed(topic, confirmation)
-        else refresh()
+        else signalled()
       }),
     )
     followed.current = topicList
@@ -211,7 +252,7 @@ export function useAsync<T>(
       followed.current = ''
       for (const stop of stops) stop()
     }
-  }, [topicList, refresh, confirmed])
+  }, [topicList, signalled, confirmed])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
   // The key the snapshot holds, so `supersede` never cancels another key's first load.
