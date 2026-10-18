@@ -5,7 +5,6 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -80,12 +79,14 @@ export function durableEvalSkip(): string | undefined {
   return undefined
 }
 
-async function freePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const { port } = server.address() as { port: number }
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
+/**
+ * The health port the sidecar bound, from its log, or undefined before it says. It is
+ * started on port 0 and names the port it got, so no port is picked first and taken by
+ * something else before it binds (#3655).
+ */
+export function durableHealthPort(log: string): number | undefined {
+  const match = /health on port (\d+)/.exec(log)
+  return match ? Number(match[1]) : undefined
 }
 
 function withSearchPath(url: string, schema: string): string {
@@ -399,7 +400,6 @@ export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<O
 }
 
 async function startDurableWorker(o: { url: string; address: string; dir: string; stderr?: ((line: string) => void) | undefined }): Promise<ChildProcess> {
-  const port = await freePort()
   const worker = spawn('uv', ['run', '--frozen', 'python', '-m', 'scadbuddy_durable'], {
     cwd: DURABLE_DIR,
     env: {
@@ -412,7 +412,7 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
       SCADBUDDY_DURABLE_CWD: o.dir,
       // ScadBuddy's own plugin, as runScenario gives the classic harness (`ownPlugin`).
       SCADBUDDY_DURABLE_SKILLS_DIR: OWN_PLUGIN_DIR,
-      SCADBUDDY_DURABLE_HEALTH_PORT: String(port),
+      SCADBUDDY_DURABLE_HEALTH_PORT: '0',
       // No agent serves the subagents' loopback MCP server here: without "off" every
       // segment's Claude Code waits about 30 s on a server it cannot reach.
       SCADBUDDY_DURABLE_SUBAGENT_MCP_URL: 'off',
@@ -420,8 +420,11 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let log = ''
+  // Read as it arrives, before the log is trimmed: a long uv sync could push it out.
+  let port: number | undefined
   const take = (d: Buffer) => {
     const text = d.toString()
+    port ??= durableHealthPort(log + text)
     log = (log + text).slice(-20_000)
     if (o.stderr) for (const line of text.split('\n')) if (line) o.stderr(line)
   }
@@ -431,9 +434,11 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
   const deadline = Date.now() + 240_000
   for (;;) {
     if (worker.exitCode !== null) throw new Error(`the durable worker exited: ${log}`)
-    const status = await fetch(`http://127.0.0.1:${port}/healthz`)
-      .then((r) => r.json() as Promise<{ worker?: string }>)
-      .catch(() => undefined)
+    const status = port === undefined
+      ? undefined
+      : await fetch(`http://127.0.0.1:${port}/healthz`)
+          .then((r) => r.json() as Promise<{ worker?: string }>)
+          .catch(() => undefined)
     if (status?.worker === 'running') return worker
     if (status?.worker && status.worker !== 'starting') {
       await stopProcess(worker)
