@@ -101,8 +101,8 @@ def test_port_zero_turns_the_sdk_metrics_off(settings: Settings) -> None:
 def test_a_taken_port_serves_no_sdk_metrics_rather_than_stopping_the_worker(
     settings: Settings,
 ) -> None:
-    # A Runtime cached for this port number by an earlier test would hide the clash.
-    sdk_runtime.cache_clear()
+    # The port is the one the OS just gave `held`, so no cached Runtime can be on it:
+    # a cached Runtime keeps its exporter bound, and a bound port is never handed out.
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
         held.listen()
