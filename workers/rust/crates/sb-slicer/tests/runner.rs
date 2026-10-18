@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sb_slicer::models::{Arrange, SliceProgress};
-use sb_slicer::runner::{RunError, RunOutcome, RunRequest, command_line, run};
+use sb_slicer::runner::{KEEPALIVE, RunError, RunOutcome, RunRequest, command_line, run};
 use tokio_util::sync::CancellationToken;
 
 fn fake(name: &str) -> PathBuf {
@@ -48,6 +48,7 @@ fn request<'a>(cli: &'a Path, p: &'a Paths) -> RunRequest<'a> {
         arrange: Arrange::No,
         allow_newer_file: true,
         debug: 1,
+        keepalive: KEEPALIVE,
     }
 }
 
@@ -118,23 +119,7 @@ async fn a_cancelled_slice_leaves_no_process_behind() {
     let Err(RunError::Cancelled { pgid }) = result else {
         panic!("expected Cancelled, got {result:?}");
     };
-    // The killed `sleep` is reaped by init a moment later; until then it is a zombie.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let out = std::process::Command::new("pgrep")
-            .args(["-g", &pgid.to_string()])
-            .output()
-            .unwrap();
-        if out.stdout.is_empty() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "group {pgid} still has {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    assert_group_gone(pgid).await;
 }
 
 #[test]
@@ -187,4 +172,72 @@ fn command_line_is_the_argv_the_spec_fixes() {
     assert!(!argv.contains(&"--export-slicedata".to_owned()));
     let i = argv.iter().position(|a| a == "--arrange").unwrap();
     assert_eq!(argv[i + 1], "auto");
+}
+
+/// Waits until no process is left in `pgid`; the killed `sleep` is reaped by init a
+/// moment after the kill.
+async fn assert_group_gone(pgid: i32) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let out = std::process::Command::new("pgrep")
+            .args(["-g", &pgid.to_string()])
+            .output()
+            .unwrap();
+        if out.stdout.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "group {pgid} still has {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_silent_cli_still_heartbeats() {
+    let cli = fake("quiet");
+    let p = paths();
+    let mut req = request(&cli, &p);
+    req.keepalive = Duration::from_millis(800);
+    let mut seen = Vec::new();
+    let outcome = run(
+        req,
+        |progress| seen.push(progress),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.exit_code, 0);
+    // 2.5 s of silence at an 800 ms keepalive: zeroed progress before the first line.
+    let before_first = seen.iter().take_while(|s| s.total_percent == 0).count();
+    assert!(
+        before_first >= 2,
+        "only {before_first} keepalives in {seen:?}"
+    );
+    assert_eq!(seen.last().unwrap().total_percent, 100);
+}
+
+#[tokio::test]
+async fn a_slice_cancelled_while_silent_leaves_no_process_behind() {
+    let cli = fake("quiet");
+    let p = paths();
+    let mut req = request(&cli, &p);
+    req.keepalive = Duration::from_millis(300);
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        trigger.cancel();
+    });
+    let mut beats = 0;
+    let started = Instant::now();
+    let result = run(req, |_| beats += 1, cancel).await;
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    assert!(beats >= 2, "only {beats} keepalives");
+    let Err(RunError::Cancelled { pgid }) = result else {
+        panic!("expected Cancelled, got {result:?}");
+    };
+    assert_group_gone(pgid).await;
 }

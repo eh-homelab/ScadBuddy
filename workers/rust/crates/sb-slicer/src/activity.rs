@@ -106,6 +106,7 @@ async fn slice(
         arrange: input.arrange,
         allow_newer_file: input.allow_newer_file,
         debug: input.debug,
+        keepalive: runner::KEEPALIVE,
     };
 
     // Progress goes through a channel so the callback stays synchronous and heartbeats

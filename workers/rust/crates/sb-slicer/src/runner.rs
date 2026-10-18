@@ -22,6 +22,10 @@ use crate::progress::{Line, LineBuffer};
 const STDERR_TAIL: usize = 8 * 1024;
 /// At most one progress callback a second; the last line seen is always delivered.
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// The longest the callback goes without a call while the CLI runs: a silent phase
+/// repeats the last progress (zeroed before the first line), because Temporal delivers
+/// cancellation only on a heartbeat and fails an activity silent past its heartbeat timeout.
+pub const KEEPALIVE: Duration = Duration::from_secs(10);
 /// How long stderr may stay open after the CLI exits (a straggler holding it).
 const STDERR_GRACE: Duration = Duration::from_secs(1);
 
@@ -37,6 +41,8 @@ pub struct RunRequest<'a> {
     pub arrange: Arrange,
     pub allow_newer_file: bool,
     pub debug: u8,
+    /// [`KEEPALIVE`] outside tests.
+    pub keepalive: Duration,
 }
 
 #[derive(Debug)]
@@ -159,12 +165,13 @@ pub async fn run(
     let stdout_task = tokio::spawn(keep_tail(child.stdout.take(), Arc::default()));
 
     let mut lines = LineBuffer::default();
-    let mut progress = Coalesce::default();
+    let mut progress = Coalesce::new(req.keepalive);
     let mut warnings = Vec::new();
     let mut buf = vec![0u8; 4096];
 
     let status = loop {
         let due = progress.due();
+        let keepalive = progress.keepalive_due();
         tokio::select! {
             status = child.wait() => break status?,
             () = cancel.cancelled() => {
@@ -180,6 +187,7 @@ pub async fn run(
                 take(read, &mut progress, &mut warnings, &mut on_progress);
             }
             () = sleep_until(due) => progress.flush(&mut on_progress),
+            () = tokio::time::sleep_until(keepalive.into()) => progress.repeat(&mut on_progress),
         }
     };
     // The leader is reaped: its pid is free, so the group must not be signalled by it.
@@ -223,21 +231,58 @@ impl Drop for Group {
     }
 }
 
-#[derive(Default)]
 struct Coalesce {
+    /// When a progress line was last delivered.
     last: Option<Instant>,
     pending: Option<SliceProgress>,
+    /// The last progress delivered, which a keepalive repeats.
+    sent: Option<SliceProgress>,
+    /// When the callback was last called, by a line or a keepalive.
+    called: Instant,
+    keepalive: Duration,
 }
 
 impl Coalesce {
+    fn new(keepalive: Duration) -> Self {
+        Self {
+            last: None,
+            pending: None,
+            sent: None,
+            called: Instant::now(),
+            keepalive,
+        }
+    }
+
+    fn deliver(&mut self, p: SliceProgress, on_progress: &mut impl FnMut(SliceProgress)) {
+        let now = Instant::now();
+        self.last = Some(now);
+        self.called = now;
+        self.sent = Some(p.clone());
+        on_progress(p);
+    }
+
     fn offer(&mut self, p: SliceProgress, on_progress: &mut impl FnMut(SliceProgress)) {
         if self.last.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
             self.pending = None;
-            self.last = Some(Instant::now());
-            on_progress(p);
+            self.deliver(p, on_progress);
         } else {
             self.pending = Some(p);
         }
+    }
+
+    fn keepalive_due(&self) -> Instant {
+        self.called + self.keepalive
+    }
+
+    fn repeat(&mut self, on_progress: &mut impl FnMut(SliceProgress)) {
+        self.called = Instant::now();
+        on_progress(self.sent.clone().unwrap_or(SliceProgress {
+            plate_index: 0,
+            plate_count: 0,
+            plate_percent: 0,
+            total_percent: 0,
+            message: String::new(),
+        }));
     }
 
     fn due(&self) -> Option<Instant> {
@@ -247,8 +292,7 @@ impl Coalesce {
 
     fn flush(&mut self, on_progress: &mut impl FnMut(SliceProgress)) {
         if let Some(p) = self.pending.take() {
-            self.last = Some(Instant::now());
-            on_progress(p);
+            self.deliver(p, on_progress);
         }
     }
 }

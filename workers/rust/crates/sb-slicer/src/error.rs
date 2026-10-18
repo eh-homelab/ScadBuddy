@@ -55,3 +55,52 @@ pub(crate) fn slicer(exit_code: i32, stderr_tail: &str) -> ActivityError {
 pub(crate) fn local(e: impl std::fmt::Display) -> ActivityError {
     failure(e.to_string(), SLICER_ERROR, false, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(e: TransferError) -> (String, bool) {
+        match transfer(e) {
+            ActivityError::Application(f) => {
+                (f.type_name().unwrap().to_owned(), f.is_non_retryable())
+            }
+            other => panic!("expected an application failure, got {other:?}"),
+        }
+    }
+
+    fn refused() -> (String, bool) {
+        (TRANSFER_REFUSED.to_owned(), true)
+    }
+
+    fn retryable() -> (String, bool) {
+        (TRANSFER_ERROR.to_owned(), false)
+    }
+
+    #[test]
+    fn refused_urls_are_not_retried() {
+        assert_eq!(kind(TransferError::Refused(403)), refused());
+        assert_eq!(kind(TransferError::Refused(401)), refused());
+        assert_eq!(kind(TransferError::Missing), refused());
+        assert_eq!(kind(TransferError::Expired), refused());
+        assert_eq!(kind(TransferError::Status(302)), refused());
+        assert_eq!(kind(TransferError::Status(400)), refused());
+    }
+
+    #[test]
+    fn transient_failures_are_retried() {
+        assert_eq!(kind(TransferError::Status(429)), retryable());
+        assert_eq!(kind(TransferError::Status(500)), retryable());
+        assert_eq!(kind(TransferError::Status(503)), retryable());
+        assert_eq!(
+            kind(TransferError::Io(std::io::Error::other("reset"))),
+            retryable()
+        );
+        assert_eq!(kind(TransferError::Http("timed out".into())), retryable());
+        let digest = TransferError::Digest {
+            expected: "a".into(),
+            actual: "b".into(),
+        };
+        assert_eq!(kind(digest), retryable());
+    }
+}
