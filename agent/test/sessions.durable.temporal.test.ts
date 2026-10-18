@@ -584,6 +584,55 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(atLast.id)).start).toMatchObject({ agent: { checkpoint: 'a2' } })
   }, 60_000)
 
+  it('forks a parent whose committed state ends at a paused call before that call, with its history through the reply (#4173)', async () => {
+    const m = await durableManager()
+    const parent = await twoTurns(m)
+    // A third turn paused on a call, then streamed a reply and was stopped: its last segment
+    // never committed, so the workflow's checkpoint is the paused call, and the reply is only in the log.
+    const third = await m.send(parent.id, browser, 'paint it')
+    await finishTurn(parent.id, [...reply('durable-11', 'painting it now'), { type: 'session.status', status: 'idle' }])
+    await third.done
+    const paused = [
+      ...conversation,
+      entry('u3', 'user', 'paint it'),
+      entry('a3', 'assistant', [{ type: 'tool_use', id: 'toolu_p', name: 'mcp__scadbuddy__list_models', input: {} }]),
+    ]
+    const setConversation = (entries: unknown[], checkpoint: string) =>
+      env.client.workflow.getHandle(sessionWorkflowId(parent.id)).signal('set_conversation', {
+        session_id: 'claude-1',
+        checkpoint,
+        conversation: entries.map((e) => JSON.stringify(e)),
+      })
+    await setConversation(paused, 'a3')
+    const child = await m.fork(parent.id, browser)
+    expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2' } })
+    expect(conversationOf((await recorded(child.id)).start as Record<string, unknown>)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    // The child shows the conversation its agent has: not the stopped turn's uncommitted reply.
+    const log = (await m.events.read(child.id)).map((e) => e.event)
+    expect(log.filter((e) => e.type === 'assistant.text.delta').map((e) => (e as { delta: string }).delta)).toEqual(['a box', 'a taller box'])
+
+    // Once the call is answered and committed, the whole conversation forks.
+    await setConversation(
+      [...paused, entry('r3', 'user', [{ type: 'tool_result', tool_use_id: 'toolu_p', content: '[]' }])],
+      'r3',
+    )
+    const later = await m.fork(parent.id, browser)
+    expect((await recorded(later.id)).start).toMatchObject({ agent: { checkpoint: 'r3' } })
+
+    // A paused call with no finished reply before it has nothing to fork.
+    const { session: fresh, turn } = await m.start(browser, { origin: 'chat', prompt: 'list them' })
+    await finishTurn(fresh.id, [{ type: 'session.status', status: 'idle' }])
+    await turn!.done
+    await env.client.workflow.getHandle(sessionWorkflowId(fresh.id)).signal('set_conversation', {
+      session_id: 'claude-2',
+      checkpoint: 'a1',
+      conversation: [entry('u1', 'user', 'list them'), entry('a1', 'assistant', [{ type: 'tool_use', id: 'toolu_q', name: 'x', input: {} }])].map((e) =>
+        JSON.stringify(e),
+      ),
+    })
+    await expect(m.fork(fresh.id, browser)).rejects.toMatchObject({ code: 'no_transcript' })
+  }, 60_000)
+
   it('refuses to fork a durable session with no conversation yet, and leaves no child', async () => {
     const m = await durableManager()
     // No turn: no workflow.
