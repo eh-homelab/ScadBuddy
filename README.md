@@ -206,11 +206,21 @@ on shutdown.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
-  - The `library` queue's worker is not versioned: any API replica may take any of
-    its tasks. A release that adds a sweep (a new activity) says so here and needs a
-    `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
-    old build takes the new sweep's task and fails it as unregistered, and since a
-    sweep is not retried, that sweep waits for the next tick (a day, by default).
+  - The `library` queue's worker is versioned (#4090): each API build is a version of
+    the Worker Deployment `scadbuddy-library`, and makes itself current at start, so
+    the API rolls out with `RollingUpdate`. Once a new replica's build is current, the
+    queue hands it every new task, a run's next sweep included; an old replica only
+    finishes the activity attempts it already holds, so it never takes a sweep (or a
+    library command) that only the new build registers. A new replica sets the
+    Schedules up only once the queue routes to its build. Every workflow on the queue
+    is auto-upgrade (Housekeeping, the preview backfill, library commands, flow trigger
+    fires, the store migration): an open run moves to the current build at its next
+    task and replays there, so a change to one goes behind `workflow.patched`, and
+    nothing is drained on stop. What is left: a request served by the new replica in
+    the second or two before its build is current may start a command of a kind only
+    it has on the old build, which refuses it as unregistered. The release notes below
+    that say a release "needs a `Recreate` rollout" were written before #4090; they
+    need none now.
   - **This release adds a sweep**, `housekeeping_attach_backfills` (#902's backstop:
     an output re-render whose `job.done` no API replica heard), so it needs that
     `Recreate` rollout. Each replica attaches a finished re-render to its output when
@@ -451,6 +461,31 @@ the pinned `revision` — the commit stamped into the image at build time by
 `SCADBUDDY_REVISION` — then posts the result on the deploy PR and back here.
 That is a stronger proof than "the image field changed": the ReplicaSet rolled
 and the new pod is serving that exact build.
+
+### The API's rollout and its `library` worker (#4090)
+
+The API rolls out with `RollingUpdate`. The `library` queue's worker inside it is
+the API build's version of the Worker Deployment `scadbuddy-library`, so old and new
+replicas may poll the queue side by side. At start each replica makes its build
+current (retrying, as the render worker does), then waits for the queue to route to
+it, up to 60 s, before it sets up the housekeeping and preview Schedules. From then on
+Temporal hands every new workflow task and every new activity of the queue to the
+current build: its workflows are all auto-upgrade, and an auto-upgrade run's activities
+start on its target version
+([Worker Versioning](https://docs.temporal.io/worker-versioning): "an Activity starts
+on the Target Worker Deployment Version of the Workflow"). An old replica keeps only
+the attempts it had already started. A replica does not drain on stop: an open run
+moves to the current build at its next task, and an attempt cut off by the stop is
+retried there. Nothing needs setting in the manifest: the deployment name is fixed and
+the build id is `SCADBUDDY_REVISION`, stamped into the image. Measured on the dev
+server (`tests/test_library_versioning.py`): the queue routes to a build 0.2-0.3 s after
+it is made current, and a sweep released before then went to the old build.
+
+The first rollout of #4090 itself goes from unversioned replicas to versioned ones.
+Once the new build is current, unversioned workers get no more tasks, and in-flight
+unversioned runs move to the versioned build at their next task
+([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)).
+Those are the replay-compatible runs an unversioned worker would have replayed anyway.
 
 ### Render worker (#424)
 

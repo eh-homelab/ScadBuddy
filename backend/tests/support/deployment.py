@@ -25,7 +25,9 @@ BUILD_SERVES_POLL = 0.25
 BUILD_SERVES_MAX_POLL = 2.0
 
 
-async def build_serves(client: Client, task_queue: str, build_id: str) -> bool:
+async def build_serves(
+    client: Client, task_queue: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
+) -> bool:
     """Whether ``task_queue`` routes its new workflows to ``build_id``, as the queue
     itself sees it (`DescribeTaskQueue`'s versioning info: the routing matching uses).
     Neither the deployment's current version nor the version's list of queues says
@@ -44,7 +46,7 @@ async def build_serves(client: Client, task_queue: str, build_id: str) -> bool:
     except RPCError:
         return False
     current = described.versioning_info.current_deployment_version
-    return current.deployment_name == DEPLOYMENT_NAME and current.build_id == build_id
+    return current.deployment_name == deployment_name and current.build_id == build_id
 
 
 async def wait_until_build_serves(
@@ -55,6 +57,7 @@ async def wait_until_build_serves(
     timeout: float,
     poll: float,
     max_poll: float,
+    deployment_name: str = DEPLOYMENT_NAME,
 ) -> bool:
     """Ask `build_serves` until it holds (True) or ``timeout`` seconds have passed
     (False), ``poll`` seconds apart at first, doubling up to ``max_poll``. The time
@@ -62,7 +65,7 @@ async def wait_until_build_serves(
     host's monotonic clock has stepped back too."""
     loop = asyncio.get_running_loop()
     waited, last = 0.0, loop.time()
-    while not await build_serves(client, task_queue, build_id):
+    while not await build_serves(client, task_queue, build_id, deployment_name):
         if waited >= timeout:
             return False
         await asyncio.sleep(poll)

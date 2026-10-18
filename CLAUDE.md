@@ -288,7 +288,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   periodic sweeps as Temporal Schedules (every sweep, and `PRUNE_SWEEPS` on its own
   300 s one: the render prune, claims, lost slice starts and activity) on the `library`
   queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
-  process (it holds the data volume). Sweeps off (`asset_sweep_interval` 0) deletes the
+  process (it holds the data volume). That worker is versioned (#4090): deployment
+  `scadbuddy-library` (`client.library_deployment`, no default behavior), each API build
+  made current at start (`main._make_library_current`, which also waits for the queue to
+  route to it before the Schedules are set up), never drained. Every workflow on it is
+  AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
+  worker cannot complete a workflow that declares a behavior), so each stays
+  replay-compatible behind `patched`; a new one needs its own behavior or the worker
+  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`

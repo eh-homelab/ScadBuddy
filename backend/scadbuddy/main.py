@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 import scadbuddy.api
@@ -106,17 +107,29 @@ from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.index import BlobIndex
 from scadbuddy.store.migrate import migrate_activity
-from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
+from scadbuddy.worker import (
+    MAKE_CURRENT_BACKOFF,
+    MAKE_CURRENT_ERROR_AFTER,
+    MAKE_CURRENT_ERROR_EVERY,
+    MAKE_CURRENT_EVERY,
+    deployment_writes,
+    make_current_until_polled,
+    run_inprocess_worker,
+    worker_deps_from_state,
+)
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
+    LIBRARY_DEPLOYMENT_NAME,
     bambuddy_worker,
     connect,
     follow_worker,
+    library_deployment,
     reconcile_lost_operations,
     reconcile_lost_runs,
+    routes_to,
     sandboxed_runner,
 )
-from scadbuddy.workflows.flow_triggers import FlowTriggerFire
+from scadbuddy.workflows.flow_triggers import VersionedFlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
@@ -132,17 +145,17 @@ from scadbuddy.workflows.housekeeping import (
     ensure_schedules,
     library_worker,
 )
-from scadbuddy.workflows.operation import OperationWorkflow
+from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
     UNRUN_FAILURE,
-    PreviewBackfill,
+    VersionedPreviewBackfill,
     ensure_preview_schedule,
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
-from scadbuddy.workflows.store_migration import StoreMigration
+from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
 
@@ -1056,17 +1069,90 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
             await handoff
 
 
+#: The ``library`` worker's workflows beside ``Housekeeping`` (`library_worker` adds it),
+#: each with its own versioning behavior (#4090): every one is AUTO_UPGRADE, and each
+#: class says why. The deployment has no default, so a workflow added here without one
+#: stops the worker from being built.
+LIBRARY_WORKFLOWS: tuple[type, ...] = (
+    VersionedPreviewBackfill,
+    VersionedOperationWorkflow,
+    VersionedFlowTriggerFire,
+    VersionedStoreMigration,
+)
+
+
+#: How long the library Schedules wait for this build to route the queue before they
+#: are set up anyway (Temporal refusing the build, say), and how often it is asked.
+LIBRARY_ROUTED_WAIT = 60.0
+LIBRARY_ROUTED_POLL = 0.5
+
+
+async def _make_library_current(
+    client: Client, build_id: str, queue: str, routed: asyncio.Event
+) -> None:
+    """Make this API build the ``scadbuddy-library`` deployment's current version, as
+    the render worker does its own (`worker._serve_versioned`, #4090): a new replica
+    then takes every new task of the queue, and an old one only finishes the activity
+    attempts it already holds. It gives up once a newer build is current (#2538). Then
+    it waits, up to `LIBRARY_ROUTED_WAIT`, for the queue itself to route to this build
+    (`routes_to`), and sets ``routed`` whatever came of it. An error other than
+    Temporal's is logged, not raised: the worker keeps serving."""
+    set_current, read_current = deployment_writes(client, build_id, LIBRARY_DEPLOYMENT_NAME)
+    loop = asyncio.get_running_loop()
+    try:
+        await make_current_until_polled(
+            set_current,
+            build_id=build_id,
+            backoff=MAKE_CURRENT_BACKOFF,
+            every=MAKE_CURRENT_EVERY,
+            error_after=MAKE_CURRENT_ERROR_AFTER,
+            error_every=MAKE_CURRENT_ERROR_EVERY,
+            current=read_current,
+        )
+        until = loop.time() + LIBRARY_ROUTED_WAIT
+        while loop.time() < until:
+            with suppress(RPCError):
+                if await routes_to(
+                    client, queue, deployment_name=LIBRARY_DEPLOYMENT_NAME, build_id=build_id
+                ):
+                    return
+            await asyncio.sleep(LIBRARY_ROUTED_POLL)
+        logger.warning(
+            "the library queue does not route to this build yet", extra={"build_id": build_id}
+        )
+    except Exception:
+        logger.exception(
+            "could not make this build current for the library queue",
+            extra={"build_id": build_id},
+        )
+    finally:
+        routed.set()
+
+
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
     sweeps and the preview backfill need the data volume this process holds. Once
-    connected it sets the Schedules up; Temporal down at boot only delays that."""
+    connected it sets the Schedules up; Temporal down at boot only delays that.
+
+    The worker is this build's version of ``scadbuddy-library`` (#4090), in every mode
+    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS` too), and makes its build current beside
+    each start. It never drains on stop: its workflows are all AUTO_UPGRADE, so the
+    current build takes over what an old replica leaves (README, "Deploying")."""
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
     settings = state.settings
     queue = settings.temporal_task_queue_library
+    build_id = settings.revision
+
+    routed = asyncio.Event()
 
     async def set_up() -> None:
+        # After this build routes the queue (#4090): each set-up triggers a run with this
+        # build's sweeps, which a previous build still routed to would fail as
+        # unregistered.
+        with suppress(TimeoutError):
+            await asyncio.wait_for(routed.wait(), LIBRARY_ROUTED_WAIT)
         paused = await _set_up_housekeeping(
             client,
             queue,
@@ -1094,11 +1180,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire, StoreMigration],
+                workflows=LIBRARY_WORKFLOWS,
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                deployment_config=library_deployment(build_id),
             )
-            if not await _serve_until([worker], stop, name="library"):
+            current = _make_library_current(client, build_id, queue, routed)
+            if not await _serve_until([worker], stop, current, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
