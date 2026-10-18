@@ -137,6 +137,45 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     assert order == ["routed", "schedules"]
 
 
+async def test_a_restarted_worker_does_not_make_its_build_current_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #4101: a worker restarted (a poller lost in a Temporal blip) late in a
+    rollout, after a newer build became current, must not write its own build back. The
+    build is made current once per process, not per worker start."""
+    second = asyncio.Event()
+    built: list[StubWorker] = []
+    made: list[str] = []
+
+    def build(*args: Any, **kwargs: Any) -> StubWorker:
+        built.append(StubWorker(False, second if built else asyncio.Event(), fail_after=not built))
+        return built[-1]
+
+    async def current(client: object, build_id: str, queue: str, routed: asyncio.Event) -> None:
+        made.append(build_id)
+        routed.set()
+
+    async def no_schedules(*args: Any) -> bool:
+        return False
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "library_worker", build)
+    monkeypatch.setattr(main, "_make_library_current", current)
+    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
+    monkeypatch.setattr(main, "ensure_schedules", no_schedules)
+    monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_library_worker(_library_state("abc123"), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(second.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert len(built) == 2
+    assert made == ["abc123"]
+
+
 def test_every_library_workflow_names_its_versioning_behavior() -> None:
     """Each type is AUTO_UPGRADE, chosen per class (#4090): a Kubernetes rollout stops
     an old replica within its termination grace, so a Pinned run it held would be
@@ -174,7 +213,9 @@ async def client() -> AsyncIterator[Client]:
 async def test_the_versioned_worker_refuses_a_workflow_without_a_behavior(
     client: Client,
 ) -> None:
-    with pytest.raises((ValueError, RuntimeError), match="PreviewBackfill"):
+    with pytest.raises(
+        ValueError, match="Workflow PreviewBackfill must specify a versioning behavior"
+    ):
         library_worker(
             client,
             "library",

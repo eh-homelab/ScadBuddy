@@ -1117,7 +1117,9 @@ async def _make_library_current(
                 ):
                     return
             await asyncio.sleep(LIBRARY_ROUTED_POLL)
-        logger.warning(
+        # An error: the Schedules are set up now anyway, and a sweep this build added
+        # that the old build is handed fails, unseen, until its next tick.
+        logger.error(
             "the library queue does not route to this build yet", extra={"build_id": build_id}
         )
     except Exception:
@@ -1135,9 +1137,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     connected it sets the Schedules up; Temporal down at boot only delays that.
 
     The worker is this build's version of ``scadbuddy-library`` (#4090), in every mode
-    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS` too), and makes its build current beside
-    each start. It never drains on stop: its workflows are all AUTO_UPGRADE, so the
-    current build takes over what an old replica leaves (README, "Deploying")."""
+    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS` too), and makes its build current once, at
+    the first connect, not at each restart of the worker. It never drains on stop: its
+    workflows are all AUTO_UPGRADE, so the current build takes over what an old replica
+    leaves (README, "Deploying")."""
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
@@ -1165,6 +1168,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             await _backfill_store_logged(state, uploads=True, fonts=False)
 
     schedules = asyncio.create_task(set_up())
+    # Once per process, beside the restart loop below, as the render worker does at its
+    # start: a worker restarted late in a rollout must not take the deployment back from
+    # a newer build (`make_current_until_polled` writes on its first attempt).
+    current = asyncio.create_task(_make_library_current(client, build_id, queue, routed))
     ops = state.components.get(OPERATIONS)
     trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
     activities = [
@@ -1185,11 +1192,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
                 deployment_config=library_deployment(build_id),
             )
-            current = _make_library_current(client, build_id, queue, routed)
-            if not await _serve_until([worker], stop, current, name="library"):
+            if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
+        current.cancel()
         schedules.cancel()
         await stop_triggers()
 

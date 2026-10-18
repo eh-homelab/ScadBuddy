@@ -487,6 +487,20 @@ unversioned runs move to the versioned build at their next task
 ([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)).
 Those are the replay-compatible runs an unversioned worker would have replayed anyway.
 
+A replica makes its build current once, when it first connects, not each time its
+worker restarts, so a replica of an older build that restarts its worker late in a
+rollout does not take the deployment back from a newer one.
+
+**Rolling back to an image from before #4090** stops the `library` queue. Unversioned
+workers get no tasks while `scadbuddy-library` has a current version, and the old
+image never clears it. Before the old pods start, run
+`temporal worker deployment set-current-version --deployment-name scadbuddy-library --unversioned`
+(or set it in the Temporal UI). Housekeeping, the preview backfill, library commands,
+flow trigger fires and a store migration wait until you do. clusters' PostSync promote
+hook (`temporal-promote-workers.yaml`) would also try to make the old revision current
+and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
+from #4090 on needs nothing: its pods make their own build current.
+
 ### Render worker (#424)
 
 Renders run on a separate worker. It is the
