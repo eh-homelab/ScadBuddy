@@ -14,6 +14,7 @@ import hashlib
 import os
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1339,6 +1340,31 @@ async def test_a_rate_limited_credential_cools_down_and_the_next_is_used(
         "SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'credential'"
     )
     assert (await cur.fetchall()) == [("cooldown", "error", uuid.UUID(sid))]
+
+
+async def test_a_rate_limit_that_names_its_reset_cools_down_until_then(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#4088: a segment never sees the 429's reset headers, but Claude Code's result
+    names the reset ("resets 10:30pm (UTC)"), and the key cools down until then, not
+    for the default 60 s."""
+    at = (datetime.now(UTC) + timedelta(hours=5)).replace(second=0, microsecond=0)
+    named = f"{at.hour % 12 or 12}:{at.minute:02d}{'am' if at.hour < 12 else 'pm'}"
+    text = f"API Error: 429 You've hit your session limit · resets {named} (UTC)"
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, _result_error(text, status=429))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    first = (await _health(agent_db))["http://127.0.0.1:9"]
+    assert first[0] == "cooling_down"
+    assert first[1] == at
 
 
 async def test_a_refused_credential_is_noted_but_never_disabled_unconfirmed(

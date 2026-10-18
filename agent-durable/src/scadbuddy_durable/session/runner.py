@@ -86,6 +86,7 @@ from scadbuddy_durable.credentials import (
     audit_health,
     cooldown_until,
     credential_env,
+    rate_limit_reset,
     record_health,
     usable_credentials,
 )
@@ -828,7 +829,10 @@ class ScadBuddyRunner:
     ) -> None:
         """Records the key's health (#2320), so Settings and the next turn see what this
         segment met; never fails the segment, as CredentialPool.report never fails a turn."""
-        until = cooldown_until(datetime.now(UTC)) if health == "cooling_down" else None
+        now = datetime.now(UTC)
+        until = (
+            cooldown_until(now, rate_limit_reset(reason, now)) if health == "cooling_down" else None
+        )
         try:
             async with self._connect() as conn:
                 change = await record_health(conn, credential, health, reason=reason, until=until)
