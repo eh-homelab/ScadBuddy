@@ -19,7 +19,7 @@ from scadbuddy.store import migrate
 from scadbuddy.store.content import BlobMissingError, BlobScope, ContentBackend, ContentStore
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
-from scadbuddy.store.migrate import MigrationBatch, migrate_batch
+from scadbuddy.store.migrate import UNPROVEN_MISS, MigrationBatch, migrate_batch
 from scadbuddy.store.s3 import S3ContentBackend
 from tests.support.store import local_content, overwrite_object, s3_content
 
@@ -193,6 +193,58 @@ async def test_a_missing_source_object_forgets_its_row_so_it_cannot_hold_the_fli
         assert _copy(pool, f"piece-{kept.sha256}")[0] == "s3"
         assert index.migration_counts("local", "s3") == (0, 0, 1)
         assert index.migration_failures("local", "s3", limit=10) == []
+    finally:
+        await target.aclose()
+
+
+async def test_a_source_that_serves_nothing_fails_its_misses_and_forgets_none(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    """#4108's review: a source missing every object (a wrong base URL, an unmounted
+    volume) would otherwise forget the whole index in one run."""
+    src = local_content(tmp_path / "a", pool)
+    refs = [await src.put("piece", data, name=data.decode(), scope=SCOPE) for data in (b"a", b"b")]
+    assert isinstance(src.backend, LocalContentBackend)
+    for ref in refs:
+        (src.backend.root / ref.backend_id).unlink()
+    keys = [f"piece-{ref.sha256}" for ref in refs]
+    index = BlobIndex(pool)
+    try:
+        result = await _batch(index, src.backend, target)
+        assert result.forgotten == [] and sorted(result.failed) == sorted(keys)
+        assert all(index.get(key) is not None for key in keys)
+        assert {error for _, error in index.migration_failures("local", "s3", limit=10)} == {
+            UNPROVEN_MISS
+        }
+    finally:
+        await target.aclose()
+
+
+async def test_a_batch_of_misses_is_forgotten_once_an_earlier_copy_is_still_served(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    """The tail of a run can be misses alone: the source is trusted by an object it
+    already copied, still there."""
+    src = local_content(tmp_path / "a", pool)
+    kept = await src.put("piece", b"kept", name="k", scope=SCOPE)
+    gone = await src.put("piece", b"gone", name="g", scope=SCOPE)
+    assert isinstance(src.backend, LocalContentBackend)
+    index = BlobIndex(pool)
+    try:
+        started = index.now()
+        first = await _batch(index, src.backend, target, limit=1, started=started)
+        assert first.moved == 1 and _copy(pool, f"piece-{kept.sha256}")[0] == "s3"
+        (src.backend.root / gone.backend_id).unlink()
+        rest = await _batch(index, src.backend, target, limit=1, started=started)
+        assert rest == MigrationBatch(
+            moved=0, remaining=0, failed=[], forgotten=[f"piece-{gone.sha256}"]
+        )
+        # And with that copy gone from the source too, nothing vouches for it.
+        third = await src.put("piece", b"third", name="t", scope=SCOPE)
+        (src.backend.root / third.backend_id).unlink()
+        (src.backend.root / kept.backend_id).unlink()
+        last = await _batch(index, src.backend, target, started=index.now())
+        assert last.forgotten == [] and last.failed == [f"piece-{third.sha256}"]
     finally:
         await target.aclose()
 

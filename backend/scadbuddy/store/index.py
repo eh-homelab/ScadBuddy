@@ -367,6 +367,17 @@ class BlobIndex:
                 (error, key, ref.sha256, ref.backend),
             )
 
+    def a_copied_ref(self, source: str, target: str) -> BlobRef | None:
+        """One row on ``source`` already copied to ``target``, the most recently touched:
+        an object the source served this migration, to ask it about again."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s AND migrated_backend = %s"
+                " ORDER BY touched_at DESC LIMIT 1",
+                (source, target),
+            ).fetchone()
+        return _stat(row).ref if row is not None else None
+
     def forget_missing(self, key: str, ref: BlobRef) -> bool:
         """Drop ``key``'s row if it still names ``ref``, object and all (#4084): one its
         backend no longer has. A row re-put meanwhile names another object and stays."""
