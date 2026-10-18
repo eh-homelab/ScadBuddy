@@ -47,12 +47,19 @@ finish() {
       docker logs "$name" 2>&1 || true
     done
   fi
+  # Detached without --rm, so one that exited at start still has its logs above.
   for name in "${started[@]}"; do
-    docker stop "$name" >/dev/null 2>&1 || true
+    docker rm -f "$name" >/dev/null 2>&1 || true
   done
   exit "$status"
 }
 trap finish EXIT
+
+# A mount test that skips would pass this step without proving anything.
+if [ ! -e /dev/fuse ] || ! command -v fusermount3 >/dev/null; then
+  echo "::error::the live mount needs /dev/fuse and fusermount3"
+  exit 1
+fi
 
 in_test_image() {
   docker run --rm -i --network host -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync "$@"
@@ -76,12 +83,16 @@ docker run --rm --network host --entrypoint temporal scadbuddy:ci-test \
 library_env=()
 if [ "$backend" = native ]; then
   started+=("$side")
-  docker run -d --rm --name "$side" --network host -w /app/backend scadbuddy:ci-test \
+  docker run -d --name "$side" --network host -w /app/backend scadbuddy:ci-test \
     uv run --frozen --no-sync moto_server -H 0.0.0.0 -p "$moto_port" >/dev/null
   for _ in $(seq 1 30); do
     curl --silent --output /dev/null "http://127.0.0.1:${moto_port}/" && break
     sleep 1
   done
+  if ! curl --silent --output /dev/null "http://127.0.0.1:${moto_port}/"; then
+    echo "::error::moto never answered on port ${moto_port}"
+    exit 1
+  fi
   curl --fail --silent --show-error -X PUT "http://127.0.0.1:${moto_port}/${bucket}" >/dev/null
   library_env=(
     -e SCADBUDDY_STORE_BACKEND=s3
@@ -93,14 +104,17 @@ if [ "$backend" = native ]; then
   )
 else
   started+=("$side")
-  docker run -d --rm --name "$side" --network host -w /app/backend scadbuddy:ci-test \
+  docker run -d --name "$side" --network host -w /app/backend scadbuddy:ci-test \
     uv run --frozen --no-sync python -m tests.support.fake_bambuddy_library \
     --host 0.0.0.0 --port "$fake_port" >/dev/null
   for _ in $(seq 1 30); do
     curl --fail --silent --output /dev/null "http://127.0.0.1:${fake_port}/api/v1/queue/" && break
     sleep 1
   done
-  curl --fail --silent --show-error --output /dev/null "http://127.0.0.1:${fake_port}/api/v1/queue/"
+  if ! curl --fail --silent --output /dev/null "http://127.0.0.1:${fake_port}/api/v1/queue/"; then
+    echo "::error::the fake Bambuddy never answered on port ${fake_port}"
+    exit 1
+  fi
   library_env=(
     -e "SCADBUDDY_BAMBUDDY_URL=http://host.docker.internal:${fake_port}"
     -e SCADBUDDY_BAMBUDDY_API_KEY=fake
@@ -109,7 +123,7 @@ fi
 
 # Published, not on the host network: the image always binds 8080 (Dockerfile).
 started+=("$app")
-docker run -d --rm --name "$app" -p "${port}:8080" \
+docker run -d --name "$app" -p "${port}:8080" \
   --add-host=host.docker.internal:host-gateway \
   -e "SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:${pg_port}/${database}" \
   -e "SCADBUDDY_TEMPORAL_ADDRESS=host.docker.internal:${temporal_port}" \
@@ -125,6 +139,10 @@ for _ in $(seq 1 90); do
   case "$health" in
     healthy | unhealthy) break ;;
   esac
+  if [ "$(docker inspect --format '{{.State.Status}}' "$app" 2>/dev/null || true)" = exited ]; then
+    health=exited
+    break
+  fi
   sleep 2
 done
 if [ "$health" != healthy ]; then
@@ -133,5 +151,10 @@ if [ "$health" != healthy ]; then
 fi
 
 cd "$repo/tools/go/bambuddy-fs"
+out="$(mktemp)"
 BAMBUDDY_FS_LIVE_API="http://127.0.0.1:${port}/api/v1" \
-  go test -run TestLiveMount -count=1 -v ./internal/fsys/
+  go test -run TestLiveMount -count=1 -v ./internal/fsys/ | tee "$out"
+if ! grep -q -- '--- PASS: TestLiveMount' "$out"; then
+  echo "::error::TestLiveMount did not pass (it skipped, or never ran)"
+  exit 1
+fi
