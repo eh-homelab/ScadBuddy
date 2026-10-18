@@ -523,7 +523,10 @@ export type MemoryActivity = {
 
 export type MemoryHooks = {
   hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>>
-  /** Settles when every retain started so far has finished (tests; nothing waits on it in a turn). */
+  /**
+   * Settles when every retain started so far has finished (tests, and the durable retain
+   * activity's release of its plugin route; no turn waits on it).
+   */
   settled(): Promise<void>
 }
 

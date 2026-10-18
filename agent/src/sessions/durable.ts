@@ -602,6 +602,9 @@ export class DurableTurns {
   async #endGone(row: RunningRow & { settled: boolean }): Promise<boolean> {
     const state = await this.#describe(sessionWorkflowId(row.id)).catch(() => 'not_found' as const)
     if (state === 'open') return false
+    // `settled` reads RUNNING_GRACE_MS, as DurableRunningSweep does unless it is given its own
+    // `graceMs` (durableSweep.ts, the constructor): a sweep given a longer one would still be
+    // waiting on a claim this ends.
     if (state !== 'closed' && !row.settled) return false
     return endLostTurn(this.#sql, this.#events, row, state)
   }

@@ -30,7 +30,9 @@ import { durableSession, type SessionOwners } from './toolActivities.js'
 //                  turn's `user.turn` event, without the page context); the workflow
 //                  appends it to the prompt. None when memory is off or nothing matched.
 //   memory_retain  at a turn's end, before finish_turn: the classic Stop hook over the
-//                  session's transcript, rebuilt from its event log (`transcriptOf`).
+//                  session's transcript, rebuilt from its event log (`transcriptOf`). It
+//                  returns once the retain is enqueued, as the hook does; the retain
+//                  lands after, off the turn.
 //
 // Neither ever fails: a failure is logged and recorded in the session as classic records
 // it, and the activity returns as if there were no memory. Only the recalled block crosses
@@ -190,9 +192,13 @@ export function memoryActivities(deps: MemoryActivityDeps) {
           // A path that never exists, so the hook reads the session store (the event log).
           const transcript = path.join('/nonexistent', `durable-${session}.jsonl`)
           await call(built.hooks, 'Stop', { session_id: session, transcript_path: transcript, cwd: '', stop_hook_active: false })
-          await built.hooks.settled()
         } finally {
-          built.release()
+          // The hook returns once the retain is enqueued, as in a classic turn, and so does
+          // the activity: the workflow marks the turn done without waiting on Hindsight.
+          // The retain runs on in this process under its own limit and the per-document
+          // chain, drained at shutdown (main.ts `drainRetains`), and the plugin's route is
+          // held until it lands.
+          void built.hooks.settled().finally(built.release)
         }
       } catch (err) {
         log(`hindsight: retain for a durable turn failed: ${(err as Error).message}\n`)
