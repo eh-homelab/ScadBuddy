@@ -381,6 +381,34 @@ def test_the_check_reads_every_spools_presets_together(client: TestClient, model
 
 
 @respx.mock
+@pytest.mark.parametrize(("first", "second"), [(404, 403), (403, 404)])
+def test_the_spools_read_together_fail_as_the_serial_reads_did(
+    client: TestClient, model: str, first: int, second: int
+) -> None:
+    """#4196 review: with both spools' presets failing, the check answers with spool 5's
+    failure, the first the serial reads made, whichever way round the two fail."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    failing = {5: first, 9: second}
+
+    def presets(request: httpx.Request) -> httpx.Response:
+        spool_id = int(request.url.path.split("/")[-2])
+        return httpx.Response(failing.get(spool_id, 200), json=[])
+
+    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
+        side_effect=presets
+    )
+
+    both = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    failing.pop(9)
+    spool_5_alone = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert spool_5_alone.status_code >= 400, spool_5_alone.text
+    assert (both.status_code, both.json()) == (spool_5_alone.status_code, spool_5_alone.json())
+
+
+@respx.mock
 @pytest.mark.parametrize(
     ("choices", "detail"),
     [

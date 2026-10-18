@@ -696,6 +696,7 @@ async def resolve_plates(
         if spool_id > 0
     ]
     # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
+    # Unbounded, because a plan's slots bound it: a few reads, never a burst Bambuddy must queue.
     read = await asyncio.gather(
         *(client.spool_filament_presets(spool_id) for spool_id in spool_ids), return_exceptions=True
     )
