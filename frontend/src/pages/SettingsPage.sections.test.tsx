@@ -912,6 +912,9 @@ describe('SettingsPage blob store (#426)', () => {
     await choose(user, library, /ScadBuddy.s own/)
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(within(region('Projects & files')).getByTestId('source-library_backend')).toHaveTextContent(
+      'Applies on restart',
+    )
     expect(bodies[0]).toEqual({ library_backend: 'native' })
     expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy\u2019s own')
   })
@@ -996,6 +999,22 @@ describe('SettingsPage blob store (#426)', () => {
     await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
+  })
+
+  it('does not fall back to local on a reset while the library is native', async () => {
+    const bodies = serve({
+      ...stored,
+      store_backend: 'bambuddy',
+      library_backend: 'native',
+      has_render_api_key: true,
+      render_key_fallback: false,
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy’s own'))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
   })
 
   it('resets only the Bambuddy URL while on the local store', async () => {
