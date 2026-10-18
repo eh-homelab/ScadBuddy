@@ -233,6 +233,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
+    monkeypatch.setattr(main, "ensure_watches", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -257,6 +258,7 @@ async def test_a_failing_sweep_fails_its_activity(
         settings_store=SimpleNamespace(load=StoredSettings),
         uploads=None,
         history=SimpleNamespace(maintain=_broken(OSError("the volume is gone"))),
+        print_runs=SimpleNamespace(client=object(), task_queue="bambuddy"),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (

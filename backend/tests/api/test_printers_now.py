@@ -5,6 +5,7 @@ a printer whose status cannot be read as a card saying so."""
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -16,10 +17,15 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.models import LanLink, PrinterCreate
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
+from tests.printers.conftest import KEK
 
 pytestmark = pytest.mark.requires_postgres
+
+SERIAL = "01P00A000000001"
 
 
 def printer(printer_id: int, *, active: bool = True) -> dict[str, Any]:
@@ -250,3 +256,99 @@ def test_a_status_in_an_unreadable_shape_is_that_printers_card(client: TestClien
     assert cards[1]["activity"] == "printing"
     assert cards[2]["activity"] == "unknown"
     assert "can't read" in cards[2]["error"]
+
+
+# --- the registry (#3823, plan 2026-10-16, Task 6) -------------------------------------
+
+
+def _registry(client: TestClient) -> Printers:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state.components.get(PRINTERS)
+
+
+def _lan_printer(client: TestClient, serial: str = SERIAL, name: str = "Garage") -> str:
+    """A LAN-linked row, written straight to the store (the link's probe is Task 3's)."""
+    printers = _registry(client)
+    printers.store.kek = KEK
+    row = printers.store.create(PrinterCreate(serial=serial, name=name))
+    printers.store.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
+    )
+    return row.id
+
+
+@respx.mock
+def test_now_prefers_bambuddy_when_linked(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    pid = _lan_printer(client)
+    _registry(client).reports.put(pid, {"gcode_state": "IDLE"}, datetime.now(UTC))
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert (card["id"], card["serial"], card["printer_id"]) == (pid, SERIAL, 1)
+    assert (card["path"], card["activity"]) == ("bambuddy", "printing")
+
+
+@respx.mock
+def test_every_bambuddy_printer_gets_a_registry_row(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200, json=[{**printer(1), "serial_number": SERIAL}, {**printer(2), "serial_number": ""}]
+        )
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/printers/2/status").mock(return_value=httpx.Response(200, json=status(2)))
+
+    first = client.get("/api/v1/print/printers/now").json()["printers"]
+    again = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert [card["id"] for card in first] == [card["id"] for card in again]
+    assert [(card["printer_id"], card["serial"]) for card in first] == [
+        (1, SERIAL),
+        (2, "bambuddy-2"),
+    ]
+    assert len(_registry(client).store.list()) == 2
+
+
+def test_now_uses_report_for_lan_only_printer(client: TestClient) -> None:
+    pid = _lan_printer(client)
+    _registry(client).reports.put(
+        pid,
+        {"gcode_state": "RUNNING", "mc_percent": 30, "subtask_name": "Bracket", "layer_num": 3},
+        datetime.now(UTC),
+    )
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert (card["id"], card["printer_id"], card["path"]) == (pid, None, "native")
+    assert (card["activity"], card["job_name"], card["progress"]) == ("printing", "Bracket", 30.0)
+
+
+def test_a_stale_report_is_offline(client: TestClient) -> None:
+    """Review Focus 5: past `STALE_AFTER` without a report the card is offline."""
+    pid = _lan_printer(client)
+    _registry(client).reports.put(
+        pid, {"gcode_state": "RUNNING"}, datetime.now(UTC) - timedelta(seconds=91)
+    )
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert (card["path"], card["activity"]) == ("native", "offline")
+
+
+def test_now_without_bambuddy_configured_still_lists_lan_printers(client: TestClient) -> None:
+    reported = _lan_printer(client)
+    silent = _lan_printer(client, serial="01P00A000000002", name="Attic")
+    _registry(client).reports.put(reported, {"gcode_state": "IDLE"}, datetime.now(UTC))
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    cards = {card["id"]: card for card in response.json()["printers"]}
+    assert (cards[reported]["path"], cards[reported]["activity"]) == ("native", "idle")
+    assert (cards[silent]["path"], cards[silent]["activity"]) == ("none", "offline")

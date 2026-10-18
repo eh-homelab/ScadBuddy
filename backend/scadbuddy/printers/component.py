@@ -9,6 +9,7 @@ start. ``probe`` is replaced by tests on the built component."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -19,13 +20,18 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.core.events import PrinterEvent, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.printers.address import lan_address
 from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
 from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.workflows.printer_watch import ensure_watch, stop_watch
+
+logger = logging.getLogger(__name__)
 
 ROW_POOL_SIZE = 4
 CONNECT_TIMEOUT = 5.0
@@ -45,8 +51,31 @@ async def lan_probe(host: str, serial: str, access_code: str) -> tuple[LanReport
     return report, sha256
 
 
+class Watches:
+    """Each LAN printer's `PrinterWatch`, started and stopped on the print queue through
+    the API's (lazy) Temporal client. Best effort: a failure is logged and the
+    housekeeping sweep (`ensure_watches`) starts what is missing."""
+
+    def __init__(self, core: Core) -> None:
+        self.core = core
+
+    async def ensure(self, printer_id: str, serial: str) -> None:
+        commands = self.core.print_runs
+        try:
+            await ensure_watch(commands.client, commands.task_queue, printer_id, serial)
+        except Exception:
+            logger.warning("could not start a printer watch", extra={"printer_id": printer_id})
+
+    async def stop(self, printer_id: str, serial: str) -> None:
+        try:
+            await stop_watch(self.core.print_runs.client, serial)
+        except Exception:
+            logger.warning("could not stop a printer watch", extra={"printer_id": printer_id})
+
+
 class Printers:
     def __init__(self, core: Core) -> None:
+        self.core = core
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             core.settings.database_url,
             min_size=1,
@@ -63,15 +92,29 @@ class Printers:
             name="scadbuddy-printers",
         )
         self._store = PrinterStore(self._pool, settings_kek(core.settings.secret_key_file))
+        self._reports = PrinterReportStore(self._pool)
         self._opened = False
         self.probe: Probe = lan_probe
+        self.watches = Watches(core)
 
     @property
     def store(self) -> PrinterStore:
+        self._open()
+        return self._store
+
+    def _open(self) -> None:
         if not self._opened:
             self._pool.open(wait=False)
             self._opened = True
-        return self._store
+
+    @property
+    def reports(self) -> PrinterReportStore:
+        self._open()
+        return self._reports
+
+    def changed(self, printer_id: str) -> None:
+        """Announce a write to ``printer_id``'s row (``printer.changed``)."""
+        emit(self.core.events, PrinterEvent(kind="printer.changed", printer_id=printer_id))
 
     @property
     def kek(self) -> Kek | None:

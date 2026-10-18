@@ -143,6 +143,24 @@ describe('NowPrinting (#977)', () => {
     errors.mockRestore()
   })
 
+  it('shows a LAN-only printer without a camera (#3823)', async () => {
+    const lan: PrinterNow = {
+      ...(PRINTERS_NOW[2] as PrinterNow),
+      id: '00000000-0000-4000-8000-0000000000aa',
+      serial: '01P00A0000000AA',
+      path: 'native',
+      printer_id: null,
+      name: 'Garage',
+    }
+    setPrintersNow([...PRINTERS_NOW, lan])
+    renderPage(<NowPrinting />)
+
+    const card = await screen.findByTestId(`printer-now-${lan.id}`)
+    expect(card).toHaveTextContent('Garage')
+    expect(within(card).queryByRole('button', { name: /Camera/ })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Camera of 3DP-31B-598' })).toBeInTheDocument()
+  })
+
   it('is absent with no printers', async () => {
     setPrintersNow([])
     renderPage(<NowPrinting />)

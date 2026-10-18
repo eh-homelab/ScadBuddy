@@ -44,6 +44,7 @@ from scadbuddy.workflows.pipelines import (
     RenderPreview,
     TemplatePipeline,
 )
+from scadbuddy.workflows.printer_watch import PrinterWatch
 from scadbuddy.workflows.printing import PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
 
@@ -168,6 +169,8 @@ def bambuddy_worker(
             PrintRunWorkflow,
             OperationWorkflow,
             FollowPrint if build_id is None else VersionedFollowPrint,
+            # Each LAN printer's report (#3823); AUTO_UPGRADE by the worker's default.
+            PrinterWatch,
         ],
         activities=activities,
         workflow_runner=sandboxed_runner(),
@@ -181,6 +184,7 @@ def follow_worker(
     task_queue: str,
     follow_print: Callable[..., Any],
     *,
+    printer_watch: Callable[..., Any] | None = None,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
     build_id: str | None = None,
 ) -> Worker:
@@ -189,11 +193,13 @@ def follow_worker(
     slot from the ``bambuddy`` worker's short activities. Its `FOLLOW_SLOTS` are set
     here, not left to the SDK's default (review #1091 2). An attempt ends at once on a
     shutdown (`FollowActivities`). With ``build_id`` it joins the same deployment
-    version as the ``bambuddy`` worker, so the follow's activity is routed within it."""
+    version as the ``bambuddy`` worker, so the follow's activity is routed within it.
+    ``printer_watch`` (#3823) holds a slot per LAN printer for as long as it is
+    reachable, beside the follows."""
     return Worker(
         client,
         task_queue=follow_queue(task_queue),
-        activities=[follow_print],
+        activities=[follow_print, *([printer_watch] if printer_watch is not None else [])],
         max_concurrent_activities=FOLLOW_SLOTS,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),

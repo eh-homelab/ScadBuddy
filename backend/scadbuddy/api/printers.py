@@ -95,7 +95,9 @@ async def list_printers(printers: PrintersDep) -> list[PrinterRow]:
     summary="Add a printer by its serial",
 )
 async def create_printer(printers: PrintersDep, body: PrinterCreate) -> PrinterRow:
-    return await _call(lambda: printers.store.create(body))
+    row = await _call(lambda: printers.store.create(body))
+    printers.changed(row.id)
+    return row
 
 
 @router.get(
@@ -138,12 +140,18 @@ async def get_printer(printers: PrintersDep, printer_id: str) -> PrinterRow:
 
 @router.patch("/{printer_id}", response_model=PrinterRow, summary="Rename it, or set its path")
 async def patch_printer(printers: PrintersDep, printer_id: str, body: PrinterPatch) -> PrinterRow:
-    return await _call(lambda: printers.store.patch(printer_id, body))
+    row = await _call(lambda: printers.store.patch(printer_id, body))
+    printers.changed(row.id)
+    return row
 
 
 @router.delete("/{printer_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Forget a printer")
 async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
+    row = await _call(lambda: printers.store.require(printer_id))
     await _call(lambda: printers.store.delete(printer_id))
+    if row.lan_host is not None:
+        await printers.watches.stop(row.id, row.serial)
+    printers.changed(printer_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -171,14 +179,18 @@ async def link_bambuddy(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Bambuddy printer {printer.id} reports another serial than this printer's",
         )
-    return await _call(lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id))
+    linked = await _call(lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id))
+    printers.changed(printer_id)
+    return linked
 
 
 @router.delete(
     "/{printer_id}/bambuddy", response_model=PrinterRow, summary="Unlink its Bambuddy printer"
 )
 async def unlink_bambuddy(printers: PrintersDep, printer_id: str) -> PrinterRow:
-    return await _call(lambda: printers.store.unlink_bambuddy(printer_id))
+    row = await _call(lambda: printers.store.unlink_bambuddy(printer_id))
+    printers.changed(printer_id)
+    return row
 
 
 #: Every way a probe fails, said one way (the security review of Task 3): a reason per
@@ -215,9 +227,15 @@ async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> Pri
             "LAN probe failed", extra={"printer_id": printer_id, "error": type(error).__name__}
         )
         raise ApiError(status.HTTP_502_BAD_GATEWAY, PROBE_FAILED) from None
-    return await _call(lambda: printers.store.link_lan(printer_id, body, cert_sha256=cert_sha256))
+    linked = await _call(lambda: printers.store.link_lan(printer_id, body, cert_sha256=cert_sha256))
+    await printers.watches.ensure(linked.id, linked.serial)
+    printers.changed(printer_id)
+    return linked
 
 
 @router.delete("/{printer_id}/lan", response_model=PrinterRow, summary="Unlink its LAN link")
 async def unlink_lan(printers: PrintersDep, printer_id: str) -> PrinterRow:
-    return await _call(lambda: printers.store.unlink_lan(printer_id))
+    row = await _call(lambda: printers.store.unlink_lan(printer_id))
+    await printers.watches.stop(row.id, row.serial)
+    printers.changed(printer_id)
+    return row

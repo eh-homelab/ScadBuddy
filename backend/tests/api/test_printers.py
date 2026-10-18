@@ -14,6 +14,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.core.events import PrinterEvent
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.lan_models import LanReport
 from tests.api.test_send import API, configure
@@ -30,6 +31,26 @@ CERT = "cd" * 32
 def registry(client: TestClient) -> Printers:
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     return state.components.get(PRINTERS)
+
+
+class RecordedWatches:
+    """`Printers.watches`, recorded: no route test dials a printer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def ensure(self, printer_id: str, serial: str) -> None:
+        self.calls.append(("ensure", printer_id, serial))
+
+    async def stop(self, printer_id: str, serial: str) -> None:
+        self.calls.append(("stop", printer_id, serial))
+
+
+@pytest.fixture(autouse=True)
+def watches(client: TestClient) -> RecordedWatches:
+    recorded = RecordedWatches()
+    registry(client).watches = recorded  # type: ignore[assignment]
+    return recorded
 
 
 def bambuddy_printer(printer_id: int, serial: str | None, **fields: Any) -> dict[str, Any]:
@@ -182,7 +203,7 @@ def _probe_ok(calls: list[tuple[str, str, str]]) -> Any:
     return probe
 
 
-def test_lan_link_never_returns_code(client: TestClient) -> None:
+def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatches) -> None:
     printers = registry(client)
     printers.store.kek = KEK
     calls: list[tuple[str, str, str]] = []
@@ -204,6 +225,7 @@ def test_lan_link_never_returns_code(client: TestClient) -> None:
         assert CODE not in read.text
     unlinked = client.delete(f"/api/v1/printers/{pid}/lan")
     assert unlinked.status_code == 200 and unlinked.json()["has_access_code"] is False
+    assert watches.calls == [("ensure", pid, SERIAL), ("stop", pid, SERIAL)]
 
 
 GENERIC = "the printer did not answer at that address"
@@ -289,3 +311,21 @@ def test_a_malformed_access_code_is_not_echoed(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "1234567x" not in response.text
+
+
+def test_every_registry_write_announces_the_printer(client: TestClient) -> None:
+    """Task 6: `printer.changed` on `printers` and `printer:<id>` for every write."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    seen: list[PrinterEvent] = []
+    publish = state.events.publish
+
+    def record(event: Any) -> None:
+        if isinstance(event, PrinterEvent):
+            seen.append(event)
+        publish(event)
+
+    state.events.publish = record  # type: ignore[method-assign]
+    pid = create(client)["id"]
+    client.patch(f"/api/v1/printers/{pid}", json={"name": "B"})
+    client.delete(f"/api/v1/printers/{pid}")
+    assert [(e.kind, e.printer_id) for e in seen] == [("printer.changed", pid)] * 3
