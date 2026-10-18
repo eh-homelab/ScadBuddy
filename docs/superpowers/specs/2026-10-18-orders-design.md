@@ -315,17 +315,21 @@ any print.
 
 - With Bambuddy configured, a slot's spool is the one loaded on that printer whose
   `_filament_key` is the slot's filament's (§5.1); with none loaded, the unarchived
-  spool of that filament with the most grams left, as the print dialog's spool-first
-  choice makes it (`bambuddy/filaments.py`). No spool of that filament at all refuses
-  the print with `needs_spool_choice` naming the slot, which the flow's
-  `wait_for_human` or the dialog answers.
+  spool of that filament on the shelf with the most grams left, as the print dialog's
+  spool-first choice makes it (`bambuddy/filaments.py` `_display_order`). A spool
+  loaded in another printer is never taken: using it means unloading it there, which
+  is a person's call. No such spool at all refuses the print with
+  `needs_spool_choice` naming the slot, which the flow's `wait_for_human` or the
+  dialog answers (naming a spool loaded elsewhere, if they choose).
 - The request may supply `filament_plan` itself, as a narrowing: each spool named must
   be of its slot's filament, else the print is refused with `spool_not_filament`. A
   different filament is a change to the quote (§3.3 `colours`), never to the print.
 - On the native path (#3823) there is no spool inventory yet (§1.2): the plan carries
   the filament's slicer profile per slot and no spool, and the person loads the
-  printer. A ScadBuddy inventory is a later design. The run's
-`subject` is `order_item:<id>`, which is how the outcome finds its way back (§6.1).
+  printer. A ScadBuddy inventory is a later design.
+
+The run's `subject` is `order_item:<id>`, which is how the outcome finds its way back
+(§6.1).
 The item's status follows the run: `queued` when the run succeeds (F7: queued, not
 printed), `printing` on the first `print.progress` for its send, `printed` or `failed`
 when the print settles. On the Bambuddy path the settle is the archive's (F8); on the
