@@ -125,6 +125,7 @@ from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import (
     LibraryReads,
+    check_folder_served,
     check_served,
     reads_for,
     served_reads,
@@ -186,8 +187,9 @@ async def get_library(
     any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
     folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
     no longer has is its 404. On ``library_backend=native`` it is ScadBuddy's own library,
-    and an id outside it is a 404."""
+    and an id outside it, a file's or a folder's, is a 404."""
     native = await library.serving_native()
+    check_folder_served(folder_id, native)
     if native is not None:
         if file_id is not None and folder_id is None:
             folder_id = (await native.library_file(file_id)).folder_id

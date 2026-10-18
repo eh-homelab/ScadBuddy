@@ -23,6 +23,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.housekeeping import (
     GIT_SWEEP,
+    LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     PRUNE_SWEEPS,
@@ -335,10 +336,20 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         async def prune(self, ttl: float, placeholder_ttl: float) -> int:
             return 0
 
+    async def serving_native() -> object:
+        return object()
+
+    async def slow_library(native: object, *, now: object) -> SimpleNamespace:
+        await asyncio.sleep(0.1)
+        return SimpleNamespace(purged=0, orphans=0)
+
+    monkeypatch.setattr(main, "sweep_library", slow_library)
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
     state.components = SimpleNamespace(
-        get=lambda key: SimpleNamespace(index=SlowIndex(), prune=slow_batches)
+        get=lambda key: SimpleNamespace(
+            index=SlowIndex(), prune=slow_batches, serving_native=serving_native
+        )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []
@@ -590,6 +601,12 @@ def test_the_background_slices_obey_the_sweeps_switch() -> None:
     assert PREVIEWS_SWEEP in SWEEPS
     assert PREVIEWS_SWEEP not in PRUNE_SWEEPS
     assert LOST_SLICES_SWEEP in PRUNE_SWEEPS
+
+
+def test_the_native_library_sweep_runs_with_the_sweeps_off() -> None:
+    """#3827: the 30-day trash purge and the orphan collection are on the prune
+    Schedule, which runs whatever the sweeps' switch is."""
+    assert LIBRARY_SWEEP in PRUNE_SWEEPS
 
 
 @pytest.mark.parametrize(

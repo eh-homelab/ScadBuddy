@@ -109,6 +109,16 @@ def _filed_for_output(conn: Connection[DictRow], output_id: str) -> list[NativeF
     return [NativeFile.model_validate(r) for r in rows]
 
 
+def _rows_of_output(conn: Connection[DictRow], output_id: str) -> list[NativeFile]:
+    """Every row naming the output, filed, moved or trashed: a move clears ``filed`` and
+    keeps ``output_id`` until `forget_output`."""
+    rows = conn.execute(
+        f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s ORDER BY id".encode(),
+        (output_id,),
+    ).fetchall()
+    return [NativeFile.model_validate(r) for r in rows]
+
+
 def _template_folder(conn: Connection[DictRow], name: str) -> NativeFolder:
     """In a transaction of ``conn``'s."""
     conn.execute(
@@ -263,9 +273,13 @@ class NativeLibraryStore:
         with self._pool.connection() as conn:
             return _filed_for_output(conn, output_id)
 
+    def rows_for_output(self, output_id: str) -> list[NativeFile]:
+        with self._pool.connection() as conn:
+            return _rows_of_output(conn, output_id)
+
     def file_for_output(self, row: NativeFile, folder: str) -> tuple[NativeFile, bool]:
         """Insert ``row``, an output's filed copy, in the top-level folder ``folder``
-        (found or made), unless the output already has one: that copy and False, or
+        (found or made), unless a row already names the output, moved or not: that row and False, or
         ``row`` as inserted and True. One short transaction on one connection, under an
         advisory lock per output, so overlapping attempts file one and a filing never
         holds a connection while it waits on the pool for another."""
@@ -275,7 +289,7 @@ class NativeLibraryStore:
                 "hashtextextended('scadbuddy:library:output:' || %s, 0))",
                 (row.output_id,),
             )
-            existing = _filed_for_output(conn, row.output_id or "")
+            existing = _rows_of_output(conn, row.output_id or "")
             if existing:
                 return existing[0], False
             folder_id = _template_folder(conn, folder).id

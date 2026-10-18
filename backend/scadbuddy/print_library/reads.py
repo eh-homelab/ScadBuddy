@@ -75,6 +75,17 @@ def check_served(file_id: int, native: object | None) -> None:
         )
 
 
+def check_folder_served(folder_id: int | None, native: object | None) -> None:
+    """`check_served` for a folder: the other library's folder is a 404, as the native
+    write routes answer a missing one, never an empty listing."""
+    if folder_id is not None and is_native_id(folder_id) != (native is not None):
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            f"library folder {folder_id} not found",
+            folder_id=folder_id,
+        )
+
+
 def reads_of(files: LibraryReads | None, client: BambuddyClient | None) -> LibraryReads:
     """``files`` when given, else Bambuddy's ``client``, one of which a read needs."""
     if files is not None:

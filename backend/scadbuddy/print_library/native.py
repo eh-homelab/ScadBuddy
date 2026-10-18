@@ -273,7 +273,8 @@ class NativeLibrary:
         filed: bool = False,
     ) -> NativeFile:
         """The bytes stored and the row that names them, not yet inserted. The caller
-        inserts the row or deletes ``blob_key``: a `library` blob is never swept."""
+        inserts the row or deletes ``blob_key``: the generic sweep skips the `library` kind;
+        `sweep_library` collects only the orphans a crash leaves."""
         file_id = await asyncio.to_thread(self.rows.next_file_id)
         file_type = file_type_of(filename)
         plates, has_thumbnail = (
@@ -304,9 +305,10 @@ class NativeLibrary:
         )
 
     async def _insert(self, row: NativeFile, folder_id: int | None) -> NativeFile:
-        """The row for a blob just stored. Any failure releases the blob first, since a
-        `library` blob is never swept and one no row names would stay for good; the
-        folder deleted since its check is the FK's refusal, the 404."""
+        """The row for a blob just stored. Any failure releases the blob first: the generic
+        sweep skips the `library` kind, and `sweep_library` (print_library/sweep.py) collects
+        the orphans a crash leaves, only later. The folder deleted since its check is the
+        FK's refusal, the 404."""
         try:
             return await asyncio.to_thread(self.rows.insert_file, row)
         except ForeignKeyViolation:

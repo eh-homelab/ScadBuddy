@@ -976,6 +976,32 @@ async def test_a_batch_run_of_the_other_librarys_file_is_404(file_id: int, nativ
     assert raised.value.status == 404
 
 
+@respx.mock
+@pytest.mark.parametrize("all_files", [False, True])
+def test_listing_a_bambuddy_folder_on_native_is_404(
+    native_client: TestClient, all_files: bool
+) -> None:
+    """One id space at a time: the other library's folder is no folder, not an empty one."""
+    configure(native_client)
+
+    response = native_client.get("/api/v1/print/library", params={"folder_id": 5, "all": all_files})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["folder_id"] == 5
+    assert list(respx.calls) == []
+
+
+@respx.mock
+def test_listing_a_native_folder_on_bambuddy_is_404(client: TestClient) -> None:
+    configure(client)
+
+    response = client.get("/api/v1/print/library", params={"folder_id": 1_000_000_005})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["folder_id"] == 1_000_000_005
+    assert list(respx.calls) == []
+
+
 def test_the_sweep_covers_the_print_routes() -> None:
     assert ("POST", "/api/v1/print/library/{file_id}/run") in FILE_ID_ROUTES
     assert ("GET", "/api/v1/print/library/{file_id}/choices") in FILE_ID_ROUTES
