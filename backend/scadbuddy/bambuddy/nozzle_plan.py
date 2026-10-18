@@ -40,13 +40,24 @@ CLI source (``src/BambuStudio.cpp``, the 02.08 tree the deployed
   the CLI pads it with the left extruder's flow (around line 6960). ScadBuddy slices a
   one-plate library file as plate 0 (#2180), so the plan writes it too.
 * ``extruder_nozzle_stats`` offer exactly the sides the plan uses. On 2026-09-28 (#745)
-  the deployed slicer was measured not to follow a Manual map while the stats offered
-  both sides, a full-length one included; its Auto For Flush grouping is held to the
-  same sides by the stats. So the stats steer it and the map does not: with one side
-  offered every filament prints there, but with both offered the slicer chooses which
-  filaments share a hotend (preview-slice 37 put two blacks on the right, where the plan
-  split them), and a side chosen by hand is not kept either. The print dialog therefore
-  shows the sides a slice of the choices used once it lands (#2703).
+  the deployed slicer was measured not to follow the project's Manual map while the
+  stats offered both sides, a full-length one included; its Auto For Flush grouping is
+  held to the same sides by the stats. So with one side offered every filament prints
+  there, but with both offered the slicer chooses which filaments share a hotend
+  (preview-slice 37 put two blacks on the right, where the plan split them). For a plan
+  nobody touched that is the slicer's call, and the print dialog shows the sides a slice
+  of the choices used once it lands (#2703).
+* A side chosen by hand is kept (#3955). Re-measured 2026-10-17 against the deployed
+  sidecar (BambuStudio 02.08.02.61): the CLI reads the map mode from the plate first
+  (``get_real_filament_map_mode``), and a plate stating "Nozzle Manual" with its
+  ``filament_maps`` and ``filament_volume_maps``, plus the project's
+  ``filament_nozzle_map``, slices exactly as stated, High Flow included. Preview-slice
+  140 (Green right, Black left, Magenta right) came back ``2 2 1``; the same file
+  pinned so came back ``2 1 2``. Only a slice of the whole file reads it: one naming a
+  plate is refused. So a plan with a side chosen by hand states the pinned map
+  (:meth:`NozzlePlan.stated_map`, :func:`~scadbuddy.render.bambu3mf._pin_plates`) and its
+  file is sliced as ``plate: 0``, but only a file of one plate: ``plate: 0`` slices every
+  plate, so a file with more names the plate printed and is left to regroup.
 """
 
 from __future__ import annotations
@@ -153,11 +164,22 @@ class NozzlePlan(BaseModel):
         order = self.filament_map(filaments)
         return [VOLUME_INDEX[flows[SLICER_ORDER[int(entry) - 1]]] for entry in order]
 
-    def stated_map(self, filaments: int) -> FilamentMap | None:
-        """The Manual map the 3MF states for a file of ``filaments`` filaments."""
+    @property
+    def by_hand(self) -> bool:
+        """Whether a side was chosen by hand (Advanced): the slice must then keep the
+        plan, every filament where it puts it (#3955)."""
+        return any(slot.by_hand for slot in self.slots)
+
+    def stated_map(self, filaments: int, *, one_plate: bool) -> FilamentMap | None:
+        """The Manual map the 3MF states for a file of ``filaments`` filaments, pinned
+        when a side was chosen by hand and the file has ``one_plate``."""
         if filaments < 1:
             return None
-        return FilamentMap(tuple(self.filament_map(filaments)), tuple(self.volume_map(filaments)))
+        return FilamentMap(
+            tuple(self.filament_map(filaments)),
+            tuple(self.volume_map(filaments)),
+            pinned=self.by_hand and one_plate,
+        )
 
 
 def one_side_map(

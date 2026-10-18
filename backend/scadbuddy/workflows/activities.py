@@ -12,7 +12,7 @@ import sys
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -113,6 +113,9 @@ class WorkerDeps:
     openscad_version: str = ""
     #: The interpreter template activities run under: this worker's own (§5.2).
     template_python: str = sys.executable
+    #: `solid_concurrency` as it is now (the `render_settings` view, re-read on its
+    #: TTL), asked by every solids stage; None keeps `config`'s, read at start.
+    stored_solid_concurrency: Callable[[], Awaitable[int]] | None = None
 
 
 def _retried(error: Exception) -> bool:
@@ -430,6 +433,15 @@ class RenderActivities:
             self.deps.config, library_path=tuple(Path(path) for path in prepared.library_path)
         )
 
+    async def _solids_config(self, prepared: PrepareResult) -> Config:
+        """`_config` with the per-job colour slots in effect now: a live setting, which
+        the standalone worker, holding no settings store (#601), reads here. 0 derives
+        them from this worker's CPUs."""
+        config = self._config(prepared)
+        if self.deps.stored_solid_concurrency is None:
+            return config
+        return replace(config, solid_concurrency=await self.deps.stored_solid_concurrency())
+
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
         """The piece as a finished render left it, so it is never rendered in place again."""
@@ -657,7 +669,7 @@ class RenderActivities:
                 req.params,
                 d.blobs.dir_for(req.piece_key),
                 _process_output(main),
-                config=self._config(prepared),
+                config=await self._solids_config(prepared),
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",

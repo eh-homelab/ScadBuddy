@@ -10,13 +10,15 @@ import type { AddressInfo } from 'node:net'
 // asked for `GET /v1/models` at start-up (model discovery).
 //
 // Replies are scripted: `reply(request)` picks (or resolves to) what the "model" says for each
-// /v1/messages call, as text or as one tool_use block. Streaming requests get
+// /v1/messages call, as text or as tool_use blocks. Streaming requests get
 // the Messages streaming SSE event sequence (message_start, content_block_*,
 // message_delta, message_stop); others get a JSON message.
 
 export type Reply =
   | { text: string }
   | { toolUse: { name: string; input: Record<string, unknown> } }
+  /** Several tool_use blocks in one assistant message: parallel calls. */
+  | { toolUses: { name: string; input: Record<string, unknown> }[] }
   /** An API error response, e.g. 401 authentication_error. */
   | { error: { status: number; type: string; message: string; headers?: Record<string, string> } }
   /** Never answer (until the server closes): a model that is still thinking. */
@@ -100,10 +102,11 @@ function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 }
 
-function contentOf(reply: ContentReply): { block: Record<string, unknown>; stopReason: string } {
-  if ('text' in reply) return { block: { type: 'text', text: reply.text }, stopReason: 'end_turn' }
+function contentOf(reply: ContentReply): { blocks: Record<string, unknown>[]; stopReason: string } {
+  if ('text' in reply) return { blocks: [{ type: 'text', text: reply.text }], stopReason: 'end_turn' }
+  const uses = 'toolUses' in reply ? reply.toolUses : [reply.toolUse]
   return {
-    block: { type: 'tool_use', id: nextId('toolu'), name: reply.toolUse.name, input: reply.toolUse.input },
+    blocks: uses.map((use) => ({ type: 'tool_use', id: nextId('toolu'), name: use.name, input: use.input })),
     stopReason: 'tool_use',
   }
 }
@@ -129,14 +132,21 @@ function stalledStart(model: string, reply: Extract<Reply, { stall: string }>): 
 }
 
 function streamEvents(model: string, reply: ContentReply): string {
-  const { block, stopReason } = contentOf(reply)
+  const { blocks, stopReason } = contentOf(reply)
   const usage = { input_tokens: REPLY_TOKENS.input, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
-  const start =
-    block.type === 'text' ? { type: 'text', text: '' } : { type: 'tool_use', id: block.id, name: block.name, input: {} }
-  const delta =
-    block.type === 'text'
-      ? { type: 'text_delta', text: block.text }
-      : { type: 'input_json_delta', partial_json: JSON.stringify(block.input) }
+  const content = blocks.flatMap((block, index) => {
+    const start =
+      block.type === 'text' ? { type: 'text', text: '' } : { type: 'tool_use', id: block.id, name: block.name, input: {} }
+    const delta =
+      block.type === 'text'
+        ? { type: 'text_delta', text: block.text }
+        : { type: 'input_json_delta', partial_json: JSON.stringify(block.input) }
+    return [
+      sse('content_block_start', { type: 'content_block_start', index, content_block: start }),
+      sse('content_block_delta', { type: 'content_block_delta', index, delta }),
+      sse('content_block_stop', { type: 'content_block_stop', index }),
+    ]
+  })
   return [
     sse('message_start', {
       type: 'message_start',
@@ -151,9 +161,7 @@ function streamEvents(model: string, reply: ContentReply): string {
         usage,
       },
     }),
-    sse('content_block_start', { type: 'content_block_start', index: 0, content_block: start }),
-    sse('content_block_delta', { type: 'content_block_delta', index: 0, delta }),
-    sse('content_block_stop', { type: 'content_block_stop', index: 0 }),
+    ...content,
     sse('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },
@@ -209,7 +217,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
           res.end(streamEvents(model, answer))
         } else {
-          const { block, stopReason } = contentOf(answer)
+          const { blocks, stopReason } = contentOf(answer)
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(
             JSON.stringify({
@@ -217,7 +225,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
               type: 'message',
               role: 'assistant',
               model,
-              content: [block],
+              content: blocks,
               stop_reason: stopReason,
               stop_sequence: null,
               usage: { input_tokens: 10, output_tokens: 5 },

@@ -118,6 +118,18 @@ export class SessionBlobs {
     })
   }
 
+  /**
+   * `put` under a fence checked in the same transaction (an AgentSession placement's hold on its
+   * turn, turnHost.ts): false, and nothing stored, when the fence refuses.
+   */
+  async putIf(sessionId: string, images: readonly SessionImage[], fence: (tx: TransactionSql) => Promise<boolean>): Promise<boolean> {
+    return this.sql.begin(async (tx) => {
+      if (!(await fence(tx))) return false
+      await this.insert(tx, sessionId, images)
+      return true
+    })
+  }
+
   private async insert(sql: Sql | TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<void> {
     for (const image of images) {
       await sql`

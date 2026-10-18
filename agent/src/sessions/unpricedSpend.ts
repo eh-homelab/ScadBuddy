@@ -119,6 +119,8 @@ type Open = { model: string | undefined; usage: Usage; reportedOutput: boolean; 
 export class UnpricedSpend {
   /** The request each stream (the main one, or a subagent's) has open. */
   readonly #open = new Map<string, Open>()
+  /** What the requests that finished cost, at the table's prices (`completedUsd`). */
+  #completed = 0
 
   observe(message: SDKMessage): void {
     if (message.type !== 'stream_event') return
@@ -162,9 +164,14 @@ export class UnpricedSpend {
         if (typeof event.usage.output_tokens === 'number') open.reportedOutput = true
         return
       }
-      case 'message_stop':
-        if (!this.#open.get(key)?.cutOff) this.#open.delete(key)
+      case 'message_stop': {
+        const open = this.#open.get(key)
+        if (open && !open.cutOff) {
+          this.#completed += requestUsd(open)
+          this.#open.delete(key)
+        }
         return
+      }
       default:
         return
     }
@@ -185,12 +192,23 @@ export class UnpricedSpend {
   /** What the requests still open cost, in USD: 0 when every request finished. */
   usd(): number {
     let total = 0
-    for (const open of this.#open.values()) {
-      const output = open.reportedOutput
-        ? n(open.usage.output_tokens)
-        : Math.max(n(open.usage.output_tokens), Math.ceil(open.chars / CHARS_PER_TOKEN))
-      total += costOf(open.model, { ...open.usage, output_tokens: output })
-    }
+    for (const open of this.#open.values()) total += requestUsd(open)
     return total
   }
+
+  /**
+   * What the requests that finished cost at the table's prices, which Claude Code prices alike
+   * once its result comes: a running total for a turn that may never reach its result (an
+   * AgentSession placement that dies, sessions/turnHost.ts), so the budget sees its spend.
+   */
+  completedUsd(): number {
+    return this.#completed
+  }
+}
+
+function requestUsd(open: Open): number {
+  const output = open.reportedOutput
+    ? n(open.usage.output_tokens)
+    : Math.max(n(open.usage.output_tokens), Math.ceil(open.chars / CHARS_PER_TOKEN))
+  return costOf(open.model, { ...open.usage, output_tokens: output })
 }

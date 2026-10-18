@@ -30,6 +30,7 @@ from scadbuddy.activity.index import (
 )
 from scadbuddy.api import (
     health,
+    internal_blobs,
     libraries,
     library_print,
     media,
@@ -119,6 +120,8 @@ from scadbuddy.worker import (
     MAKE_CURRENT_ERROR_AFTER,
     MAKE_CURRENT_ERROR_EVERY,
     MAKE_CURRENT_EVERY,
+    ROUTED_POLL,
+    ROUTED_WAIT,
     deployment_writes,
     make_current_until_polled,
     run_inprocess_worker,
@@ -1114,9 +1117,10 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
 
 
 #: How long the library Schedules wait for this build to route the queue before they
-#: are set up anyway (Temporal refusing the build, say), and how often it is asked.
-LIBRARY_ROUTED_WAIT = 60.0
-LIBRARY_ROUTED_POLL = 0.5
+#: are set up anyway (Temporal refusing the build, say), and how often it is asked: as
+#: long as a versioned worker waits to report ready (`worker.ROUTED_WAIT`).
+LIBRARY_ROUTED_WAIT = ROUTED_WAIT
+LIBRARY_ROUTED_POLL = ROUTED_POLL
 
 
 async def _make_library_current(
@@ -1624,6 +1628,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
+            # The slicer worker's upload (plan 2026-10-16-native-slicer-rust-worker).
+            internal_blobs.PUT_ROUTE_LIMIT,
         ],
     )
     # A write from a page on another origin is refused before its body is read (#962).
