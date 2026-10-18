@@ -464,12 +464,14 @@ for item in order["items"]:
     if out["error"] == "requote_needed":                    # its sliced file is gone or stale
         quote = tool("order_item_quote", {"order_id": order["id"], "item_id": item["id"]})
         # in a flow the tool follows its operation to the answer (§7.3); this is the quote
-        a = wait_for_human(f"{item['title']} re-quoted at {quote['total_minor']} minor units "
-                           f"(accepted {item['accepted_quote']['total_minor']}). Accept and print?")
-        if a.answer.strip().lower() != "yes":
-            continue
+        rise = quote["total_minor"] - item["accepted_quote"]["total_minor"]
+        if rise > inputs().auto_accept_quotes_under_minor:     # past the shop's threshold: ask
+            a = wait_for_human(f"{item['title']} re-quoted at {quote['total_minor']} minor units "
+                               f"(accepted {item['accepted_quote']['total_minor']}). Accept and print?")
+            if a.answer.strip().lower() != "yes":
+                continue
         tool("order_item_accept_quote", {"order_id": order["id"], "item_id": item["id"],
-                                         "quote_id": quote["id"]})
+                                         "quote_id": quote["id"]})   # covered by the grant: no second park
         out = queue_print({"order_item_id": item["id"]}, {})
     if out["status"] != "succeeded":
         wait_for_human(f"Print of {item['title']} did not queue: {out['error']}")
@@ -494,7 +496,12 @@ What this relies on, and what the design adds for it:
   covered by the trigger's standing grant (`printers`, `max_prints`, `max_filament_g`,
   F13), and the order tools that are `outward` (§7.3: `order_accept`,
   `order_item_accept_quote`, `order_item_fulfil`, `order_ship`,
-  `order_notify_customer`) only by a rule naming each. A flow's `tool()` gates only an
+  `order_notify_customer`) only by a rule naming each. The built-in's trigger is
+  expected to carry a standing grant naming `order_item_accept_quote` and
+  `order_item_fulfil` (any order), so the script's accept after a person's "yes" does
+  not park a second time; a rise under `auto_accept_quotes_under_minor` is accepted
+  with no question at all, which is the one place the script spends that grant
+  unattended. A flow's `tool()` gates only an
   outward tool (F11), so those are the tools the new bound reaches: `GrantRule` gains
   `orders: [ids]`, so a standing grant can say "any order" or a run grant "this order
   only", and the flow narrows the grant it hands the child agent to this order (10-11
