@@ -841,6 +841,7 @@ workers restart.
 | Variable | Default | What it does |
 |---|---|---|
 | `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
+| `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3` or `bambuddy`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). |
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
@@ -874,6 +875,33 @@ UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
 
 When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy` or `s3`),
 set `SCADBUDDY_STORE_BACKEND=local` instead.
+
+### Choosing ScadBuddy's own print library
+
+**Print library** in Settings → *Projects & files* (`library_backend`, seeded by
+`SCADBUDDY_LIBRARY_BACKEND`) picks where print files live: `bambuddy` (the default) or
+`native`, ScadBuddy's own library of folders and files over the blob store. It applies
+when ScadBuddy and its render workers restart. It needs a content store, so choose
+`store_backend` `s3` or `bambuddy` first; with `s3`, nothing at start needs Bambuddy,
+while `bambuddy` still needs its inbox folder at start
+(spec 2026-10-16 §4.5, `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md`).
+
+**A flip moves no files.** Switching to `native` starts an empty library, and Bambuddy's
+files stay in Bambuddy; switching back shows Bambuddy's again. Copy anything you want
+across yourself.
+
+If the API refuses to start because `library_backend` is `native` over the local store,
+run this in ScadBuddy's database, in the schema `SCADBUDDY_DATABASE_URL` uses (as above,
+`SET search_path` first on a custom schema), then restart:
+
+```sql
+UPDATE settings SET value = '"bambuddy"' WHERE name = 'library_backend';
+```
+
+When nothing is stored (the refusal comes from `SCADBUDDY_LIBRARY_BACKEND=native`), set
+`SCADBUDDY_LIBRARY_BACKEND=bambuddy` instead. The statement is the start-up refusal's own
+(`backend/scadbuddy/library/settings_store.py` `RECOVER_BAMBUDDY_LIBRARY_SQL`), the same
+form as the `store_backend` one above.
 
 ### Encrypted API keys (#602)
 

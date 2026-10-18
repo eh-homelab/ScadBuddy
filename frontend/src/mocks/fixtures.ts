@@ -963,6 +963,7 @@ export const settingsDefaults = {
   store_s3_prefix: 'scadbuddy',
   store_s3_access_key_id: null,
   store_s3_path_style: true,
+  library_backend: 'bambuddy',
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
@@ -1000,6 +1001,7 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   store_s3_access_key_id: 'restart',
   store_s3_secret_access_key: 'restart',
   store_s3_path_style: 'restart',
+  library_backend: 'restart',
 }
 
 export const settings: Settings = {

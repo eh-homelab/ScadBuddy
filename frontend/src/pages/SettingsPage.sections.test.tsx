@@ -888,6 +888,64 @@ describe('SettingsPage blob store (#426)', () => {
     expect(bodies[0]).toEqual({ store_backend: 'bambuddy' })
   })
 
+  it('offers ScadBuddy\u2019s own library only over a content store', async () => {
+    serve({ ...stored, store_backend: 'local' })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const library = screen.getByLabelText('Print library')
+    expect(library).toHaveTextContent('Bambuddy')
+    expect(await optionDisabled(user, library, /ScadBuddy.s own/)).toBe(true)
+  })
+
+  it('saves library_backend and shows it applies on restart', async () => {
+    const bodies = serve({
+      ...stored,
+      store_backend: 'bambuddy',
+      has_render_api_key: true,
+      render_key_fallback: false,
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    const library = screen.getByLabelText('Print library')
+    expect(await optionDisabled(user, library, /ScadBuddy.s own/)).toBe(false)
+    await choose(user, library, /ScadBuddy.s own/)
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ library_backend: 'native' })
+    expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy\u2019s own')
+  })
+
+  it('does not fall back to local while the library is native', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const stuck = { ...stored, store_backend: 'bambuddy' as const, library_backend: 'native' as const }
+    server.use(
+      http.get('/api/v1/settings', () => HttpResponse.json(stuck)),
+      http.put('/api/v1/settings', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Unprocessable Content',
+            status: 422,
+            detail:
+              'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 or bambuddy first',
+          },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy\u2019s own'))
+    await user.clear(screen.getByLabelText('Bambuddy URL'))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ bambuddy_url: null })
+    expect(await screen.findByText(/set store_backend to s3 or bambuddy/)).toBeVisible()
+    expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('')
+  })
+
   it('keeps a stored Bambuddy store backend on an unrelated save', async () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
