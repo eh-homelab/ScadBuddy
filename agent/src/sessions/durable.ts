@@ -12,6 +12,7 @@ import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
+import { durableDescriber, endLostTurn, type RunningRow } from './durableSweep.js'
 import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
 import { POOL_BUDGET, POOL_COST, SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
@@ -470,25 +471,40 @@ export class DurableTurns {
    * False when no turn runs, or the session has no workflow yet.
    */
   async interrupt(session: SessionRecord, reason: string): Promise<boolean> {
-    const [row] = await this.#sql<{ status: SessionStatus }[]>`SELECT status FROM ai_sessions WHERE id = ${session.id}`
+    const [row] = await this.#sql<(RunningRow & { status: SessionStatus })[]>`
+      SELECT id, status, event_seq, durable_offset FROM ai_sessions WHERE id = ${session.id}`
     if (!row || !RUNNING.includes(row.status)) return false
     try {
       await this.#gate.cancelInput(session.id, reason)
     } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return false
+      if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
       // Unanswered: the Signal stops the turn and its parked calls all the same.
       if (!(err instanceof DurableUnavailable)) throw err
     }
     try {
       await this.#gate.interrupt(session.id, reason)
     } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return false
+      if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
       if (err instanceof DurableUnavailable) {
         throw new SessionError('unavailable', `session ${session.id}'s workflow could not be reached; interrupt it again in a moment`)
       }
       throw err
     }
     return true
+  }
+
+  /**
+   * Stop on a `running` row whose workflow is gone (ended, or never started): nothing
+   * there will end the turn, so it is ended here as DurableRunningSweep would end it,
+   * not left `running` until the sweep's grace has passed (#4018). Described first, so
+   * the ending says whether the workflow ended or was never found; a describe that
+   * fails is taken as not found, which the Signal just said. A workflow open again
+   * (started meanwhile) holds its own turn: nothing is written.
+   */
+  async #endGone(row: RunningRow): Promise<boolean> {
+    const state = await durableDescriber(this.#client)(sessionWorkflowId(row.id)).catch(() => 'not_found' as const)
+    if (state === 'open') return false
+    return endLostTurn(this.#sql, this.#events, row, state)
   }
 
   /**

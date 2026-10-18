@@ -46,6 +46,38 @@ const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
   removed: "the turn never started: the session's workflow is gone (it ended and was removed); continue in a new chat",
 }
 
+/** A `running` row as read: its claim (`event_seq`) and how far its workflow's output got. */
+export type RunningRow = { id: string; event_seq: string; durable_offset: string }
+
+/**
+ * Writes the end of a turn whose workflow cannot end it (`state`, from DescribeSession),
+ * as finish_turn writes a failed turn but to `idle`. Guarded on the claim read, so a
+ * turn that claimed the row meanwhile is never ended. True when it wrote. The sweep's,
+ * and Stop's on a session whose workflow is gone (#4018).
+ */
+export async function endLostTurn(
+  sql: Sql,
+  events: EventLog,
+  row: RunningRow,
+  state: Exclude<SessionRunState, 'open'>,
+): Promise<boolean> {
+  const lost = state === 'not_found' && Number(row.durable_offset) > 0 ? 'removed' : state
+  const tail: ServerEvent[] = [
+    event({ type: 'error', sessionId: row.id, code: 'turn_failed', message: LOST[lost] }),
+    event({ type: 'session.status', sessionId: row.id, status: 'idle' }),
+  ]
+  const done = await sql.begin(async (tx) => {
+    const [claimed] = await tx`
+      UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
+      WHERE id = ${row.id} AND mode = 'durable' AND status = 'running' AND event_seq = ${row.event_seq}
+      RETURNING id`
+    return claimed ? await events.append(row.id, tail, tx) : undefined
+  })
+  if (!done) return false
+  events.committed(row.id, tail, done)
+  return true
+}
+
 export type DurableRunningSweepDeps = {
   sql: Sql
   events: EventLog
@@ -81,7 +113,7 @@ export class DurableRunningSweep {
   /** One pass; returns the sessions reset. */
   async sweep(): Promise<string[]> {
     const { sql, events } = this.#deps
-    const page = (after: string) => sql<{ id: string; event_seq: string; durable_offset: string }[]>`
+    const page = (after: string) => sql<RunningRow[]>`
       SELECT id, event_seq, durable_offset FROM ai_sessions
       WHERE mode = 'durable' AND status = 'running' AND id::text > ${after}
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
@@ -101,21 +133,7 @@ export class DurableRunningSweep {
         continue
       }
       if (state === 'open') continue
-      const lost = state === 'not_found' && Number(row.durable_offset) > 0 ? 'removed' : state
-      const tail: ServerEvent[] = [
-        event({ type: 'error', sessionId: row.id, code: 'turn_failed', message: LOST[lost] }),
-        event({ type: 'session.status', sessionId: row.id, status: 'idle' }),
-      ]
-      const done = await sql.begin(async (tx) => {
-        const [claimed] = await tx`
-          UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
-          WHERE id = ${row.id} AND mode = 'durable' AND status = 'running' AND event_seq = ${row.event_seq}
-          RETURNING id`
-        return claimed ? await events.append(row.id, tail, tx) : undefined
-      })
-      if (!done) continue
-      events.committed(row.id, tail, done)
-      reset.push(row.id)
+      if (await endLostTurn(sql, events, row, state)) reset.push(row.id)
     }
     // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
     if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)
