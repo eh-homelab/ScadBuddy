@@ -176,7 +176,8 @@ unique index), the measured facts and the arithmetic:
   a quote releases every other quote's; cancelling the item, or closing the order,
   releases them all. The quote rows stay (Ruling 6 is about the record, not the
   bytes), with `sliced_sha256` saying what was priced. §6.1's attempt takes a ref of
-  its own on the same key, so a print's file outlives the quote's ref;
+  its own on the same key, so a print's file outlives the quote's ref. A `manual`
+  quote has no sliced file: both fields are null and no ref is taken;
 - `plates` (jsonb: per plate `{index, print_seconds, filaments: [{slot, used_g}]}`
   as `read_sliced` gives them, §5.2);
 - `lines` (jsonb): the priced lines, each `{kind, label, quantity, unit_minor,
@@ -317,7 +318,11 @@ stored as a quote, and never accepted. A filament with no density gives none.
 
 `order_item_print` starts a `PrintRunWorkflow` for the item: the source is the
 accepted quote's sliced file (its digest must match, else the print is refused with
-`requote_needed` and the item wants a re-quote), the request's `filament_plan` maps
+`requote_needed` and the item wants a re-quote). An accepted `manual` quote names no
+file, so the print slices at its start, through §5.2's step 2 with the item's
+colours, and the attempt records that file; the digest check applies only to a
+`slice` quote, since a manual price was never a fact about one file. The request's
+`filament_plan` maps
 each slot to a spool of the slot's filament, and `copies` is the quantity still to
 print. A flow reaches it as `queue_print({"order_item_id": id}, request)` (§7.2), so
 the grant's `printers`, `max_prints` and `max_filament_g` bounds apply as they do to
