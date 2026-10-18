@@ -1116,13 +1116,15 @@ which the `DurableSession` workflow calls around each turn, behind the patch
 - `memory_retain` runs after the turn's events are written and before `finish_turn`.
   It runs the Stop hook over the session's transcript, rebuilt from its event log
   (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
-  It upserts `conversation:<ScadBuddy session id>`.
+  It upserts `conversation:<ScadBuddy session id>`. The activity returns once the retain
+  is enqueued, as the hook does in a classic turn, so the turn is marked done without
+  waiting on Hindsight; the retain lands after, in the agent process, under the 15 s
+  retain limit and the shutdown drain.
 
 Each recall and retain gets the same audit row and `memory` event as in a classic
 turn. Neither is retried (beyond the one shorter recall above), and neither ever fails the turn: a failure is recorded and
 the turn goes on with no memories. Only the recalled block enters the workflow's history,
-sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
-retain before it is marked done (up to the 15 s retain limit).
+sealed by the session's payload codec.
 
 ## 12. The HTTP request tool (#827)
 
