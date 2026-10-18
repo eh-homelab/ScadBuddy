@@ -29,7 +29,10 @@ fn failure(
 
 pub(crate) fn transfer(e: TransferError) -> ActivityError {
     let refused = match &e {
-        TransferError::Missing | TransferError::Expired | TransferError::Refused(_) => true,
+        TransferError::Missing
+        | TransferError::Expired
+        | TransferError::Refused(_)
+        | TransferError::InvalidHeader(_) => true,
         TransferError::Status(code) => !(*code >= 500 || *code == 429),
         TransferError::Io(_) | TransferError::Http(_) => false,
     };
@@ -131,6 +134,10 @@ mod tests {
         assert_eq!(kind(TransferError::Expired), refused());
         assert_eq!(kind(TransferError::Status(302)), refused());
         assert_eq!(kind(TransferError::Status(400)), refused());
+        assert_eq!(
+            kind(TransferError::InvalidHeader("bad name".into())),
+            refused()
+        );
     }
 
     #[test]

@@ -68,6 +68,9 @@ pub enum TransferError {
     Expired,
     Missing,
     Refused(u16),
+    /// A header the URL carries is not a valid name or value: no request is sent, and none
+    /// would ever be. Names the header, never its value.
+    InvalidHeader(String),
     /// Any other non-2xx (a 3xx is not followed): 5xx and 429 are worth a retry.
     Status(u16),
     Io(std::io::Error),
@@ -80,6 +83,7 @@ impl std::fmt::Display for TransferError {
             Self::Expired => write!(f, "transfer url expired"),
             Self::Missing => write!(f, "object not found (404)"),
             Self::Refused(code) => write!(f, "transfer refused ({code})"),
+            Self::InvalidHeader(why) => write!(f, "{why}"),
             Self::Status(code) => write!(f, "unexpected status {code}"),
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Http(e) => write!(f, "http: {e}"),
@@ -238,9 +242,9 @@ fn header_map(url: &TransferUrl) -> Result<HeaderMap, TransferError> {
     let mut map = HeaderMap::new();
     for (k, v) in &url.headers {
         let name = HeaderName::from_bytes(k.as_bytes())
-            .map_err(|_| TransferError::Http(format!("invalid header name {k:?}")))?;
+            .map_err(|_| TransferError::InvalidHeader(format!("invalid header name {k:?}")))?;
         let value = HeaderValue::from_str(v)
-            .map_err(|_| TransferError::Http(format!("invalid value for header {k:?}")))?;
+            .map_err(|_| TransferError::InvalidHeader(format!("invalid value for header {k:?}")))?;
         map.insert(name, value);
     }
     Ok(map)
