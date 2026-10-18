@@ -137,23 +137,34 @@ class _Missing(enum.Enum):
 
 
 #: Why a miss is failed rather than forgotten: nothing showed the source serving.
+#: The oldest rows go first, so a healthy source's first batch can be misses alone
+#: (a deleted model's files): a new run forgets them once the source has served a copy.
 UNPROVEN_MISS = (
-    "BlobMissingError: not forgotten, since the source served no object in its batch;"
+    "BlobMissingError: not forgotten, since nothing yet shows the source serving. A new"
+    " run forgets it once the source has served a copy; if every row fails this way,"
     " check the source backend's settings"
 )
 
+#: How many already-copied objects `_source_serves` asks about before it gives up.
+SERVES_PROBES = 3
+
 
 async def _source_serves(index: BlobIndex, source: ContentBackend, target: ContentBackend) -> bool:
-    """Whether ``source`` still has an object this migration already copied: what lets
-    a batch that copied nothing trust its misses."""
-    ref = await asyncio.to_thread(index.a_copied_ref, source.backend, target.backend)
-    if ref is None:
-        return False
-    try:
-        return await source.exists(ref.backend_id)
-    except Exception:
-        logger.warning("could not ask the source whether it serves", exc_info=True)
-        return False
+    """Whether ``source`` still has any of up to `SERVES_PROBES` objects this migration
+    already copied: what lets a batch that copied nothing trust its misses. More than
+    one, so a single copied object deleted since does not make a healthy source look
+    dead."""
+    refs = await asyncio.to_thread(
+        index.copied_refs, source.backend, target.backend, limit=SERVES_PROBES
+    )
+    for ref in refs:
+        try:
+            if await source.exists(ref.backend_id):
+                return True
+        except Exception:
+            logger.warning("could not ask the source whether it serves", exc_info=True)
+            return False
+    return False
 
 
 def _error(error: BaseException) -> str:

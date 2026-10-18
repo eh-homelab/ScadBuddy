@@ -249,6 +249,29 @@ async def test_a_batch_of_misses_is_forgotten_once_an_earlier_copy_is_still_serv
         await target.aclose()
 
 
+async def test_a_copied_object_deleted_since_does_not_make_the_source_look_dead(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    """#4111's review: one probe of one copied object would fail a healthy source's
+    misses whenever that object alone was deleted after its copy."""
+    src = local_content(tmp_path / "a", pool)
+    copied = [await src.put("piece", d, name=d.decode(), scope=SCOPE) for d in (b"a", b"b", b"c")]
+    index = BlobIndex(pool)
+    try:
+        started = index.now()
+        assert (await _batch(index, src.backend, target, started=started)).moved == 3
+        assert isinstance(src.backend, LocalContentBackend)
+        # Two of the copied objects go from the source; the third still vouches for it.
+        for ref in copied[:2]:
+            (src.backend.root / ref.backend_id).unlink()
+        gone = await src.put("piece", b"gone", name="g", scope=SCOPE)
+        (src.backend.root / gone.backend_id).unlink()
+        result = await _batch(index, src.backend, target, started=started)
+        assert result.forgotten == [f"piece-{gone.sha256}"] and result.failed == []
+    finally:
+        await target.aclose()
+
+
 async def test_forgetting_a_missing_object_spares_a_row_put_again_meanwhile(
     pool: Pool, tmp_path: Path
 ) -> None:
