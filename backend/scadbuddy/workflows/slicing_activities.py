@@ -8,22 +8,25 @@ and the sliced blob right after `Transfers.finish_put`."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 from collections.abc import Awaitable, Callable
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing
 from typing import Any
 
+from fastapi import status
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.component import PrintLibrary
-from scadbuddy.print_library.native import blob_key
+from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.print_library.reads import served_reads
 from scadbuddy.slicing.component import Slicing
 from scadbuddy.slicing.models import SlicePlateInput
-from scadbuddy.slicing.presets import build_presets, native_preset_key
+from scadbuddy.slicing.presets import build_presets, native_preset_key, needs_bambuddy
 from scadbuddy.slicing.profiles import ProfileError
 from scadbuddy.slicing.store import HOLDER
 from scadbuddy.slicing.transfer import TransferRecordError, Transfers, TransferUnavailableError
@@ -38,7 +41,11 @@ from scadbuddy.workflows.slicing_models import (
     SliceWorkflowResult,
 )
 
+logger = logging.getLogger(__name__)
+
 _SCOPE = BlobScope(folder="work")
+#: The row's failure when the worker's PUT cannot be recorded.
+LOST_PUT = "The sliced 3MF was lost; slice again."
 
 
 def _refused(message: str) -> ApplicationError:
@@ -61,30 +68,48 @@ class SliceActivities:
         await asyncio.to_thread(self.slicing.refs.add, key, HOLDER, str(slice_id))
 
     async def _input(
-        self, content: ContentStore, input: SliceWorkflowInput, read: Callable[[], Any]
+        self,
+        content: ContentStore,
+        input: SliceWorkflowInput,
+        native: NativeLibrary | None,
+        client: BambuddyClient | None,
     ) -> tuple[str, str]:
         """The copy's key and sha256. A native library file is read where it is (its
         own ``library-file-<id>`` blob: no bytes move); Bambuddy's is downloaded and
         put as a ``slice``."""
-        native = await self.library.serving_native()
+        file_id = input.library_file_id
         if native is not None:
-            key = blob_key(input.library_file_id)
+            key = blob_key(file_id)
             stat = await content.stat(key)
             if stat is None:
-                raise _refused(f"library file {input.library_file_id} is no longer stored")
+                raise _refused(f"library file {file_id} is no longer stored")
             return key, stat.ref.sha256
+        if client is None:
+            raise _refused(
+                f"library file {file_id} is in Bambuddy's library, and no Bambuddy is configured"
+            )
         await asyncio.to_thread(content.spool.mkdir, parents=True, exist_ok=True)
         # Spooled to a file, never held whole: a laid-out copy can be large.
         with tempfile.TemporaryFile(dir=content.spool) as body:
-            async with aclosing(read()) as chunks:
-                async for chunk in chunks:
-                    await asyncio.to_thread(body.write, chunk)
+            try:
+                reads = served_reads(file_id, client, None)
+                async with aclosing(reads.download_library_file(file_id)) as chunks:
+                    async for chunk in chunks:
+                        await asyncio.to_thread(body.write, chunk)
+            except ApiError as error:
+                # A copy gone or a Bambuddy not set up: its message is already the
+                # browser's (review M3); anything else is retried.
+                if error.status in (status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT):
+                    raise _refused(error.detail) from None
+                raise
             await asyncio.to_thread(body.seek, 0)
             ref = await content.put("slice", body, name="input.3mf", scope=_SCOPE)
         return f"slice-{ref.sha256}", ref.sha256
 
     @activity.defn(name=PREPARE_ACTIVITY)
     async def slice_prepare(self, input: SliceWorkflowInput) -> SlicePrepared:
+        # Each execution owns its row's running state (review I2).
+        await self.slicing.store.running(input.slice_id)
         try:
             transfers = self.slicing.transfers()
         except RuntimeError as error:
@@ -95,15 +120,18 @@ class SliceActivities:
                 "the native slicer needs Bambu Studio's profiles, which this image lacks"
             )
         content = transfers.content
+        native = await self.library.serving_native()
         settings = await asyncio.to_thread(self._settings_store().load)
-        async with client_for(settings) as client:
-            key, sha = await self._input(
-                content,
-                input,
-                lambda: served_reads(input.library_file_id, client, None).download_library_file(
-                    input.library_file_id
-                ),
+        # Bambuddy only when the copy or a preset is read there (review M3): with none
+        # configured, the image's presets still slice a native file.
+        wanted = native is None or await needs_bambuddy(input.plan, profiles)
+        async with AsyncExitStack() as stack:
+            client = (
+                await stack.enter_async_context(client_for(settings))
+                if wanted and settings.bambuddy_url
+                else None
             )
+            key, sha = await self._input(content, input, native, client)
             await self._hold(content, key, input.slice_id)
             await self.slicing.store.prepared(input.slice_id, sha)
             reused = await self.slicing.store.reusable(sha, input.preset_key)
@@ -165,6 +193,18 @@ class SliceActivities:
 
     @activity.defn(name=RECORD_ACTIVITY)
     async def slice_record(self, input: SliceRecordInput) -> SliceWorkflowResult:
+        if input.cancelled:
+            failure = input.failure or "The slice was cancelled."
+            await self.slicing.store.finish(
+                input.slice_id,
+                status="cancelled",
+                sliced_blob_key=None,
+                failure=failure,
+                warnings=[],
+            )
+            return SliceWorkflowResult(
+                status="cancelled", sliced_blob_key=None, failure=failure, warnings=[]
+            )
         if input.output is not None and input.put is not None:
             transfers = self.slicing.transfers()
             try:
@@ -172,7 +212,12 @@ class SliceActivities:
                     input.put, sha256=input.output.sliced_sha256, size=input.output.sliced_size
                 )
             except TransferRecordError as error:
-                return await self._failed(input.slice_id, f"The sliced 3MF was lost: {error}")
+                # The detail names internal keys: the log's, not the row's (review M6).
+                logger.warning(
+                    "a sliced 3MF could not be recorded",
+                    extra={"slice_id": input.slice_id, "error": str(error)},
+                )
+                return await self._failed(input.slice_id, LOST_PUT)
             # Held at once: nothing keeps it between the PUT and this (Ruling C5).
             await self._hold(transfers.content, key, input.slice_id)
             return await self._completed(input.slice_id, key, input.output.warnings)

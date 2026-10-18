@@ -4,10 +4,16 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Literal
 
 import pytest
 
-from scadbuddy.slicing.store import HOLDER, NativeSliceStore, native_workflow_id
+from scadbuddy.slicing.store import (
+    HOLDER,
+    NativeSliceStore,
+    SliceSubjectError,
+    native_workflow_id,
+)
 from scadbuddy.store.index import Pool
 from scadbuddy.store.refs import BlobRefs
 from tests.support.store import pool  # noqa: F401
@@ -44,7 +50,9 @@ async def test_start_twice_with_one_workflow_id_is_one_row(store: NativeSliceSto
     assert first.status == "running" and first.warnings == [] and first.finished_at is None
 
 
-async def test_start_on_a_failed_row_runs_it_again(store: NativeSliceStore) -> None:
+async def test_start_leaves_a_failed_row_to_its_next_execution(store: NativeSliceStore) -> None:
+    """The execution owns the running transition (review I2): a start that joins one
+    closing never sets the row running behind it."""
     slice_id = await _start(store)
     await store.finish(
         slice_id, status="failed", sliced_blob_key=None, failure="The slicer failed: x", warnings=[]
@@ -52,8 +60,47 @@ async def test_start_on_a_failed_row_runs_it_again(store: NativeSliceStore) -> N
     again = await store.start(
         workflow_id="slice-1-a", subject="out-1", library_file_id=1, plate_id=1, preset_key="k"
     )
-    assert again.id == slice_id
-    assert (again.status, again.failure, again.finished_at) == ("running", None, None)
+    assert (again.id, again.status) == (slice_id, "failed")
+
+    await store.running(slice_id)
+    found = await store.get(slice_id, "out-1")
+    assert found is not None
+    assert (found.status, found.failure, found.finished_at) == ("running", None, None)
+
+
+async def test_start_under_another_subject_is_refused(store: NativeSliceStore) -> None:
+    await _start(store)
+    with pytest.raises(SliceSubjectError, match="out-1"):
+        await store.start(
+            workflow_id="slice-1-a", subject="out-2", library_file_id=1, plate_id=1, preset_key="k"
+        )
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_an_unfinished_slice_drops_its_holds(
+    store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
+    status: Literal["failed", "cancelled"],
+) -> None:
+    kept = await _start(store, "slice-1-a")
+    ended = await _start(store, "slice-2-a")
+    refs = BlobRefs(pool)
+    for slice_id in (kept, ended):
+        refs.add(f"slice-{slice_id}", HOLDER, str(slice_id))
+    await store.finish(ended, status=status, sliced_blob_key=None, failure="no", warnings=[])
+    found = await store.get(ended, "out-1")
+    assert found is not None and found.status == status
+    assert refs.referenced() == {f"slice-{kept}"}
+
+
+async def test_lost_lists_old_running_rows(store: NativeSliceStore) -> None:
+    running = await _start(store, "slice-1-a")
+    done = await _start(store, "slice-2-a")
+    await store.finish(
+        done, status="completed", sliced_blob_key="slice-x", failure=None, warnings=[]
+    )
+    assert await store.lost(timedelta(hours=1)) == []
+    assert [row.id for row in await store.lost(timedelta(0))] == [running]
 
 
 async def test_start_on_a_completed_row_returns_it(store: NativeSliceStore) -> None:

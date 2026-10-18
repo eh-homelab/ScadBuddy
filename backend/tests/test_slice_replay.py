@@ -1,20 +1,23 @@
 """``SliceWorkflow`` replays the histories it wrote (plan
 2026-10-16-native-slicer-rust-worker Task 11).
 
-The ``library`` worker is unversioned, so a slice left open across a deploy replays on
-the new code. A change to the commands ``SliceWorkflow.run`` issues (an activity added,
+On the versioned ``library`` worker (#4090) a slice runs as ``VersionedSliceWorkflow``,
+AUTO_UPGRADE: an open slice moves to the new build at its next workflow task and replays
+there. So a change to the commands ``SliceWorkflow.run`` issues (an activity added,
 reordered, or its options changed) goes behind ``workflow.patched`` and adds a history
 recorded on the changed code beside these; this test is what says so.
 
 ``completed`` is a slice that prepares, slices and records; ``refused`` one whose
 ``slice_plate`` fails as a validation exit (192); ``prepared_again`` one whose first
 ``slice_plate`` refuses its URLs (``TransferRefused``), so it prepares once more and
-slices. Each was recorded with stub activities (``SCADBUDDY_RECORD_HISTORIES=1`` runs
-the recording below). Never re-record them.
+slices; ``cancelled`` one cancelled while ``slice_plate`` runs, which records the row
+and ends cancelled (review M4). Each was recorded with stub activities
+(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below). Never re-record them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import Iterator
@@ -23,7 +26,7 @@ from pathlib import Path
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, WorkflowHistory
+from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Replayer, Worker
@@ -52,7 +55,7 @@ from scadbuddy.workflows.slicing_models import (
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "slice_workflow_histories"
-NAMES = ["completed", "refused", "prepared_again"]
+NAMES = ["completed", "refused", "prepared_again", "cancelled"]
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -107,6 +110,8 @@ async def test_record(recording_temporal: str, name: str) -> None:
     async def slice_plate(input: SlicePlateInput) -> SlicePlateOutput:
         nonlocal calls
         calls += 1
+        if name == "cancelled":
+            await asyncio.sleep(3600)
         if name == "refused":
             raise ApplicationError(
                 "validation failed",
@@ -123,7 +128,7 @@ async def test_record(recording_temporal: str, name: str) -> None:
     @activity.defn(name=RECORD_ACTIVITY)
     async def record(input: SliceRecordInput) -> SliceWorkflowResult:
         return SliceWorkflowResult(
-            status="failed" if input.failure else "completed",
+            status="cancelled" if input.cancelled else "failed" if input.failure else "completed",
             sliced_blob_key=None if input.failure else "slice-out",
             failure=input.failure,
             warnings=[],
@@ -157,7 +162,13 @@ async def test_record(recording_temporal: str, name: str) -> None:
             task_queue=queue,
             execution_timeout=timedelta(minutes=2),
         )
-        result: SliceWorkflowResult = await handle.result()
+        if name == "cancelled":
+            await asyncio.sleep(1)
+            await handle.cancel()
+            with pytest.raises(WorkflowFailureError):
+                await handle.result()
+        else:
+            result: SliceWorkflowResult = await handle.result()
+            assert result.status == ("failed" if name == "refused" else "completed")
         history = await handle.fetch_history()
-    assert result.status == ("failed" if name == "refused" else "completed")
     (HISTORIES / f"{name}.json").write_text(history.to_json())

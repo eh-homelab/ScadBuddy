@@ -33,12 +33,16 @@ class NativeSlice(BaseModel):
     plate_id: int
     preset_key: str
     input_sha256: str | None
-    status: Literal["running", "completed", "failed"]
+    status: Literal["running", "completed", "failed", "cancelled"]
     failure: str | None
     sliced_blob_key: str | None
     warnings: list[str]
     created_at: datetime
     finished_at: datetime | None
+
+
+class SliceSubjectError(ValueError):
+    """A start for a subject other than the one the copy's row was started for."""
 
 
 def native_workflow_id(library_file_id: int, preset_key: str) -> str:
@@ -64,8 +68,10 @@ class NativeSliceStore:
         plate_id: int,
         preset_key: str,
     ) -> NativeSlice:
-        """The row of ``workflow_id``, inserted if there is none. A failed one is set
-        back to running, its failure and finish cleared, for the execution started next."""
+        """The row of ``workflow_id``, inserted if there is none, as it stands: the
+        execution, not the start, sets it running (`running`), so a start that joins a
+        closing execution never leaves it running with nothing behind it. A copy belongs
+        to one subject: the row of another's is refused (`SliceSubjectError`)."""
 
         def run() -> NativeSlice:
             with self._pool.connection() as conn:
@@ -73,20 +79,28 @@ class NativeSliceStore:
                     "INSERT INTO native_slices"
                     " (workflow_id, subject, library_file_id, plate_id, preset_key)"
                     " VALUES (%s, %s, %s, %s, %s)"
-                    " ON CONFLICT (workflow_id) DO UPDATE SET"
-                    " status = CASE WHEN native_slices.status = 'failed' THEN 'running'"
-                    " ELSE native_slices.status END,"
-                    " failure = CASE WHEN native_slices.status = 'failed' THEN NULL"
-                    " ELSE native_slices.failure END,"
-                    " finished_at = CASE WHEN native_slices.status = 'failed' THEN NULL"
-                    " ELSE native_slices.finished_at END"
+                    " ON CONFLICT (workflow_id) DO UPDATE SET workflow_id = EXCLUDED.workflow_id"
                     f" RETURNING {_COLUMNS}",
                     (workflow_id, subject, library_file_id, plate_id, preset_key),
                 ).fetchone()
             assert row is not None
             return NativeSlice.model_validate(row)
 
-        return await asyncio.to_thread(run)
+        found = await asyncio.to_thread(run)
+        if found.subject != subject:
+            raise SliceSubjectError(
+                f"slice {workflow_id} belongs to {found.subject}, not {subject}"
+            )
+        return found
+
+    async def running(self, slice_id: int) -> None:
+        """What each execution does first: the row running again, its last outcome
+        cleared."""
+        await self._execute(
+            "UPDATE native_slices SET status = 'running', failure = NULL, finished_at = NULL,"
+            " sliced_blob_key = NULL, warnings = '[]' WHERE id = %s",
+            (slice_id,),
+        )
 
     async def prepared(self, slice_id: int, input_sha256: str) -> None:
         await self._execute(
@@ -97,16 +111,44 @@ class NativeSliceStore:
         self,
         slice_id: int,
         *,
-        status: Literal["completed", "failed"],
+        status: Literal["completed", "failed", "cancelled"],
         sliced_blob_key: str | None,
         failure: str | None,
         warnings: list[str],
     ) -> None:
-        await self._execute(
-            "UPDATE native_slices SET status = %s, sliced_blob_key = %s, failure = %s,"
-            " warnings = %s, finished_at = now() WHERE id = %s",
-            (status, sliced_blob_key, failure, Jsonb(warnings), slice_id),
-        )
+        """A slice that did not complete drops its holds in the same transaction: its
+        blobs serve nothing (`reusable` reads completed rows), and a later execution
+        holds them again (review I1)."""
+
+        def run() -> None:
+            with self._pool.connection() as conn, conn.transaction():
+                conn.execute(
+                    "UPDATE native_slices SET status = %s, sliced_blob_key = %s, failure = %s,"
+                    " warnings = %s, finished_at = now() WHERE id = %s",
+                    (status, sliced_blob_key, failure, Jsonb(warnings), slice_id),
+                )
+                if status != "completed":
+                    conn.execute(
+                        "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+                        (HOLDER, str(slice_id)),
+                    )
+
+        await asyncio.to_thread(run)
+
+    async def lost(self, older_than: timedelta) -> list[NativeSlice]:
+        """Running rows created more than ``older_than`` ago: the sweep asks Temporal
+        whether each still has an execution."""
+
+        def run() -> list[NativeSlice]:
+            with self._pool.connection() as conn:
+                rows = conn.execute(
+                    f"SELECT {_COLUMNS} FROM native_slices WHERE status = 'running'"
+                    " AND created_at <= now() - %s ORDER BY id",
+                    (older_than,),
+                ).fetchall()
+            return [NativeSlice.model_validate(row) for row in rows]
+
+        return await asyncio.to_thread(run)
 
     async def get(self, slice_id: int, subject: str) -> NativeSlice | None:
         return await self._one(

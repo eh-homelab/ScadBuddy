@@ -39,7 +39,7 @@ class Slicing:
 
     @cached_property
     def starter(self) -> NativeSliceStarter | None:
-        return native_slice_starter(self.core.settings)
+        return native_slice_starter(self.core.settings, self.profiles)
 
     def transfers(self) -> Transfers:
         """`RuntimeError` without a content store (``store_backend`` local)."""

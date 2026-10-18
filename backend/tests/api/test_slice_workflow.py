@@ -13,6 +13,8 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import suppress
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,8 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowFailureError
+from temporalio.exceptions import CancelledError
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.client import client_for
@@ -34,10 +37,14 @@ from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.slicing.component import SLICING, Slicing
 from scadbuddy.slicing.models import SliceProgress
-from scadbuddy.slicing.start import slice_progress, start_native_slice
+from scadbuddy.slicing.presets import native_preset_key
+from scadbuddy.slicing.profiles import ProfileError
+from scadbuddy.slicing.start import slice_progress, start_native_slice, sweep_native_slices
 from scadbuddy.slicing.store import HOLDER, NativeSlice
 from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.content_models import BlobScope
+from scadbuddy.workflows.slicing import SliceWorkflow
+from scadbuddy.workflows.slicing_models import SliceWorkflowInput
 from tests.api.test_send import API, configure
 from tests.slicing.conftest import PROFILES
 from tests.support.fake_slicer import INTERNAL, SLICED, FakeSlicer, fake_slicer_worker
@@ -49,6 +56,8 @@ COPY = 41
 OTHER_COPY = 42
 #: A copy of other bytes, which no earlier slice answers for.
 OTHER_BYTES_COPY = 43
+#: A copy Bambuddy no longer has.
+GONE_COPY = 44
 #: The laid-out copy's bytes, distinctive enough to find in a history.
 INPUT = b"PK\x03\x04 the laid-out copy " + os.urandom(64).hex().encode()
 PLAN = SlicePlan(
@@ -110,9 +119,10 @@ def bambuddy() -> Iterator[respx.MockRouter]:
         yield router
 
 
-def _open(app_settings: Settings) -> Iterator[TestClient]:
+def _open(app_settings: Settings, *, bambuddy: bool = True) -> Iterator[TestClient]:
     with TestClient(create_app(app_settings)) as client:
-        configure(client)
+        if bambuddy:
+            configure(client)
         yield client
 
 
@@ -150,25 +160,30 @@ def _call[T](client: TestClient, fn: Callable[[], Awaitable[T]]) -> T:
     return result
 
 
-def _start(client: TestClient, library_file_id: int = COPY) -> NativeSlice:
+def _start(
+    client: TestClient,
+    library_file_id: int = COPY,
+    *,
+    plan: SlicePlan = PLAN,
+    temporal: Any = None,
+) -> NativeSlice:
     slicing = _slicing(client)
-    assert slicing.starter is not None and slicing.profiles is not None
-    starter, profiles = slicing.starter, slicing.profiles
+    starter = slicing.starter
+    assert starter is not None
 
     async def start() -> NativeSlice:
         settings = _state(client).settings_store.load()
+        args: dict[str, Any] = {
+            "library_file_id": library_file_id,
+            "plan": plan,
+            "plate_id": 1,
+            "subject": SUBJECT,
+        }
+        target = temporal or slicing.temporal()
+        if not settings.bambuddy_url:
+            return await start_native_slice(target, slicing.store, starter, client=None, **args)
         async with client_for(settings) as bambuddy:
-            return await start_native_slice(
-                slicing.temporal(),
-                slicing.store,
-                starter,
-                library_file_id=library_file_id,
-                plan=PLAN,
-                plate_id=1,
-                subject=SUBJECT,
-                profiles=profiles,
-                client=bambuddy,
-            )
+            return await start_native_slice(target, slicing.store, starter, client=bambuddy, **args)
 
     return _call(client, start)
 
@@ -177,7 +192,8 @@ def _finished(client: TestClient, row: NativeSlice) -> NativeSlice:
     slicing = _slicing(client)
 
     async def wait() -> NativeSlice:
-        await slicing.temporal().get_workflow_handle(row.workflow_id).result()
+        with suppress(WorkflowFailureError):  # a cancelled slice ends cancelled
+            await slicing.temporal().get_workflow_handle(row.workflow_id).result()
         found = await slicing.store.get(row.id, SUBJECT)
         assert found is not None
         return found
@@ -185,8 +201,10 @@ def _finished(client: TestClient, row: NativeSlice) -> NativeSlice:
     return _call(client, wait)
 
 
-def _slice(client: TestClient, library_file_id: int = COPY) -> NativeSlice:
-    return _finished(client, _start(client, library_file_id))
+def _slice(
+    client: TestClient, library_file_id: int = COPY, *, plan: SlicePlan = PLAN
+) -> NativeSlice:
+    return _finished(client, _start(client, library_file_id, plan=plan))
 
 
 def _holds(client: TestClient, row: NativeSlice) -> set[str]:
@@ -263,6 +281,7 @@ def test_a_validation_failure_fails_once_with_the_stderr_tail(
     assert row.status == "failed"
     assert row.failure == "The slicer refused the plate: plate 99 is empty"
     assert row.sliced_blob_key is None
+    assert _holds(slice_client, row) == set()
     assert slicer.calls == 1
 
 
@@ -276,11 +295,12 @@ def test_a_crash_retries_three_times(slice_client: TestClient, slicer: FakeSlice
     failed = _slice(slice_client, OTHER_BYTES_COPY)
     assert failed.status == "failed"
     assert failed.failure == "The slicer failed: segfault"
+    assert _holds(slice_client, failed) == set()
     assert slicer.calls == 4
 
 
 def test_an_expired_url_prepares_again_once(slice_client: TestClient, slicer: FakeSlicer) -> None:
-    slicer.expire_first = True
+    slicer.expire_times = 1
     row = _slice(slice_client)
     assert row.status == "completed", row.failure
     assert slicer.calls == 2
@@ -419,3 +439,275 @@ def test_on_the_local_store_the_slice_fails_saying_why(
         row = _slice(client)
         assert row.status == "failed"
         assert row.failure is not None and "store_backend" in row.failure
+
+
+# -- fix round 1: the row's edges -------------------------------------------------------
+
+
+def _wait_for_slicing(client: TestClient, row: NativeSlice) -> None:
+    """Until the fake has beaten: `slice_prepare` has held everything by then."""
+    temporal = _slicing(client).temporal()
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if _call(client, partial(slice_progress, temporal, row.workflow_id)) is not None:
+            return
+        time.sleep(0.2)
+    pytest.fail("the slice never reached slice_plate")
+
+
+def _terminate(client: TestClient, row: NativeSlice) -> None:
+    async def terminate() -> None:
+        handle = _slicing(client).temporal().get_workflow_handle(row.workflow_id)
+        await handle.terminate("test")
+
+    _call(client, terminate)
+
+
+def _sweep_lost(client: TestClient) -> list[int]:
+    slicing = _slicing(client)
+    return _call(
+        client,
+        partial(
+            sweep_native_slices,
+            slicing.temporal(),
+            slicing.store,
+            finished_older_than=timedelta(hours=1),
+            lost_after=timedelta(0),
+        ),
+    )
+
+
+def _row(client: TestClient, row: NativeSlice) -> NativeSlice:
+    found = _call(client, partial(_slicing(client).store.get, row.id, SUBJECT))
+    assert found is not None
+    return found
+
+
+class _Down:
+    """A Temporal that refuses every start, as one blipping or the API stopping does."""
+
+    async def start_workflow(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("temporal is down")
+
+
+def test_a_start_that_never_reached_temporal_is_swept_failed(
+    slice_client: TestClient,
+) -> None:
+    with pytest.raises(RuntimeError, match="temporal is down"):
+        _start(slice_client, temporal=_Down())
+    with _slicing(slice_client).store._pool.connection() as conn:
+        row = NativeSlice.model_validate(
+            conn.execute("SELECT * FROM native_slices ORDER BY id DESC LIMIT 1").fetchone()
+        )
+    assert row.status == "running"
+    _slicing(slice_client).refs.add("slice-orphan", HOLDER, str(row.id))
+
+    assert _sweep_lost(slice_client) == []
+
+    swept = _row(slice_client, row)
+    assert (swept.status, swept.failure) == ("failed", "The slice stopped.")
+    assert _holds(slice_client, row) == set()
+
+
+def test_a_terminated_slice_is_swept_failed(slice_client: TestClient, slicer: FakeSlicer) -> None:
+    slicer.hold = _call(slice_client, _event)
+    row = _start(slice_client)
+    _wait_for_slicing(slice_client, row)
+    assert _holds(slice_client, row)
+    _terminate(slice_client, row)
+
+    _sweep_lost(slice_client)
+
+    swept = _row(slice_client, row)
+    assert (swept.status, swept.failure) == ("failed", "The slice stopped.")
+    assert _holds(slice_client, row) == set()
+    _set(slice_client, slicer)
+
+
+def test_a_start_joining_a_closing_slice_leaves_its_row_alone(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    """The record has written `failed` and the execution is still closing: a start
+    joins it (USE_EXISTING) and does not set the row running behind it."""
+    slicer.hold = _call(slice_client, _event)
+    row = _start(slice_client)
+    _wait_for_slicing(slice_client, row)
+    store = _slicing(slice_client).store
+    _call(
+        slice_client,
+        partial(
+            store.finish, row.id, status="failed", sliced_blob_key=None, failure="x", warnings=[]
+        ),
+    )
+
+    joined = _start(slice_client)
+
+    assert (joined.id, joined.status) == (row.id, "failed")
+    _terminate(slice_client, row)
+    _sweep_lost(slice_client)
+    assert _row(slice_client, row).status == "failed"
+    assert _holds(slice_client, row) == set()
+    _set(slice_client, slicer)
+
+
+def test_a_cancelled_slice_is_recorded_cancelled(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    slicer.hold = _call(slice_client, _event)
+    row = _start(slice_client)
+    _wait_for_slicing(slice_client, row)
+
+    async def cancel() -> BaseException | None:
+        handle = _slicing(slice_client).temporal().get_workflow_handle(row.workflow_id)
+        await handle.cancel()
+        try:
+            await handle.result()
+        except WorkflowFailureError as error:
+            return error.cause
+        return None
+
+    cause = _call(slice_client, cancel)
+
+    assert isinstance(cause, CancelledError)
+    done = _row(slice_client, row)
+    assert (done.status, done.failure) == ("cancelled", "The slice was cancelled.")
+    assert _holds(slice_client, row) == set()
+    _set(slice_client, slicer)
+
+
+def test_no_slicer_worker_fails_the_slice_saying_so(slice_client: TestClient) -> None:
+    slicing = _slicing(slice_client)
+    starter = slicing.starter
+    assert starter is not None
+
+    async def start() -> NativeSlice:
+        row = await slicing.store.start(
+            workflow_id="slice-unserved",
+            subject=SUBJECT,
+            library_file_id=COPY,
+            plate_id=1,
+            preset_key="k",
+        )
+        await slicing.temporal().start_workflow(
+            SliceWorkflow.run,
+            SliceWorkflowInput(
+                slice_id=row.id,
+                library_file_id=COPY,
+                plan=PLAN,
+                plate_id=1,
+                # What the start keys PLAN by, or the drift check refuses it first.
+                preset_key=native_preset_key(PLAN, 1, starter.profiles.version),
+                slicer_queue=f"{starter.slicer_queue}-nobody",
+                slicer_wait=timedelta(seconds=2),
+            ),
+            id=row.workflow_id,
+            task_queue=starter.library_queue,
+        )
+        return row
+
+    row = _finished(slice_client, _call(slice_client, start))
+
+    assert row.status == "failed"
+    assert row.failure is not None and row.failure.startswith("No slicer worker took the slice")
+    assert _holds(slice_client, row) == set()
+
+
+def test_a_second_refused_url_fails(slice_client: TestClient, slicer: FakeSlicer) -> None:
+    slicer.expire_times = 2
+    row = _slice(slice_client)
+    assert row.status == "failed"
+    assert row.failure == "The slicer worker failed (TransferRefused)."
+    names = _history_activities(slice_client, row)
+    assert names.count("slice_prepare") == 2 and names.count("slice_plate") == 2
+    assert slicer.calls == 2
+
+
+LOCAL_PLAN = PLAN.model_copy(update={"process_preset": PresetRef(source="local", id="4")})
+
+
+def test_a_process_preset_changed_since_the_start_is_refused(
+    slice_client: TestClient, bambuddy: respx.MockRouter, slicer: FakeSlicer
+) -> None:
+    bambuddy.get(f"{API}/slicer/presets").respond(200, json={})
+    bambuddy.get(f"{API}/local-presets/").respond(200, json={})
+    bambuddy.get(f"{API}/slicer/preset-values").mock(
+        side_effect=[
+            httpx.Response(200, json={"resolved": True, "values": {"layer_height": h}})
+            for h in ("0.12", "0.20")
+        ]
+    )
+    row = _slice(slice_client, plan=LOCAL_PLAN)
+    assert row.status == "failed"
+    assert row.failure == "The process preset changed while the slice started: slice again."
+    assert slicer.calls == 0
+
+
+def test_a_failed_slice_started_again_completes(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    slicer.refuse_plate = True
+    assert _slice(slice_client).status == "failed"
+    slicer.refuse_plate = False
+
+    again = _slice(slice_client)
+
+    assert (again.status, again.failure) == ("completed", None)
+    assert slicer.calls == 2
+
+
+def test_a_lost_put_fails_without_internal_keys(
+    slice_client: TestClient, slicer: FakeSlicer
+) -> None:
+    slicer.wrong_sha = True
+    row = _slice(slice_client)
+    assert (row.status, row.failure) == ("failed", "The sliced 3MF was lost; slice again.")
+
+
+def test_a_gone_bambuddy_copy_says_so(
+    slice_client: TestClient, bambuddy: respx.MockRouter, slicer: FakeSlicer
+) -> None:
+    bambuddy.get(f"{API}/library/files/{GONE_COPY}/download").respond(
+        404, json={"detail": "File not found"}
+    )
+    row = _slice(slice_client, GONE_COPY)
+    assert row.status == "failed" and row.failure is not None
+    assert not row.failure.startswith("Preparing the slice failed")
+    assert str(GONE_COPY) in row.failure
+
+
+@pytest.fixture
+def native_alone_client(
+    settings: Settings, s3: S3Settings, kek_file: Path, bambuddy: respx.MockRouter
+) -> Iterator[TestClient]:
+    """The native library with no Bambuddy configured at all."""
+    yield from _open(
+        _slice_settings(settings, kek_file, **_s3(s3), library_backend="native"), bambuddy=False
+    )
+
+
+def _native_upload(client: TestClient, tmp_path: Path) -> int:
+    native: NativeLibrary = _state(client).components.get(PRINT_LIBRARY).native
+    source = tmp_path / "copy.3mf"
+    source.write_bytes(INPUT)
+    with source.open("rb") as data:
+        uploaded = _call(client, partial(native.upload, source.name, data, None))
+    return uploaded.id
+
+
+def test_standard_presets_slice_with_no_bambuddy(
+    native_alone_client: TestClient, settings: Settings, tmp_path: Path
+) -> None:
+    client = native_alone_client
+    file_id = _native_upload(client, tmp_path)
+    with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
+        row = _slice(client, file_id)
+    assert row.status == "completed", row.failure
+    assert slicer.calls == 1
+
+
+def test_a_preset_that_needs_bambuddy_says_none_is_configured(
+    native_alone_client: TestClient, tmp_path: Path
+) -> None:
+    file_id = _native_upload(native_alone_client, tmp_path)
+    with pytest.raises(ProfileError, match="needs Bambuddy, and none is configured"):
+        _start(native_alone_client, file_id, plan=LOCAL_PLAN)

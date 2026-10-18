@@ -5,13 +5,14 @@ it from the model validated), and `TransferUrl`'s repr redacts it."""
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.dispatch import SlicePlan
 from scadbuddy.slicing.models import SlicePlateInput, SlicePlateOutput
-from scadbuddy.slicing.transfer import PendingPut
+from scadbuddy.slicing.transfer import TRANSFER_TTL, PendingPut
 
 SLICE_WORKFLOW = "SliceWorkflow"
 PREPARE_ACTIVITY = "slice_prepare"
@@ -21,6 +22,9 @@ SLICE_PLATE = "slice_plate"
 #: The `ApplicationError` type of `slice_prepare`'s own refusals, whose message is the
 #: slice's failure.
 SLICE_REFUSED = "SliceRefused"
+#: How long ``slice_plate`` waits for a slicer worker to take it (review M2): past
+#: `TRANSFER_TTL` a worker would find its URLs expired anyway.
+SLICER_WAIT = TRANSFER_TTL
 
 
 class SliceWorkflowInput(BaseModel):
@@ -30,6 +34,8 @@ class SliceWorkflowInput(BaseModel):
     plate_id: int
     preset_key: str
     slicer_queue: str
+    #: `SLICER_WAIT`; a test names a shorter one.
+    slicer_wait: timedelta = SLICER_WAIT
 
 
 class SlicePrepared(BaseModel):
@@ -52,10 +58,12 @@ class SliceRecordInput(BaseModel):
     reused_blob_key: str | None
     failure: str | None
     reused_warnings: list[str] = Field(default_factory=list)
+    #: The workflow was cancelled: ``failure`` says so and the row reads cancelled.
+    cancelled: bool = False
 
 
 class SliceWorkflowResult(BaseModel):
-    status: Literal["completed", "failed"]
+    status: Literal["completed", "failed", "cancelled"]
     sliced_blob_key: str | None
     failure: str | None
     warnings: list[str]

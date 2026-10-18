@@ -8,7 +8,11 @@ native library; Ruling C1).
 2. Unless reused, ``slice_plate`` on the slicer queue, retried three times (Ruling C4).
    URLs the worker refuses (``TransferRefused``: they expired in a long queue wait) are
    prepared once more and sliced once more.
-3. ``slice_record`` holds the sliced blob and finishes the row, completed or failed.
+   A slicer worker must take it within ``slicer_wait``, or the slice fails saying none
+   did.
+3. ``slice_record`` holds the sliced blob and finishes the row, completed or failed (a
+   failure drops the slice's holds). A cancel is recorded as cancelled, and the
+   execution then ends cancelled.
 
 No bytes and no preset document cross the history: ``SlicePrepared`` carries URLs and
 the record carries keys. On the versioned ``library`` worker it runs as
@@ -18,12 +22,19 @@ behind ``workflow.patched`` (``tests/test_slice_replay.py``).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, VersioningBehavior
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    TimeoutType,
+    is_cancelled_exception,
+)
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.slicing.models import (
@@ -67,6 +78,10 @@ RECORD_RETRY = RetryPolicy(
 )
 
 
+#: A cancelled slice's row (review M4).
+CANCELLED = "The slice was cancelled."
+
+
 def _type(cause: BaseException | None) -> str:
     if isinstance(cause, ApplicationError):
         return cause.type or "ApplicationError"
@@ -80,9 +95,10 @@ def prepare_failure(cause: BaseException | None) -> str:
     return f"Preparing the slice failed ({_type(cause)})."
 
 
-def slice_failure(cause: BaseException | None) -> str:
+def slice_failure(cause: BaseException | None, queue: str) -> str:
     """Ruling C4: a ``SlicerError``'s ``stderr_tail``, the only details decoded (the
-    worker's README, "Slicer worker"); any other type is named, never its message."""
+    worker's README, "Slicer worker"); any other type is named, never its message. No
+    worker taking the activity in `SliceWorkflowInput.slicer_wait` says so (review M2)."""
     if isinstance(cause, ApplicationError) and cause.type == SLICER_ERROR:
         details: Any = cause.details[0] if cause.details else {}
         if not isinstance(details, dict):
@@ -90,6 +106,11 @@ def slice_failure(cause: BaseException | None) -> str:
         refused = details.get("exit_code") == VALIDATION_EXIT
         prefix = "The slicer refused the plate:" if refused else "The slicer failed:"
         return f"{prefix} {details.get('stderr_tail', '')}".rstrip()
+    if isinstance(cause, TemporalTimeoutError) and cause.type == TimeoutType.SCHEDULE_TO_START:
+        return (
+            "No slicer worker took the slice: is scadbuddy-slicer running, serving the"
+            f" {queue} queue?"
+        )
     return f"The slicer worker failed ({_type(cause)})."
 
 
@@ -97,30 +118,17 @@ def slice_failure(cause: BaseException | None) -> str:
 class SliceWorkflow:
     @workflow.run
     async def run(self, input: SliceWorkflowInput) -> SliceWorkflowResult:
-        prepared, failure = await self._prepare(input)
+        prepared: SlicePrepared | None = None
         output: SlicePlateOutput | None = None
-        again = True
-        while prepared is not None and prepared.reused_blob_key is None:
-            assert prepared.plate_input is not None
-            try:
-                output = await workflow.execute_activity(
-                    SLICE_PLATE,
-                    prepared.plate_input,
-                    task_queue=input.slicer_queue,
-                    start_to_close_timeout=SLICE_TIMEOUT,
-                    heartbeat_timeout=SLICE_HEARTBEAT,
-                    retry_policy=SLICE_RETRY,
-                    result_type=SlicePlateOutput,
-                )
-                break
-            except ActivityError as error:
-                cause = error.cause
-                if again and isinstance(cause, ApplicationError) and cause.type == TRANSFER_REFUSED:
-                    again = False
-                    prepared, failure = await self._prepare(input)
-                    continue
-                failure = slice_failure(cause)
-                break
+        failure: str | None = None
+        cancelled: BaseException | None = None
+        try:
+            prepared, output, failure = await self._slice(input)
+        except (ActivityError, asyncio.CancelledError) as error:
+            if not is_cancelled_exception(error):
+                raise
+            # Recorded, then raised again, so the execution ends cancelled (review M4).
+            cancelled, prepared, output, failure = error, None, None, CANCELLED
         reused = prepared.reused_blob_key if prepared is not None and failure is None else None
         record = SliceRecordInput(
             slice_id=input.slice_id,
@@ -129,6 +137,7 @@ class SliceWorkflow:
             reused_blob_key=reused,
             failure=failure,
             reused_warnings=prepared.reused_warnings if reused is not None and prepared else [],
+            cancelled=cancelled is not None,
         )
         result: SliceWorkflowResult = await workflow.execute_activity(
             RECORD_ACTIVITY,
@@ -137,7 +146,40 @@ class SliceWorkflow:
             retry_policy=RECORD_RETRY,
             result_type=SliceWorkflowResult,
         )
+        if cancelled is not None:
+            raise cancelled
         return result
+
+    async def _slice(
+        self, input: SliceWorkflowInput
+    ) -> tuple[SlicePrepared | None, SlicePlateOutput | None, str | None]:
+        """The prepare and the slice: what to record. A cancel propagates."""
+        prepared, failure = await self._prepare(input)
+        again = True
+        while prepared is not None and prepared.reused_blob_key is None:
+            assert prepared.plate_input is not None
+            try:
+                output: SlicePlateOutput = await workflow.execute_activity(
+                    SLICE_PLATE,
+                    prepared.plate_input,
+                    task_queue=input.slicer_queue,
+                    schedule_to_start_timeout=input.slicer_wait,
+                    start_to_close_timeout=SLICE_TIMEOUT,
+                    heartbeat_timeout=SLICE_HEARTBEAT,
+                    retry_policy=SLICE_RETRY,
+                    result_type=SlicePlateOutput,
+                )
+                return prepared, output, None
+            except ActivityError as error:
+                if is_cancelled_exception(error):
+                    raise
+                cause = error.cause
+                if again and isinstance(cause, ApplicationError) and cause.type == TRANSFER_REFUSED:
+                    again = False
+                    prepared, failure = await self._prepare(input)
+                    continue
+                return prepared, None, slice_failure(cause, input.slicer_queue)
+        return prepared, None, failure
 
     async def _prepare(self, input: SliceWorkflowInput) -> tuple[SlicePrepared | None, str | None]:
         try:
@@ -149,6 +191,8 @@ class SliceWorkflow:
                 result_type=SlicePrepared,
             )
         except ActivityError as error:
+            if is_cancelled_exception(error):
+                raise
             return None, prepare_failure(error.cause)
         return prepared, None
 

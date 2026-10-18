@@ -49,8 +49,10 @@ class FakeSlicer:
         self.crash_times = 0
         #: Fail this many calls first with a `SlicerWorkerError` carrying a message.
         self.worker_errors = 0
-        #: Refuse the first call's URLs as expired (`TransferRefused`).
-        self.expire_first = False
+        #: Refuse this many calls' URLs first as expired (`TransferRefused`).
+        self.expire_times = 0
+        #: Report a digest other than the one it PUT.
+        self.wrong_sha = False
         #: Waited on after the heartbeat, before the upload.
         self.hold: asyncio.Event | None = None
         self.calls = 0
@@ -71,7 +73,8 @@ class FakeSlicer:
     @activity.defn(name="slice_plate")
     async def slice_plate(self, input: SlicePlateInput) -> SlicePlateOutput:
         self.calls += 1
-        if self.expire_first and self.calls == 1:
+        if self.expire_times > 0:
+            self.expire_times -= 1
             raise ApplicationError("expired", type=TRANSFER_REFUSED, non_retryable=True)
         if self.refuse_plate:
             raise ApplicationError(
@@ -107,7 +110,7 @@ class FakeSlicer:
         response.raise_for_status()
         self.downloads.append(downloaded)
         return SlicePlateOutput(
-            sliced_sha256=hashlib.sha256(SLICED).hexdigest(),
+            sliced_sha256=hashlib.sha256(b"other" if self.wrong_sha else SLICED).hexdigest(),
             sliced_size=len(SLICED),
             warnings=["a warning"],
             exit_code=0,
