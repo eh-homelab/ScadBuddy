@@ -8,7 +8,7 @@ import os
 from collections.abc import AsyncGenerator, Callable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from temporalio import activity
@@ -19,7 +19,7 @@ from scadbuddy.store import migrate
 from scadbuddy.store.content import BlobMissingError, BlobScope, ContentBackend, ContentStore
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
-from scadbuddy.store.migrate import UNPROVEN_MISS, MigrationBatch, migrate_batch
+from scadbuddy.store.migrate import SERVES_PROBES, UNPROVEN_MISS, MigrationBatch, migrate_batch
 from scadbuddy.store.s3 import S3ContentBackend
 from tests.support.store import local_content, overwrite_object, s3_content
 
@@ -54,6 +54,16 @@ async def _batch(
         started=started or index.now(),
         heartbeat=heartbeat,
     )
+
+
+def _age(pool: Pool, key: str, *, minutes: int) -> None:
+    """Make ``key``'s row ``minutes`` older than now, for a copy order that ties cannot
+    blur."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE store_blobs SET touched_at = now() - make_interval(mins => %s) WHERE key = %s",
+            (minutes, key),
+        )
 
 
 def _copy(pool: Pool, key: str) -> tuple[str | None, str | None, str | None]:
@@ -284,6 +294,8 @@ async def test_a_first_batch_of_misses_alone_is_forgotten_by_the_next_run(
     assert isinstance(src.backend, LocalContentBackend)
     (src.backend.root / gone.backend_id).unlink()
     key = f"piece-{gone.sha256}"
+    # The missing row is the oldest, so the first one-row batch takes it alone.
+    _age(pool, key, minutes=5)
     index = BlobIndex(pool)
     try:
         started = index.now()
@@ -294,6 +306,66 @@ async def test_a_first_batch_of_misses_alone_is_forgotten_by_the_next_run(
         again = await _batch(index, src.backend, target, started=index.now())
         assert again == MigrationBatch(moved=0, remaining=0, failed=[], forgotten=[key])
         assert index.migration_failures("local", "s3", limit=10) == []
+    finally:
+        await target.aclose()
+
+
+class _FlakyExists:
+    """``backend`` but for `exists`, which raises for the first ``raises`` calls and
+    answers for real after."""
+
+    def __init__(self, backend: ContentBackend, raises: int) -> None:
+        self._backend = backend
+        self._raises = raises
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._backend, name)
+
+    async def exists(self, backend_id: str) -> bool:
+        if self._raises > 0:
+            self._raises -= 1
+            raise RuntimeError("the source did not answer")
+        return await self._backend.exists(backend_id)
+
+
+async def _copied_two_then_one_gone(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> tuple[ContentStore, BlobIndex, str, datetime]:
+    """Two rows copied, then a third whose object is gone: its batch is misses alone."""
+    src = local_content(tmp_path / "a", pool)
+    for data in (b"a", b"b"):
+        await src.put("piece", data, name=data.decode(), scope=SCOPE)
+    index = BlobIndex(pool)
+    started = index.now()
+    assert (await _batch(index, src.backend, target, started=started)).moved == 2
+    gone = await src.put("piece", b"gone", name="g", scope=SCOPE)
+    assert isinstance(src.backend, LocalContentBackend)
+    (src.backend.root / gone.backend_id).unlink()
+    return src, index, f"piece-{gone.sha256}", started
+
+
+async def test_a_probe_that_raises_is_passed_over_for_the_next(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    """#4116's review: one probe's error must not end the check."""
+    src, index, key, started = await _copied_two_then_one_gone(pool, tmp_path, target)
+    try:
+        flaky = cast(ContentBackend, _FlakyExists(src.backend, raises=1))
+        result = await _batch(index, flaky, target, started=started)
+        assert result.forgotten == [key] and result.failed == []
+    finally:
+        await target.aclose()
+
+
+async def test_every_probe_raising_fails_the_misses(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    src, index, key, started = await _copied_two_then_one_gone(pool, tmp_path, target)
+    try:
+        flaky = cast(ContentBackend, _FlakyExists(src.backend, raises=SERVES_PROBES))
+        result = await _batch(index, flaky, target, started=started)
+        assert result.forgotten == [] and result.failed == [key]
+        assert index.migration_failures("local", "s3", limit=10) == [(key, UNPROVEN_MISS)]
     finally:
         await target.aclose()
 
