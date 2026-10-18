@@ -1,5 +1,5 @@
 import type { Sql } from 'postgres'
-import type { InputEntry, Owner } from '../sessions/protocol.js'
+import type { InputEntry, InputOutcome, Owner } from '../sessions/protocol.js'
 
 // The durable entries' projection, `ai_pending_input` (durable-agents spec §6.6, "Two
 // reads, two sources"): what GET /api/v1/ai/pending-input, the badge's read, unions
@@ -55,6 +55,14 @@ export type ProjectionFilter = {
   allApprovals?: boolean
 }
 
+export type RecordedInput = {
+  kind: 'approval' | 'answer'
+  outcome: InputOutcome
+  response: unknown
+  responseHash: string | null
+  responder: { kind?: string; id?: string }
+}
+
 export class PendingProjection {
   readonly #sql: Sql
 
@@ -108,6 +116,13 @@ export class PendingProjection {
     const [row] = await this.#sql<{ n: number }[]>`
       SELECT 1 AS n FROM ai_pending_input WHERE request_id = ${requestId} AND flow_run_id IS NOT NULL`
     return row !== undefined
+  }
+
+  /** What the gate recorded for a resolved request (`ai_input_responses`), or undefined. */
+  async recorded(requestId: string): Promise<RecordedInput | undefined> {
+    const [row] = await this.#sql<RecordedInput[]>`
+      SELECT kind, outcome, response, response_hash AS "responseHash", responder FROM ai_input_responses WHERE request_id = ${requestId}`
+    return row
   }
 
   /** The session, or undefined when there is none. */
