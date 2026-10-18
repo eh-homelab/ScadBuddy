@@ -11,6 +11,7 @@ uses these helpers.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -34,7 +35,7 @@ def inventory_routes(*, printer_id: int | None = 1) -> None:
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
     respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
-        return_value=httpx.Response(200, json=recording("filament-requirements.json"))
+        side_effect=requirements_as_sliced
     )
     if printer_id is not None:
         respx.get(f"{API}/printers/{printer_id}").mock(
@@ -43,6 +44,34 @@ def inventory_routes(*, printer_id: int | None = 1) -> None:
         respx.get(f"{API}/printers/{printer_id}/inventory-remain").mock(
             return_value=httpx.Response(200, json=recording("inventory-remain.json"))
         )
+
+
+def requirements_as_sliced(request: httpx.Request) -> httpx.Response:
+    """The recorded filament requirements, for a sliced file in the colours its slice
+    was sent: what Bambuddy reads off a file it sliced, which a run checks before it
+    queues (#4013). A file no slice made (the copy, read before it is sliced) answers
+    the recording as it is."""
+    answer = recording("filament-requirements.json")
+    file_id = int(request.url.path.split("/")[-2])
+    sliced = [
+        json.loads(call.request.content)
+        for call in respx.calls
+        if call.request.method == "POST" and call.request.url.path.endswith("/slice")
+    ]
+    made = {
+        int(call.response.json()["result"]["library_file_id"])
+        for call in respx.calls
+        if call.request.url.path.startswith("/api/v1/slice-jobs/")
+        and call.response is not None
+        and call.response.status_code == 200
+        and (call.response.json().get("result") or {}).get("library_file_id") is not None
+    }
+    if sliced and file_id in made:
+        colours = sliced[-1].get("filament_colours") or []
+        for filament in answer["filaments"]:
+            if 1 <= filament["slot_id"] <= len(colours) and colours[filament["slot_id"] - 1]:
+                filament["color"] = colours[filament["slot_id"] - 1]
+    return httpx.Response(200, json={**answer, "file_id": file_id})
 
 
 def slice_routes(*, sliced_id: int = 77, job_id: int = 9) -> respx.Route:
