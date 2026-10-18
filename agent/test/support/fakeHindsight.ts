@@ -70,11 +70,15 @@ export async function startFakeHindsight(): Promise<FakeHindsight> {
         (request.path.endsWith('/memories/recall')
           ? { json: { results: fake.memories.map((m) => ({ text: m, type: 'world' })) } }
           : { json: { success: true, operation_id: `op-${requests.length}` } })
-      void Promise.resolve(decided).then((answer) => {
-        if ('hang' in answer) return
-        if (answer.delayMs) setTimeout(() => send(res, answer), answer.delayMs)
-        else send(res, answer)
-      })
+      void Promise.resolve(decided).then(
+        (answer) => {
+          if ('hang' in answer) return
+          if (answer.delayMs) setTimeout(() => send(res, answer), answer.delayMs)
+          else send(res, answer)
+        },
+        // A `respond` Promise that rejects answers 500, never leaves the request hanging.
+        (err: unknown) => send(res, { status: 500, text: String(err) }),
+      )
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
