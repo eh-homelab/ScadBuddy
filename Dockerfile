@@ -680,6 +680,10 @@ RUN case "$TARGETARCH" in \
     && temporal --version
 ENV SCADBUDDY_TEST_TEMPORAL_DEV_SERVER=/usr/local/bin/temporal
 
+# The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
+# #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
+COPY workers/rust/vectors /app/workers/rust/vectors
+
 # Numeric, not `scadbuddy`: a name is unresolvable to anything outside this
 # image, and Kubernetes' `runAsNonRoot` admission check can only read a uid.
 USER 10001:10001
