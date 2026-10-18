@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { BatchChoice, PrintBatch, PrintRunRequest } from '../api/types'
 import { choicesView } from '../mocks/choices'
-import { libraryFiles } from '../mocks/features/library'
+import { libraryFiles, setMockPrintBatchOutcome } from '../mocks/features/library'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -328,6 +328,21 @@ describe('BatchPrintDialog (#2672)', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onClose).toHaveBeenCalledOnce()
     await expect(api.getPrintBatch(batch.id)).resolves.toMatchObject({ id: batch.id })
+  })
+
+  it('drops a batch when it is closed if only a removed file is still being checked (#3932 review)', async () => {
+    const onClose = vi.fn()
+    const batch = await newBatch(89, 91)
+    await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
+    await api.putPrintBatchItem(batch.id, 1, { request: { ...REQUEST }, skipped: false, removed: true })
+    await api.putPrintBatchStep(batch.id, 2)
+    // The backend's pending check leaves removed files out, and so does the close.
+    setMockPrintBatchOutcome(batch.id, 1, { status: 'pending', run_id: null, detail: null, attempt: 0, stale: false })
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={onClose} />)
+    await screen.findByRole('dialog', { name: 'Review 1 files' })
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onClose).toHaveBeenCalledOnce()
+    await waitFor(() => expect(api.getPrintBatch(batch.id)).rejects.toMatchObject({ status: 404 }))
   })
 
   it('removes a file in the review, and Edit goes back to its step on its own choices', async () => {

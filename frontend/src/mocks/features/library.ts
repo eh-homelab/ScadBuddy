@@ -552,6 +552,14 @@ const batches = new Map<string, PrintBatch>()
 /** The choices each refusal was of (`refused_request`), by `<batch>:<position>` (#3932 review). */
 const refusedRequests = new Map<string, string>()
 const itemKey = (batchId: string, position: number) => `${batchId}:${position}`
+/** JSON text with every object's keys sorted: equal as jsonb compares them, whatever the order. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  )
+}
 
 /** Sets one file's outcome, as a Queue all the mock cannot make would (a `pending` answer). */
 export function setMockPrintBatchOutcome(batchId: string, position: number, outcome: BatchOutcome): void {
@@ -616,11 +624,9 @@ function batchHandlers() {
       const choice = (await request.json()) as BatchChoice
       // A refusal of other choices than these says so, and one edited back to the
       // choices it refused does not, as the backend marks it (#3798, #3932 review).
-      // JSON text compares key order too, where jsonb does not: both sides here come
-      // from the client's one serializer, so they agree; a request from elsewhere may not.
       if (item.outcome?.status === 'refused') {
         const refused = refusedRequests.get(itemKey(batch.id, item.position)) ?? null
-        item.outcome = { ...item.outcome, stale: JSON.stringify(choice.request ?? null) !== refused }
+        item.outcome = { ...item.outcome, stale: canonical(choice.request ?? null) !== refused }
       }
       Object.assign(item, {
         request: choice.request ?? null,
@@ -642,7 +648,7 @@ function batchHandlers() {
           continue
         }
         const refused = libraryRefusal(item.library_file_id)
-        if (refused) refusedRequests.set(itemKey(batch.id, item.position), JSON.stringify(item.request))
+        if (refused) refusedRequests.set(itemKey(batch.id, item.position), canonical(item.request))
         else refusedRequests.delete(itemKey(batch.id, item.position))
         item.outcome = refused
           ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.`, attempt: 0, stale: false }
