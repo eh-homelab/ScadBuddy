@@ -14,7 +14,7 @@ import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -137,12 +137,24 @@ MAKE_CURRENT_ERROR_AFTER = 60.0
 MAKE_CURRENT_ERROR_EVERY = 60.0
 
 
+def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Awaitable[int]]:
+    """The Settings page's per-job colour slots, through the `render_settings` view on
+    ``source``'s TTL: a worker holds no settings store, so this is how the live setting
+    reaches it (#601). ``deps.config`` is the one read at start."""
+
+    async def current() -> int:
+        return (await source.current()).solid_concurrency
+
+    return current
+
+
 def build_worker_deps(
     settings: Settings, *, stopping: Callable[[], bool] = lambda: False
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``stopping`` ends the wait for the API's schema and grants
     (`WorkerStoppedError`)."""
-    config = settings.to_config()
+    # Editor checks run in the API, never here: no CPU is kept back for them.
+    config = replace(settings.to_config(), serves_checks=False)
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
     # The image's libraries (#169), as the API's boot seeds them: a worker on an
@@ -224,6 +236,7 @@ def build_worker_deps(
         snapshots=store.snapshots,
         fonts_mirror=store.fonts,
         remote_assets=store.remote_assets,
+        stored_solid_concurrency=stored_solid_concurrency(store.source),
     )
     return deps, store
 
@@ -251,6 +264,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
         openscad_version=state.openscad_version or "",
+        stored_solid_concurrency=stored_solid_concurrency(state.store.source),
     )
 
 
