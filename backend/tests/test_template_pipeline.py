@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.exceptions import TimeoutError as WorkflowTimeoutError
@@ -544,6 +545,33 @@ class _SlowSnapshots:
         if not target.is_dir():
             shutil.copytree(self.template, target)
         return True
+
+
+class _LostFirstProjection(FakeWorld):
+    """A `project` whose first attempt never answers: the worker Temporal recorded as
+    having it never got it (a poll that gave up while history recorded the start)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lost = False
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> bool:
+        if not self.lost:
+            self.lost = True
+            await asyncio.Event().wait()  # cancelled when the worker shuts down
+        return await super().project(projection)
+
+
+async def test_a_lost_projection_attempt_is_retried_within_seconds() -> None:
+    """Only `start_to_close` recovers an attempt that was started but never delivered,
+    so `project` (one short write) gets `PROJECT_TIMEOUT`, not `SHORT`: a lost attempt
+    cost a page load 60 s on prod (2026-10-18)."""
+    world, job = _LostFirstProjection(), a_job(params={"w": 12})
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, job, client=client), 30)
+    assert world.lost
+    assert world.final().state == "done"
 
 
 async def test_a_snapshot_download_longer_than_short_still_loads_the_pipeline(
