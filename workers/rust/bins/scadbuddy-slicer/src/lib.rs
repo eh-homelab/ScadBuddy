@@ -1,41 +1,57 @@
 //! The `slicer` queue's worker loop (spec 2026-10-16 §5.2, §7): `slice_plate` only, no
 //! workflows, unversioned (versioning comes with the first Rust workflow, §7.2).
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use sb_slicer::activity::SlicerActivities;
 use temporalio_client::Client;
 use temporalio_sdk::runtime::worker_tuner::{FixedSizeSlotSupplier, TunerHolder};
 use temporalio_sdk::{Runtime, Worker, WorkerOptions};
-use tokio::signal::unix::{SignalKind, signal};
 
-/// Serves `activities` on `queue`, at most `concurrency` slices at once, until SIGTERM.
-/// `ready` is true while the worker runs. SIGTERM stops polling and lets the slices
-/// already running finish before this returns.
+/// What `main` reads from the environment for [`run_worker`].
+#[derive(Debug, Clone)]
+pub struct WorkerSettings {
+    pub task_queue: String,
+    /// Slices at once.
+    pub concurrency: usize,
+    /// How long running slices may go on after `stop`, before they are cancelled. Below
+    /// the Deployment's `terminationGracePeriodSeconds`, so a cancelled slice's process
+    /// group is killed and its failure reported before the pod is: the retry then starts
+    /// at once instead of after the heartbeat timeout.
+    pub shutdown_grace: Duration,
+}
+
+/// Serves `activities` on `settings.task_queue` until `stop` resolves (SIGTERM, in
+/// `main`), then stops polling, lets running slices go on for `shutdown_grace`, cancels
+/// what is left (the runner kills each one's process group) and returns.
 pub async fn run_worker(
     runtime: &Runtime,
     client: Client,
-    queue: &str,
-    concurrency: usize,
+    settings: WorkerSettings,
     activities: SlicerActivities,
     ready: Arc<AtomicBool>,
+    stop: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    let options = WorkerOptions::new(queue)
+    let options = WorkerOptions::new(settings.task_queue.as_str())
         .register_activities(activities)
-        .tuner(tuner(concurrency))
+        .tuner(tuner(settings.concurrency))
+        .graceful_shutdown_period(settings.shutdown_grace)
         .build();
     let mut worker =
         Worker::new(runtime, client, options).context("could not create the worker")?;
     let shutdown = worker.shutdown_handle();
-    let mut sigterm = signal(SignalKind::terminate()).context("could not watch for SIGTERM")?;
     let stop = async move {
-        sigterm.recv().await;
-        tracing::info!("SIGTERM: finishing the running slices");
+        stop.await;
+        tracing::info!("stopping: draining the running slices");
         shutdown();
         std::future::pending::<()>().await;
     };
+    // Advisory: this worker serves no Service traffic, so nothing routes by it. It is set
+    // just before `run()` validates the namespace and stays true while draining.
     ready.store(true, Ordering::SeqCst);
     let result = tokio::select! {
         r = worker.run() => r,

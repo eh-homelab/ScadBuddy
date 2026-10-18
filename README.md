@@ -1204,11 +1204,21 @@ by the `slicer` job in `build-image.yml` with the same tags). It is the Rust wor
 `scadbuddy-slicer` with the Bambu Studio CLI v02.08.02.61, pinned by the AppImage's
 sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own.
 
-- Its whole configuration is five variables: `SCADBUDDY_TEMPORAL_ADDRESS` (required),
+- Its whole configuration is six variables: `SCADBUDDY_TEMPORAL_ADDRESS` (required),
   `SCADBUDDY_TEMPORAL_NAMESPACE` (default `default`),
   `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` (default `slicer`),
   `SCADBUDDY_SLICER_CONCURRENCY` (slices at once; default half the cores, at least
-  one) and the standard `OTEL_*`.
+  one), `SCADBUDDY_SLICER_SHUTDOWN_GRACE_SECONDS` (below) and the standard `OTEL_*`.
+  `BAMBU_STUDIO_CLI` overrides where the CLI is (the image's `/opt/bambu-studio/AppRun`),
+  for running the worker outside the image.
+- On SIGTERM it stops taking slices and lets the running ones go on for
+  `SCADBUDDY_SLICER_SHUTDOWN_GRACE_SECONDS` (default 20). Past that it cancels them:
+  each CLI's process group is killed and the slice fails as a retryable
+  `WorkerShutdown`, so its retry starts on another pod at once instead of after the
+  heartbeat timeout. Keep the grace below the Deployment's
+  `terminationGracePeriodSeconds` (Kubernetes' default is 30), with room for that
+  report: if the pod is killed first, the slice is lost with it and its retry waits out
+  the heartbeat timeout.
 - It mounts no volume and holds no credentials: no Postgres, no store keys, no
   Bambuddy client. Each slice reads and writes its files through short-lived
   transfer URLs in the activity's payload, so the pod must reach the API's internal

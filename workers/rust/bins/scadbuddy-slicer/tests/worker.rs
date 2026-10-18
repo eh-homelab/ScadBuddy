@@ -8,10 +8,11 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sb_slicer::activity::{SLICER_ERROR, SlicerActivities, VALIDATION_EXIT};
 use sb_slicer::models::{SlicePlateInput, SlicePlateOutput};
+use scadbuddy_slicer::WorkerSettings;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{Client, WorkflowGetResultOptions, WorkflowStartOptions};
 use temporalio_common::RetryPolicy;
@@ -28,6 +29,8 @@ const CALLER_QUEUE: &str = "slicer-test-caller";
 /// registered on its queue for the runtime's life, so a second one there is refused.
 const OK_QUEUE: &str = "slicer-test";
 const INVALID_QUEUE: &str = "slicer-test-192";
+const DRAIN_QUEUE: &str = "slicer-test-drain";
+const DRAIN_CALLER_QUEUE: &str = "slicer-test-drain-caller";
 
 /// The workflow's input: which slicer queue to call.
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +48,8 @@ struct Seen {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Failure {
+    /// `failed` or `cancelled` (the `ActivityExecutionError`), then the cause's kind.
+    kind: String,
     type_name: Option<String>,
     non_retryable: bool,
     details: Vec<serde_json::Value>,
@@ -80,25 +85,41 @@ impl SliceCaller {
     }
 }
 
-/// An activity failure's application cause, its details decoded as JSON.
+/// How the activity failed: the error's variant, its cause's kind and, for an
+/// application failure, its type, retryability and details decoded as JSON. Never
+/// panics: a panic here would fail the workflow task, not the test.
 fn failure(err: &ActivityExecutionError) -> Failure {
     use temporalio_common::error::IncomingError;
-    let ActivityExecutionError::Failed(failed) = err else {
-        panic!("expected an activity failure, got {err:?}");
+    let variant = match err {
+        ActivityExecutionError::Failed(_) => "failed",
+        ActivityExecutionError::Cancelled(_) => "cancelled",
+        ActivityExecutionError::Serialization(_) => "serialization",
+        _ => "other",
     };
-    let Some(IncomingError::Application(app)) = failed.cause() else {
-        panic!("expected an application failure as the cause, got {err:?}");
+    let cause = match err.cause() {
+        Some(IncomingError::Application(_)) => "application",
+        Some(IncomingError::Timeout(_)) => "timeout",
+        Some(IncomingError::Cancelled(_)) => "cancelled",
+        Some(_) => "other",
+        None => "none",
     };
-    Failure {
-        type_name: app.type_name().map(str::to_owned),
-        non_retryable: app.is_non_retryable(),
-        details: app
+    let mut failure = Failure {
+        kind: format!("{variant}/{cause}"),
+        type_name: None,
+        non_retryable: false,
+        details: Vec::new(),
+    };
+    if let Some(IncomingError::Application(app)) = err.cause() {
+        failure.type_name = app.type_name().map(str::to_owned);
+        failure.non_retryable = app.is_non_retryable();
+        failure.details = app
             .raw_details()
             .unwrap_or_default()
             .iter()
-            .map(|p| serde_json::from_slice(&p.data).expect("JSON details"))
-            .collect(),
+            .map(|p| serde_json::from_slice(&p.data).unwrap_or(serde_json::Value::Null))
+            .collect();
     }
+    failure
 }
 
 /// The Temporal CLI the tests start their dev server from, as the agent's tests find it.
@@ -133,21 +154,54 @@ async fn start_server() -> Option<WorkflowEnvironment<temporalio_sdk::testing::L
     )
 }
 
-/// Runs `SliceCaller` on `queue` to the end and returns what it saw.
-async fn slice(client: &Client, queue: &str, input: SlicePlateInput) -> Seen {
+fn settings(queue: &str, shutdown_grace: Duration) -> WorkerSettings {
+    WorkerSettings {
+        task_queue: queue.to_owned(),
+        concurrency: 1,
+        shutdown_grace,
+    }
+}
+
+fn caller_worker(runtime: &Runtime, client: &Client, queue: &str) -> Worker {
+    Worker::new(
+        runtime,
+        client.clone(),
+        WorkerOptions::new(queue)
+            .register_workflow::<SliceCaller>()
+            .unwrap()
+            .build(),
+    )
+    .unwrap()
+}
+
+/// Starts `SliceCaller` on `caller_queue`, calling the slicer on `queue`.
+async fn start(
+    client: &Client,
+    caller_queue: &str,
+    queue: &str,
+    input: SlicePlateInput,
+) -> temporalio_client::WorkflowHandle<
+    Client,
+    impl temporalio_common::HasWorkflowDefinition<Output = Seen>,
+> {
     let call = Call {
         queue: queue.to_owned(),
         input,
     };
     let id = format!("slice-caller-{queue}-{}", std::process::id());
-    let handle = client
+    client
         .start_workflow(
             SliceCaller::run,
             call,
-            WorkflowStartOptions::new(CALLER_QUEUE, id).build(),
+            WorkflowStartOptions::new(caller_queue, id).build(),
         )
         .await
-        .unwrap();
+        .unwrap()
+}
+
+/// Runs `SliceCaller` on `queue` to the end and returns what it saw.
+async fn slice(client: &Client, queue: &str, input: SlicePlateInput) -> Seen {
+    let handle = start(client, CALLER_QUEUE, queue, input).await;
     tokio::time::timeout(
         Duration::from_secs(60),
         handle.get_result(WorkflowGetResultOptions::default()),
@@ -166,31 +220,24 @@ async fn the_worker_serves_slice_plate_and_its_failures() {
     let (base, transfers) = support::serve().await;
     let runtime = Runtime::from_current_tokio(Default::default()).unwrap();
     let ready = Arc::new(AtomicBool::new(false));
+    let grace = Duration::from_secs(20);
     let ok = scadbuddy_slicer::run_worker(
         &runtime,
         client.clone(),
-        OK_QUEUE,
-        1,
+        settings(OK_QUEUE, grace),
         support::activities(""),
         ready.clone(),
+        std::future::pending(),
     );
     let invalid = scadbuddy_slicer::run_worker(
         &runtime,
         client.clone(),
-        INVALID_QUEUE,
-        1,
+        settings(INVALID_QUEUE, grace),
         support::activities("exit-192"),
         Arc::new(AtomicBool::new(false)),
+        std::future::pending(),
     );
-    let mut caller = Worker::new(
-        &runtime,
-        client.clone(),
-        WorkerOptions::new(CALLER_QUEUE)
-            .register_workflow::<SliceCaller>()
-            .unwrap()
-            .build(),
-    )
-    .unwrap();
+    let mut caller = caller_worker(&runtime, &client, CALLER_QUEUE);
 
     let checks = async {
         let seen = slice(&client, OK_QUEUE, support::input(&base)).await;
@@ -208,6 +255,7 @@ async fn the_worker_serves_slice_plate_and_its_failures() {
         let seen = slice(&client, INVALID_QUEUE, support::input(&base)).await;
         assert!(seen.output.is_none());
         let failure = seen.failure.expect("an activity failure");
+        assert_eq!(failure.kind, "failed/application");
         assert_eq!(failure.type_name.as_deref(), Some(SLICER_ERROR));
         assert!(failure.non_retryable);
         assert_eq!(failure.details.len(), 1, "{:?}", failure.details);
@@ -223,6 +271,99 @@ async fn the_worker_serves_slice_plate_and_its_failures() {
         r = invalid => panic!("the second slicer worker stopped: {r:?}"),
         r = caller.run() => panic!("the caller worker stopped: {r:?}"),
     }
+
+    env.shutdown().await.unwrap();
+}
+
+/// The newest running fake CLI's process group: the runner makes the CLI a group leader,
+/// and the `hang` wrapper execs the fake, whose command line names it.
+async fn fake_cli_group() -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let out = std::process::Command::new("pgrep")
+            .args(["-n", "-f", "fake/../fake-bambu-studio.sh"])
+            .output()
+            .unwrap();
+        let pid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !pid.is_empty() {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "pgid=", "-p", &pid])
+                .output()
+                .unwrap();
+            if let Ok(pgid) = String::from_utf8_lossy(&out.stdout).trim().parse() {
+                return pgid;
+            }
+        }
+        assert!(Instant::now() < deadline, "the fake CLI never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Shutdown with a slice still running: past the grace the SDK cancels the activity, the
+/// runner kills the CLI's process group, and the failure reaches the workflow at once,
+/// not after the 30 s heartbeat timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_cancels_a_running_slice_after_the_grace() {
+    let Some(env) = start_server().await else {
+        return;
+    };
+    let client = env.client().clone();
+    let (base, transfers) = support::serve().await;
+    let runtime = Runtime::from_current_tokio(Default::default()).unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut slicer = std::pin::pin!(scadbuddy_slicer::run_worker(
+        &runtime,
+        client.clone(),
+        settings(DRAIN_QUEUE, Duration::from_secs(1)),
+        support::activities("hang"),
+        Arc::new(AtomicBool::new(false)),
+        async move {
+            let _ = stop_rx.await;
+        },
+    ));
+    let mut caller = caller_worker(&runtime, &client, DRAIN_CALLER_QUEUE);
+    let mut caller_run = std::pin::pin!(caller.run());
+
+    let (handle, pgid) = tokio::select! {
+        started = async {
+            let handle = start(&client, DRAIN_CALLER_QUEUE, DRAIN_QUEUE, support::input(&base)).await;
+            (handle, fake_cli_group().await)
+        } => started,
+        r = &mut slicer => panic!("the slicer worker stopped early: {r:?}"),
+        r = &mut caller_run => panic!("the caller worker stopped: {r:?}"),
+    };
+
+    stop_tx.send(()).unwrap();
+    let stopping = Instant::now();
+    let stopped = tokio::select! {
+        r = tokio::time::timeout(Duration::from_secs(10), &mut slicer) => {
+            r.expect("run_worker returns within 10 s of stop")
+        }
+        r = &mut caller_run => panic!("the caller worker stopped: {r:?}"),
+    };
+    stopped.expect("run_worker returns Ok after a drain");
+    assert!(
+        stopping.elapsed() >= Duration::from_millis(900),
+        "the slice had its grace: {:?}",
+        stopping.elapsed()
+    );
+    support::assert_group_gone(pgid).await;
+
+    let seen = tokio::select! {
+        r = tokio::time::timeout(
+            Duration::from_secs(15),
+            handle.get_result(WorkflowGetResultOptions::default()),
+        ) => r.expect("the failure reaches the workflow before the heartbeat timeout").unwrap(),
+        r = &mut caller_run => panic!("the caller worker stopped: {r:?}"),
+    };
+    assert!(seen.output.is_none());
+    let failure = seen.failure.expect("an activity failure");
+    // The SDK fails a slice cancelled by its shutdown as a retryable `WorkerShutdown`, so
+    // a real policy retries it on another pod at once.
+    assert_eq!(failure.kind, "failed/application", "{failure:?}");
+    assert_eq!(failure.type_name.as_deref(), Some("WorkerShutdown"));
+    assert!(!failure.non_retryable);
+    assert!(transfers.lock().unwrap().puts.is_empty());
 
     env.shutdown().await.unwrap();
 }

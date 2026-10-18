@@ -1,8 +1,11 @@
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sb_slicer::models::{Arrange, SliceProgress};
 use sb_slicer::runner::{KEEPALIVE, RunError, RunOutcome, RunRequest, command_line, run};
+use support::assert_group_gone;
 use tokio_util::sync::CancellationToken;
 
 fn fake(name: &str) -> PathBuf {
@@ -172,27 +175,6 @@ fn command_line_is_the_argv_the_spec_fixes() {
     assert!(!argv.contains(&"--export-slicedata".to_owned()));
     let i = argv.iter().position(|a| a == "--arrange").unwrap();
     assert_eq!(argv[i + 1], "auto");
-}
-
-/// Waits until no process is left in `pgid`; the killed `sleep` is reaped by init a
-/// moment after the kill.
-async fn assert_group_gone(pgid: i32) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let out = std::process::Command::new("pgrep")
-            .args(["-g", &pgid.to_string()])
-            .output()
-            .unwrap();
-        if out.stdout.is_empty() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "group {pgid} still has {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 #[tokio::test]

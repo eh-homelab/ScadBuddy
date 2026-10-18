@@ -1,11 +1,12 @@
 //! What the activity's tests and the worker's (`bins/scadbuddy-slicer/tests/worker.rs`,
 //! which includes this file by path) share: a transfer server, the inputs that point at
-//! it, and the fake CLI.
+//! it, the fake CLI, and the check that a killed CLI left no process behind.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
 use axum::{
     Router,
@@ -89,5 +90,26 @@ pub fn activities(mode: &str) -> SlicerActivities {
         cli: fake(mode),
         transfer: Transfer::new(),
         stages: Stages::register(&prometheus::Registry::new()),
+    }
+}
+
+/// Waits until no process is left in `pgid`; the killed `sleep` is reaped by init a
+/// moment after the kill.
+pub async fn assert_group_gone(pgid: i32) {
+    let deadline = Instant::now() + StdDuration::from_secs(2);
+    loop {
+        let out = std::process::Command::new("pgrep")
+            .args(["-g", &pgid.to_string()])
+            .output()
+            .unwrap();
+        if out.stdout.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "group {pgid} still has {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
     }
 }

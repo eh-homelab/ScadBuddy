@@ -11,12 +11,20 @@ use std::time::{Duration, Instant};
 use sb_slicer::activity::SlicerActivities;
 use sb_temporal::{Stages, WorkerEnv};
 use sb_transfer::Transfer;
+use scadbuddy_slicer::WorkerSettings;
+use tokio::signal::unix::{SignalKind, signal};
 
 /// The extracted AppImage's entry point (the Dockerfile's `slicer` stage).
 const CLI: &str = "/opt/bambu-studio/AppRun";
 
 /// Overrides [`CLI`], for running the worker outside the image.
 const CLI_VAR: &str = "BAMBU_STUDIO_CLI";
+
+/// Seconds running slices may go on after SIGTERM before they are cancelled.
+const GRACE_VAR: &str = "SCADBUDDY_SLICER_SHUTDOWN_GRACE_SECONDS";
+/// Below Kubernetes' default `terminationGracePeriodSeconds` (30), so cancelled slices
+/// are killed and reported before the pod is.
+const DEFAULT_GRACE: Duration = Duration::from_secs(20);
 
 /// The Bambu Studio version the image pins, set by the Dockerfile.
 const VERSION_VAR: &str = "BAMBU_STUDIO_VERSION";
@@ -100,6 +108,12 @@ async fn worker() -> anyhow::Result<()> {
     let cli = std::env::var_os(CLI_VAR)
         .filter(|v| !v.is_empty())
         .map_or_else(|| PathBuf::from(CLI), PathBuf::from);
+    let settings = WorkerSettings {
+        task_queue: env.task_queue.clone(),
+        concurrency: env.concurrency,
+        shutdown_grace: shutdown_grace(std::env::var(GRACE_VAR).ok().as_deref())?,
+    };
+    let mut sigterm = signal(SignalKind::terminate())?;
     let registry = prometheus::Registry::new();
     let stages = Stages::register(&registry);
     let ready = Arc::new(AtomicBool::new(false));
@@ -109,6 +123,7 @@ async fn worker() -> anyhow::Result<()> {
     tracing::info!(
         task_queue = env.task_queue,
         concurrency = env.concurrency,
+        shutdown_grace_seconds = settings.shutdown_grace.as_secs(),
         "serving slice_plate"
     );
     let activities = SlicerActivities {
@@ -116,15 +131,22 @@ async fn worker() -> anyhow::Result<()> {
         transfer: Transfer::new(),
         stages,
     };
-    scadbuddy_slicer::run_worker(
-        &runtime,
-        client,
-        &env.task_queue,
-        env.concurrency,
-        activities,
-        ready,
-    )
-    .await
+    let stop = async move {
+        sigterm.recv().await;
+    };
+    scadbuddy_slicer::run_worker(&runtime, client, settings, activities, ready, stop).await
+}
+
+/// [`GRACE_VAR`]'s value, read as `WorkerEnv` reads the concurrency: unset or blank is
+/// the default, anything else must be a whole number of seconds.
+fn shutdown_grace(raw: Option<&str>) -> anyhow::Result<Duration> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(DEFAULT_GRACE),
+        Some(v) => v
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|_| anyhow::anyhow!("{GRACE_VAR} must be a whole number of seconds")),
+    }
 }
 
 /// Runs `<cli> --help` and checks its output with [`check_help`]. Never prints the CLI's
@@ -232,6 +254,18 @@ mod tests {
     use super::*;
 
     const HELP: &str = "BambuStudio-02.08.02.61:\nUsage: bambu-studio [ OPTIONS ] [ file.3mf/file.stl ... ]\n\n  --export-3mf  Export project as 3MF.\n  --slice Option  Slice the plates\n  --slicedata  Directory\n";
+
+    #[test]
+    fn shutdown_grace_defaults_to_20_s_and_takes_whole_seconds() {
+        assert_eq!(shutdown_grace(None).unwrap(), Duration::from_secs(20));
+        assert_eq!(shutdown_grace(Some(" ")).unwrap(), Duration::from_secs(20));
+        assert_eq!(shutdown_grace(Some("5")).unwrap(), Duration::from_secs(5));
+        assert_eq!(shutdown_grace(Some("0")).unwrap(), Duration::ZERO);
+        for bad in ["-1", "1.5", "soon"] {
+            let err = shutdown_grace(Some(bad)).unwrap_err().to_string();
+            assert!(err.contains(GRACE_VAR), "{err}");
+        }
+    }
 
     #[test]
     fn accepts_the_pinned_help() {
