@@ -800,10 +800,11 @@ describe("a durable handoff whose workflow cannot be reached", () => {
       withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
       workflow: { getHandle: () => ({ executeUpdate: down, signal: down }) },
     } as unknown as Client
-    const turns = new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog })
+    // handoff reads the row's runtime first: no row, so a classic durable session.
+    const turns = new DurableTurns({ client, sql: (() => Promise.resolve([])) as unknown as Sql, events: {} as EventLog })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      await turns.handoff({ id: 'f0e1d2c3-0000-4000-8000-000000000000' } as SessionRecord, 'the session was handed off to You')
+      await turns.handoff({ id: 'f0e1d2c3-0000-4000-8000-000000000000' } as SessionRecord, 'the session was handed off to You', { kind: 'browser', id: 'browser', label: 'You' })
       expect(warn).toHaveBeenCalledTimes(1)
       const [line] = warn.mock.calls[0] as [string]
       expect(line).toContain('f0e1d2c3-0000-4000-8000-000000000000')
@@ -821,7 +822,9 @@ describe('a durable fork whose workflow cannot be read (#3739)', () => {
       withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
       workflow: { getHandle: () => ({ query: () => Promise.reject(err) }) },
     } as unknown as Client
-    return new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog })
+    // forkSource reads the row's runtime first: no row, so a classic durable session.
+    const sql = (() => Promise.resolve([])) as unknown as Sql
+    return new DurableTurns({ client, sql, events: {} as EventLog })
   }
 
   it('logs why, and says when no worker answered in time', async () => {

@@ -185,8 +185,12 @@ export type VerdictSource = {
 export type ApprovalVerdict =
   /** Run the tool with exactly this input: the one that was approved. */
   | ({ approved: true; input: Record<string, unknown> } & VerdictSource)
-  /** Refused; `message` is what the model reads as the tool's error result. */
-  | ({ approved: false; message: string } & VerdictSource)
+  /**
+   * Refused; `message` is what the model reads as the tool's error result. `interrupt`: the turn
+   * stops there, as a Stop does, with no further model request (a released AgentSession turn,
+   * sessions/turnHost.ts).
+   */
+  | ({ approved: false; message: string; interrupt?: true } & VerdictSource)
 
 /**
  * Parks an outward call until it is decided. It may take as long as it needs
@@ -227,7 +231,7 @@ export function makeCanUseTool(
       // The approved input, not a later copy: the approval binds to it.
       return verdict.approved
         ? { behavior: 'allow', updatedInput: verdict.input }
-        : { behavior: 'deny', message: verdict.message }
+        : { behavior: 'deny', message: verdict.message, ...(verdict.interrupt ? { interrupt: true } : {}) }
     } catch (err) {
       return {
         behavior: 'deny',

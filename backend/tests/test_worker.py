@@ -1702,3 +1702,50 @@ async def test_a_write_still_propagating_is_seen_before_it_is_resent() -> None:
 
     assert await _write_refusal(write, routing, "old", max_wait=0) is None
     assert len(sent) == 1
+
+
+async def test_readyz_waits_for_the_queue_to_route_to_the_build(tmp_path: Path) -> None:
+    """#4146: a rolling update's readiness probe; /healthz, the liveness probe's, never
+    waits on it."""
+    ready = asyncio.Event()
+    app = worker_module._health_app(
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
+        Metrics(),
+        None,
+        "projects",
+        ready=ready,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:
+        assert (await http.get("/readyz")).status_code == 503
+        assert (await http.get("/healthz")).status_code == 200
+        ready.set()
+        answer = await http.get("/readyz")
+    assert answer.status_code == 200 and answer.json()["task_queue"] == "projects"
+
+
+async def test_wait_until_routed_gives_up_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    asked: list[str] = []
+
+    async def never(client: object, task_queue: str, **kwargs: Any) -> bool:
+        asked.append(task_queue)
+        return False
+
+    monkeypatch.setattr(worker_module, "routes_to", never)
+    with caplog.at_level(logging.ERROR):
+        routed = await worker_module.wait_until_routed(
+            cast(Client, None),
+            "projects",
+            deployment_name="d",
+            build_id="b",
+            timeout=0.05,
+            poll=0.01,
+        )
+    assert not routed and asked
+    assert "does not route to this build" in caplog.text

@@ -4,7 +4,7 @@
 
 **Goal:** A slice is a ScadBuddy activity: a Rust worker runs the Bambu Studio CLI with ScadBuddy's own preset files, reports progress as heartbeats, and the print dialog and `PrintRunWorkflow` use it when `slicer_backend` is `native`, with Bambuddy's slicer still selectable.
 
-**Architecture:** A new Rust workspace `workers/rust/` holds the first Rust worker, `scadbuddy-slicer`, on task queue `slicer`. It serves one activity, `slice_plate`, whose input carries transfer URLs the Python caller mints (presigned S3 URLs, or the API's internal blob routes), never bytes, store keys or credentials. The Python side resolves presets into files (`backend/scadbuddy/slicing/`), mints the URLs and records the result in the store (`slicing/transfer.py`), and wraps the activity in a one-activity `SliceWorkflow` until Temporal 1.31's standalone activities. Payload shapes are pinned across the two languages by a JSON vector file, as the agent and agent-durable pin theirs.
+**Architecture:** A new Rust workspace `workers/rust/` holds the first Rust worker, `scadbuddy-slicer`, on task queue `slicer`. It serves one activity, `slice_plate`, whose input carries transfer URLs the Python caller mints (the API's internal blob routes on every store backend, or a presigned S3 GET; Ruling C3), never bytes, store keys or credentials. The Python side resolves presets into files (`backend/scadbuddy/slicing/`), mints the URLs and records the result in the store (`slicing/transfer.py`), and wraps the activity in a one-activity `SliceWorkflow` on the `library` queue (the API process) until Temporal 1.31's standalone activities; the print dialog and `PrintRunWorkflow` share one execution per copy and presets (Rulings C1, C2). Payload shapes are pinned across the two languages by a JSON vector file, as the agent and agent-durable pin theirs.
 
 **Tech Stack:** Rust stable (pinned by `rust-toolchain.toml`), `temporalio-sdk` / `temporalio-client` / `temporalio-common` / `temporalio-macros` 1.1.0, `tokio` 1, `serde` / `serde_json`, `reqwest` 0.12 (streaming bodies, rustls), `sha2`, `nix` 0.31 (`mkfifo`), `zip`, `tracing` + `tracing-opentelemetry` 0.34 + `opentelemetry-otlp` 0.33, `prometheus` for `/metrics`, `axum` 0.8 for `/healthz` and `/metrics` and as the test servers; Python 3.12 backend (FastAPI, `temporalio` ≥1.33, pydantic 2); Bambu Studio `v02.08.02.61` Ubuntu 24.04 AppImage; React 19 frontend.
 
@@ -30,8 +30,13 @@
 1. **A progress line split across two fifo reads.** The CLI writes in 512-byte chunks (spec §2), so one JSON line can arrive in two reads and two lines in one. The reader must buffer to `\n` and parse each complete line; a half line parsed as JSON must not fail the slice. Test in Task 6.
 2. **The CLI exits before it ever opens the pipe.** A validation failure (exit 192) can happen before the first progress write. A blocking `open` of the fifo for reading would hang until the activity's start-to-close timeout. The reader opens the fifo `O_RDWR | O_NONBLOCK` (so there is always a writer) and ends when the child exits. Test in Task 6.
 3. **A cancelled slice leaves a process behind.** The CLI forks worker threads; killing only the parent pid can leave them. The activity spawns the child in its own process group and sends `SIGKILL` to the group on cancellation and on its own error path; the temp dir goes with it. Test in Task 6.
+Items 1–3 shipped with Task 6. For Tasks 8–15:
+
 4. **A preset whose `inherits` chain loops or names a missing parent.** Bambu Studio's profiles are hand-maintained; flattening must refuse a loop and a missing parent with the preset's name in the error, not recurse forever. Test in Task 8.
-5. **A transfer token for one blob opening another, or outliving its two hours.** The internal blob routes take a per-call token bound to the key, the method and the expiry; a token minted for a GET of key A must not PUT, must not read key B, and must be refused after `expires_at`. Test in Task 10.
+5. **A transfer token for one blob opening another, probing for keys, or outliving its two hours.** A token minted for a GET of key A must not PUT, must not read key B, and must be refused after `expires_at`; a missing key answers 404 only to a valid token for it, 403 to any other. Test in Task 10.
+6. **The dialog and the run asking for the same plate at once.** A person opens the dialog (its background slice starts), then presses Print before it finishes: one slice must run, not two, and both must read its result. Test in Task 13.
+7. **A slice that waits in the queue longer than its URLs live.** With one slicer pod busy, a slice can start after its two-hour URLs expire; the worker refuses them (`TransferRefused`), and the slice must be prepared again with fresh URLs once, not fail. Test in Task 11.
+8. **A native preview whose id equals a Bambuddy preview's.** Both id spaces start at 1; a read or a toolpath of native job 3 must never answer Bambuddy's job 3, nor the reverse, even after `slicer_backend` changes while the dialog is open. Test in Task 12.
 
 ---
 
@@ -503,38 +508,52 @@ git commit -m "feat(slicer): the scadbuddy-slicer worker serves slice_plate on t
 
 ---
 
-### Task 8: Presets as files (`slicing/presets.py`)
+### Task 8: Presets as files (`slicing/profiles.py`, `slicing/presets.py`)
 
 **Files:**
-- Create: `backend/scadbuddy/slicing/presets.py`, `backend/scadbuddy/slicing/profiles.py`
-- Modify: `Dockerfile` `app` stage (`COPY --from=slicer /opt/bambu-studio/profiles/BBL /opt/slicer-profiles/BBL`), `backend/scadbuddy/core/settings.py` (`slicer_profiles_dir: Path = Path("/opt/slicer-profiles")`, an infrastructure field in `BOOTSTRAP_FIELDS`, not env-seeded into Postgres)
-- Test: `backend/tests/slicing/test_presets.py`, fixtures `backend/tests/slicing/profiles/BBL/` (a three-level `inherits` chain, a loop, a missing parent; small JSON files)
+- Create: `backend/scadbuddy/slicing/profiles.py`, `backend/scadbuddy/slicing/presets.py`
+- Modify: `Dockerfile`: split a `slicer-dist` stage out of `slicer` (the download, the sha256 check and the extraction only), and copy the profiles into `app` from it (Step 4)
+- Modify: `backend/scadbuddy/core/settings.py`: `slicer_profiles_dir: Path = Path("/opt/slicer-profiles")` beside `api_internal_url`, with a `BOOTSTRAP_FIELDS` entry ("Where the image puts Bambu Studio's BBL profiles and their VERSION, copied from the slicer's AppImage at build time: not a setting.")
+- Modify: `backend/pyproject.toml` `markers`: `"requires_slicer_profiles: needs Bambu Studio's BBL profiles under SCADBUDDY_SLICER_PROFILES_DIR (the app and test images ship them at /opt/slicer-profiles)"`
+- Test: `backend/tests/slicing/test_presets.py`, `backend/tests/slicing/conftest.py` (fixture `profiles`), fixtures `backend/tests/slicing/profiles/VERSION` (`02.08.02.61`) and `backend/tests/slicing/profiles/BBL/{BBL.json,machine,process,filament}/…` (a three-level `inherits` chain, a loop `loop_a`↔`loop_b`, an `orphan` naming a missing parent; small JSON files)
 
 **Interfaces:**
-- Consumes: `SlicePlan` (`bambuddy/dispatch.py:61`), `PresetRef` (`bambuddy/models.py:34`), the override semantics of `bambuddy/filament_profiles.py` and the 2026-10-13 filament-profiles spec, `BambuddyClient.preset_values` (`client.py:482`) for a `local:` preset's values when a Bambuddy is configured.
+- Consumes: `SlicePlan` (`bambuddy/dispatch.py:61`), `PresetRef` (`bambuddy/models.py:34`), `ProcessValue` (`bambuddy/models.py:43`), `slice_request` (`bambuddy/dispatch.py:219`) and its `SliceRequest.preset_key` (`bambuddy/models.py:739`), `BambuddyClient.preset_values` (`bambuddy/client.py:490`, process slot only), `read_catalogue(client).names()` (`bambuddy/catalogue.py`, `_Catalogue.names`).
 - Produces:
   ```python
-  class Profiles:                       # profiles.py: Bambu Studio's resources/profiles/BBL as shipped in the image
-      def __init__(self, root: Path) -> None
-      def machine(self, name: str) -> dict[str, str | list[str]]      # flattened
-      def process(self, name: str) -> dict[str, str | list[str]]
-      def filament(self, name: str) -> dict[str, str | list[str]]
+  # profiles.py
+  class ProfileError(ValueError): ...     # a missing preset, a missing parent, an inherits loop, a preset the native slicer cannot read; the message names it
+  Flat = dict[str, str | list[str]]
+  def flatten(name: str, load: Callable[[str], dict[str, Any] | None]) -> Flat
+      # follows "inherits" to the root, child over parent; drops "inherits"; refuses a loop and a missing parent
+  class Profiles:
+      def __init__(self, root: Path) -> None          # root holds BBL/ and VERSION
       @property
-      def version(self) -> str          # BBL.json's "version"
-  class ProfileError(ValueError): ...   # a missing preset, a missing parent, an inherits loop; the message names the preset
+      def version(self) -> str                        # root/VERSION, stripped: the image's BAMBU_STUDIO_VERSION (Ruling C7)
+      @property
+      def profile_version(self) -> str                # BBL/BBL.json "version": a check only, never a key
+      def machine(self, ref_or_name: str) -> Flat
+      def process(self, ref_or_name: str) -> Flat
+      def filament(self, ref_or_name: str) -> Flat     # each looks up by setting_id, then by name
+      @classmethod
+      def installed(cls, root: Path) -> Profiles | None   # None when root/BBL/BBL.json is absent (a dev run outside the image)
 
-  def flatten(name: str, load: Callable[[str], dict[str, Any]]) -> dict[str, str | list[str]]
-      # follows "inherits" to the root, child over parent; keeps every key but "inherits"; refuses a loop and a missing parent
-
-  class PresetFiles(BaseModel): machine: bytes; process: bytes; filaments: list[bytes]      # the JSON documents
+  # presets.py
+  class PresetFiles(BaseModel):                       # never crosses a workflow history (Task 11 puts each as a blob)
+      machine: bytes; process: bytes; filaments: list[bytes]     # JSON documents
+  def apply_overrides(process: Flat, overrides: Mapping[str, ProcessValue]) -> Flat
+      # a str over a str; a list over a list position by position (#717); a str over a list sets every position
   async def build_presets(plan: SlicePlan, profiles: Profiles, client: BambuddyClient | None) -> PresetFiles
-      # process = flatten(process) with apply_overrides(plan.process_overrides); a `cloud:`/`standard:` ref resolves by name;
-      # a `local:` ref needs `client` (its preset_values), else ProfileError
-  def apply_overrides(process: dict[str, str | list[str]], overrides: Mapping[str, ProcessValue]) -> dict[str, str | list[str]]
-      # a str over a str; a list over a list position by position (per-extruder variants, #717); a str over a list sets every position
-  def native_preset_key(plan: SlicePlan, plate: int, version: str) -> str
-      # f"native@{version}/" + slice_request(plan, plate).preset_key
+  def native_preset_key(plan: SlicePlan, plate_id: int, version: str) -> str
+      # f"native@{version}/" + slice_request(plan, plate_id).preset_key
   ```
+
+Resolution rules, the decisions the implementer cannot make alone:
+- A `standard` or `cloud` ref resolves in `Profiles` by `setting_id == ref.id`, then, when that misses and `client` is given, by the name `read_catalogue(client).names()[(ref.source, ref.id)]`. Verify first which of the two Bambuddy's ids are (compare a few `standard`/`cloud` rows under `backend/tests/bambuddy/recordings/` with the image's profile files) and record the answer, with how it was measured, in `profiles.py`'s docstring.
+- A `local` process ref takes `client.preset_values(ref).values` (`resolved` false is a `ProfileError` carrying its `reason`). A `local` printer or filament ref, an `orca_cloud` ref and a cloud *user* preset with no BBL file are a `ProfileError` ("the native slicer cannot read <source> <kind> preset <name>: Bambuddy serves only process preset values"): `GET /slicer/preset-values?slot=filament` answers `400 "Only the 'process' slot is supported"` (measured 2026-09-27, `docs/superpowers/plans/2026-09-27-spool-first-print.md`). Re-measure it against the live Bambuddy before building on it; if it still refuses, Task 15 records the gap in spec §5.3.
+- Bambu Studio's `inherits` has list rules beyond child-over-parent (spec §9's open decision): read `PresetBundle::load_vendor_configs_from_json` in the v02.08.02.61 source, record the rules in `profiles.py`'s docstring with the source link, and add a fixture and a test for each rule that changes a flattened value.
+- `plan.bed_type` must reach the slice. Verify first, in the slicer image, how the v02.08.02.61 CLI takes the plate type (`docker run --rm scadbuddy-slicer:dev /opt/bambu-studio/AppRun --help | grep -i bed`). If the process JSON's `curr_bed_type` carries it, `build_presets` sets it there; if only a CLI flag does, stop and report to the controller: Task 6's argv and the vectors would change.
+- `plan.filament_colours` are not written into the filament files: the laid-out 3MF carries the colours.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -549,31 +568,56 @@ def test_flatten_refuses_a_loop(profiles):
 def test_flatten_refuses_a_missing_parent(profiles):
     with pytest.raises(ProfileError, match="orphan.*no such"): profiles.process("orphan")
 
+def test_a_ref_resolves_by_setting_id(profiles):                      # the fixture's leaf has "setting_id": "GP_LEAF"
+    assert profiles.process("GP_LEAF") == profiles.process("leaf")
+
+def test_version_is_the_images_not_the_profiles(profiles):
+    assert profiles.version == "02.08.02.61" and profiles.profile_version != profiles.version
+
+def test_installed_is_none_without_profiles(tmp_path):
+    assert Profiles.installed(tmp_path) is None
+
 def test_apply_overrides_per_extruder():
     assert apply_overrides({"outer_wall_speed": ["200", "200"]}, {"outer_wall_speed": ["150", "200"]}) == {"outer_wall_speed": ["150", "200"]}
     assert apply_overrides({"outer_wall_speed": ["200", "200"]}, {"outer_wall_speed": "150"}) == {"outer_wall_speed": ["150", "150"]}
 
-async def test_build_presets_gives_one_file_per_slot(profiles, plan):   # plan: cloud refs resolving in the fixture profiles
+async def test_build_presets_gives_one_file_per_slot(profiles, plan):   # plan: standard refs resolving in the fixture
     files = await build_presets(plan, profiles, None)
     assert len(files.filaments) == 2 and json.loads(files.process)["layer_height"] == "0.16"
 
+async def test_a_local_filament_is_refused_by_name(profiles, plan):
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
+    with pytest.raises(ProfileError, match="local filament preset"):
+        await build_presets(local, profiles, None)
+
 def test_native_preset_key_is_distinct_from_bambuddys(plan):
     assert native_preset_key(plan, 1, "02.08.02.61") == "native@02.08.02.61/" + slice_request(plan, 1).preset_key
+
+@pytest.mark.requires_slicer_profiles
+def test_the_images_h2c_machine_flattens():
+    profiles = Profiles.installed(Path(os.environ.get("SCADBUDDY_SLICER_PROFILES_DIR", "/opt/slicer-profiles")))
+    assert profiles is not None and "printable_height" in profiles.machine("Bambu Lab H2C 0.4 nozzle")
 ```
+
+The `requires_slicer_profiles` test skips, saying why, unless `<slicer_profiles_dir>/BBL/BBL.json` exists (register the skip where the other `requires_*` markers are decided, `backend/tests/conftest.py`).
 
 - [ ] **Step 2: Run them to verify they fail** — `cd backend && uv run --frozen pytest tests/slicing/test_presets.py -v` → import errors.
 
-- [ ] **Step 3: Implement `profiles.py` and `presets.py`**
+- [ ] **Step 3: Implement `profiles.py` and `presets.py`.** `Profiles` indexes `BBL/{machine,process,filament}/*.json` by `name` and `setting_id` once, lazily, off the event loop (`asyncio.to_thread` at the async callers).
 
-`Profiles` indexes `BBL/machine/*.json`, `BBL/process/*.json`, `BBL/filament/*.json` by each file's `"name"` once, lazily. A `PresetRef.id` for `cloud`/`standard` is the preset *name* on the Bambuddy side (`resolver.py:56-80` picks by name); confirm against `bambuddy/catalogue.py:105-143` and record the mapping in the docstring. One test marked `requires_slicer_profiles` skips unless `/opt/slicer-profiles/BBL/BBL.json` exists (so it runs in the test image): it flattens `"Bambu Lab H2C 0.4 nozzle"` and asserts `printable_height` is present.
+- [ ] **Step 4: Split `slicer-dist` and copy the profiles into `app`**
 
-- [ ] **Step 4: Run and commit**
+`slicer-dist`: `FROM` the same pinned `ubuntu:24.04@sha256:68ee2200…` as `slicer`; installs only `ca-certificates curl`; takes the `TARGETARCH`, `BAMBU_STUDIO_*` ARGs and the download/check/extract `RUN` from `slicer` as they are, and also writes `printf '%s\n' "$BAMBU_STUDIO_VERSION" > /opt/bambu-studio/VERSION`. `slicer` keeps its runtime libraries and everything after the extraction, with `COPY --from=slicer-dist /opt/bambu-studio /opt/bambu-studio` in place of the `RUN`. `app` gets `COPY --from=slicer-dist /opt/bambu-studio/resources/profiles/BBL /opt/slicer-profiles/BBL` (the real directory, not the `profiles` symlink) and `COPY --from=slicer-dist /opt/bambu-studio/VERSION /opt/slicer-profiles/VERSION`. Move the comment about the pin to `slicer-dist`.
+
+Run: `docker build --target app --progress=plain -t scadbuddy:app . 2>&1 | grep -c 'cargo build'` → `0` (the `app` and `test` builds, CI's backend shards included, never compile the worker), then `docker build --target slicer -t scadbuddy-slicer:dev . && docker run --rm scadbuddy-slicer:dev scadbuddy-slicer --check-cli` → passes, and `docker run --rm scadbuddy:app cat /opt/slicer-profiles/VERSION` → `02.08.02.61`. `hadolint --config .hadolint.yaml Dockerfile` → clean.
+
+- [ ] **Step 5: Run and commit**
 
 Run: `cd backend && uv run --frozen pytest tests/slicing -v && uv run --frozen mypy && uv run --frozen ruff check . && uv run --frozen ruff format --check .`
-Expected: PASS (the image-only test skipped locally)
+Expected: PASS (the image-only test skipped locally, with its reason). Then in the image: `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test uv run --frozen pytest tests/slicing/test_presets.py -v` → the `requires_slicer_profiles` test passes.
 
 ```bash
-git add backend/scadbuddy/slicing backend/tests/slicing backend/scadbuddy/core/settings.py Dockerfile
+git add backend/scadbuddy/slicing backend/tests/slicing backend/scadbuddy/core/settings.py backend/pyproject.toml backend/tests/conftest.py Dockerfile
 git commit -m "feat(slicing): presets as flattened Bambu Studio profile files with ScadBuddy's overrides"
 ```
 
@@ -583,31 +627,63 @@ git commit -m "feat(slicing): presets as flattened Bambu Studio profile files wi
 
 **Files:**
 - Create: `backend/scadbuddy/slicing/slice_info.py`
-- Modify: `backend/scadbuddy/bambuddy/preview.py:57,341-383` (`_filament_changes`'s G-code reader becomes the pure `filament_changes(sliced: bytes, plate_id: int) -> int | None` in `slice_info.py`, which `preview.py` imports; `_LOAD` and the `MAX_*` caps move with it)
-- Test: `backend/tests/slicing/test_slice_info.py`, with a small 3MF zip (`Metadata/slice_info.config`, `Metadata/plate_1.gcode`) the test writes
+- Create: `backend/tests/support/sliced3mf.py` (the fixture writer Tasks 11–13 reuse)
+- Modify: `backend/scadbuddy/bambuddy/preview.py`: `_LOAD` (:57) and `MAX_GCODE_BYTES` (:54) move to `slice_info.py`; `_plate_gcode` (:349) keeps its name and signature (`tests/api/test_print_preview.py` monkeypatches it) and keeps the download and `MAX_SLICED_BYTES` (:52), its zip part becomes `slice_info.plate_gcode`; `_filament_changes` (:341) calls `slice_info.filament_changes`. `read_toolpath` is unchanged.
+- Test: `backend/tests/slicing/test_slice_info.py`
 
 **Interfaces:**
-- Consumes: `SLICE_INFO_NAME` and the parser in `bambuddy/filaments3mf.py:53,147,241` (`used_g` per filament per plate); extend it, do not duplicate it.
-- Produces:
+- Consumes: `read_filaments(payload, sliced=True)` (`bambuddy/filaments3mf.py:405`): its `LocalFilaments.sliced` (grams per slot per plate, `_sliced` :268) and `.profile.plate(i).print_seconds` (`SlicedPlate` :108, `prediction`). Extend nothing there; do not parse `slice_info.config` a second time.
+- Produces (`slice_info.py` imports nothing from `bambuddy/preview.py`, which imports it):
   ```python
-  class SlicedPlate(BaseModel):
+  MAX_GCODE_BYTES = 256 * 1024 * 1024
+  def plate_gcode(payload: bytes, plate_id: int) -> bytes | None
+      # Metadata/plate_<id>.gcode, else the only plate's; None for none, a bad zip, or past MAX_GCODE_BYTES (moved from preview.py)
+  def filament_changes(gcode: bytes) -> int        # M620 S<n>A loads, 255 excluded, minus one, never below 0
+  class NativeSliceRead(BaseModel):                # not `SlicedPlate`: filaments3mf.py has one
       plate_id: int
-      print_time_seconds: float | None     # <metadata key="prediction" value="…"/>
-      slots: list[PreviewSlot]             # bambuddy/preview.py:67; side=None (the native slicer gives no side)
-      filament_used_g: float | None        # the slots' sum
+      print_time_seconds: int | None
+      grams_by_slot: dict[int, float]
+      filament_used_g: float | None                # the slots' sum, rounded to 2
       filament_changes: int | None
-  def read_sliced(sliced: bytes, plate_id: int) -> SlicedPlate   # ApiError 404 for a plate the file lacks
-  def filament_changes(sliced: bytes, plate_id: int) -> int | None
+  def read_sliced(payload: bytes, plate_id: int) -> NativeSliceRead
+      # the only plate when the file has one; ApiError 404 for a plate a file of several lacks;
+      # an UnreadableFilamentsError reads as every field None and no grams
+  def sliced_3mf(*, plates: Mapping[int, tuple[int, list[float]]], gcode: Mapping[int, bytes]) -> bytes   # tests/support/sliced3mf.py
+      # plate -> (prediction seconds, used_g per slot from 1); a minimal Metadata/project_settings.config of "{}" and whatever else read_filaments(sliced=True) needs
   ```
 
-- [ ] **Step 1: Write the failing tests** — one plate (`index="1"`, `prediction="3600"`, filaments `used_g="12.5"`/`"3.0"`) and a `plate_1.gcode` with `M620 S0A`, `M620 S1A`, `M620 S0A` → `print_time_seconds == 3600`, `filament_used_g == 15.5`, two slots, `filament_changes == 2`; a missing plate → 404.
+- [ ] **Step 1: Write the failing tests**
+
+```python
+ONE = sliced_3mf(plates={1: (3600, [12.5, 3.0])}, gcode={1: b"M620 S0A\nM620 S1A\nM620 S0A\n"})
+
+def test_read_sliced_reads_time_grams_and_changes():
+    read = read_sliced(ONE, 1)
+    assert (read.print_time_seconds, read.grams_by_slot, read.filament_used_g, read.filament_changes) == (3600, {1: 12.5, 2: 3.0}, 15.5, 2)
+
+def test_one_plate_is_read_whatever_its_number():          # a whole-file slice (plan.whole_file) names plate 0
+    assert read_sliced(ONE, 2).print_time_seconds == 3600
+
+def test_a_plate_a_file_of_several_lacks_is_404():
+    two = sliced_3mf(plates={1: (60, [1.0]), 2: (60, [1.0])}, gcode={1: b"", 2: b""})
+    with pytest.raises(ApiError) as missing: read_sliced(two, 3)
+    assert missing.value.status_code == 404
+
+def test_unloads_are_not_changes():
+    assert filament_changes(b"M620 S255A\nM620 S0A\nM620 S1A\n") == 1
+
+def test_an_unreadable_file_reads_as_unknown():
+    read = read_sliced(b"not a zip", 1)
+    assert read.print_time_seconds is None and read.grams_by_slot == {} and read.filament_changes is None
+```
+
 - [ ] **Step 2: Run to verify they fail** — `cd backend && uv run --frozen pytest tests/slicing/test_slice_info.py -v` → import error.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run the slicing tests and the preview tests** — `cd backend && uv run --frozen pytest tests/slicing $(grep -rl read_preview tests/api | tr '\n' ' ') -v` → PASS.
+- [ ] **Step 3: Implement** `slice_info.py`, `sliced3mf.py`, and the `preview.py` move.
+- [ ] **Step 4: Run the slicing and preview tests** — `cd backend && uv run --frozen pytest tests/slicing tests/api/test_print_preview.py -v && uv run --frozen mypy && uv run --frozen ruff check . && uv run --frozen ruff format --check .` → PASS (the preview tests unchanged; they skip without Postgres and Temporal, so run them with both).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/scadbuddy/slicing/slice_info.py backend/scadbuddy/bambuddy/preview.py backend/tests/slicing/test_slice_info.py
+git add backend/scadbuddy/slicing/slice_info.py backend/scadbuddy/bambuddy/preview.py backend/tests/slicing/test_slice_info.py backend/tests/support/sliced3mf.py
 git commit -m "feat(slicing): read time, grams and filament changes from a sliced 3MF"
 ```
 
@@ -615,188 +691,319 @@ git commit -m "feat(slicing): read time, grams and filament changes from a slice
 
 ### Task 10: Transfer URLs and the internal blob routes (`slicing/transfer.py`)
 
+Ruling C3: the internal routes serve every store backend, and the only presigned URL is an optional `S3ContentBackend.presign_get` of an object that already exists. Presigned PUT (and adopting its `pending/` object) is a follow-up issue, filed in Task 15: a presigned PUT to a key `sweep_unrecorded` does not write is never swept (`store/s3.py:192`).
+
 **Files:**
-- Create: `backend/scadbuddy/slicing/transfer.py`, `backend/scadbuddy/slicing/transfer_token.py`
-- Modify: `backend/scadbuddy/api/internal.py` (routes `GET` and `PUT /api/v1/internal/blobs/{key}`; the router's prefix today is `INTERNAL_OUTPUTS`-derived, so add a second router `blobs_router` with prefix `/api/v1/internal/blobs`, `include_in_schema=False`, registered where `internal.router` is), `backend/scadbuddy/core/settings.py` (`api_internal_url` exists for the print worker; reuse it as the base of minted internal URLs)
-- Test: `backend/tests/slicing/test_transfer_token.py`, `backend/tests/api/test_internal_blobs.py` (requires_postgres; `local` and `bambuddy`-shaped stores through the api `client` fixture), `backend/tests/slicing/test_transfer.py`
+- Create: `backend/scadbuddy/slicing/transfer_token.py`, `backend/scadbuddy/slicing/transfer.py`, `backend/scadbuddy/api/internal_blobs.py` (its own module with a `router`: `main._api_router` (`main.py:180`) mounts the one attribute named `router` per module)
+- Create: a NEW migration `backend/scadbuddy/migrations/$(date -u +%Y%m%dT%H%MZ)_transfer_puts.sql`, named by `date -u` when you create it (CLAUDE.md "Migrations"; edit nothing else there)
+- Modify: `backend/scadbuddy/store/s3.py` (`S3ContentBackend.presign_get`), `backend/scadbuddy/core/settings.py` (`BOOTSTRAP_FIELDS["api_internal_url"]`: also the base the API mints the slicer's transfer URLs under)
+- Test: `backend/tests/slicing/test_transfer_token.py`, `backend/tests/api/test_internal_blobs.py` (`requires_postgres`; the api `settings` on moto's S3 through `tests/support/store.py` `s3`, with a KEK file written to `tmp_path` and `api_internal_url="http://scadbuddy"`)
 
 **Interfaces:**
-- Consumes: `ContentStore.put/get/stat` (`store/content.py:175,299,408`), `BlobRef`, `BlobScope`, the KEK file `SCADBUDDY_SECRET_KEY_FILE` (already required by flows; `payload_codec.py` reads it), and, from the S3 plan (`docs/superpowers/plans/2026-10-16-s3-store-backend.md`), `S3ContentBackend.presign_get(backend_id, expires: timedelta) -> str` and `S3ContentBackend.presign_put(backend_id, expires: timedelta) -> str`; this plan does not define them. Until that plan lands, `mint_*` on a backend without `presign_*` falls back to the internal routes (`hasattr` check), so the native slicer works on `s3` either way.
+- Consumes: `ContentStore.put` (`store/content.py:175`; keys are `f"{kind}-{sha256}"`, :186), `ContentStore.stat(key) -> BlobStat | None` (:431), `ContentStore.get(ref: BlobRef)` (:318, takes a ref: `stat(key).ref`), `ContentStore.spool`, `load_kek` (`core/secrets.py:83`), HKDF as `bambuddy/catalogue.py` `catalogue_name_key` derives (`cryptography` is a dependency).
 - Produces:
   ```python
-  TRANSFER_TTL = timedelta(hours=2)
-  TRANSFER_HEADER = "X-ScadBuddy-Transfer"
-
-  # transfer_token.py: HMAC-SHA256 under a key derived from the KEK (HKDF info b"scadbuddy/transfer/v1"), urlsafe base64 of
-  # f"{method}\n{key}\n{expires_unix}" + "." + mac; verify refuses a wrong method, another key, a tampered mac, or a past expiry.
-  class TransferToken: method: Literal["GET", "PUT"]; key: str; expires_at: datetime
-  def sign(kek: bytes, token: TransferToken) -> str
-  def verify(kek: bytes, value: str, *, method: str, key: str, now: datetime) -> TransferToken   # raises TokenError
+  # transfer_token.py
+  TRANSFER_KEY_INFO = b"scadbuddy:slicing:transfer:v1"
+  def transfer_key(kek: Kek) -> bytes                         # HKDF-SHA256, 32 bytes, salt None
+  class TransferToken(BaseModel): method: Literal["GET", "PUT"]; blob_key: str; expires_at: datetime
+  class TokenError(ValueError): ...
+  def sign(secret: bytes, token: TransferToken) -> str
+  def verify(secret: bytes, value: str, *, method: str, blob_key: str, now: datetime) -> TransferToken
+  # the format, fixed: urlsafe_b64(f"{method}\n{blob_key}\n{int(expires_at.timestamp())}") + "." + urlsafe_b64(HMAC-SHA256),
+  # compared with hmac.compare_digest; refuses another method, another key, a tampered mac, a past expiry
 
   # transfer.py
+  TRANSFER_TTL = timedelta(hours=2)
+  TRANSFER_HEADER = "X-ScadBuddy-Transfer"
+  INTERNAL_BLOBS = "/api/v1/internal/blobs"
+  PENDING_PREFIX = "pending-"
+  class TransferUnavailableError(RuntimeError): ...           # no api_internal_url or no KEK: says which variable
+  class TransferRecordError(RuntimeError): ...                # finish_put on nothing PUT, or a sha/size the PUT did not have
+  class PendingPut(BaseModel): url: TransferUrl; pending_key: str          # pending_key = PENDING_PREFIX + uuid4().hex
+  class TransferPuts:                                          # the transfer_puts table, over a pool
+      def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None
+      def record(self, pending_key: str, *, key: str, sha256: str, size: int) -> None   # upsert: a retried attempt PUTs again
+      def get(self, pending_key: str) -> TransferPut | None
+      def prune(self, older_than: timedelta) -> int
   class Transfers:
-      def __init__(self, content: ContentStore, *, internal_base_url: str, kek: bytes, now: Callable[[], datetime] = utcnow)
-      async def mint_get(self, ref: BlobRef) -> TransferUrl
-          # s3 with presign: TransferUrl(url=presign_get(ref.backend_id, TRANSFER_TTL), headers={}, expires_at=now+TTL)
-          # else: f"{internal_base_url}/api/v1/internal/blobs/{key}" with {TRANSFER_HEADER: sign(GET, key)}
-      async def mint_put(self, kind: BlobKind, name: str) -> PendingPut
-          # PendingPut(url: TransferUrl, kind, name, pending_key: str)   pending_key = f"pending/{kind}/{uuid4().hex}"
-          # s3 with presign: a presigned PUT of backend_id f"{prefix}/{pending_key}"; else the internal PUT route of pending_key
-      async def finish_put(self, put: PendingPut, *, sha256: str, size: int, scope: BlobScope) -> BlobRef
-          # s3: ContentStore.adopt_object(kind, pending backend_id, sha256, size, name, scope) → the index row, the object
-          #   copied/renamed to its content key by the backend (S3 CopyObject) and the pending one removed; refuses a size or
-          #   sha the object does not have (HEAD/ETag check in the backend, or a streamed re-hash under 64 MiB)
-          # internal: the PUT route already stored it under its content key through ContentStore.put, recording
-          #   `transfer_puts(pending_key → key, sha256, size)`; finish_put reads that row, checks sha and size, returns the ref
+      def __init__(self, content: ContentStore, puts: TransferPuts, *, internal_base_url: str | None, secret: bytes | None,
+                   now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None
+      async def mint_get(self, key: str) -> TransferUrl
+          # BlobMissingError for a key stat() does not find; on an S3ContentBackend, the presigned GET of stat.ref.backend_id
+          # (headers {}); else f"{internal_base_url}{INTERNAL_BLOBS}/{key}" with {TRANSFER_HEADER: sign(GET, key)}; expires now+TTL
+      def mint_put(self) -> PendingPut                         # the internal PUT route of a new pending key, on every backend
+      async def finish_put(self, put: PendingPut, *, sha256: str, size: int) -> str     # the stored key
+  # store/s3.py
+  async def presign_get(self, backend_id: str, expires: timedelta) -> str     # S3ContentBackend
   ```
-  Internal routes (`api/internal.py`): `GET /api/v1/internal/blobs/{key:path}` verifies the header token for `GET` and that key, then streams `ContentStore.get(key)` with `Content-Length` from `stat`; `PUT /api/v1/internal/blobs/{key:path}` verifies for `PUT`, spools the request body to a temp file under `cache/blob-spool` (never into memory), `ContentStore.put(kind, file, name=…, scope=BlobScope(folder="work"))`, writes a `transfer_puts` row (`pending_key`, `key`, `sha256`, `size`, `created_at`; migration in this task; rows older than a day pruned by the Task 12 sweep) and answers 204. A missing or bad token is 403 (not 401: nothing to challenge), an expired one 403, an unknown key 404 after the token check (so a token cannot probe keys it was not minted for).
+  ```sql
+  CREATE TABLE transfer_puts (
+    pending_key text PRIMARY KEY,
+    key text NOT NULL,
+    sha256 text NOT NULL,
+    size bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX transfer_puts_created ON transfer_puts (created_at);
+  ```
+  Routes (`api/internal_blobs.py`, `router = APIRouter(prefix=INTERNAL_BLOBS.removeprefix("/api/v1"), include_in_schema=False)`, as `api/internal_library.py:18`):
+  - `GET /{key:path}`: `verify(..., method="GET", blob_key=key)` else 403; then `stat(key)` None → 404; else a `StreamingResponse` of `content.get(stat.ref)` with `Content-Length: stat.ref.size`, `application/octet-stream`.
+  - `PUT /{key:path}`: `verify(..., method="PUT")` else 403; a key without `PENDING_PREFIX` → 404; the body streamed (`request.stream()`) into a temp file under `content.spool`, never into memory; `content.put("slice", file, name="sliced.3mf", scope=BlobScope(folder="work"))`; `TransferPuts.record(key, key=f"slice-{ref.sha256}", sha256=ref.sha256, size=ref.size)`; 204.
+  - A missing, malformed, tampered or expired token is 403 (nothing to challenge, so not 401), and the token is checked before the key, so a token never probes a key it was not minted for. Neither route ever redirects: the Rust side treats a 3xx as `TransferRefused` (`sb-transfer` follows no redirects).
+  - Without a content store (`store_backend=local`, `store/factory.py:84`) both answer 404: the native slicer needs `store_backend` `s3` or `bambuddy` (Task 15 records it in spec §5.2).
+  - `presign_get`: aiobotocore's `generate_presigned_url("get_object", Params={"Bucket", "Key": self._key(backend_id)}, ExpiresIn=…)`; verify in the pinned aiobotocore (`backend/uv.lock`) that it is a coroutine before awaiting it.
 
-- [ ] **Step 1: Write the failing token tests**
+- [ ] **Step 1: Write the failing token tests** (`test_transfer_token.py`, `AT = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)`, `SECRET = transfer_key(kek_from_base64(base64.b64encode(bytes(32)).decode()))`)
 
 ```python
 def test_token_round_trips():
-    t = TransferToken(method="GET", key="slice/abc", expires_at=AT)
-    assert verify(KEK, sign(KEK, t), method="GET", key="slice/abc", now=AT - timedelta(minutes=1)) == t
+    t = TransferToken(method="GET", blob_key="slice-abc", expires_at=AT)
+    assert verify(SECRET, sign(SECRET, t), method="GET", blob_key="slice-abc", now=AT - timedelta(minutes=1)) == t
 
-@pytest.mark.parametrize("method,key,now", [("PUT", "slice/abc", AT - 1min), ("GET", "slice/other", AT - 1min), ("GET", "slice/abc", AT + 1s)])
-def test_token_refuses_other_method_key_or_expiry(method, key, now):
-    with pytest.raises(TokenError): verify(KEK, sign(KEK, TransferToken(method="GET", key="slice/abc", expires_at=AT)), method=method, key=key, now=now)
+@pytest.mark.parametrize("method,blob_key,now", [("PUT", "slice-abc", AT - timedelta(minutes=1)),
+                                                 ("GET", "slice-other", AT - timedelta(minutes=1)),
+                                                 ("GET", "slice-abc", AT + timedelta(seconds=1))])
+def test_token_refuses_other_method_key_or_expiry(method, blob_key, now):
+    with pytest.raises(TokenError):
+        verify(SECRET, sign(SECRET, TransferToken(method="GET", blob_key="slice-abc", expires_at=AT)), method=method, blob_key=blob_key, now=now)
 
-def test_tampered_mac_is_refused(): ...   # flip one char of the mac
+def test_tampered_mac_is_refused():          # flip one character of the part after "."
+def test_another_kek_is_refused():           # signed under transfer_key(another KEK)
 ```
 
-- [ ] **Step 2: Write the failing route and `Transfers` tests** — with the api `client` on a `local`-shaped `ContentStore` (the test store the api fixtures already build, or `LocalContentBackend`): `mint_get` of a put blob gives a URL the test GETs through `client` with the minted headers → the bytes; the same URL with the header stripped → 403; a GET token used for PUT → 403; `mint_put` then PUT 5 bytes → 204, `finish_put(sha256 of the bytes, 5)` → a `BlobRef` the store can `read`; `finish_put` with a wrong sha → `TransferError`; a URL minted with `now` two hours and a second later → 403 (Review Focus 5).
+- [ ] **Step 2: Write the failing route and `Transfers` tests** (`test_internal_blobs.py`, through the TestClient, `follow_redirects=False` on every request):
+  - `test_a_minted_get_reads_the_blob`: `content.put("slice", b"hello", …)` → `mint_get(key)` → GET the URL's path with its headers → 200, body `b"hello"`, `Content-Length: 5`.
+  - `test_get_without_the_header_is_403`, `test_a_get_token_cannot_put` (PUT with a GET token → 403).
+  - `test_a_token_for_key_a_cannot_read_key_b` (Review Focus 5): A's token on B's URL → 403.
+  - `test_a_missing_key_is_404_only_after_the_token` (Review Focus 5): a token minted for missing key C → 404; a bad token on C → 403.
+  - `test_an_expired_url_is_403`: `Transfers(now=lambda: AT - TRANSFER_TTL - timedelta(seconds=1))` mints; the request at real time → 403.
+  - `test_put_then_finish_put`: `mint_put()`, PUT 5 bytes → 204 (not a 3xx); `finish_put(sha256(b"hello"), 5)` → `"slice-<sha>"`, and `content.read(content.stat(key).ref) == b"hello"`.
+  - `test_a_second_put_to_the_same_pending_key_upserts`: PUT `b"one"` then `b"two"` to one `PendingPut` → both 204; `finish_put(sha256(b"two"), 3)` succeeds and `finish_put(sha256(b"one"), 3)` raises `TransferRecordError`.
+  - `test_finish_put_refuses_a_wrong_digest_or_nothing_put`.
+  - `test_put_to_a_non_pending_key_is_404` (a valid PUT token for `slice-abc`).
+  - `test_mint_without_internal_url_or_kek_says_which`: `TransferUnavailableError` matching `SCADBUDDY_API_INTERNAL_URL`, then `SCADBUDDY_SECRET_KEY_FILE`.
+  - `test_s3_presigned_get_reads_the_object`: `mint_get` on the moto store gives a URL with no headers whose `httpx.get` returns the bytes.
+  - `test_transfer_puts_prune`: a row backdated two days is pruned by `prune(timedelta(days=1))`, a fresh one kept.
 
-- [ ] **Step 3: Run to verify they fail** — `cd backend && uv run --frozen pytest tests/slicing/test_transfer_token.py tests/slicing/test_transfer.py tests/api/test_internal_blobs.py -v` → import errors.
+- [ ] **Step 3: Run to verify they fail** — `cd backend && uv run --frozen pytest tests/slicing/test_transfer_token.py tests/api/test_internal_blobs.py -v` → import errors.
 
-- [ ] **Step 4: Implement** — the migration `transfer_puts`, `transfer_token.py` (`hmac`, `hashlib`, HKDF via `cryptography`, already a dependency of the backend? check `pyproject.toml`; if not, `hashlib.pbkdf2_hmac` with a fixed salt is enough for a key derivation from 32 random bytes and adds nothing), `transfer.py`, the two routes, `ContentStore.adopt_object` (s3 only, under the S3 plan's backend; here it raises `NotImplementedError` for a backend without `presign_*`, since such a backend never mints a presigned PUT).
+- [ ] **Step 4: Implement** the migration (a NEW file, `$(date -u +%Y%m%dT%H%MZ)_transfer_puts.sql`), `transfer_token.py`, `transfer.py`, `api/internal_blobs.py`, `presign_get`.
 
 - [ ] **Step 5: Run, lint, commit**
 
-Run: `cd backend && uv run --frozen pytest tests/slicing tests/api/test_internal_blobs.py -v && uv run --frozen mypy && uv run --frozen ruff check . && uv run --frozen ruff format --check .`
-Expected: PASS
+Run: `cd backend && uv run --frozen pytest tests/slicing tests/api/test_internal_blobs.py tests/api/test_routes.py -v && uv run --frozen mypy && uv run --frozen ruff check . && uv run --frozen ruff format --check .`
+Expected: PASS (`test_routes.py`: no two routes match one request)
 
 ```bash
-git add backend/scadbuddy/slicing backend/scadbuddy/api/internal.py backend/scadbuddy/migrations backend/scadbuddy/store/content.py backend/tests
-git commit -m "feat(slicing): transfer URLs for workers: signed internal blob routes, presigned S3 when the backend can"
+git add backend/scadbuddy/slicing backend/scadbuddy/api/internal_blobs.py backend/scadbuddy/migrations backend/scadbuddy/store/s3.py backend/scadbuddy/core/settings.py backend/tests
+git commit -m "feat(slicing): signed internal blob routes and transfer URLs for the slicer worker"
 ```
 
 ---
 
-### Task 11: `slicer_backend`, the `native_slices` table and `SliceWorkflow`
+### Task 11: `slicer_backend`, `native_slices` and `SliceWorkflow` on the `library` queue
+
+Rulings C1, C2, C4, C5. `SliceWorkflow` runs on the `library` queue (the API process: content store, Bambuddy client, native library). Its first activity reads the laid-out copy and builds the presets, so neither bytes nor presets ever enter a history: the workflow's input is the copy's library file id, the `SlicePlan` (refs and overrides) and the plate.
 
 **Files:**
-- Create: `backend/scadbuddy/migrations/<now>_native_slices.sql`, `backend/scadbuddy/slicing/store.py`, `backend/scadbuddy/slicing/component.py`, `backend/scadbuddy/workflows/slicing.py`
-- Modify: `backend/scadbuddy/core/config.py:91` (`Slicer = Literal["bambuddy", "native"]`), `core/settings.py` (`slicer_backend: Slicer = "bambuddy"`, `temporal_task_queue_slicer: str = "slicer"`; `APPLIES["slicer_backend"] = "live"`), `library/settings_store.py` (the stored field, as `store_backend` is stored), `main.py:519-525` (register `SliceWorkflow`, `slice_prepare` and `slice_record` on the `library` queue's in-process worker), `workflows/client.py` (the `library` worker's workflow list)
-- Test: `backend/tests/slicing/test_store.py` (requires_postgres), `backend/tests/api/test_slice_workflow.py` (requires_temporal + pg), `backend/tests/support/fake_slicer.py`
+- Create: a NEW migration `backend/scadbuddy/migrations/$(date -u +%Y%m%dT%H%MZ)_native_slices.sql`, named by `date -u` when you create it
+- Create: `backend/scadbuddy/slicing/store.py`, `backend/scadbuddy/slicing/component.py`, `backend/scadbuddy/slicing/start.py`, `backend/scadbuddy/workflows/slicing.py`, `backend/scadbuddy/workflows/slicing_activities.py`, `backend/scadbuddy/workflows/slicing_models.py`
+- Modify: `backend/scadbuddy/core/config.py` (`Slicer = Literal["bambuddy", "native"]` beside `StoreBackend` :92 and `LibraryBackend` :96)
+- Modify: `backend/scadbuddy/core/settings.py`: `slicer_backend: Slicer = "bambuddy"` after `library_backend` (:151); `temporal_task_queue_slicer: str = "slicer"` after `temporal_task_queue_agent_tools` (:277), added to `_temporal_without_whitespace`'s field list (:346-350) and to `BOOTSTRAP_FIELDS` beside the other queues ("Paired with the Temporal address: the API starts slices on it, and the scadbuddy-slicer worker must name the same queue."); `APPLIES["slicer_backend"] = "live"`
+- Modify: `backend/scadbuddy/library/settings_store.py` (`StoredSettings.slicer_backend` beside `library_backend` :304, `SettingsUpdate.slicer_backend: Slicer | None` beside :557), `backend/scadbuddy/api/settings.py` (the response field beside `library_backend` :114 and its fill beside :356)
+- Modify: `backend/scadbuddy/slicing/models.py`: `TRANSFER_REFUSED = "TransferRefused"` beside `SLICER_ERROR`
+- Modify: `backend/scadbuddy/main.py` `_run_library_worker` (:1091): the slicing activities into `activities` (:1117-1123) and `SliceWorkflow` into `workflows=` (:1129)
+- Modify: `backend/tests/api/conftest.py`: `"temporal_task_queue_slicer": f"{queue}-slicer"` beside :140
+- Test: `backend/tests/slicing/test_store.py` (`requires_postgres`), `backend/tests/api/test_slice_workflow.py` (`requires_temporal`, `requires_postgres`), `backend/tests/support/fake_slicer.py`, `backend/tests/test_slice_replay.py`, `backend/tests/fixtures/slice_workflow_histories/` (new)
 
 **Interfaces:**
-- Consumes: `Transfers` (Task 10), `build_presets`, `native_preset_key` (Task 8), `read_sliced` (Task 9), the models (Task 1).
+- Consumes: Task 8 (`Profiles.installed`, `Profiles.version`, `build_presets`, `native_preset_key`), Task 9 (`sliced_3mf`, in the tests), Task 10 (`Transfers.mint_get/mint_put/finish_put`, `PendingPut`, `TransferUnavailableError`), Task 1 (`SlicePlateInput`, `SlicePlateOutput`, `SliceProgress`, `SLICER_ERROR`, `VALIDATION_EXIT`), `served_reads` (`print_library/reads.py:55`), `PrintLibrary.serving_native` (`print_library/component.py:76`), `BlobRefs.add/drop_holder` (`store/refs.py:21,29`), `ContentStore.touch` (`store/content.py:444`).
 - Produces:
   ```sql
   CREATE TABLE native_slices (
     id bigserial PRIMARY KEY,
-    workflow_id text NOT NULL UNIQUE,            -- slice-<sha256(input sha256, preset_key)[:32]>
-    subject text NOT NULL,                       -- the run subject, as print_preview_slices.subject
-    input_sha256 text NOT NULL,
-    preset_key text NOT NULL,                    -- native_preset_key(...)
+    workflow_id text NOT NULL UNIQUE,            -- native_workflow_id(library_file_id, preset_key)
+    subject text NOT NULL,                       -- the starter's run subject, as print_preview_slices.subject
+    library_file_id bigint NOT NULL,             -- the laid-out copy (Bambuddy's or the native library's)
     plate_id integer NOT NULL,
-    status text NOT NULL DEFAULT 'running',      -- running | completed | failed | cancelled
+    preset_key text NOT NULL,                    -- native_preset_key(...)
+    input_sha256 text,                           -- set by slice_prepare
+    status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
     failure text,
-    sliced_blob_key text,                        -- store_blobs key of the sliced 3MF
+    sliced_blob_key text,
     warnings jsonb NOT NULL DEFAULT '[]',
-    printed boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz
   );
   CREATE INDEX native_slices_reuse ON native_slices (input_sha256, preset_key) WHERE status = 'completed';
   ```
   ```python
-  class NativeSlice(BaseModel): id, workflow_id, subject, input_sha256, preset_key, plate_id, status, failure, sliced_blob_key, warnings, printed, created_at, finished_at
-  class NativeSliceStore:                                     # slicing/store.py, over the pool
-      async def start(self, row: NativeSlice) -> NativeSlice   # insert, or the existing row of the same workflow_id
-      async def finish(self, workflow_id: str, *, status: str, sliced_blob_key: str | None, failure: str | None, warnings: list[str]) -> None
+  # slicing/store.py
+  HOLDER = "native_slice"                                      # blob_refs holder kind; holder id str(row.id)
+  class NativeSlice(BaseModel): id: int; workflow_id: str; subject: str; library_file_id: int; plate_id: int; preset_key: str
+      input_sha256: str | None; status: Literal["running", "completed", "failed"]; failure: str | None
+      sliced_blob_key: str | None; warnings: list[str]; created_at: datetime; finished_at: datetime | None
+  class NativeSliceStore:                                      # over the settings pool; every method async (asyncio.to_thread)
+      def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None
+      async def start(self, *, workflow_id: str, subject: str, library_file_id: int, plate_id: int, preset_key: str) -> NativeSlice
+          # insert, or the row of that workflow_id; a failed one is set back to running (failure, finished_at cleared)
+      async def prepared(self, slice_id: int, input_sha256: str) -> None
+      async def finish(self, slice_id: int, *, status: Literal["completed", "failed"], sliced_blob_key: str | None,
+                       failure: str | None, warnings: list[str]) -> None
       async def get(self, slice_id: int, subject: str) -> NativeSlice | None
-      async def reusable(self, input_sha256: str, preset_key: str) -> NativeSlice | None
-      async def claim(self, slice_id: int) -> bool              # printed = true once
-      async def sweep(self, older_than: timedelta) -> list[str] # finished rows past grace: their blob keys, rows deleted
-  SLICING = Component(...)                                     # slicing/component.py: Slicing(store, transfers, profiles, content, client, settings)
+      async def reusable(self, input_sha256: str, preset_key: str) -> NativeSlice | None     # completed, newest first
+      async def sweep(self, older_than: timedelta) -> list[int]                           # finished rows past it: deleted, ids returned
+  def native_workflow_id(library_file_id: int, preset_key: str) -> str
+      # f"slice-{library_file_id}-{sha256(preset_key)[:32]}": known before the bytes are read, so the dialog and the run
+      # name one execution (Ruling C2); reuse across copies of identical bytes is slice_prepare's (Ruling C1)
 
-  class SliceWorkflowInput(BaseModel): slice_id: int; workflow_id: str; input_3mf: BlobRef; presets: PresetFiles; plate: int;
-                                        arrange: Literal["no","yes","auto"]; slicer_queue: str; timeout: timedelta
-  class SliceWorkflowResult(BaseModel): status: Literal["completed", "failed"]; sliced_blob_key: str | None; failure: str | None; warnings: list[str]
-  class SlicePrepared(BaseModel): plate_input: SlicePlateInput; put: PendingPut
-  class SliceWorkflow:                                         # workflows/slicing.py
-      # 1. execute_activity("slice_prepare", input, result_type=SlicePrepared, SHORT): puts the preset files as `slice` blobs
-      #    (ContentStore.put, deduped by sha so a repeated preset costs one upload), mints GET URLs for the 3MF and each preset
-      #    and a PendingPut for the output; returns SlicePlateInput. Minted inside the workflow's first activity so the two-hour
-      #    clock starts at the slice, not at the preview request.
-      # 2. execute_activity("slice_plate", prepared.plate_input, task_queue=input.slicer_queue, result_type=SlicePlateOutput,
-      #    start_to_close_timeout=input.timeout, heartbeat_timeout=timedelta(seconds=60), retry_policy=RetryPolicy(maximum_attempts=3))
-      # 3. execute_activity("slice_record", SliceRecordInput(workflow_id, put, output | failure), SHORT, RECORD_RETRY):
-      #    finish_put(...) → the BlobRef → NativeSliceStore.finish(status="completed", sliced_blob_key=key, warnings)
-      #    or finish(status="failed", failure=message + stderr_tail)
-      # A TransferRefused failure (an expired URL after a long queue wait) runs step 1 again once, then fails.
-  async def slice_progress(client: Client, workflow_id: str) -> SliceProgress | None
-      # describe() → pending_activities[0].heartbeat_details → payload converter → SliceProgress; None when none
+  # slicing/component.py: a Component (core/components.py), discovered; nothing is built until first use, as PRINT_LIBRARY
+  class Slicing:
+      store: NativeSliceStore; puts: TransferPuts; refs: BlobRefs
+      profiles: Profiles | None                                # Profiles.installed(settings.slicer_profiles_dir)
+      starter: NativeSliceStarter | None                       # native_slice_starter(settings)
+      def transfers(self) -> Transfers                         # RuntimeError without a content store (store_backend=local)
+      def temporal(self) -> Client                             # AppState.temporal (main.py:940)
+  SLICING: Key[Slicing]
+
+  # slicing/start.py: what preview_run (bambuddy queue) and slice_run (library queue) both call
+  class NativeSliceStarter(BaseModel):
+      library_queue: str; slicer_queue: str                   # Settings.temporal_task_queue_library / _slicer
+      version: str                                            # Profiles.version: the image's BAMBU_STUDIO_VERSION
+  def native_slice_starter(settings: Settings) -> NativeSliceStarter | None
+      # None when Profiles.installed(settings.slicer_profiles_dir) finds no profiles (a run outside the image)
+  async def start_native_slice(temporal: Client, store: NativeSliceStore, starter: NativeSliceStarter, *, library_file_id: int,
+                               plan: SlicePlan, plate_id: int, subject: str) -> NativeSlice
+      # preset_key = native_preset_key(plan, plate_id, starter.version); row = store.start(...); unless row.status == "completed":
+      # temporal.start_workflow(SliceWorkflow.run, SliceWorkflowInput(...), id=row.workflow_id, task_queue=starter.library_queue,
+      #   id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING, id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE)
+      # (the pattern of workflows/commands.py `start_command`); returns the row
+  async def slice_progress(temporal: Client, workflow_id: str) -> SliceProgress | None
+      # describe().raw_description.pending_activities, the one whose activity_type.name == "slice_plate" (during slice_prepare
+      # another is first); its last heartbeat_details decoded with temporal.data_converter as SliceProgress; None when there is none.
+      # The first beat is all zeros (Rust's SliceProgress::default), so a running slice reads total_percent 0, not None.
+      # Verify the describe and payload-decoding calls in the pinned temporalio (1.34.0, backend/uv.lock) before relying on them.
+
+  # workflows/slicing_models.py
+  class SliceWorkflowInput(BaseModel): slice_id: int; library_file_id: int; plan: SlicePlan; plate_id: int; preset_key: str
+                                       slicer_queue: str
+  class SlicePrepared(BaseModel): plate_input: SlicePlateInput | None; put: PendingPut | None
+                                  reused_blob_key: str | None     # a completed slice of the same bytes and presets: nothing to slice
+  class SliceRecordInput(BaseModel): slice_id: int; put: PendingPut | None; output: SlicePlateOutput | None
+                                     reused_blob_key: str | None; failure: str | None
+  class SliceWorkflowResult(BaseModel): status: Literal["completed", "failed"]; sliced_blob_key: str | None
+                                        failure: str | None; warnings: list[str]
+
+  # workflows/slicing.py
+  SLICE_WORKFLOW = "SliceWorkflow"
+  SLICE_TIMEOUT = timedelta(minutes=30)                        # one slice_plate attempt's start-to-close
+  SLICE_HEARTBEAT = timedelta(seconds=60)                      # spec §5.2; the worker beats every 10 s
+  SLICE_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=4)   # "retries three times" (§5.5, C4)
+  @workflow.defn(name=SLICE_WORKFLOW)
+  class SliceWorkflow:
+      @workflow.run
+      async def run(self, input: SliceWorkflowInput) -> SliceWorkflowResult
   ```
+  `SliceWorkflow.run`, in order:
+  1. `slice_prepare(input)` on its own queue (SHORT, a read retry): reads the copy. On the native library the input is the file's own blob (`print_library/native.py:50` `blob_key(file_id)`, its ref by `content.stat`): no bytes move and nothing is linked (see "Notes to the parent" (e)). On Bambuddy's, the download (`served_reads(library_file_id, client, None)`) is put as kind `slice`. `NativeSliceStore.prepared(slice_id, sha)`; a `reusable(sha, preset_key)` row with a blob `stat` finds → `SlicePrepared(reused_blob_key=…)`; else `build_presets` → each document put as kind `slice` (`ContentStore.put` dedupes by sha) → `mint_get` for the input and each preset, `mint_put` for the output. Every key it puts or names is `touch`ed and then held with `BlobRefs.add(key, HOLDER, str(slice_id))` before the URLs are minted (Ruling C5: `slice` is a `SWEPT_KINDS` kind, `content_models.py:37`). A `ProfileError` or `TransferUnavailableError` is a non-retryable `ApplicationError` whose message is the slice's failure.
+  2. Unless reused, `slice_plate(prepared.plate_input)` with `task_queue=input.slicer_queue`, `start_to_close_timeout=SLICE_TIMEOUT`, `heartbeat_timeout=SLICE_HEARTBEAT`, `retry_policy=SLICE_RETRY`, `result_type=SlicePlateOutput`. A failure whose cause is an `ApplicationError` of type `TRANSFER_REFUSED` (URLs expired in a long queue wait) runs step 1 and this step once more, then fails.
+  3. `slice_record(...)` (SHORT, `RECORD_RETRY` as `workflows/printing.py` defines it): `finish_put` → the key, `BlobRefs.add(key, HOLDER, …)`, `NativeSliceStore.finish(completed, …)`; or `finish(failed, failure=…)`. The failure text (Ruling C4): for a `SlicerError`, its details' `stderr_tail` (`cause.details[0]["stderr_tail"]`, decoded only for that type, as `README.md` "Slicer worker" says) after `"The slicer refused the plate:"` (exit 192) or `"The slicer failed:"`; for any other type, `"The slicer worker failed (<type>)."` with no message.
+  Every activity but `slice_plate` runs on `library`. No bytes and no preset document cross the history: `SlicePrepared` carries URLs (spec §5.2, Global Constraints) and the record carries keys.
 
-- [ ] **Step 1: Write the failing store test** — `start` twice with one `workflow_id` returns the same row; `reusable` finds a completed row and not a failed one; `claim` is true once; `sweep(timedelta(0))` returns the blob key and deletes the row.
+- [ ] **Step 1: Write the failing store tests** (`test_store.py`): `start` twice with one `workflow_id` returns one row; `start` on a failed row returns it `running` with `failure` cleared; `reusable` finds a completed row and not a failed one; `get` under another subject is `None`; `sweep(timedelta(0))` deletes finished rows and returns their ids and leaves running ones; `native_workflow_id(7, "k") == native_workflow_id(7, "k") != native_workflow_id(8, "k")`.
 
-- [ ] **Step 2: Write the failing workflow test** — register `fake_slicer.slice_plate` (a Python `@activity.defn(name="slice_plate")` that GETs each `TransferUrl` with httpx and the headers, heartbeats one `SliceProgress`, PUTs Task 9's fixture zip to `sliced_3mf`, returns a `SlicePlateOutput` with its sha and size; with `plate == 99` raises `ApplicationError("validation failed", type="SlicerError", non_retryable=True, details=[{"exit_code": 192, "stderr_tail": "…"}])`) on the test's slicer queue; start `SliceWorkflow`; assert the `native_slices` row is `completed` with a `sliced_blob_key` the `ContentStore` can `read` to the fixture bytes, and that plate 99 ends `failed` with `failure` containing the stderr tail after one attempt.
+- [ ] **Step 2: Write `fake_slicer.py`** — `fake_slice_plate(app)`: a Python `@activity.defn(name="slice_plate")` that GETs each `TransferUrl` with its headers through `httpx.AsyncClient(transport=httpx.ASGITransport(app=app))` (as `tests/api/test_library_native.py` reaches the internal routes), heartbeats `SliceProgress(0, 1, 40, 40, "Slicing")`, PUTs `sliced_3mf(plates={1: (3600, [12.5, 3.0])}, gcode={1: b"M620 S0A\nM620 S1A\nM620 S0A\n"})` to `sliced_3mf`, and returns a `SlicePlateOutput` with its sha and size. `FakeSlicer` controls it: `refuse_plate` (raises `ApplicationError("validation failed", {"exit_code": 192, "stderr_tail": "plate 99 is empty"}, type="SlicerError", non_retryable=True)`: details positional, `ApplicationError(msg, *details, type=, non_retryable=)`), `crash_times` (raises a retryable `SlicerError` that many times first), `expire_first` (raises `ApplicationError("expired", type="TransferRefused", non_retryable=True)` on its first call), `hold` (an `asyncio.Event` it waits on after its heartbeat), `calls`. A `fake_slicer_worker(client: TestClient, queue: str)` context runs a `Worker` with it in the app's portal (`client.portal`), where the in-process workers run.
 
-- [ ] **Step 3: Run both to verify they fail** — `cd backend && uv run --frozen pytest tests/slicing/test_store.py tests/api/test_slice_workflow.py -v` → import errors.
+- [ ] **Step 3: Write the failing workflow tests** (`test_slice_workflow.py`, the api `client` with `store_backend="s3"` on moto, a KEK, `api_internal_url="http://scadbuddy"`, `slicer_backend="native"`, the fixture profiles as `slicer_profiles_dir`):
+  - `test_a_slice_completes_and_holds_its_blob`: start through `start_native_slice` for a library copy the fake Bambuddy serves → the row is `completed`, `content.read(content.stat(row.sliced_blob_key).ref)` is the fixture bytes, and `blob_refs` holds the sliced key, the input key and each preset key under `("native_slice", str(row.id))`.
+  - `test_a_held_blob_survives_the_blob_sweep` (C5): `sweep_content(content, refs, grace=0)` while the row stands → the sliced key still `stat`s.
+  - `test_a_validation_failure_fails_once_with_the_stderr_tail`: `refuse_plate` → `failed`, `failure == "The slicer refused the plate: plate 99 is empty"`, `calls == 1`.
+  - `test_a_crash_retries_three_times`: `crash_times=3` → `completed` after 4 calls; `crash_times=4` → `failed` with `"The slicer failed:"`.
+  - `test_an_expired_url_prepares_again_once` (Review Focus 7): `expire_first` → `completed`; the history has two `slice_prepare` activities.
+  - `test_another_error_type_hides_its_message`: the fake raises `ApplicationError("secret detail", type="SlicerWorkerError")` four times → `failure == "The slicer worker failed (SlicerWorkerError)."`.
+  - `test_the_same_bytes_and_presets_reuse_the_slice`: a second copy with identical bytes (another library file id) → its row `completed` with the first's `sliced_blob_key`; the fake's `calls` unchanged.
+  - `test_progress_reads_the_slice_plate_heartbeat`: with `hold` set, `slice_progress` → `SliceProgress(total_percent=40, …)`; before the fake has beaten, `None` or 0, never another activity's details.
+  - `test_no_bytes_or_presets_in_the_history`: in the completed history, no payload holds the fixture's 3MF bytes or a preset document's `"layer_height"`.
+  - `test_native_library_input_moves_no_bytes`: `library_backend="native"` as `test_library_native.py` sets it → completed, and the input key is the native file's own `blob_key` (no `slice-` copy of it is put).
+  - `test_on_the_local_store_the_slice_fails_saying_why`: `store_backend="local"` → `failed`, failure naming `store_backend`.
 
-- [ ] **Step 4: Implement** — the migration, `store.py`, `component.py`, `workflows/slicing.py` and its two activities, the settings fields (the `render_settings` view needs nothing: the render worker never slices), registration in `main.py` beside the housekeeping activities.
+- [ ] **Step 4: Write the replay test** — `tests/test_slice_replay.py` as `tests/test_housekeeping_replay.py`: `test_slice_workflow_replays_its_recorded_history` over `["completed", "refused", "prepared_again"]` with `Replayer(workflows=[SliceWorkflow], data_converter=pydantic_data_converter)`, and a `SCADBUDDY_RECORD_HISTORIES=1` recording test (stub activities) that writes the three. The `library` worker is unversioned, so a later change to `SliceWorkflow`'s commands goes behind `workflow.patched` and adds a history beside these; the module docstring says so, as the housekeeping one does.
 
-- [ ] **Step 5: Run, lint, commit**
+- [ ] **Step 5: Run them to verify they fail** — `cd backend && uv run --frozen pytest tests/slicing/test_store.py tests/api/test_slice_workflow.py tests/test_slice_replay.py -v` → import errors.
 
-Run: `cd backend && uv run --frozen pytest tests/slicing tests/api/test_slice_workflow.py -v && uv run --frozen mypy && uv run --frozen ruff check . && uv run --frozen ruff format --check .`
-Expected: PASS
+- [ ] **Step 6: Implement** the migration (a NEW file, `$(date -u +%Y%m%dT%H%MZ)_native_slices.sql`), the settings fields, `store.py`, `component.py`, `start.py`, the workflow, models and activities, and the registration in `_run_library_worker`. Then record the histories: `SCADBUDDY_RECORD_HISTORIES=1 uv run --frozen pytest tests/test_slice_replay.py -v`, and commit them.
+
+- [ ] **Step 7: Run, lint, commit**
+
+Run: `cd backend && uv run --frozen pytest tests/slicing tests/api/test_slice_workflow.py tests/test_slice_replay.py tests/api/test_settings.py tests/api/test_settings_runtime.py tests/test_settings_store.py -v && uv run --frozen mypy && uv run --frozen ruff check . && uv run --frozen ruff format --check .`
+Expected: PASS; `test_settings_runtime.py` lists `slicer_backend` among `ENV_SEEDED` and `"live"` in `applies`, and nothing else moves.
 
 ```bash
-git add backend/scadbuddy/migrations backend/scadbuddy/slicing backend/scadbuddy/workflows/slicing.py backend/scadbuddy/core backend/scadbuddy/library/settings_store.py backend/scadbuddy/main.py backend/scadbuddy/workflows/client.py backend/tests
-git commit -m "feat(slicing): slicer_backend setting, native_slices and the SliceWorkflow around slice_plate"
+git add backend/scadbuddy backend/tests
+git commit -m "feat(slicing): slicer_backend, native_slices and SliceWorkflow around slice_plate"
 ```
 
 ---
 
 ### Task 12: The print dialog's preview on the native slicer
 
+Ruling C1: `preview_run` runs on the `bambuddy` queue, which in prod is the storeless print worker (`build_print_deps`, `worker.py:888`), so it only starts the slice (`start_native_slice` with `activity.client()`); every byte moves on `library`. The read routes run in the API.
+
 **Files:**
 - Create: `backend/scadbuddy/slicing/preview.py`
-- Modify: `backend/scadbuddy/bambuddy/preview.py:89-146` (`start_preview`), `:220-246` (`read_preview`), `:60-86` (`PreviewStarted.slicer`, `SlicePreview.progress: int | None`, `.warnings: list[str]`, `.slicer: Literal["bambuddy","native"] = "bambuddy"`), `bambuddy/operations.py:300-334` (`preview_run` passes the slicing component), the two `preview-slices/{job_id}` routes (`api/library_print.py:1124-1136`, `api/printing.py:981`)
-- Modify: `backend/scadbuddy/workflows/housekeeping.py:89-129` (`housekeeping_sweep_native_slices` beside `PREVIEWS_SWEEP`: `NativeSliceStore.sweep(PREVIEW_GRACE)` then `content.delete` per key, and the `transfer_puts` prune from Task 10; behind `workflow.patched("housekeeping-sweep-native-slices")`, following the sweeps' switch)
-- Test: `backend/tests/api/test_print_preview_native.py` (requires_temporal + pg; uses `fake_slicer`)
+- Modify: `backend/scadbuddy/bambuddy/preview.py`: `PreviewStarted` (:60) gains `slicer: Literal["bambuddy", "native"] = "bambuddy"`; `SlicePreview` (:75) gains `progress: int | None = None`, `warnings: list[str] = []` and `slicer: Literal["bambuddy", "native"] = "bambuddy"`; `start_preview` (:89) gains `native: NativeSliceStarter | None = None` and, after `plan_run`, branches on `settings.slicer_backend`; `read_toolpath` (:264)'s semaphore, cache and parse become `_toolpath(key, fetch: Callable[[], Awaitable[bytes | None]]) -> bytes`, which it and the native read share
+- Modify: `backend/scadbuddy/bambuddy/operations.py`: `bambuddy_kinds_over` (:80) takes `native_slices: NativeSliceStore | None = None` and `native: NativeSliceStarter | None = None`; `preview_run` (:321) passes them to `start_preview` with `activity.client()`; `bambuddy_kinds` (:67) and the print worker's call of `bambuddy_kinds_over` (`worker.py`, beside `build_print_deps` :888) build them from the settings pool and `native_slice_starter(settings)`
+- Modify: the four read routes: `api/printing.py` `get_preview_slice` (:1045) and `get_preview_toolpath` (:1065), `api/library_print.py` (:1367 and :1382): a query parameter `slicer: Literal["bambuddy", "native"] = "bambuddy"`; `native` reads through `slicing/preview.py`, `bambuddy` as today. The slicer comes from the request, never from the live setting, so a switch while a dialog is open cannot misroute, and a native id equal to a Bambuddy preview row's id reads its own slicer's row (Review Focus 8)
+- Modify: `backend/scadbuddy/workflows/housekeeping.py`: two sweeps, each behind its own patch in `_run`'s loop as the others are (:210-224), both appended last to `SWEEPS` (:120), with timeouts in `sweep_timeout`:
+  - `NATIVE_SLICES_SWEEP = "housekeeping_sweep_native_slices"`, `NATIVE_SLICES_PATCH = "housekeeping-sweep-native-slices"`: `NativeSliceStore.sweep(PREVIEW_GRACE)` then `BlobRefs.drop_holder(HOLDER, str(id))` per id; `sweep_content` deletes the blobs on its next pass (no `content.delete` here). It obeys the sweeps' switch, as `PREVIEWS_SWEEP` does: with the sweeps off, `sweep_content` does not run either.
+  - `TRANSFER_PUTS_SWEEP = "housekeeping_prune_transfer_puts"`, `TRANSFER_PUTS_PATCH = "housekeeping-prune-transfer-puts"`: `TransferPuts.prune(timedelta(days=1))`; also in `PRUNE_SWEEPS` (:145), like the claims sweep, so it runs with the sweeps off.
+  - Their activities in `main.py` `_housekeeping_activities` (:512), as `sweep_preview_slices` (:558) is.
+- Test: `backend/tests/api/test_print_preview_native.py` (`requires_temporal`, `requires_postgres`; Task 11's fake slicer), `backend/tests/test_housekeeping_replay.py`, `backend/tests/fixtures/housekeeping_histories/native_slices.json` (new)
 
 **Interfaces:**
-- Consumes: `prepare_run`, `plan_run` (`print_run.py`), `_laid_out_for` (`send.py:265-306`) for the laid-out 3MF bytes, `build_presets`, `native_preset_key`, `NativeSliceStore`, `SliceWorkflow`, `slice_progress`, `read_sliced`.
+- Consumes: `start_native_slice`, `native_slice_starter`, `slice_progress`, `NativeSliceStore`, `NativeSliceStarter`, `HOLDER`, `SLICING` (Task 11), `TransferPuts.prune` (Task 10), `read_sliced`, `plate_gcode` (Task 9), `MAX_SLICED_BYTES` (`preview.py:52`).
 - Produces:
   ```python
-  async def start_native_preview(client: BambuddyClient | None, source: PrintSource, settings: StoredSettings,
-                                 slicing: Slicing, request: PrintRunRequest, *, subject: str) -> PreviewStarted
-      # prepare + plan as start_preview does (a Bambuddy client only when one is configured: with none, `local:` presets are refused);
-      # laid-out bytes → content.put(kind="slice") → BlobRef; presets = build_presets; key = native_preset_key(plan, plate, profiles.version);
-      # a reusable row → PreviewStarted(job_id=row.id, slicer="native"); else NativeSliceStore.start +
-      # client.start_workflow(SliceWorkflow, id=workflow_id, id_conflict_policy=USE_EXISTING, task_queue=settings.temporal_task_queue_library)
+  # slicing/preview.py
   async def read_native_preview(slicing: Slicing, slice_id: int, subject: str) -> SlicePreview
-      # running → status="running", progress=slice_progress(...).total_percent; completed → read_sliced(content.read(key), plate_id);
-      # failed → status, failure
+      # 404 for no row of that subject; running → status "running", progress = slice_progress(...).total_percent (None before a beat);
+      # completed → read_sliced(the blob, row.plate_id): print_time_seconds, slots = [PreviewSlot(slot_id, grams, side=None)],
+      #   filament_used_g, filament_changes, warnings; failed → status "failed", failure; always slicer="native"
+  async def read_native_toolpath(slicing: Slicing, slice_id: int, subject: str) -> bytes
+      # 404 / 409 as read_toolpath; the blob read whole past no MAX_SLICED_BYTES (else 422), plate_gcode, then preview._toolpath
+      # under a cache key no Bambuddy entry can equal: (row.id, 0, row.sliced_blob_key, row.plate_id)
   ```
-  `start_preview`/`read_preview` branch on `settings.slicer_backend` at their top; the two slicers' job ids are different id spaces, and the row's `subject` check refuses a cross-read.
+  `start_preview` gains `native: NativeSliceStarter | None = None, native_slices: NativeSliceStore | None = None, temporal: Client | None = None`. Its native branch: `ApiError` 503 when any is `None` ("the native slicer is not set up here: <which>"); else `start_native_slice(temporal, native_slices, native, library_file_id=planned.library_file_id, plan=plate.plan, plate_id=plate.plate_id, subject=subject)` and `PreviewStarted(job_id=row.id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan, slicer="native")`. The Bambuddy branch is today's code. `side` stays `None` on native: the side-mismatch warning (`PreviewPane.tsx:101`) goes quiet there, a follow-up issue Task 15 files.
 
-- [ ] **Step 1: Write the failing test** — with `slicer_backend="native"` and the fake slicer: `POST …/preview-slice` returns a `job_id` and `slicer == "native"`; polling `GET …/preview-slices/{id}` reaches `completed` with `print_time_seconds == 3600`, `filament_used_g == 15.5`, `filament_changes == 2`; a second POST with the same choices returns the same `job_id`; the refused plate reaches `failed` with the stderr tail in `failure`; `GET` under another subject is 404; a row older than `PREVIEW_GRACE` is swept and its blob gone.
+- [ ] **Step 1: Write the failing tests** (`test_print_preview_native.py`, the Task 11 app, through the routes):
+  - `test_a_native_preview_completes`: `POST …/preview-slice` → `slicer == "native"`; polling `GET …/preview-slices/{id}?slicer=native` reaches `completed` with `print_time_seconds == 3600`, `filament_used_g == 15.5`, `filament_changes == 2`, `slots[*].side is None`.
+  - `test_the_same_choices_answer_the_same_job`: a second POST → the same `job_id`, the fake's `calls` still 1.
+  - `test_progress_while_running`: with the fake's `hold`, the read is `running` with `progress == 40`.
+  - `test_a_refused_plate_fails_with_its_stderr`: `failure` contains `plate 99 is empty`.
+  - `test_another_subject_reads_404`.
+  - `test_the_toolpath_of_a_native_slice` (preflight: the toolpath route): `GET …/preview-slices/{id}/toolpath?slicer=native` → 200 and the bytes `toolpath.parse(gcode).encode()` gives; 409 while running.
+  - `test_a_native_id_never_reads_a_bambuddy_preview` (Review Focus 8): with a Bambuddy preview row of the same id recorded for the same subject, `?slicer=native` reads the native row and no `?slicer` reads Bambuddy's.
+  - `test_native_without_profiles_is_503`.
+  - `test_the_sweep_removes_a_settled_slice_and_its_holds`: a row backdated past `PREVIEW_GRACE`; the native-slices sweep, then `sweep_content(grace=0)` → the row gone, its sliced key no longer `stat`s.
+  - `test_the_bambuddy_preview_is_unchanged`: `slicer_backend="bambuddy"` → `slicer == "bambuddy"` and `tests/api/test_print_preview.py` passes as it is.
+  - `test_native_library_with_native_slicer` (preflight: the combination): `library_backend="native"` and `slicer_backend="native"` → `completed`.
 
-- [ ] **Step 2: Run to verify it fails** — `cd backend && uv run --frozen pytest tests/api/test_print_preview_native.py -v` → fails.
+- [ ] **Step 2: Extend the housekeeping replay** — rename `test_record_print_attachments` to `test_record_native_slices`, writing `native_slices.json` (never rewrite `print_attachments.json`; its assertion `names == list(SWEEPS)` now includes the two sweeps); add `"native_slices"` to the replay list; extend the module docstring with the two patches.
 
-- [ ] **Step 3: Implement.**
+- [ ] **Step 3: Run to verify they fail** — `cd backend && uv run --frozen pytest tests/api/test_print_preview_native.py -v` → fails.
 
-- [ ] **Step 4: Run the preview tests, both slicers** — `cd backend && uv run --frozen pytest tests/api/test_print_preview_native.py $(grep -rl read_preview tests/api | tr '\n' ' ') -v` → PASS (the Bambuddy path unchanged).
+- [ ] **Step 4: Implement**, then record: `SCADBUDDY_RECORD_HISTORIES=1 uv run --frozen pytest tests/test_housekeeping_replay.py -k record -v`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the preview and housekeeping tests, both slicers**
+
+Run: `cd backend && uv run --frozen pytest tests/api/test_print_preview_native.py tests/api/test_print_preview.py tests/test_housekeeping_replay.py $(git grep -l PRUNE_SWEEPS -- tests | tr '\n' ' ') -v`
+Expected: PASS; every earlier housekeeping history replays.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend/scadbuddy/slicing/preview.py backend/scadbuddy/bambuddy/preview.py backend/scadbuddy/bambuddy/operations.py backend/scadbuddy/api backend/scadbuddy/workflows/housekeeping.py backend/tests
+git add backend
 git commit -m "feat(slicing): the print dialog's background slice runs on the native slicer when selected"
 ```
 
@@ -804,34 +1011,54 @@ git commit -m "feat(slicing): the print dialog's background slice runs on the na
 
 ### Task 13: `PrintRunWorkflow` on the native slicer
 
+Rulings C1, C2. The run neither builds presets nor touches the store: a `library`-queue activity `slice_run` starts the shared `SliceWorkflow` (or joins the one the dialog started) and waits for it, and `print_sliced_upload`, also on `library`, puts the sliced file where the queue takes it from. A child workflow is not used: in temporalio 1.34.0 `start_child_workflow` takes no `id_conflict_policy` (checked in the pinned `temporalio/workflow/_workflow_ops.py`), so a dialog's running execution of the same id would fail the child's start.
+
 **Files:**
-- Create: `backend/scadbuddy/migrations/<now>_output_bambuddy_slices_blob.sql` (`ALTER TABLE output_bambuddy_slices ADD COLUMN sliced_blob_key text;`)
-- Modify: `backend/scadbuddy/bambuddy/print_run.py:1371-1393` (`PlannedRun.slicer: Literal["bambuddy","native"]` and `.slicer_queue: str`, read from the live settings in `plan_run`), `workflows/printing.py:323-370` (`_slice` branches), `workflows/print_activities.py` (new activities `print_native_slice_prepare`, `print_sliced_upload`), `workflows/print_models.py` (`NativeSliceInput`, `NativeSlicePrepared`, `SlicedUploadInput`), `bambuddy/dispatch.py:179` (`QueueOutcome.sliced_blob_key: str | None = None`), `bambuddy/uploads.py:570,703-747` (`SlicedCopy.sliced_blob_key`, written by `record`)
-- Test: `backend/tests/api/test_print_run_native.py` (requires_temporal + pg); a history fixture of the Bambuddy path exported before the change and replayed after (`tests/fixtures/print_run_histories/`, created if absent)
+- Create: a NEW migration `backend/scadbuddy/migrations/$(date -u +%Y%m%dT%H%MZ)_output_bambuddy_slices_blob.sql`, named by `date -u` when you create it: `ALTER TABLE output_bambuddy_slices ADD COLUMN sliced_blob_key text;`
+- Modify: `backend/scadbuddy/bambuddy/print_run.py`: `PlannedRun` (:1390) gains `slicer: Literal["bambuddy", "native"] = "bambuddy"` and `library_queue: str = "library"` (the defaults keep every recorded `print_plan` result reading as Bambuddy's); `plan_run` (:1472) takes `native: NativeSliceStarter | None = None` and, with `settings.slicer_backend == "native"`, sets `slicer="native"` and `library_queue=native.library_queue`, or refuses with `ApiError` 503 when `native` is `None`; its reuse lookup (`source.recorded_slice(…, slice_request(plan, plate_id).preset_key)`, around :1628) uses `native_preset_key(plan, plate_id, native.version)` when native, so a reprint reuses the native slice's uploaded file
+- Modify: `backend/scadbuddy/workflows/print_activities.py`: `PrintDeps` (:114) gains `native: NativeSliceStarter | None = None`, which `print_plan` passes to `plan_run`; the API's and the print worker's `PrintDeps` are built with `native_slice_starter(settings)`
+- Modify: `backend/scadbuddy/bambuddy/dispatch.py` `QueueOutcome` (:37): `native_slice_id: int | None = None`, `sliced_blob_key: str | None = None`. `slice_job_id` stays a Bambuddy job id and is `None` on native, so `REUSED_GONE_PATCH`'s `job_id is not None` test (`workflows/printing.py:447`) reslices a gone native upload through `_slice` again (natively: the row is `completed`, so it re-uploads without slicing)
+- Modify: `backend/scadbuddy/bambuddy/uploads.py`: `SlicedCopy` (:34) gains `sliced_blob_key: str | None = None`; `_record_sliced`'s insert (:743) writes it. It records which blob was sliced, as provenance: nothing reads it, and its blob is swept with its `native_slices` row (Task 15 says so in spec §5.4)
+- Modify: `backend/scadbuddy/bambuddy/print_source.py` (:489): `SlicedCopy(…, sliced_blob_key=outcome.sliced_blob_key)`
+- Modify: `backend/scadbuddy/workflows/printing.py`: `NATIVE_SLICER_PATCH = "native-slicer"` beside `REUSED_GONE_PATCH` (:180); `_slice` (:328) returns `tuple[SliceStarted | NativeSliced, int]`, and the `QueueOutcome(...)` (:472) takes `native_slice_id`/`sliced_blob_key` from a `NativeSliced`
+- Modify: `backend/scadbuddy/workflows/print_models.py` (`SliceRunInput`, `NativeSliced`, `SlicedUploadInput`), `backend/scadbuddy/workflows/slicing_activities.py` (`slice_run`, `print_sliced_upload`, registered on `library` in `_run_library_worker` with Task 11's)
+- Test: `backend/tests/api/test_print_run_native.py` (`requires_temporal`, `requires_postgres`), `backend/tests/test_print_replay.py`, `backend/tests/fixtures/print_run_histories/native_sliced.json`, `native_slicer_refused.json` (new)
 
 **Interfaces:**
+- Consumes: `start_native_slice`, `NativeSliceStarter`, `native_slice_starter`, `Slicing.starter`, `SliceWorkflowResult`, `SLICE_TIMEOUT`, `SLICE_RETRY` (Task 11), `native_preset_key`, `Profiles` (Task 8), `FAILED` (`workflows/print_models.py:35`) and `problem_of` (`workflows/problems.py:68`), `upload_into` (`bambuddy/commits.py:66`), `NativeLibrary.upload` (`print_library/native.py:253`).
 - Produces:
   ```python
-  class NativeSliceInput(BaseModel): planned: PlannedRun; plate: PlatePlan; run_id: str
-  class NativeSlicePrepared(BaseModel): slice_id: int; workflow_id: str; preset_key: str; reused_blob_key: str | None;
-                                        workflow_input: SliceWorkflowInput | None     # None when reused
-  # activity print_native_slice_prepare (bambuddy queue): the plate's laid-out bytes (as print_plan laid them out) → content.put(kind="slice");
-  #   build_presets; native_preset_key; NativeSliceStore.reusable → reused_blob_key, else NativeSliceStore.start + the SliceWorkflowInput
-  class SlicedUploadInput(BaseModel): planned: PlannedRun; plate: PlatePlan; sliced_blob_key: str
-  # activity print_sliced_upload (bambuddy queue): content.read(key) → upload_into(client, f"<copy name>.sliced.3mf", bytes, folder_id=inbox)
-  #   → the library file id the Bambuddy queue takes; recorded by print_record through QueueOutcome.sliced_library_file_id
+  class SliceRunInput(BaseModel): library_file_id: int; plan: SlicePlan; plate_id: int; subject: str
+  class NativeSliced(BaseModel): slice_id: int; preset_key: str; sliced_blob_key: str
+  class SlicedUploadInput(BaseModel): planned: PlannedRun; plate_id: int; sliced: NativeSliced
+  # activity slice_run (library): start_native_slice, then await the workflow's handle.result() while heartbeating every 10 s;
+  #   completed → NativeSliced; failed → ApplicationError(failure, PrintRunError(status=422 if refused else 502,
+  #   title="The slice failed", detail=failure), type=FAILED, non_retryable=True), so problem_of reports it (never SLICE_LOST)
+  SLICE_RUN_TIMEOUT = SLICE_RETRY.maximum_attempts * SLICE_TIMEOUT + timedelta(minutes=10)
+  # activity print_sliced_upload (library) -> int: the sliced blob's bytes into the copy's folder as
+  #   f"{stem of the copy's filename}.plate{plate_id}.sliced.3mf": upload_into(client, …, folder_id=planned.folder_id) on Bambuddy's
+  #   library, NativeLibrary.upload on the native one; the library file id print_enqueue queues
   ```
-  In `_slice`, after `if plate.plan is None`: `if planned.slicer == "native" and workflow.patched("native-slicer"):` → `print_native_slice_prepare` (SHORT, READ_RETRY) → unless reused, `execute_child_workflow(SliceWorkflow.run, prepared.workflow_input, id=prepared.workflow_id, task_queue=<library queue>, parent_close_policy=ABANDON)` (a child, so the preview's reuse row and the run's slice are one execution; `USE_EXISTING` on the child id when the dialog started it first) → `print_sliced_upload` (SHORT, READ_RETRY) → return `(SliceStarted(job_id=prepared.slice_id, preset_key=prepared.preset_key), uploaded_library_file_id)`, and set `QueueOutcome.sliced_blob_key` where the outcome is built (`printing.py:432-438`). A `SlicerError` ends the run as `FAILED` with the result's `failure`, never `SLICE_LOST`.
+  In `_slice`, after the `plate.plan is None` refusal: `if planned.slicer == "native" and workflow.patched(NATIVE_SLICER_PATCH):` → `slice_run` with `SliceRunInput(library_file_id=planned.library_file_id, plan=plate.plan, plate_id=plate.plate_id, subject=accepted.run.subject)` (`_slice` gains a `subject: str` parameter, which `_print` passes) (`task_queue=planned.library_queue`, `start_to_close_timeout=SLICE_RUN_TIMEOUT`, `heartbeat_timeout=HEARTBEAT`, `retry_policy=READ_RETRY`: re-attaching is idempotent) → `print_sliced_upload` (`task_queue=planned.library_queue`, SHORT, READ_RETRY) → `return native, uploaded`. `patched` is asked only on that branch, so a Bambuddy run's history never records the marker and every recorded history replays unchanged. The library queue's name reaches the workflow in `PlannedRun.library_queue` (a workflow reads no settings). No `print_slice_start` or `print_slice_wait` runs on this branch.
 
-- [ ] **Step 1: Write the failing test** — a run with `slicer_backend="native"`, the fake slicer and the test's fake Bambuddy for the queue succeeds; `output_bambuddy_slices.sliced_blob_key` is set and `sliced_library_file_id` is the fake Bambuddy's upload id; the history shows no `print_slice_start`; with the refused plate the run fails with the stderr tail in its error.
+- [ ] **Step 1: Write the failing tests** (`test_print_run_native.py`, the Task 11 app with the fake slicer and the fake Bambuddy routes `tests/api/test_print_run_choices.py` `run_routes` sets up):
+  - `test_a_native_run_slices_uploads_and_queues`: the run succeeds; the queue's `library_file_id` is the fake Bambuddy's upload id of `<stem>.plate1.sliced.3mf`; `output_bambuddy_slices.sliced_blob_key` is the row's; the history has `slice_run` and `print_sliced_upload` and no `print_slice_start`; `QueueOutcome.slice_job_id is None` and `native_slice_id` is the row id.
+  - `test_a_refused_plate_fails_the_run_with_its_stderr`: the run ends `failed` with `plate 99 is empty` in its error, never `SLICE_LOST`.
+  - `test_the_dialog_and_the_run_share_one_slice` (Review Focus 6, C2): start the dialog's preview with the fake's `hold`, start the run, release → one `slice_plate` call; both read the same `native_slices` row.
+  - `test_a_gone_native_upload_is_resliced` (`REUSED_GONE`): the fake Bambuddy answers the first `print_enqueue` with the gone-slice refusal → `_slice` runs again, `slice_plate` is not called again (the row is completed), a second upload is queued.
+  - `test_a_reprint_reuses_the_native_upload`: a second run of the same choices queues the first upload (`plan_run`'s reuse under the native key).
+  - `test_bambuddy_runs_are_unchanged`: `slicer_backend="bambuddy"` → `print_slice_start` in the history, no patch marker.
+  - `test_native_library_run` (preflight: the combination): `library_backend="native"` and `slicer_backend="native"` → succeeds; the sliced file is a native library file.
 
-- [ ] **Step 2: Run to verify it fails** — `cd backend && uv run --frozen pytest tests/api/test_print_run_native.py -v` → fails.
+- [ ] **Step 2: Record and add the histories** — in `test_a_native_run_slices_uploads_and_queues` and `test_a_refused_plate_fails_the_run_with_its_stderr`, with `SCADBUDDY_RECORD_HISTORIES=1`, write the run's history to `native_sliced.json` and `native_slicer_refused.json`; add both names to `test_print_run_replays_its_recorded_history`'s list (`tests/test_print_replay.py`) and a `NATIVE_SLICER_PATCH` paragraph to its docstring. Never re-record an existing history.
 
-- [ ] **Step 3: Implement**, with the replay fixture check.
+- [ ] **Step 3: Run to verify they fail** — `cd backend && uv run --frozen pytest tests/api/test_print_run_native.py -v` → fails.
 
-- [ ] **Step 4: Run the print suite** — `cd backend && uv run --frozen pytest tests/api/test_print_run_native.py $(ls tests/api/test_print_run*.py | tr '\n' ' ') tests/workflows -v` → PASS; the Bambuddy-path history replays.
+- [ ] **Step 4: Implement** the migration (a NEW file), then record the two histories (`SCADBUDDY_RECORD_HISTORIES=1 uv run --frozen pytest tests/api/test_print_run_native.py -k "queues or refused" -v`).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the print suite** — `cd backend && uv run --frozen pytest tests/api/test_print_run_native.py tests/test_print_replay.py $(ls tests/api/test_print_run*.py | tr '\n' ' ') -v` → PASS; all 22 recorded histories and the two new ones replay.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add backend
@@ -840,53 +1067,104 @@ git commit -m "feat(printing): PrintRunWorkflow slices on the native slicer behi
 
 ---
 
-### Task 14: Progress in the print dialog
+### Task 14: The print dialog's progress, its slicer, and the setting
 
 **Files:**
-- Modify: `frontend/src/lib/usePreviewSlice.ts` (`PreviewSliceState.progress: number | null`, from `read.progress` while running), `frontend/src/components/print/PreviewPane.tsx:214-222` (the `slice-status` span shows a `<progress max={100}>` bar, `data-testid="slice-progress"`, when `progress != null`, with the text `Slicing… 40%`), the msw mock of `preview-slices/{id}` (`grep -rl preview-slices frontend/src/mocks`) answering `progress` on a running native slice
-- Test: `frontend/src/components/print/PreviewPane.test.tsx` (a running read with `progress: 40` renders the bar at 40; a Bambuddy read without `progress` renders the text only), `frontend/src/lib/usePreviewSlice.test.ts` (progress updates between polls)
+- Modify: `frontend/src/lib/usePreviewSlice.ts`: `PreviewSliceState.progress: number | null` (the read's `progress` while running, `null` otherwise); the `PreviewStarted.slicer` it got is passed to every read and to the toolpath URL
+- Modify: `frontend/src/lib/printSource.ts` (`readPreview(jobId, slicer)`, `toolpathUrl(jobId, slicer)`, :55-57 and :133-149) and `frontend/src/api/client.ts` (`getPreviewSlice`, `getLibraryPreviewSlice`, `previewToolpathUrl`, `libraryPreviewToolpathUrl`, :1726-1734): `?slicer=native` only when native, so a Bambuddy read's URL is today's
+- Modify: `frontend/src/components/print/PreviewPane.tsx`: the `slicing` branch of `slice-status` (:269) shows `Slicing… 40%` and a `<progress max={100} value={40} data-testid="slice-progress">` when `progress != null`; the text alone otherwise
+- Modify: `frontend/src/pages/SettingsPage.tsx`: a `slicer_backend` select (`bambuddy` "Bambuddy's slicer", `native` "ScadBuddy's slicer (Bambu Studio CLI)") beside `library_backend` (:112, :200, :1272), applying live (no restart badge)
+- Modify: `frontend/src/mocks/features/printPreview.ts` (:52: a native read answers `running` with `progress` once, then `completed`), `frontend/src/mocks/fixtures.ts` and `frontend/src/mocks/features/settings.ts` (`slicer_backend: 'bambuddy'`)
+- Test: `frontend/src/components/print/PreviewPane.test.tsx`, `frontend/src/lib/usePreviewSlice.test.ts`, `frontend/src/pages/SettingsPage.sections.test.tsx`
 
 **Interfaces:**
-- Consumes: `SlicePreview.progress` and `.slicer` from the regenerated `schema.d.ts` (`pnpm gen:api` runs in `typecheck`).
+- Consumes: `PreviewStarted.slicer`, `SlicePreview.progress`, `.slicer`, `.warnings`, the `slicer` query parameter (Task 12), `slicer_backend` on the settings routes (Task 11), all from the regenerated `schema.d.ts` (`pnpm gen:api` runs in `typecheck`).
 
-- [ ] **Step 1: Write the failing tests.**
-- [ ] **Step 2: Run to verify they fail** — `cd frontend && pnpm test -- PreviewPane usePreviewSlice` → FAIL.
+- [ ] **Step 1: Write the failing tests**
+  - `PreviewPane`: a running read with `progress: 40` renders `slice-progress` with `value` 40 and the text `Slicing… 40%`; a Bambuddy read without `progress` renders `Slicing…` and no bar; a failed native read's `failure` (`"The slicer refused the plate: plate 99 is empty"`) is the `slice-error` alert's text verbatim (spec §5.5).
+  - `usePreviewSlice`: `progress` follows two polls (20 then 60); a native start's reads and toolpath URL carry `slicer=native`, a Bambuddy start's carry none.
+  - `SettingsPage`: the `slicer_backend` select saves `native` with no restart notice.
+- [ ] **Step 2: Run to verify they fail** — `cd frontend && pnpm test -- PreviewPane usePreviewSlice SettingsPage` → FAIL.
 - [ ] **Step 3: Implement** — a native `<progress>` styled with the pane's tokens; no new library.
 - [ ] **Step 4: Run** — `cd frontend && pnpm lint && pnpm typecheck && pnpm test && pnpm build` → PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
 git add frontend/src
-git commit -m "feat(frontend): the print dialog shows the native slicer's progress"
+git commit -m "feat(frontend): the print dialog shows the native slicer's progress; slicer_backend in Settings"
 ```
 
-> **My call, departing from spec §5.4:** no `slice:<job>` realtime topic in this plan. `realtime.ts` documents that events "carry ids, never content", and nothing on the Python side sees a heartbeat except a `describe()`, so a topic would be a poll republished. The dialog already polls `read_preview` every 2 s (`RESLICE_POLL_MS`); `progress` rides on that read. Revisit when the Rust worker has a path to publish and the realtime contract allows a percent.
+> **My call, as spec §5.4 now reads:** no `slice:<job>` realtime topic. `realtime.ts` documents that events "carry ids, never content", and nothing on the Python side sees a heartbeat except a `describe()`, so a topic would be a poll republished. The dialog already polls every 2 s (`RESLICE_POLL_MS`); `progress` rides on that read.
 
 ---
 
-### Task 15: Dashboards, docs and the agent's view
+### Task 15: Dashboards, docs, spec and follow-ups
 
 **Files:**
-- Modify: `deploy/grafana/scadbuddy-printing.json` (a "Slice duration" panel on `scadbuddy_render_stage_seconds{stage="slice"}`, p50/p95, and its count)
-- Modify: `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §5.4 (a one-line note pointing at Task 14's call), `docs/ai/operating.md` (a line: `slicer_backend` and what the agent sees in `get_settings`), `CLAUDE.md` Layout (`backend/scadbuddy/slicing/` bullet: models, transfer, presets, slice_info, store, preview, component; `workflows/slicing.py`; the internal blob routes)
-- Check: `agent/src/tools/coverage.ts` needs no entry (the routes are unchanged; the internal ones are hidden from the schema); `cd agent && pnpm test -- coverage` confirms
+- Modify: `deploy/grafana/scadbuddy-printing.json` (a "Slice duration" panel on `scadbuddy_render_stage_seconds{stage="slice"}`, p50/p95, and its count; the series is declared in `backend/scadbuddy/core/metrics.py:287`)
+- Modify: `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md`, each change a sentence or two citing its ruling or measurement:
+  - §5.2: the internal blob routes serve every store backend that has a content store (`s3`, `bambuddy`; not `local`, which has none, `store/factory.py:84`); presigned S3 is GET only (`presign_get`), presigned PUT and adopting its object a follow-up (Ruling C3, the issue below); the token is new, signed under a key derived from the KEK, so the native slicer needs `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_API_INTERNAL_URL` (`RemoteOutputs` has no token: correct the "as `RemoteOutputs` already uses" line); `slice` blobs are held by `blob_refs` while their `native_slices` row stands (Ruling C5).
+  - §5.3: the profiles are copied into the API image from the `slicer-dist` stage at build time, not mirrored as a `preset_bundle` blob (no such kind exists); the preset key's version is the API image's `BAMBU_STUDIO_VERSION` (Ruling C7); a `local` filament or printer preset is refused on the native slicer while Bambuddy serves process values only (Task 8's re-measurement, with its date), unless that measurement found otherwise.
+  - §5.4: `SliceWorkflow` runs on the `library` queue and is started, never run, by the print worker's `preview_run`; the run shares it through the `slice_run` activity (Rulings C1, C2); in tier 2 the sliced file is still uploaded to the print library for the queue (`print_sliced_upload`), and `sliced_blob_key` is provenance whose blob is swept with its row; the read routes take `slicer`; `side` is `None` on native (the follow-up below).
+  - §5.5: the retry policy is four attempts (three retries), and a `TransferRefused` prepares again once (Ruling C4); the failure text is `stderr_tail` for a `SlicerError` only.
+  - §8: the slicer image and the API image deploy together, since the preset key carries the API image's Bambu Studio version (Ruling C7).
+- Modify: `README.md` "Slicer worker (#3821)": the API side (the KEK and `SCADBUDDY_API_INTERNAL_URL` on the API, the slicer pod reaching that URL, `store_backend` `s3` or `bambuddy`, the print worker's `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` and `_SLICER` matching the API's) and a "Rolling out" list: deploy both images together, check `scadbuddy-slicer --check-cli` and one preview slice with `slicer_backend` still `bambuddy`… then flip `slicer_backend` to `native` in Settings (live), and back the same way.
+- Modify: `docs/ai/operating.md`: a line that `get_settings` shows `slicer_backend` and `update_settings` changes it (an outward call, as every settings write).
+- Modify: `CLAUDE.md` Layout: a `backend/scadbuddy/slicing/` bullet (models, profiles, presets, slice_info, transfer and transfer_token, store, start, preview, component; `workflows/slicing.py` on `library`; `api/internal_blobs.py`, hidden; the replay fixtures `tests/fixtures/slice_workflow_histories/`).
+- Check: `agent/src/tools/coverage.ts` needs no entry (no new public route; the internal ones are hidden, and the four read routes only gained a query parameter); `cd agent && pnpm test -- coverage` confirms.
 
-- [ ] **Step 1: Add the panel and run the lint** — `KUSTOMIZE=<path to kustomize 5.6.0> .github/scripts/lint-dashboard.sh` → clean (the series is declared in `core/metrics.py:278`).
-- [ ] **Step 2: Docs edits.**
-- [ ] **Step 3: Agent check** — `cd agent && pnpm test -- coverage` → PASS.
-- [ ] **Step 4: Commit**
+- [ ] **Step 1: Add the panel and lint** — `KUSTOMIZE=<kustomize v5.6.0> .github/scripts/lint-dashboard.sh` → clean.
+- [ ] **Step 2: The spec, README, operating guide and CLAUDE.md edits.**
+- [ ] **Step 3: File the follow-ups** with `gh issue create --repo eh-homelab/ScadBuddy`, each `Refs #3818, #3822` with a session tag: "presigned S3 PUT for the slicer's output, with the backend adopting its `pending/` object" (C3), "the native slicer's `side` per slot for the side-mismatch warning" (`extruders.py`'s plan can fill it), and, if Task 8's re-measurement still refuses filament values, "`local` filament presets on the native slicer". Put their numbers in the spec lines above.
+- [ ] **Step 4: Agent check** — `cd agent && pnpm test -- coverage` → PASS.
+- [ ] **Step 5: Commit**
 
 ```bash
-git add deploy/grafana docs CLAUDE.md
-git commit -m "docs(slicing): dashboard panel, layout notes and the operating guide for the native slicer"
+git add deploy/grafana docs README.md CLAUDE.md
+git commit -m "docs(slicing): dashboard panel, spec rulings, rollout and layout notes for the native slicer"
+```
+
+---
+
+### Task 15b: The #4080 review nits (#4099)
+
+Ruling C6. Closes #4099.
+
+**Files:**
+- Modify: `workers/rust/crates/sb-transfer/src/lib.rs` (`TransferError::InvalidHeader`'s `Display`, :86: `invalid transfer header: {why}`, as the other variants carry `http:` and `io:`)
+- Modify: `workers/rust/crates/sb-slicer/tests/runner.rs`, and a fake beside `tests/fake-bambu-studio.sh` (or a `FAKE_` switch in it) that starts `setsid sh -c 'echo held >&2; sleep 30' &`, writes the child's pid to `$FAKE_HOLDER_PID_FILE`, and exits 0 with its sliced 3MF written
+- Create: `.github/scripts/rust-toolchain-pin.sh`, `.github/scripts/rust-toolchain-pin.test.sh`, `.github/workflows/rust-toolchain-pin.yml`
+- Modify: `CLAUDE.md` "CI and caching rules" (a line on the check), `.github/workflows/ci.yml` only to point the pin's comment (:1611) at the check
+
+**Interfaces:**
+- `rust-toolchain-pin.sh [--check]`: reads the SHA after `dtolnay/rust-toolchain@` in `ci.yml` and `gh api repos/dtolnay/rust-toolchain/commits/master --jq .sha`; prints both; with `--check` exits 1 when they differ, naming the line to change. The action has no release tags, so Dependabot never moves this pin (#4099).
+- `rust-toolchain-pin.yml`: `schedule` weekly and `workflow_dispatch`, `ubuntu-latest`, `permissions: contents: read`, runs the script with `--check` and `GH_TOKEN: ${{ github.token }}`; a failure is the reminder, as `agent-durable-pin.yml` is for its pin.
+
+- [ ] **Step 1: Write the failing tests**
+  - `sb-transfer`: `assert_eq!(TransferError::InvalidHeader("invalid header name \"a b\"".into()).to_string(), "invalid transfer header: invalid header name \"a b\"")`.
+  - `runner.rs` `stderr_held_outside_the_group_is_abandoned_after_the_grace`: the setsid fake → `run` returns `Ok` with `exit_code == 0` within `STDERR_GRACE + 2 s`, and `stderr_tail` contains `held`; the test then kills the holder by the pid in its file (`nix::sys::signal::kill`), never by name.
+  - `rust-toolchain-pin.test.sh`: with a stub `gh` on `PATH` answering a fixed SHA, `--check` passes on a `ci.yml` copy pinned to it and fails, naming the line, on one pinned elsewhere.
+- [ ] **Step 2: Run to verify they fail** — `cd workers/rust && cargo test --workspace` → the two Rust tests fail; `bash .github/scripts/rust-toolchain-pin.test.sh` → fails (no script).
+- [ ] **Step 3: Implement** the prefix, the fake and the script and workflow.
+- [ ] **Step 4: Run the `rust` job's commands and the lint job's** — `cd workers/rust && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`, then `shellcheck .github/scripts/*.sh && bash .github/scripts/rust-toolchain-pin.test.sh && actionlint` → PASS.
+- [ ] **Step 5: Commit**
+
+```bash
+git add workers/rust .github CLAUDE.md
+git commit -m "chore(slicer): #4080 review nits: InvalidHeader prefix, setsid stderr test, toolchain pin check
+
+Fixes #4099"
 ```
 
 ---
 
 ## Self-review notes
 
-- **Spec coverage.** §5.1 boundary → Tasks 5, 6. §5.2 activity, queue, `TransferUrl` inputs and PUT outputs, no credentials or database in the worker, the env-only configuration, heartbeats, `SlicerError`, 192 non-retryable, process-group kill, 60 s heartbeat timeout, concurrency `cpus/2` → Tasks 1, 3, 6, 7, 10, 11. §5.2's internal blob routes and presigned S3 → Task 10 (the `presign_*` pair consumed from the S3 plan, not defined). §5.3 presets as files, flattening, overrides, `local:` via Bambuddy, `preset_key` with slicer and version → Task 8 (the profiles reach the API image by `COPY --from=slicer`, my call, noted there). §5.4 `slicer_backend`, `SliceWorkflow`, `native-slicer` patch, `output_bambuddy_slices` column, preview switch, progress → Tasks 11–14 (the realtime topic deferred, Task 14 note). §5.5 failure surface → Tasks 6, 12, 13. §7.1 workspace layout (`sb-transfer`, `sb-temporal`, `sb-slicer`, `bins/scadbuddy-slicer`; `sb-render` and `scadbuddy-render-tools` named, not built), vectors, OTel, the stage histogram → Tasks 1–4, 6. §7.2 activities only, `task_queue=` behind a patch, no queue renamed → Tasks 7, 11, 13. §7.3 is the render-tools plan's: nothing here is a render activity or queue. §7.4 one-activity workflow until 1.31 → Task 11.
-- **Types.** `TransferUrl`, `SlicePlateInput/Output`, `SliceProgress` (Task 1) are the names in Tasks 2, 3, 6, 10, 11; `PendingPut`, `Transfers.mint_get/mint_put/finish_put` (Task 10) in Task 11; `PresetFiles`, `build_presets`, `native_preset_key` (Task 8) in Tasks 11–13; `NativeSliceStore` methods in Tasks 11–13; `SliceWorkflowInput` (Task 11) in Task 13.
-- **Review Focus.** 1–3 → Task 6; 4 → Task 8; 5 → Task 10.
-- **Proportion.** Fifteen tasks against a four-section spec slice; code blocks are tests and signatures, bodies only where the argv, the token format and the fake CLI's protocol are fixed by the spec.
-- **Notes to the parent.** (a) The Bambuddy print path still needs the sliced file in Bambuddy's library (`print_sliced_upload`, Task 13), so a native slice on a Bambuddy-printed job costs one upload; tier 3's native print path removes it. (b) Resolved by the spec change: the worker reaches every store through URLs the API mints. (c) `SlicePreview.slots[].side` is `None` on the native slicer: the side comes from Bambuddy's `filament-requirements` today; `extruders.py`'s own nozzle plan can fill it in a follow-up. (d) `transfer_token.py` derives its key from the KEK (`SCADBUDDY_SECRET_KEY_FILE`), which flows already require on prod; a deployment without it cannot use the native slicer on a non-S3 store, and `build_store`-style readiness says so at start.
+- **Spec coverage.** §5.1 boundary → Tasks 5, 6. §5.2 activity, queue, `TransferUrl` inputs and PUT outputs, no credentials or database in the worker, the env-only configuration, heartbeats, `SlicerError`, 192 non-retryable, process-group kill, 60 s heartbeat timeout, concurrency `cpus/2` → Tasks 1, 3, 6, 7, 10, 11. §5.2's internal blob routes → Task 10, on every backend with a content store; presigned GET only (Ruling C3; presigned PUT a follow-up filed in Task 15). §5.3 presets as files, flattening, overrides, `local:` via Bambuddy, `preset_key` with slicer and version → Task 8 (profiles copied into the API image from `slicer-dist`; version from the API image, Ruling C7). §5.4 `slicer_backend`, `SliceWorkflow`, `native-slicer` patch, `output_bambuddy_slices` column, preview switch, progress → Tasks 11–14 (no realtime topic, as §5.4 says). §5.5 failure surface → Tasks 6, 11 (four attempts, Ruling C4), 12, 13, 14 (the alert's text). §7.1–§7.3 → Tasks 1–7 as before. §7.4 one-activity workflow until 1.31 → Task 11. §8 rollout → Task 15 (README; both images together). Where a ruling departs from the spec, Task 15 edits the section.
+- **Rulings.** C1 → Tasks 11 (`slice_prepare` on `library`), 12 (`preview_run` only starts), 13 (`slice_run`, `print_sliced_upload` on `library`). C2 → Task 11 `start_native_slice` (`USE_EXISTING`) and Task 13 `slice_run`, with `native_workflow_id` known before the bytes. C3 → Task 10. C4 → Task 11 `SLICE_RETRY`, the re-prepare and the failure text. C5 → Task 11 holds, Task 12 drops. C6 → Task 15b. C7 → Task 8 `Profiles.version`, Task 15 §8. Plus: `transfer_puts` on `PRUNE_SWEEPS` (Task 12); `slice_progress` by activity type (Task 11); presets built in `slice_prepare` (Task 11); the `/toolpath` routes and the id collision (Task 12, the `slicer` parameter); `NativeSliceRead` (Task 9); `slicer-dist` (Task 8); `QueueOutcome.slice_job_id` stays Bambuddy's (Task 13); the spec notes and follow-up issues (Task 15); README rollout (Task 15).
+- **History.** No task puts bytes or preset documents in a history: `SliceWorkflowInput` carries a library file id, a `SlicePlan` (refs and overrides, as `print_plan` already records) and a plate; `SlicePrepared` carries URLs; the records carry keys. Task 11 asserts it.
+- **Temporal versioning.** `PrintRunWorkflow` (the unversioned-in-API, pinned-in-worker `bambuddy` queue): `NATIVE_SLICER_PATCH`, asked only on the native branch; the 22 recorded histories replay and two new ones are added (Task 13). `Housekeeping` (unversioned `library`): two new sweeps, each behind its own patch, one new history (Task 12). `SliceWorkflow` (unversioned `library`, new): three histories from the start, so its first change needs a patch (Task 11).
+- **Types.** `Profiles.version`, `build_presets`, `native_preset_key` (Task 8) in Tasks 11–13; `plate_gcode`, `read_sliced`, `NativeSliceRead`, `sliced_3mf` (Task 9) in Tasks 11–13; `Transfers.mint_get(key)`, `mint_put()`, `finish_put(put, sha256=, size=)`, `PendingPut`, `TransferPuts.prune` (Task 10) in Tasks 11, 12; `NativeSliceStore`, `HOLDER`, `native_workflow_id`, `start_native_slice`, `NativeSliceStarter`, `slice_progress`, `SliceWorkflowResult`, `SLICE_TIMEOUT`, `SLICE_RETRY` (Task 11) in Tasks 12, 13; `PreviewStarted.slicer`, `SlicePreview.progress/.slicer/.warnings`, the `slicer` parameter (Task 12) in Task 14.
+- **Review Focus.** 1–3 → Task 6; 4 → Task 8; 5 → Task 10; 6 → Task 13; 7 → Task 11; 8 → Task 12.
+- **Proportion.** Code blocks are tests, signatures, two tables and the token format; bodies only where the token format and the fake CLI's protocol are fixed.
+- **Notes to the parent.** (a) The Bambuddy print path still needs the sliced file in the print library (`print_sliced_upload`), so a native slice on a Bambuddy-printed job costs one upload; tier 3's native print path removes it. (b) `local` has no content store, so the native slicer needs `store_backend` `s3` or `bambuddy` (Task 10, recorded in §5.2). (c) `side` is `None` on native (follow-up, Task 15). (d) The transfer token's key derives from the KEK, which flows already require on prod; without it `slice_prepare` fails the slice saying so. (e) Ruling C1 names `ContentStore.link` for a native library input; this plan mints the GET on the library file's own key instead, because a linked key keeps its ref's kind `library`, and `print_library/sweep.py` `sweep_library` removes, after its one-hour `ORPHAN_GRACE`, every `library` key no library row names, which a slice's linked key is not. No bytes move either way.

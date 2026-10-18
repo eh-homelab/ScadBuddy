@@ -5,7 +5,9 @@ the script through the Code Mode tool over ScadBuddy's host functions.
 
 It registers no Update, Query or Signal of its own: answers, approvals and status are the
 harness's (`provide_callback_result`, `tool_approval`, `agent_status`), and `close` ends
-it. Unversioned (Ruling 13): a change must replay
+it. AUTO_UPGRADE on the versioned ``scadbuddy-projects`` worker (#4146; never pinned,
+Ruling 13: a flow may run for weeks): an open run moves to each new build at its next
+task and replays there, so a change must replay
 `tests/fixtures/project_workflow_histories/`, or go behind `workflow.patched()`.
 """
 
@@ -33,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.flow_models import FlowRecord, ProjectionWrite
     from scadbuddy.workflows.flow_steps import project
     from scadbuddy.workflows.flow_tools import run_flow_tool
+    from scadbuddy.workflows.registered import REGISTERED_HOST_FUNCTIONS
 
 PROJECT_WORKFLOW = "ProjectWorkflow"
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
@@ -81,6 +84,34 @@ class FlowStart(BaseModel):
     #: The commit of the version it runs, in `data/flows` (#2503); "" from a run started
     #: before flows were in git, so recorded histories decode unchanged.
     commit: str = ""
+    #: The host functions the starting API's build offers (#4146), what its type check
+    #: passed the script against; empty from an API from before, which checks nothing.
+    host_functions: list[str] = []
+
+
+class UnregisteredHostFunctionError(Exception):
+    """A host function the run's start names that this build does not have (#4146).
+    The API's new pods start runs while the old build is still current, in a rolling
+    update; run there, the script would fail on the name as a script error. Raised so
+    that it fails the workflow task, not the run (`offers_host_functions`): Temporal
+    retries the task (at once, then once per workflow task timeout, 10 s), and an
+    AUTO_UPGRADE run's retry goes to the current build, which a newer build with the
+    function becomes as it starts."""
+
+
+def offers_host_functions(start: FlowStart) -> bool:
+    """True when this run's worker offers every host function its start names; raises
+    `UnregisteredHostFunctionError` otherwise. A worker that does not say (the
+    ``Replayer``) and a start from before #4146 (none named) check nothing."""
+    registered = workflow.extern_functions().get(REGISTERED_HOST_FUNCTIONS)
+    if registered is None or not start.host_functions:
+        return True
+    missing = sorted(set(start.host_functions) - registered())
+    if missing:
+        raise UnregisteredHostFunctionError(
+            f"this build lacks the host functions {missing}; retrying on the current build"
+        )
+    return True
 
 
 @agent.defn(name=PROJECT_WORKFLOW)
@@ -166,6 +197,15 @@ class ProjectWorkflow:
             ),
             start_to_close_timeout=_ACTIVITY,
         )
+        # A build without a host function the start names defers here, before the script
+        # (#4146), by failing the workflow task, never the run. Not earlier: the first
+        # task carries the start's `execute` Update, which a failed task loses (measured,
+        # tests/flows/test_projects_versioning.py), and the run would wait for a script
+        # for ever. Not by raising here either: this handler runs in the harness's own
+        # task, which turns any Exception into the message's error. The SDK checks a
+        # condition in its event loop, outside every task, so one that raises fails the
+        # activation. It adds no command: a run that does not wait replays unchanged.
+        await workflow.wait_condition(lambda: offers_host_functions(start))
         self._upsert("running")
         output: str = await self._runner.run_tool(
             str(workflow.uuid4()), self._flow, script=message.script

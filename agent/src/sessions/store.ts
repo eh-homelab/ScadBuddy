@@ -1,5 +1,5 @@
 import type { SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import { openBytes, sealBytes } from '../secrets.js'
 import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/payloadCodec.js'
 
@@ -60,6 +60,9 @@ import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/
 // colliding with row id 5. Rows written before sealing still hold
 // plaintext `entry` and are read as they are, until the backfill.
 
+/** A condition an append is written under, checked in its transaction (`appendIf`). */
+export type AppendFence = (tx: TransactionSql) => Promise<boolean>
+
 // `entry_type` is plaintext, so only a short token-like type is stored; anything else is NULL, never content.
 const ENTRY_TYPE = /^[a-z][a-z0-9_-]{0,63}$/
 
@@ -96,18 +99,26 @@ export class PostgresSessionStore implements SessionStore {
   private readonly appending = new Map<string, Promise<unknown>>()
 
   async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
-    if (entries.length === 0) return
-    const turn = (this.appending.get(key.sessionId) ?? Promise.resolve()).then(() => this.appendNow(key, entries))
+    await this.appendIf(key, entries)
+  }
+
+  /**
+   * `append`, only while `fence` holds, checked in the transaction that inserts the rows (an
+   * AgentSession placement that still holds its turn, sessions/turnHost.ts). Whether it was written.
+   */
+  async appendIf(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean> {
+    if (entries.length === 0) return true
+    const turn = (this.appending.get(key.sessionId) ?? Promise.resolve()).then(() => this.appendNow(key, entries, fence))
     const tail = turn.catch(() => {})
     this.appending.set(key.sessionId, tail)
     try {
-      await turn
+      return await turn
     } finally {
       if (this.appending.get(key.sessionId) === tail) this.appending.delete(key.sessionId)
     }
   }
 
-  private async appendNow(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+  private async appendNow(key: SessionKey, entries: SessionStoreEntry[], fence?: AppendFence): Promise<boolean> {
     const subpath = subpathOf(key)
     const dek = await this.keyOf(key.sessionId, true)
     try {
@@ -136,14 +147,17 @@ export class PostgresSessionStore implements SessionStore {
       // with the entries) or after it, and is refused as a fresh key lookup would be.
       // The tombstone is its own SELECT, not a NOT EXISTS on the insert: ON CONFLICT
       // also inserts no row for a repeated uuid, so a zero count could not tell the two apart.
+      // The fence, when given, is checked in the same transaction, after the lock.
       const subject = `session-${key.sessionId}`
-      await this.sql.begin(async (tx) => {
+      return await this.sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
         const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
         if (forgotten) throw new SubjectForgotten(`${subject} was forgotten: its transcript is not written`)
+        if (fence && !(await fence(tx))) return false
         await tx`
           INSERT INTO ai_session_entries ${tx(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed')}
           ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
+        return true
       })
     } finally {
       dek.fill(0)

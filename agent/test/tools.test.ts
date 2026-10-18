@@ -8,7 +8,7 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import { RENDER_LIMITS, RenderLimiter } from '../src/tools/renderLimits.js'
 import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
-import { runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { idempotencyKey, runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { CALL_TIMEOUT_MS } from '../src/bridge/hub.js'
 import { TAB_WAIT_S } from '../src/sessions/manager.js'
 import { sameRepository } from '../src/tools/libraries.js'
@@ -718,6 +718,19 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(first.body?.request_id).toBeTruthy()
     expect(second.body?.request_id).toBeTruthy()
     expect(second.body?.request_id).not.toBe(first.body?.request_id)
+  })
+
+  it('keys request_id on the call when it has one: the same call run again re-attaches, another call is a new print (spec §7)', async () => {
+    const runs = [{}, {}, {}] as { body?: { request_id?: string } }[]
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const key = 'durable:session:run-1:toolu_1'
+    for (const [i, callKey] of [key, key, 'durable:session:run-1:toolu_2'].entries()) {
+      server.use(...capturedRun(runs[i]!))
+      await tool('print_output').execute(args, { ...ctx(), callKey })
+    }
+    expect(runs[0]!.body?.request_id).toBe(idempotencyKey({ callKey: key }))
+    expect(runs[1]!.body?.request_id).toBe(runs[0]!.body?.request_id)
+    expect(runs[2]!.body?.request_id).not.toBe(runs[0]!.body?.request_id)
   })
 
   describe('a POST or poll that ScadBuddy never answered (#470)', () => {

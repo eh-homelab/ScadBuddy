@@ -32,11 +32,13 @@ yq '.jobs[].steps[] | select(.id == "edit") | .run' "$workflow" > "$work/edit.sh
 export IMAGE=ghcr.io/eh-homelab/scadbuddy
 export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export AGENT_DURABLE_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent-durable
+export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
 export MANIFEST_PROJECTS=applications/scadbuddy/scadbuddy-projects.yaml
 export MANIFEST_AGENT_DURABLE=applications/scadbuddy/scadbuddy-agent-durable.yaml
+export MANIFEST_SLICER=applications/scadbuddy/scadbuddy-slicer.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
 # What the step before it found: deploy/grafana exists at REVISION.
@@ -46,7 +48,8 @@ DIGEST="sha256:$(printf '2%.0s' {1..64})"
 REVISION="$(printf '2%.0s' {1..40})"
 AGENT_DIGEST="sha256:$(printf '4%.0s' {1..64})"
 AGENT_DURABLE_DIGEST="sha256:$(printf '5%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST
+SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -54,6 +57,8 @@ pinned="$IMAGE:$VERSION@$DIGEST"
 agent_pinned="$AGENT_IMAGE:$VERSION@$AGENT_DIGEST"
 durable="$AGENT_DURABLE_IMAGE:sha-3333333@sha256:$(printf '6%.0s' {1..64})"
 durable_pinned="$AGENT_DURABLE_IMAGE:$VERSION@$AGENT_DURABLE_DIGEST"
+slicer_old="$SLICER_IMAGE:sha-3333333@sha256:$(printf '8%.0s' {1..64})"
+slicer_pinned="$SLICER_IMAGE:$VERSION@$SLICER_DIGEST"
 failures=0
 
 fail() {
@@ -120,6 +125,7 @@ run() {
   [ $# -lt 3 ] || printf '%s\n' "$3" > "$work/repo/$MANIFEST_PRINT"
   [ $# -lt 4 ] || printf '%s\n' "$4" > "$work/repo/$MANIFEST_PROJECTS"
   [ -z "${durable_manifest:-}" ] || printf '%s\n' "$durable_manifest" > "$work/repo/$MANIFEST_AGENT_DURABLE"
+  [ -z "${slicer_manifest:-}" ] || printf '%s\n' "$slicer_manifest" > "$work/repo/$MANIFEST_SLICER"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   (cd "$work/repo" && git init -q)
   rerun
@@ -292,6 +298,49 @@ else
     || fail "empty durable deployment: wrong error: $(grep '::error' "$work/log")"
 fi
 durable_manifest=
+
+# 8. The slicer worker (#3822) has its own file, optional until clusters has it.
+#    Absent: not pinned, output none. Present: pinned to this build's digest.
+#    A build with no slicer image keeps the pin and warns (the one image whose
+#    absence is not an error). A file with no slicer line is an error.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^slicer=none$' "$work/out" || fail "no slicer file: slicer output is not none"
+else
+  fail "no slicer file: step failed: $(grep '::error' "$work/log")"
+fi
+slicer_manifest=$(deployment scadbuddy-slicer "$slicer_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "slicer: api image not pinned"
+  has_line "$slicer_pinned" "$MANIFEST_SLICER" || fail "slicer: slicer image not pinned"
+  grep -q '^slicer=pinned$' "$work/out" || fail "slicer: slicer output is not pinned"
+  grep -q "$MANIFEST_SLICER" "$work/out" || fail "slicer: not among the changed files"
+else
+  fail "slicer: step failed: $(grep '::error' "$work/log")"
+fi
+if SLICER_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "slicer, no image: api image not pinned"
+  has_line "$slicer_old" "$MANIFEST_SLICER" || fail "slicer, no image: old pin was not kept"
+  grep -q '^slicer=kept$' "$work/out" || fail "slicer, no image: slicer output is not kept"
+  grep -q '::warning.*keeping the slicer pin' "$work/log" || fail "slicer, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_SLICER" "$work/out" && fail "slicer, no image: kept file listed as changed"
+else
+  fail "slicer, no image: step failed: $(grep '::error' "$work/log")"
+fi
+slicer_manifest=$(deployment scadbuddy-slicer "$slicer_old" "$slicer_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "two slicer lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one slicer image line, found 2' "$work/log" \
+    || fail "two slicer lines: wrong error: $(grep '::error' "$work/log")"
+fi
+slicer_manifest=$(deployment scadbuddy-slicer "ghcr.io/eh-homelab/other:1")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "slicer file without its line: step passed, expected an error"
+else
+  grep -q 'expected exactly one slicer image line, found 0' "$work/log" \
+    || fail "slicer file without its line: wrong error: $(grep '::error' "$work/log")"
+fi
+slicer_manifest=
 
 # `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent
 # beside an overlay carrying those lines; the step must fail with that error.

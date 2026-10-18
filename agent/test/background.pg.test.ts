@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -9,6 +10,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
+import { AuditLog } from '../src/audit/log.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
@@ -17,8 +19,10 @@ import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
 import { NoUsableCredentialError } from '../src/harness/fallback.js'
 import { originPolicy } from '../src/http/origins.js'
+import { SessionBlobs } from '../src/sessions/blobs.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
+import { TurnHost } from '../src/sessions/turnHost.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
 import { SessionFiles } from '../src/workspace/store.js'
 import { managerAgents } from '../src/background/workflowAgents.js'
@@ -557,6 +561,55 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(Number(row!.cost_usd)).toBeCloseTo(0.06)
     expect(Number(row!.unpriced_cost_usd)).toBeCloseTo(0.05)
     classic.abortAll()
+  })
+
+  it("counts WebFetch's own model calls in the cost of an AgentSession turn: its result, the row and its audit row (#2684)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    let spend: ((cost: number) => Promise<void>) | undefined
+    const scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.01 }))
+    const unified = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // The turn's WebFetch answered with a nested query that cost 0.05 before Claude Code's result.
+      run: (run) =>
+        (async function* () {
+          await spend!(0.05)
+          yield* scripted.runner(run)
+        })(),
+      nestedQueries: (deps) => {
+        spend = deps.spent
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      audit: new AuditLog({ sql: db.sql }),
+    })
+    const { session } = await unified.start(browser, { origin: 'chat' })
+    // The row runs the turn as DurableTurns.send claims it; session_turn runs it here as TurnHost.
+    const turnId = randomUUID()
+    await db.sql`
+      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      WHERE id = ${session.id}`
+    const host = new TurnHost({ core: unified.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
+    const result = await host.run(
+      { sessionId: session.id, turnId, attempt: 'run:0', message: { turn_id: turnId, author: browser, text: 'fetch it', images: [], system_append: null } },
+      { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
+    )
+    // Each of the three places on its own (soft): the turn's result, as session.finish_turn writes it.
+    expect(result).toMatchObject({ status: 'done' })
+    expect.soft(result.tail?.find((e) => e.type === 'session.result')).toMatchObject({ costUsd: expect.closeTo(0.06) })
+    const [row] = await db.sql<{ cost_usd: string; unpriced_cost_usd: string }[]>`
+      SELECT cost_usd, unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
+    expect.soft(Number(row!.cost_usd)).toBeCloseTo(0.06)
+    expect.soft(Number(row!.unpriced_cost_usd)).toBeCloseTo(0.05)
+    // Its audit row (#1922), as a classic turn's.
+    const audit = await db.sql<{ cost_usd: string; cost_estimated_usd: string }[]>`
+      SELECT cost_usd, cost_estimated_usd FROM ai_audit WHERE session_id = ${session.id} AND kind = 'turn'`
+    expect.soft(audit.map((a) => [Number(a.cost_usd), Number(a.cost_estimated_usd)])).toEqual([[expect.closeTo(0.06), expect.closeTo(0.05)]])
+    await host.stop({ graceMs: 0, abortWaitMs: 0 })
+    unified.abortAll()
   })
 
   it("recycles the next turn's warm process for its budget after WebFetch spend, and logs why (#3597)", async () => {

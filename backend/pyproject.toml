@@ -61,7 +61,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.8",
-    "respx>=0.22",
+    "respx>=0.23,<0.24",
     "ruff>=0.7",
     "types-lxml>=2026.2.16",
     "pytest-split>=0.11",
@@ -69,6 +69,8 @@ dev = [
     "types-regex>=2026.9.29.20261005",
     "moto[server]>=5.1",
     "types-aiobotocore[s3]>=2.21,<3",
+    "aiomqtt>=2.3,<3",
+    "pyftpdlib[ssl]>=2.2",
 ]
 
 [tool.ruff]
@@ -108,5 +110,6 @@ markers = [
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
     "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose; it blinds the guard to every fallback in the test, so inject an expected type (ApiError, psycopg.OperationalError) instead when that proves the same point",
     "requires_fixtures: needs the Git LFS files under test-fixtures/ (git lfs pull), or SCADBUDDY_TEST_FIXTURES naming where they are",
+    "requires_slicer_profiles: needs Bambu Studio's BBL profiles under SCADBUDDY_SLICER_PROFILES_DIR (the app and test images ship them at /opt/slicer-profiles)",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
 ]

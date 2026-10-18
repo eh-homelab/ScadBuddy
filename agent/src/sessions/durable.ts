@@ -11,6 +11,8 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
+import { TASK_QUEUE } from '../temporal/names.js'
+import { SESSION_QUEUE, UNIFIED_SESSIONS_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
 import type { EventLog } from './eventLog.js'
@@ -45,12 +47,20 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 // - handoff: after the owner change is committed, `cancel_input`, best-effort; when
 //   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
 //
+// Which workflow runs a session is its `runtime` column, fixed by its first send (unified
+// runtime spec 2026-10-13 §5.1): the setting `unified_sessions = true` starts a NEW
+// session's workflow as AgentSession on `agent-sessions`; every other session, and every one
+// that has run a turn already, is a DurableSession on `agent`, for life. The gate calls, the
+// Updates after the first and the signals are by workflow id, the same for both types.
+//
 // The wire shapes are agent-durable's session/models.py (`SessionStart`, `Message`,
 // `ImageRef`, `Owner`). No prompt, image or tool content is logged or traced here.
 
 export const DURABLE_WORKFLOW = 'DurableSession'
 export const DURABLE_TASK_QUEUE = 'agent'
 export const SEND_MESSAGE_UPDATE = 'send_message'
+/** `ai_sessions.runtime`: the workflow type a session runs as. */
+export type SessionRuntime = 'durable' | 'unified'
 export const FORK_POINT_QUERY = 'fork_point'
 /** The most characters of entries one `fork_point` page carries: under Temporal's 512 KiB warning. */
 const FORK_PAGE_CHARS = 384 * 1024
@@ -70,6 +80,8 @@ const POLLER_FRESH_MS = 70_000
 const READY_DEADLINE_MS = 3_000
 /** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW */
 const WORKFLOW_TASK_QUEUE = 1
+/** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY */
+const ACTIVITY_TASK_QUEUE = 2
 
 /** What the workflow's validator refuses a second turn with (models.py, workflow.py). */
 const BUSY = 'busy'
@@ -143,6 +155,15 @@ export type DurableTurnsDeps = {
   events: EventLog
   /** Tests only: a queue other than `agent`. */
   taskQueue?: string
+  /** Tests only: a queue other than `agent-sessions`. */
+  sessionQueue?: string
+  /** Tests only: a queue other than `agent-tools`, where `acquire_worker` runs. */
+  toolsQueue?: string
+  /**
+   * This replica's session host queue (`agent-sessions.<identity>`, spec 2026-10-13 §5.2), when it
+   * serves AgentSession's turns; without it a unified session is not ready here.
+   */
+  sessionHostQueue?: string
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
@@ -154,7 +175,8 @@ export type DurableTurnsDeps = {
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
 /** A protobuf Timestamp (`seconds` may be a Long) as epoch ms; 0 when absent. */
-function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
+/** A protobuf timestamp (a poller's `lastAccessTime`) as epoch milliseconds; 0 when absent. */
+export function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
   return ts ? Number(String(ts.seconds ?? 0)) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0
 }
 
@@ -168,9 +190,12 @@ export class DurableTurns {
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
+  readonly #sessionQueue: string
+  readonly #toolsQueue: string
+  readonly #sessionHostQueue: string | undefined
   readonly #sendTimeoutMs: number
+  readonly #ready = new Map<SessionRuntime, { until: number; why: string | undefined }>()
   readonly #describe: DescribeSession
-  #ready: { until: number; why: string | undefined } | undefined
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -179,41 +204,78 @@ export class DurableTurns {
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
+    this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
+    this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
+    this.#sessionHostQueue = deps.sessionHostQueue
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
     this.#describe = deps.describe ?? durableDescriber(deps.client)
   }
 
+  /** The runtime a session that has run nothing would get at its first send: the `unified_sessions` flag (spec 2026-10-13 §5.1). */
+  async newRuntime(): Promise<SessionRuntime> {
+    const [row] = await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${UNIFIED_SESSIONS_SETTING}`
+    return row?.value === true ? 'unified' : 'durable'
+  }
+
   /**
-   * Why a new durable session could not run now, or undefined when it could (plan 5d
-   * Ruling 2): some agent-durable worker polls the `agent` queue. Until one does, a
-   * turn would wait on a queue no one reads, so the manager falls back or refuses at
-   * start instead. An answer from Temporal is reused for READY_TTL_MS, no answer for
-   * UNANSWERED_TTL_MS, so one blip does not refuse explicit durable starts for long.
-   * Only a poller seen within POLLER_FRESH_MS counts: Temporal keeps listing one for
-   * minutes after its worker has gone.
+   * Why a new durable session of `runtime` could not run now, or undefined when it could (plan
+   * 5d Ruling 2): a fresh poller on every queue its turns need. Until there is one, a turn
+   * would wait on a queue no one reads, so the manager falls back or refuses at start instead.
+   *
+   * - `durable` (DurableSession): agent-durable's workflow worker on `agent`.
+   * - `unified` (AgentSession, spec 2026-10-13 §5.1-5.2): the `agent-sessions` workflow worker;
+   *   the shared `agent-tools` activity worker, where `acquire_worker` places the turn; and this
+   *   replica's own `agent-sessions.<identity>`, the turn's host. Another replica's host queue
+   *   cannot be listed without knowing its identity; this one's stands for the build serving turns.
+   *
+   * An answer from Temporal is reused for READY_TTL_MS, no answer for UNANSWERED_TTL_MS, so one
+   * blip does not refuse explicit durable starts for long. Only a poller seen within
+   * POLLER_FRESH_MS counts: Temporal keeps listing one for minutes after its worker has gone.
    */
-  async unready(): Promise<string | undefined> {
-    const cached = this.#ready
+  async unready(runtime: SessionRuntime = 'durable'): Promise<string | undefined> {
+    const cached = this.#ready.get(runtime)
     if (cached && Date.now() < cached.until) return cached.why
     let why: string | undefined
     let answered = true
     try {
-      const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
-        this.#client.workflowService.describeTaskQueue({
-          namespace: this.#client.options.namespace,
-          taskQueue: { name: this.#taskQueue },
-          taskQueueType: WORKFLOW_TASK_QUEUE,
-        }),
-      )
-      const now = Date.now()
-      const live = (pollers ?? []).filter((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
-      if (!live.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+      if (runtime === 'durable') {
+        if (!(await this.#polled(this.#taskQueue, WORKFLOW_TASK_QUEUE))) {
+          why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+        }
+      } else if (!this.#sessionHostQueue) {
+        why = 'this agent service runs no session host worker (agent-sessions.<identity>), so it cannot place a unified session\'s turns'
+      } else {
+        const needed: [string, number, string][] = [
+          [this.#sessionQueue, WORKFLOW_TASK_QUEUE, 'session workflow worker'],
+          [this.#toolsQueue, ACTIVITY_TASK_QUEUE, 'agent-tools worker'],
+          [this.#sessionHostQueue, ACTIVITY_TASK_QUEUE, 'session host worker'],
+        ]
+        for (const [queue, type, what] of needed) {
+          if (!(await this.#polled(queue, type))) {
+            why = `no ${what} polls Temporal's "${queue}" queue`
+            break
+          }
+        }
+      }
     } catch {
       why = 'Temporal did not answer'
       answered = false
     }
-    this.#ready = { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why }
+    this.#ready.set(runtime, { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why })
     return why
+  }
+
+  /** Whether a worker polled `queue` (of `type`) within POLLER_FRESH_MS. */
+  async #polled(queue: string, type: number): Promise<boolean> {
+    const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
+      this.#client.workflowService.describeTaskQueue({
+        namespace: this.#client.options.namespace,
+        taskQueue: { name: queue },
+        taskQueueType: type,
+      }),
+    )
+    const now = Date.now()
+    return (pollers ?? []).some((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
   }
 
   /**
@@ -230,13 +292,18 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
-    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
+    // The runtime is recorded by the first send: the flag for a session that has run nothing, else DurableSession.
+    const flagged = (await this.newRuntime()) === 'unified'
+    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now() FROM prior
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(),
+         interrupt_requested = false,
+         runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 AND $6::boolean THEN 'unified' ELSE 'durable' END)
+       FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
-       RETURNING prior.prior_status, prior.durable_offset`,
+       RETURNING prior.prior_status, prior.durable_offset, ai_sessions.runtime`,
       // The turn's tool activities run with these, cut to what the owner holds then (#2320).
       [
         id,
@@ -245,6 +312,7 @@ export class DurableTurns {
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
         // The running turn (#2320).
         turn.turnId,
+        flagged,
       ],
     )
     if (!claimed) return undefined
@@ -265,7 +333,7 @@ export class DurableTurns {
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0)
+      await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0, claimed.runtime)
     } catch (err) {
       if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       // The refusal is what the caller hears, whatever the give-back meets.
@@ -296,7 +364,7 @@ export class DurableTurns {
    * workflow not found was removed by retention after it ended, and starting
    * `session-<id>` again would run the session's history-holding chat empty (#2078).
    */
-  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean): Promise<void> {
+  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean, runtime: SessionRuntime): Promise<void> {
     const start: SessionStart = {
       session_id: session.id,
       creator: wire(session.creator),
@@ -313,9 +381,10 @@ export class DurableTurns {
       system_append: turn.systemAppend,
       ...(turn.flow ? { flow: { run_id: turn.flow.run_id, call_id: turn.flow.call_id } } : {}),
     }
-    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
+    const unified = runtime === 'unified'
+    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(unified ? SESSION_WORKFLOW : DURABLE_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
-      taskQueue: this.#taskQueue,
+      taskQueue: unified ? this.#sessionQueue : this.#taskQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
       // A session whose workflow ended (failed, or terminated) lost its conversation:
@@ -358,6 +427,11 @@ export class DurableTurns {
    * count, and the read starts again.
    */
   async forkSource(sessionId: string): Promise<ForkSource | undefined> {
+    // Phase 6 forks an AgentSession session (its transcript is in ai_session_entries, not its workflow).
+    const [row] = await this.#sql<{ runtime: SessionRuntime | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${sessionId}`
+    if (row?.runtime === 'unified') {
+      throw new SessionError('invalid', `session ${sessionId} runs on the unified runtime, which cannot be forked yet; this is not supported until its fork lands`)
+    }
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     const page = (start: number) =>
       this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
@@ -413,6 +487,8 @@ export class DurableTurns {
       system_append: null,
       agent,
     }
+    // Its workflow is a DurableSession whatever the flag says, so its first send must not pick the type again.
+    await this.#sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${child.id}`
     try {
       await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
         this.#client.workflow.start<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
@@ -464,7 +540,8 @@ export class DurableTurns {
     }
     return {
       kind: 'result',
-      subtype: error?.code === 'error_max_budget_usd' ? 'error_max_budget_usd' : 'success',
+      // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).
+      subtype: error?.code === 'error_max_budget_usd' || error?.code === 'error_max_turns' ? error.code : 'success',
       costUsd: result?.costUsd ?? 0,
       turns: result?.turns ?? 0,
     }
@@ -477,17 +554,25 @@ export class DurableTurns {
    * yet is left to it.
    */
   async interrupt(session: SessionRecord, reason: string): Promise<boolean> {
-    const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean })[]>`
-      SELECT id, status, event_seq, durable_offset,
+    const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean; runtime: SessionRuntime | null })[]>`
+      SELECT id, status, event_seq, durable_offset, runtime,
         updated_at < now() - make_interval(secs => ${RUNNING_GRACE_MS / 1000}) AS settled
       FROM ai_sessions WHERE id = ${session.id}`
     if (!row || !RUNNING.includes(row.status)) return false
-    try {
-      await this.#gate.cancelInput(session.id, reason)
-    } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
-      // Unanswered: the Signal stops the turn and its parked calls all the same.
-      if (!(err instanceof DurableUnavailable)) throw err
+    if (row.runtime === 'unified') {
+      // The fast path (spec §5.6): the turn's replica reads the flag on its next tick and stops
+      // the turn there, a held call included, with no further model request. Its parked
+      // entries are not cancelled first (a cancelled one is a refusal the model would answer):
+      // the Signal below cancels them as the turn ends, and is the backstop for a missed tick.
+      await this.#sql`UPDATE ai_sessions SET interrupt_requested = true WHERE id = ${session.id} AND durable_turn_id IS NOT NULL`
+    } else {
+      try {
+        await this.#gate.cancelInput(session.id, reason)
+      } catch (err) {
+        if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
+        // Unanswered: the Signal stops the turn and its parked calls all the same.
+        if (!(err instanceof DurableUnavailable)) throw err
+      }
     }
     try {
       await this.#gate.interrupt(session.id, reason)
@@ -530,9 +615,16 @@ export class DurableTurns {
    * goes unanswered, the `interrupt` Signal (recorded even while no worker runs) ends
    * them and the turn; a session with no workflow has nothing parked.
    */
-  async handoff(session: SessionRecord, reason: string): Promise<void> {
+  async handoff(session: SessionRecord, reason: string, to: Owner): Promise<void> {
+    const [row] = await this.#sql<{ runtime: SessionRuntime | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${session.id}`
     try {
       await this.#gate.cancelInput(session.id, reason)
+      // An AgentSession's gate checks each later response against the new owner (§5.6).
+      if (row?.runtime === 'unified') {
+        await this.#gate.ownerChanged(session.id, to).catch(() => {
+          console.warn(`durable handoff: session ${session.id}'s workflow could not be told its new owner; it is told at its next turn`)
+        })
+      }
       return
     } catch (err) {
       if (err instanceof WorkflowNotFoundError) return

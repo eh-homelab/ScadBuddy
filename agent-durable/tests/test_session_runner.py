@@ -54,6 +54,7 @@ from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef
 from scadbuddy_durable.session.runner import (
+    DURABLE_PREFIX,
     IMAGE_TOO_LARGE,
     IMAGES_SERVER,
     NO_CREDENTIAL,
@@ -63,6 +64,7 @@ from scadbuddy_durable.session.runner import (
     HeldText,
     Image,
     ScadBuddyRunner,
+    SegmentCalls,
     TurnSettings,
     image_problem,
     image_size,
@@ -171,6 +173,8 @@ async def test_a_segment_runs_with_the_credential_and_what_is_left_of_the_budget
     # images server offering view_tool_images only (#2320).
     extra = dict(made["extra_options"])
     assert set(extra.pop("mcp_servers")) == {IMAGES_SERVER}
+    # The segment's own calls, published as they run (SegmentCalls).
+    assert set(extra.pop("hooks")) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
     assert extra == {
         "system_prompt": {"type": "preset", "preset": "claude_code", "append": "Be careful."},
         "allowed_tools": [VIEW_TOOL_IMAGES_TOOL],
@@ -883,6 +887,48 @@ def test_the_plugins_runner_publishes_text_through_the_held_contextvar() -> None
     finally:
         _EMIT.reset(token)
     assert [e["text"] for e in seen] == ["held"]
+
+
+def test_segment_calls_skip_what_the_plugin_publishes_itself() -> None:
+    """DURABLE_PREFIX is the plugin's own server's: a pin bump that renames it would
+    publish each durable call twice."""
+    from temporalio.claude_agent_sdk import _runner as plugin_runner
+
+    assert vars(plugin_runner)["PREFIX"] == DURABLE_PREFIX
+
+
+async def test_segment_calls_publish_a_segments_own_calls_as_they_run() -> None:
+    """Skill, Agent and a subagent's calls go out as they start and end, the subagent's
+    under its Agent call; the calls the workflow runs and publishes do not."""
+    calls = SegmentCalls(["Bash"])
+    hooks = calls.hooks()
+    started: Any = hooks["PreToolUse"][0].hooks[0]
+    ended: Any = hooks["PostToolUse"][0].hooks[0]
+    failed: Any = hooks["PostToolUseFailure"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started({"tool_name": "Skill", "tool_input": {"skill": "authoring"}}, "s1", None)
+        await ended({"tool_name": "Skill"}, "s1", None)
+        await started({"tool_name": "Agent", "tool_input": {}}, "a1", None)
+        sub = {"tool_name": "mcp__scadbuddy__get_model", "tool_input": {}, "agent_id": "x"}
+        await started(sub, "c1", None)
+        await failed({**sub, "hook_event_name": "PostToolUseFailure"}, "c1", None)
+        await started({"tool_name": f"{DURABLE_PREFIX}render_model", "tool_input": {}}, "d1", None)
+        await started({"tool_name": "Bash", "tool_input": {}}, "b1", None)
+        await ended({"tool_name": "Agent"}, "a1", None)
+        await started(sub, "c2", None)  # no Agent call open: no parent
+    finally:
+        _EMIT.reset(token)
+    assert [(e["type"], e["id"], e.get("parent"), e.get("status")) for e in seen] == [
+        ("tool_call", "s1", None, None),
+        ("tool_result", "s1", None, "done"),
+        ("tool_call", "a1", None, None),
+        ("tool_call", "c1", "a1", None),
+        ("tool_result", "c1", None, "failed"),
+        ("tool_result", "a1", None, "done"),
+        ("tool_call", "c2", None, None),
+    ]
 
 
 async def test_a_first_credentials_answer_still_reaches_the_transcript(
