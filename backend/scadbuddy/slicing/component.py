@@ -6,9 +6,11 @@ built on first use."""
 from __future__ import annotations
 
 from functools import cached_property
+from typing import Annotated
 
 from temporalio.client import Client
 
+from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.profiles import Profiles
@@ -69,3 +71,5 @@ def _build(core: Core, components: Components) -> Slicing:
 
 
 COMPONENT = Component(SLICING, build=_build)
+
+SlicingDep = Annotated[Slicing, component_dep(SLICING)]

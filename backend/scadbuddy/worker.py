@@ -83,6 +83,8 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
+from scadbuddy.slicing.start import native_slice_starter
+from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
@@ -940,6 +942,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         links=links,
         archive_cache=ArchiveCache(),
         library=partial(_given, library),
+        native_slices=NativeSliceStore(pool),
+        native=native_slice_starter(settings),
     )
     printing = PrintActivities(
         PrintDeps(

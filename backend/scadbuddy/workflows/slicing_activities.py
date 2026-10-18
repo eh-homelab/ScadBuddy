@@ -22,8 +22,9 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.component import PrintLibrary
+from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
-from scadbuddy.print_library.reads import served_reads
+from scadbuddy.print_library.reads import reads_for
 from scadbuddy.slicing.component import Slicing
 from scadbuddy.slicing.models import SlicePlateInput
 from scadbuddy.slicing.presets import build_presets, native_preset_key, needs_bambuddy
@@ -78,9 +79,15 @@ class SliceActivities:
     ) -> tuple[str, str]:
         """The copy's key and sha256. A native library file is read where it is (its
         own ``library-file-<id>`` blob: no bytes move); Bambuddy's is downloaded and
-        put as a ``slice``."""
+        put as a ``slice``. Which by its id, as `reads_for` decides: on the native
+        library a run still lays its copy out in Bambuddy's (Task 12's combination)."""
         file_id = input.library_file_id
-        if native is not None:
+        if is_native_id(file_id):
+            if native is None:
+                raise _refused(
+                    f"library file {file_id} is in ScadBuddy's own library, which does not"
+                    " serve here"
+                )
             key = blob_key(file_id)
             stat = await content.stat(key)
             if stat is None:
@@ -94,7 +101,7 @@ class SliceActivities:
         # Spooled to a file, never held whole: a laid-out copy can be large.
         with tempfile.TemporaryFile(dir=content.spool) as body:
             try:
-                reads = served_reads(file_id, client, None)
+                reads = reads_for(file_id, client, None)
                 async with aclosing(reads.download_library_file(file_id)) as chunks:
                     async for chunk in chunks:
                         await asyncio.to_thread(body.write, chunk)
@@ -128,7 +135,9 @@ class SliceActivities:
         settings = await asyncio.to_thread(self._settings_store().load)
         # Bambuddy only when the copy or a preset is read there (review M3): with none
         # configured, the image's presets still slice a native file.
-        wanted = native is None or await needs_bambuddy(input.plan, profiles)
+        wanted = not is_native_id(input.library_file_id) or await needs_bambuddy(
+            input.plan, profiles
+        )
         async with AsyncExitStack() as stack:
             client = (
                 await stack.enter_async_context(client_for(settings))

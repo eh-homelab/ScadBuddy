@@ -33,6 +33,8 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LIBRARY_TIMEOUT,
     LOST_SLICES_SWEEP,
+    NATIVE_SLICES_SWEEP,
+    NATIVE_SLICES_TIMEOUT,
     PREVIEWS_SWEEP,
     PREVIEWS_TIMEOUT,
     PRUNE_INTERVAL,
@@ -40,6 +42,8 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_TIMEOUT,
     SWEEP_TIMEOUT,
     SWEEPS,
+    TRANSFER_PUTS_SWEEP,
+    TRANSFER_PUTS_TIMEOUT,
     Housekeeping,
     ensure_schedule,
     ensure_schedules,
@@ -119,6 +123,8 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         ACTIVITY_SWEEP: ACTIVITY_TIMEOUT,
         ATTACHMENTS_SWEEP: ATTACHMENTS_TIMEOUT,
         LIBRARY_SWEEP: LIBRARY_TIMEOUT,
+        NATIVE_SLICES_SWEEP: NATIVE_SLICES_TIMEOUT,
+        TRANSFER_PUTS_SWEEP: TRANSFER_PUTS_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -258,8 +264,10 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_sweep_lost_slices",
         "housekeeping_activity",
         "housekeeping_sweep_library",
+        "housekeeping_prune_transfer_puts",
     ]
-    assert PREVIEWS_SWEEP not in sweeps
+    # The native slices obey the switch, as the Bambuddy background slices do.
+    assert PREVIEWS_SWEEP not in sweeps and NATIVE_SLICES_SWEEP not in sweeps
 
 
 async def _actions(client: Client, schedule_id: str, count: int) -> int:

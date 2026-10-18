@@ -120,6 +120,16 @@ ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
 #: The native print library's trash purge and orphan blobs (#3827); after the attachments.
 LIBRARY_SWEEP = "housekeeping_sweep_library"
 LIBRARY_PATCH = "housekeeping-sweep-library"
+#: The native slicer's settled slices (plan 2026-10-16 Task 12): rows past
+#: `PREVIEW_GRACE` deleted with their holds (`sweep_content` then collects the blobs), and
+#: the running rows whose execution is gone failed first. It obeys the sweeps' switch, as
+#: `PREVIEWS_SWEEP` does: with the sweeps off, `sweep_content` does not run either.
+NATIVE_SLICES_SWEEP = "housekeeping_sweep_native_slices"
+NATIVE_SLICES_PATCH = "housekeeping-sweep-native-slices"
+#: What the slicer worker PUT through the internal blob route (`transfer_puts`), a day
+#: on. On the prune Schedule too, like the claims, so it runs with the sweeps off.
+TRANSFER_PUTS_SWEEP = "housekeeping_prune_transfer_puts"
+TRANSFER_PUTS_PATCH = "housekeeping-prune-transfer-puts"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -136,6 +146,8 @@ SWEEPS = (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
     LIBRARY_SWEEP,
+    NATIVE_SLICES_SWEEP,
+    TRANSFER_PUTS_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -144,9 +156,17 @@ SWEEPS = (
 #: and the native print library's trash purge and orphan blobs (#3827), which the generic
 #: blob sweep skips, so with the sweeps off nothing else would collect them. Behind
 #: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
-#: Not the dialog's background slices (`PREVIEWS_SWEEP`): they obey the sweeps' switch,
-#: so with the sweeps off they stay in Bambuddy's library.
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP, LIBRARY_SWEEP)
+#: Not the dialog's background slices (`PREVIEWS_SWEEP`, `NATIVE_SLICES_SWEEP`): they
+#: obey the sweeps' switch, so with the sweeps off they stay. The transfer PUTs'
+#: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch.
+PRUNE_SWEEPS = (
+    SWEEPS[0],
+    SWEEPS[4],
+    LOST_SLICES_SWEEP,
+    ACTIVITY_SWEEP,
+    LIBRARY_SWEEP,
+    TRANSFER_PUTS_SWEEP,
+)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -174,6 +194,10 @@ ACTIVITY_TIMEOUT = timedelta(minutes=5)
 ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
 #: The library sweep purges trash past 30 days and deletes the blobs no row names.
 LIBRARY_TIMEOUT = timedelta(minutes=10)
+#: A delete, and a describe per running native slice past `LOST_AFTER`.
+NATIVE_SLICES_TIMEOUT = timedelta(minutes=5)
+#: One delete.
+TRANSFER_PUTS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -194,6 +218,10 @@ def sweep_timeout(sweep: str) -> timedelta:
         return ATTACHMENTS_TIMEOUT
     if sweep == LIBRARY_SWEEP:
         return LIBRARY_TIMEOUT
+    if sweep == NATIVE_SLICES_SWEEP:
+        return NATIVE_SLICES_TIMEOUT
+    if sweep == TRANSFER_PUTS_SWEEP:
+        return TRANSFER_PUTS_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -226,6 +254,10 @@ class Housekeeping:
             if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
                 continue
             if sweep == LIBRARY_SWEEP and not workflow.patched(LIBRARY_PATCH):
+                continue
+            if sweep == NATIVE_SLICES_SWEEP and not workflow.patched(NATIVE_SLICES_PATCH):
+                continue
+            if sweep == TRANSFER_PUTS_SWEEP and not workflow.patched(TRANSFER_PUTS_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

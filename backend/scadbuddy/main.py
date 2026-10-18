@@ -64,7 +64,7 @@ from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
 from scadbuddy.bambuddy.output_reader import LocalOutputs
-from scadbuddy.bambuddy.preview import sweep_preview_slices
+from scadbuddy.bambuddy.preview import PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
@@ -105,6 +105,7 @@ from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.start import sweep_native_slices
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -149,9 +150,11 @@ from scadbuddy.workflows.housekeeping import (
     HEARTBEAT_TIMEOUT,
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
+    NATIVE_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
+    TRANSFER_PUTS_SWEEP,
     ensure_schedules,
     library_worker,
 )
@@ -596,6 +599,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_library() -> None:
         await _heartbeating(_sweep_print_library_logged(state))
 
+    @activity.defn(name=NATIVE_SLICES_SWEEP)
+    async def sweep_native_slice_rows() -> None:
+        await _heartbeating(_sweep_native_slices_logged(state))
+
+    @activity.defn(name=TRANSFER_PUTS_SWEEP)
+    async def prune_transfer_puts() -> None:
+        await _heartbeating(_prune_transfer_puts_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -611,7 +622,38 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_activity,
         sweep_print_attachments,
         sweep_print_library,
+        sweep_native_slice_rows,
+        prune_transfer_puts,
     ]
+
+
+async def _sweep_native_slices_logged(state: AppState) -> None:
+    """The native slicer's settled slices (plan 2026-10-16 Task 12): the rows past
+    `PREVIEW_GRACE` with their holds, after failing the running ones whose execution is
+    gone. The blobs go on `sweep_content`'s next pass."""
+    slicing = state.components.get(SLICING)
+    try:
+        removed = await sweep_native_slices(
+            slicing.temporal(), slicing.store, finished_older_than=PREVIEW_GRACE
+        )
+    except Exception:
+        logger.exception("could not sweep the native slices")
+        raise
+    if removed:
+        logger.info("removed settled native slices", extra={"count": len(removed)})
+
+
+#: How long the slicer worker's PUT records are kept: a slice records its PUT within
+#: minutes, and a retry reuses the same pending key.
+TRANSFER_PUTS_TTL = timedelta(days=1)
+
+
+async def _prune_transfer_puts_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(state.components.get(SLICING).puts.prune, TRANSFER_PUTS_TTL)
+    except Exception:
+        logger.exception("could not prune the transfer PUTs")
+        raise
 
 
 async def _sweep_print_library_logged(state: AppState) -> None:

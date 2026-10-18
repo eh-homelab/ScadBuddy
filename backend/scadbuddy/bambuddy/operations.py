@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 from fastapi import status
+from temporalio import activity
 
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
@@ -49,6 +50,9 @@ from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.reads import NativeReads, no_native, reads_for
+from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.start import NativeSliceStarter
+from scadbuddy.slicing.store import NativeSliceStore
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -74,6 +78,8 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         links=core.print_links,
         archive_cache=components.get(ARCHIVE_CACHE),
         library=components.get(PRINT_LIBRARY).serving_native,
+        native_slices=components.get(SLICING).store,
+        native=components.get(SLICING).starter,
     )
 
 
@@ -85,6 +91,8 @@ def bambuddy_kinds_over(
     links: PrintLinkStore,
     archive_cache: ArchiveCache,
     library: NativeReads = no_native,
+    native_slices: NativeSliceStore | None = None,
+    native: NativeSliceStarter | None = None,
 ) -> list[OperationKind]:
     """The Bambuddy kinds over these stores: the API's, or the print worker's, which
     reads its outputs (#1060) and native library files (#3827) through the API."""
@@ -353,7 +361,18 @@ def bambuddy_kinds_over(
                     print_settings=naming.print_settings,
                 )
             return _json(
-                await start_preview(client, source, settings, uploads, body, subject=subject)
+                await start_preview(
+                    client,
+                    source,
+                    settings,
+                    uploads,
+                    body,
+                    subject=subject,
+                    # Ruling C1: only the start, on this (storeless) queue's client.
+                    native=native,
+                    native_slices=native_slices,
+                    temporal=activity.client(),
+                )
             )
 
     async def sidebar_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:

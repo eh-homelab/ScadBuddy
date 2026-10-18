@@ -20,16 +20,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from datetime import timedelta
 from typing import Literal
 
 from fastapi import status
 from pydantic import BaseModel, Field
+from temporalio.client import Client
 
 from scadbuddy.bambuddy import toolpath
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import ReuseSlice, slice_request
+from scadbuddy.bambuddy.dispatch import ReuseSlice, SlicePlan, slice_request
 from scadbuddy.bambuddy.models import SliceJob
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.print_run import (
@@ -43,6 +45,9 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.slicing import slice_info
+from scadbuddy.slicing.profiles import ProfileError
+from scadbuddy.slicing.start import NativeSliceStarter, start_native_slice
+from scadbuddy.slicing.store import NativeSliceStore
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,9 @@ class PreviewStarted(BaseModel):
     job_id: int
     plate_id: int
     nozzle_plan: NozzlePlan | None = None
+    #: Who slices it: ``native`` is a `native_slices` row's id, read with
+    #: ``?slicer=native`` (plan 2026-10-16 Task 12).
+    slicer: Literal["bambuddy", "native"] = "bambuddy"
 
 
 class PreviewSlot(BaseModel):
@@ -77,6 +85,10 @@ class SlicePreview(BaseModel):
     #: Filament loads after the first: each is a purge (``M620 S<n>A`` in the G-code).
     #: ``None`` when the sliced file could not be read.
     filament_changes: int | None = None
+    #: A native slice's total percent while it runs; ``None`` before its first beat.
+    progress: int | None = None
+    warnings: list[str] = Field(default_factory=list)
+    slicer: Literal["bambuddy", "native"] = "bambuddy"
 
 
 async def start_preview(
@@ -87,6 +99,9 @@ async def start_preview(
     request: PrintRunRequest,
     *,
     subject: str,
+    native: NativeSliceStarter | None = None,
+    native_slices: NativeSliceStore | None = None,
+    temporal: Client | None = None,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
     record the slice for ``subject``; the first plate when every plate prints.
@@ -116,6 +131,18 @@ async def start_preview(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "This plate prints a file sliced already, so there is nothing to slice.",
         )
+    if settings.slicer_backend == "native":
+        return await _start_native(
+            planned.library_file_id,
+            plate.plan,
+            plate.plate_id,
+            planned.nozzle_plan,
+            client,
+            subject=subject,
+            native=native,
+            native_slices=native_slices,
+            temporal=temporal,
+        )
     key = slice_request(plate.plan, plate.plate_id).preset_key
     job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
     if job_id is None:
@@ -137,6 +164,52 @@ async def start_preview(
             )
         )
     return PreviewStarted(job_id=job_id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
+
+
+async def _start_native(
+    library_file_id: int,
+    plan: SlicePlan,
+    plate_id: int,
+    nozzle_plan: NozzlePlan | None,
+    client: BambuddyClient,
+    *,
+    subject: str,
+    native: NativeSliceStarter | None,
+    native_slices: NativeSliceStore | None,
+    temporal: Client | None,
+) -> PreviewStarted:
+    """The laid-out copy sliced by `SliceWorkflow` (Ruling C1: this only starts it; every
+    byte moves on the ``library`` queue). Its ``job_id`` is the `native_slices` row's."""
+    missing = [
+        name
+        for name, value in (
+            ("Bambu Studio's profiles", native),
+            ("the native slice store", native_slices),
+            ("a Temporal client", temporal),
+        )
+        if value is None
+    ]
+    if native is None or native_slices is None or temporal is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"the native slicer is not set up here: {', '.join(missing)}",
+        )
+    try:
+        row = await start_native_slice(
+            temporal,
+            native_slices,
+            native,
+            library_file_id=library_file_id,
+            plan=plan,
+            plate_id=plate_id,
+            subject=subject,
+            client=client,
+        )
+    except ProfileError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    return PreviewStarted(
+        job_id=row.id, plate_id=plate_id, nozzle_plan=nozzle_plan, slicer="native"
+    )
 
 
 def _same_job(job: SliceJob, row: PreviewSlice) -> bool:
@@ -268,6 +341,16 @@ async def read_toolpath(
     if job.status != "completed" or job.result is None or sliced is None:
         raise ApiError(status.HTTP_409_CONFLICT, f"background slice {job_id} has not finished")
     key = (row.id or 0, sliced, job.result.name, row.plate_id)
+    return await _toolpath(key, lambda: _plate_gcode(client, sliced, row.plate_id))
+
+
+ToolpathKey = tuple[int, int, str | None, int]
+
+
+async def _toolpath(key: ToolpathKey, fetch: Callable[[], Awaitable[bytes | None]]) -> bytes:
+    """The toolpath of the plate G-code ``fetch`` gives (None when there is none that
+    can be read), cached under ``key``: Bambuddy's background slices and native ones share
+    the cache, the turns and the parse."""
     if (cached := _TOOLPATHS.get(key)) is not None:
         _TOOLPATHS.move_to_end(key)
         return cached
@@ -289,7 +372,7 @@ async def read_toolpath(
             return cached
         try:
             async with asyncio.timeout(TOOLPATH_DOWNLOAD_SECONDS):
-                gcode = await _plate_gcode(client, sliced, row.plate_id)
+                gcode = await fetch()
         except TimeoutError:
             raise ApiError(
                 status.HTTP_504_GATEWAY_TIMEOUT, "the sliced file took too long to download"
