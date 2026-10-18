@@ -426,6 +426,30 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     })
   }, 60_000)
 
+  it('ends a session parked on a call whose workflow is gone on Stop, and cancels the entry no run will resolve (#4018)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'print it' })
+    // The turn parked on an approval, then its workflow ended without resolving it.
+    const rid = `durable:${session.id}:run-1:toolu_p`
+    await db.sql`
+      INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, prompt,
+                                    requested_by, responders, expires_at)
+      VALUES (${rid}, ${session.id}, ${sessionWorkflowId(session.id)}, 'run-1', 'approval', 'print_output', 'print box', ${'a'.repeat(64)}, '',
+              ${db.sql.json({ kind: 'browser', id: 'browser', label: 'You' })}, ${['browser']}, now() + interval '1 hour')`
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    expect(await status(session.id)).toBe('idle')
+    expect(await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${session.id}`).toHaveLength(0)
+    const [response] = await db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_input_responses WHERE request_id = ${rid}`
+    expect(response?.outcome).toBe('cancelled')
+    const log = (await m.events.read(session.id)).map((e) => e.event)
+    expect(log).toContainEqual(expect.objectContaining({ type: 'error', code: 'turn_failed', message: expect.stringMatching(/workflow has ended/) }))
+    expect(log).toContainEqual(expect.objectContaining({ type: 'approval.resolved', id: rid, decision: 'cancelled' }))
+    // Once ended, Stop has nothing left to stop.
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+  }, 60_000)
+
   it('writes nothing on Stop when the gone workflow is open again by the time it is described (#4131 review)', async () => {
     const m = await durableManager()
     m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: QUEUE, describe: async () => 'open' })
