@@ -22,6 +22,7 @@ const CASES: { name: string; value: unknown }[] = [
   { name: 'a bare string', value: 'x' },
   // JSON.stringify escapes an unpaired surrogate (well-formed JSON); canonical.py must too.
   { name: 'a lone surrogate is escaped, not encoded', value: { kind: 'answer', text: 'a\udc00b\ud83d' } },
+  { name: 'a lone surrogate in a key is escaped and sorts by code unit', value: { kind: 'answer', answers: { '\udc00': 'a', '\ud800x': 'b', z: 'c' } } },
 ]
 
 const built = {
@@ -33,6 +34,9 @@ describe('the response hash vectors (#3724)', () => {
   it('match the committed file', () => {
     if (process.env.UPDATE_RESPONSE_HASH_VECTORS === '1') writeFileSync(FILE, `${JSON.stringify(built, null, 2)}\n`)
     expect(JSON.parse(readFileSync(FILE, 'utf8'))).toEqual(built)
+  })
+  it('refuses a number, which JS and Python would print differently', () => {
+    for (const n of [1, -0, 1e21, 1.5]) expect(() => canonicalJson({ kind: 'answer', n })).toThrow(TypeError)
   })
   it('hash a response the same whatever its key order', () => {
     expect(responseHash({ kind: 'approval', decision: 'approve' })).toBe(responseHash({ decision: 'approve', kind: 'approval' }))

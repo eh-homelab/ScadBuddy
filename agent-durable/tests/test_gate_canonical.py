@@ -26,3 +26,14 @@ DOC: dict[str, Any] = json.loads(
 def test_vector(vector: dict[str, Any]) -> None:
     assert canonical_json(vector["value"]) == vector["canonical"]
     assert response_hash(vector["value"]) == vector["sha256"]
+
+
+@pytest.mark.parametrize("number", [1, -0.0, 1e21, 1.5])
+def test_a_number_is_refused(number: float) -> None:
+    # canonical.ts refuses one too: the two languages print some numbers differently.
+    with pytest.raises(TypeError):
+        canonical_json({"kind": "answer", "n": number})
+
+
+def test_true_and_false_are_not_numbers() -> None:
+    assert canonical_json([True, False]) == "[true,false]"

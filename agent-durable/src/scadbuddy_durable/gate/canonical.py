@@ -3,7 +3,7 @@
 The same function as the agent's ``src/gate/canonical.ts``; the shared vectors
 (``agent/test/fixtures/response-hash-vectors.json``) pin the two together. Keys sort by
 UTF-16 code unit, as JavaScript's do; a response holds only strings, booleans, null,
-arrays and objects.
+arrays and objects; a number is refused.
 """
 
 from __future__ import annotations
@@ -28,8 +28,11 @@ def canonical_json(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ",".join(canonical_json(v) for v in value) + "]"
     if isinstance(value, dict):
-        keys = sorted(value, key=lambda k: k.encode("utf-16-be"))
+        keys = sorted(value, key=lambda k: k.encode("utf-16-be", "surrogatepass"))
         return "{" + ",".join(f"{_dumps(k)}:{canonical_json(value[k])}" for k in keys) + "}"
+    # bool is an int in Python; JSON's true/false are fine, a number is not (canonical.ts).
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        raise TypeError("a response holds no numbers, and canonical JSON has none")
     return _dumps(value)
 
 
