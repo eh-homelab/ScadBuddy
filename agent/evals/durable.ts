@@ -29,6 +29,7 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { fixedCredentials } from '../test/support/fixedCredentials.js'
 import { ensureTemplate, TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from '../test/support/postgres.js'
+import { durableHealthPort } from '../test/support/durableHealth.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/temporal.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
 import { collectRenders, type CollectOptions, type ScenarioBackend } from './render.js'
@@ -77,16 +78,6 @@ export function durableEvalSkip(): string | undefined {
   if (!TEMPORAL_CLI) return `${TEMPORAL_CLI_ENV} is not set and no temporal on PATH`
   if (!TEST_DATABASE_URL) return `${TEST_DATABASE_URL_ENV} is not set`
   return undefined
-}
-
-/**
- * The health port the sidecar bound, from its log, or undefined before it says. It is
- * started on port 0 and names the port it got, so no port is picked first and taken by
- * something else before it binds (#3655).
- */
-export function durableHealthPort(log: string): number | undefined {
-  const match = /health on port (\d+)/.exec(log)
-  return match ? Number(match[1]) : undefined
 }
 
 function withSearchPath(url: string, schema: string): string {

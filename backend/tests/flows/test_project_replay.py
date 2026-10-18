@@ -20,7 +20,13 @@ code; the test no longer records, as it now runs the patched workflow) and
 `requeued` on #2937's (that queue asked for again once approved, recorded by
 `test_an_approved_turn_tool_runs_on_the_replica_live_once_approved` before #3420 raised an
 approved call's schedule-to-start timeout from 60 s to 600 s: replay does not compare
-timeouts, so it still stands for the current code). Never re-record them.
+timeouts, so it still stands for the current code); `rehomed` and `retried` on #4152's
+(an approved call in a run whose first pinned call replays from before #2937, sent to the
+live replica, recorded by
+`test_an_approved_turn_tool_in_a_run_from_before_2937_runs_on_the_live_replica`; and one
+nothing picked up, sent once more to the replica live then, recorded by
+`test_an_approved_turn_tool_nothing_picks_up_goes_to_the_replica_live_then`). Never
+re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -45,7 +51,18 @@ from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.flows_support import Flows, Keys, script
 
 HISTORIES = Path(__file__).parent.parent / "fixtures" / "project_workflow_histories"
-NAMES = ["slept", "answered", "restarted", "printed", "tooled", "inputted", "turned", "requeued"]
+NAMES = [
+    "slept",
+    "answered",
+    "restarted",
+    "printed",
+    "tooled",
+    "inputted",
+    "turned",
+    "requeued",
+    "rehomed",
+    "retried",
+]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
 

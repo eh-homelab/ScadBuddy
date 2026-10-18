@@ -187,6 +187,19 @@ FLOW_TURN_TOOLS_PATCH = "flow-turn-tools-2320"
 #: waits `host_queue_start_s` for a worker, then fails as that replica gone. Runs
 #: recorded before kept the queue from before the park and waited without limit.
 FLOW_HOST_QUEUE_PATCH = "flow-host-queue-2937"
+#: The same, per call (#4152), plus one more try on the replica live when a call's wait
+#: for a worker runs out. The SDK keeps a patch id's first answer for the whole run, so a
+#: run that made a turn tool call before #2937 answered False to the run-wide id while
+#: replaying it, and every later call, even one made after a reset onto newer code, kept
+#: the gone replica's queue and waited for ever. An id per call is first asked where its
+#: call is made: True for a call made on this code, False for one replayed from before.
+FLOW_PINNED_CALL_PATCH = "flow-pinned-call-4152"
+
+
+def _pinned_call_patched(call_id: str) -> bool:
+    return workflow.patched(f"{FLOW_PINNED_CALL_PATCH}:{call_id}")
+
+
 #: The agent's own tools' tiers as the agent resolves them when the call is made
 #: (agent/src/temporal/flowTools.ts, #2704): runs recorded before take the run's start's.
 FLOW_TOOL_TIER = "flow_tool_tier"
@@ -623,6 +636,8 @@ async def _call_tool(
     tool's call is the activity `turn:<name>`, on the queue `turn_tool_tier` named."""
     owner: StepOwner = workflow.instance()
     task_queue = queue or owner.tools_queue
+    pinned = task_queue != owner.tools_queue
+    per_call = pinned and _pinned_call_patched(call_id)
     # A replica's own queue has no worker once that replica is gone (a deploy replaces
     # it), and an activity, its retries included, never moves queue (#2937).
     # An approved call waits longer: a live replica with every slot busy frees one, and
@@ -630,41 +645,54 @@ async def _call_tool(
     start_s = owner.approved_queue_start_s if approved else owner.host_queue_start_s
     to_start = (
         timedelta(seconds=start_s)
-        if task_queue != owner.tools_queue and workflow.patched(FLOW_HOST_QUEUE_PATCH)
+        if pinned and (per_call or workflow.patched(FLOW_HOST_QUEUE_PATCH))
         else None
     )
-    try:
-        # Untyped: a string, or `{text, images}` (#2477); a history from before either replays.
-        answer: Any = await workflow.execute_activity(
-            activity or name,
-            args,
-            activity_id=f"{TOOL_PREFIX}{call_id}",
-            task_queue=task_queue,
-            schedule_to_start_timeout=to_start,
-            start_to_close_timeout=_TOOL_TIMEOUT,
-            retry_policy=RetryPolicy(
-                maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
-            ),
-        )
-    except ActivityError as err:
-        if isinstance(err.cause, ApplicationError):
-            raise ToolFailedError(err.cause.message) from None
-        if (
-            isinstance(err.cause, ActivityTimeoutError)
-            and err.cause.type == TimeoutType.SCHEDULE_TO_START
-        ):
-            # Gone in a deploy, or alive with every slot busy: either way nothing ran.
-            again = (
-                "Call it again; the new call needs approving again."
-                if approved
-                else "Call it again."
+    # A pinned call nothing picked up is asked for once more on the replica the agent
+    # names then (#4152): one tiered just before a deploy took its replica.
+    tries = 2 if per_call else 1
+    while True:
+        tries -= 1
+        try:
+            # Untyped: a string, or `{text, images}` (#2477); a history from before either
+            # replays.
+            answer: Any = await workflow.execute_activity(
+                activity or name,
+                args,
+                activity_id=f"{TOOL_PREFIX}{call_id}",
+                task_queue=task_queue,
+                schedule_to_start_timeout=to_start,
+                start_to_close_timeout=_TOOL_TIMEOUT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
+                ),
             )
-            raise ToolFailedError(
-                f"{name} was not run: no worker on the agent replica that holds its state "
-                f"picked it up in {start_s}s (the replica may be gone or busy). {again}"
-            ) from None
-        raise
-    return _tool_result(answer)
+            return _tool_result(answer)
+        except ActivityError as err:
+            if isinstance(err.cause, ApplicationError):
+                raise ToolFailedError(err.cause.message) from None
+            if not (
+                isinstance(err.cause, ActivityTimeoutError)
+                and err.cause.type == TimeoutType.SCHEDULE_TO_START
+            ):
+                raise
+        # Gone in a deploy, or alive with every slot busy: either way nothing ran, so
+        # sending it to another replica keeps it at most once.
+        if tries > 0:
+            try:
+                live = await _turn_queue(name, args)
+            except (ValueError, ToolFailedError):
+                live = task_queue
+            if live != task_queue:
+                task_queue = live
+                continue
+        again = (
+            "Call it again; the new call needs approving again." if approved else "Call it again."
+        )
+        raise ToolFailedError(
+            f"{name} was not run: no worker on the agent replica that holds its state "
+            f"picked it up in {start_s}s (the replica may be gone or busy). {again}"
+        ) from None
 
 
 @agent.tool_defn()
@@ -683,7 +711,9 @@ async def approved_tool(call: str, name: str, args: dict[str, Any]) -> ToolResul
 async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: str) -> ToolResult:
     """An outward plugin or http_request call, run once a person approved it, at most once."""
     await _approved(call)
-    if workflow.patched(FLOW_HOST_QUEUE_PATCH):
+    # Per call first (#4152): the run-wide id alone stays False in a run that made a
+    # pinned call before #2937, whatever code this call is made on.
+    if _pinned_call_patched(call) or workflow.patched(FLOW_HOST_QUEUE_PATCH):
         # The replica that tiered it may have gone while it waited (#2937): ask again. Only
         # the queue is taken: a tier raised since is the `turn:` activity's to refuse,
         # which checks the call again when it runs. A tool no longer offered at all (its

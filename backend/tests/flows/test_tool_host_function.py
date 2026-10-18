@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.common import RawValue
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -19,7 +19,9 @@ from temporalio.worker import Worker
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
-from tests.flows.fake_api import Outward
+from scadbuddy.workflows.flow_tools import FLOW_HOST_QUEUE_PATCH, FLOW_PINNED_CALL_PATCH
+from scadbuddy.workflows.projects_worker import projects_worker
+from tests.flows.fake_api import Outward, outward_activities
 from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, history_payloads, script
 from tests.flows.test_project_replay import HISTORIES, RECORD
 
@@ -340,6 +342,8 @@ class TurnTools:
         self.offered = True
         #: Set: the tier fails with this message, as a busy agent's answer does.
         self.tier_fails: str | None = None
+        #: The replicas later tiers name, one a tier, as a deploy replaces them.
+        self.next_hosts: list[str] = []
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -348,6 +352,8 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
+            if self.next_hosts:
+                self.host = self.next_hosts.pop(0)
             if self.tier_fails is not None:
                 raise ApplicationError(self.tier_fails, type="Busy", non_retryable=True)
             if not self.offered or not name.startswith("scadbuddy_http__"):
@@ -492,6 +498,8 @@ async def test_an_approved_turn_tool_no_replica_picks_up_says_it_needs_approving
     result = run.result or ""
     assert "no worker on the agent replica that holds its state picked it up in 2s" in result
     assert "the new call needs approving again" in result
+    # Asked to park, once approved, and once more after the wait (#4152): no other replica.
+    assert served.tiered == ["scadbuddy_http__http_request"] * 3
     assert served.calls == []
 
 
@@ -553,7 +561,96 @@ async def test_a_turn_tool_on_a_gone_replicas_queue_fails_instead_of_waiting(
     assert "no worker on the agent replica that holds its state picked it up in 2s" in (
         run.result or ""
     )
+    assert served.tiered == ["scadbuddy_http__http_request"] * 2
     assert served.calls == []
+
+
+async def test_an_approved_turn_tool_in_a_run_from_before_2937_runs_on_the_live_replica(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4152: a run whose first pinned call was made before #2937 replays it with no
+    marker, and the SDK keeps that False for `flow-host-queue-2937` for the whole run. Its
+    outward call, tiered by a replica since replaced and approved after a reset (here: a
+    new worker replaying the run), still asks for the live replica's queue."""
+    tools_queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{tools_queue}.gone")
+    live = f"{tools_queue}.live"
+    projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
+    activities = outward_activities(outward.store, None)
+    patched = workflow.patched
+
+    def before_2937(patch_id: str) -> bool:
+        if patch_id == FLOW_HOST_QUEUE_PATCH or patch_id.startswith(FLOW_PINNED_CALL_PATCH):
+            return False
+        return patched(patch_id)
+
+    async with Worker(outward.client, task_queue=tools_queue, activities=[served.tier()]):
+        with monkeypatch.context() as m:
+            m.setattr(workflow, "patched", before_2937)
+            async with (
+                projects_worker(outward.client, projects.queue, activities),
+                Worker(outward.client, task_queue=served.host, activities=[served.call()]),
+            ):
+                run_id = await projects.run(
+                    script(
+                        "await tool('scadbuddy_http__http_request', {'method': 'GET'})",
+                        "return await tool('scadbuddy_http__http_request', {'method': 'POST'})",
+                    ),
+                    tools_queue=tools_queue,
+                )
+                call_id = await projects.approval(run_id)
+        # The replica that tiered the call is gone; a new build replays the run.
+        served.host = live
+        async with (
+            projects_worker(outward.client, projects.queue, activities),
+            Worker(outward.client, task_queue=live, activities=[served.call()]),
+        ):
+            await _approve(projects, run_id, call_id)
+            run = await projects.finished(run_id)
+            if RECORD:
+                handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+                (HISTORIES / "rehomed.json").write_text((await handle.fetch_history()).to_json())
+    assert run.result == "result: 'POST done'"
+    assert served.tiered == ["scadbuddy_http__http_request"] * 3
+    assert [(c[0], c[2]) for c in served.calls] == [
+        ("turn:scadbuddy_http__http_request", {"method": "GET"}),
+        ("turn:scadbuddy_http__http_request", {"method": "POST"}),
+    ]
+    assert served.calls[1][1] == f"tool-{call_id}"
+
+
+async def test_an_approved_turn_tool_nothing_picks_up_goes_to_the_replica_live_then(
+    outward: Outward,
+) -> None:
+    """#4152: the replica asked once the call was approved is replaced before it picks the
+    call up (a rolling deploy). Nothing ran, so the call goes once more, to the replica the
+    agent names then, and the approval is not spent on the gone one."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    gone = f"{queue}.gone"
+    live = f"{queue}.live"
+    served = TurnTools(gone)
+    # Tiered to park, again once approved, and again once the wait ran out.
+    served.next_hosts = [gone, gone, live]
+    async with (
+        Worker(outward.client, task_queue=queue, activities=[served.tier()]),
+        Worker(outward.client, task_queue=live, activities=[served.call()]),
+    ):
+        run_id = await outward.run(
+            script("return await tool('scadbuddy_http__http_request', {'method': 'POST'})"),
+            tools_queue=queue,
+            approved_queue_start_s=2,
+        )
+        call_id = await outward.approval(run_id)
+        await _approve(outward, run_id, call_id)
+        run = await outward.finished(run_id)
+        if RECORD:
+            handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+            (HISTORIES / "retried.json").write_text((await handle.fetch_history()).to_json())
+    assert run.result == "result: 'POST done'"
+    assert served.tiered == ["scadbuddy_http__http_request"] * 3
+    assert served.calls == [
+        ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
+    ]
 
 
 async def test_a_turn_tool_nothing_offers_is_refused_before_any_call(
