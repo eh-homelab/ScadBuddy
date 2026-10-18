@@ -1,13 +1,22 @@
-//! The `slicer` queue's worker (spec 2026-10-16 §7). This task ships only its two checks:
-//! `--version`, and `--check-cli`, which the image build runs against the pinned Bambu
-//! Studio. The worker loop comes with the `slice_plate` activity.
+//! The `slicer` queue's worker (spec 2026-10-16 §7). With no arguments it serves
+//! `slice_plate` until SIGTERM; `--version`, and `--check-cli`, which the image build runs
+//! against the pinned Bambu Studio.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
+
+use sb_slicer::activity::SlicerActivities;
+use sb_temporal::{Stages, WorkerEnv};
+use sb_transfer::Transfer;
 
 /// The extracted AppImage's entry point (the Dockerfile's `slicer` stage).
 const CLI: &str = "/opt/bambu-studio/AppRun";
+
+/// Overrides [`CLI`], for running the worker outside the image.
+const CLI_VAR: &str = "BAMBU_STUDIO_CLI";
 
 /// The Bambu Studio version the image pins, set by the Dockerfile.
 const VERSION_VAR: &str = "BAMBU_STUDIO_VERSION";
@@ -24,6 +33,7 @@ fn main() -> ExitCode {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        [] => serve(),
         ["--version"] => {
             println!("scadbuddy-slicer {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -39,10 +49,82 @@ fn main() -> ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: scadbuddy-slicer --version | --check-cli");
+            eprintln!("usage: scadbuddy-slicer [--version | --check-cli]");
             ExitCode::from(2)
         }
     }
+}
+
+/// The worker: its environment, `/healthz` and `/metrics`, the Temporal connection, then
+/// [`scadbuddy_slicer::run_worker`] until SIGTERM. A failure is logged (a value goes in a
+/// field, never the message: the `sb_temporal` telemetry rule) and exits non-zero; one
+/// before the log subscriber exists goes to stderr.
+fn serve() -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("scadbuddy-slicer: cannot start the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async {
+        let tracer = match sb_temporal::init_tracing() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("scadbuddy-slicer: cannot start logging: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let code = match worker().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = format!("{e:#}"), "the slicer worker failed");
+                ExitCode::FAILURE
+            }
+        };
+        if let Some(provider) = tracer
+            && let Err(e) = provider.shutdown()
+        {
+            tracing::warn!(error = %e, "could not flush the trace exporter");
+        }
+        code
+    })
+}
+
+async fn worker() -> anyhow::Result<()> {
+    let env = WorkerEnv::from_env(
+        "SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER",
+        "slicer",
+        "SCADBUDDY_SLICER_CONCURRENCY",
+    )?;
+    let cli = std::env::var_os(CLI_VAR)
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from(CLI), PathBuf::from);
+    let registry = prometheus::Registry::new();
+    let stages = Stages::register(&registry);
+    let ready = Arc::new(AtomicBool::new(false));
+    sb_temporal::serve_health(env.metrics_port, ready.clone(), registry);
+    let runtime = temporalio_sdk::Runtime::from_current_tokio(Default::default())?;
+    let client = sb_temporal::connect(&env, &runtime).await?;
+    tracing::info!(
+        task_queue = env.task_queue,
+        concurrency = env.concurrency,
+        "serving slice_plate"
+    );
+    let activities = SlicerActivities {
+        cli,
+        transfer: Transfer::new(),
+        stages,
+    };
+    scadbuddy_slicer::run_worker(
+        &runtime,
+        client,
+        &env.task_queue,
+        env.concurrency,
+        activities,
+        ready,
+    )
+    .await
 }
 
 /// Runs `<cli> --help` and checks its output with [`check_help`]. Never prints the CLI's

@@ -354,12 +354,15 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # "Slicer worker").
 #
 # The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.99.1);
-# bump the two together, tag and digest. The Temporal Core SDK's build runs protoc.
+# bump the two together, tag and digest. The Temporal Core SDK's build runs protoc,
+# and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
+# Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
+# build script fails with "google/protobuf/field_mask.proto: File not found".
 FROM rust:1.99.1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS slicer-build
 
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY workers/rust /src
 WORKDIR /src

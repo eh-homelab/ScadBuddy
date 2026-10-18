@@ -1,91 +1,14 @@
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+mod support;
+
 use std::sync::{Arc, Mutex};
 
-use axum::{
-    Router,
-    body::Bytes,
-    extract::{Path as UrlPath, State},
-    http::StatusCode,
-    routing::{get, put},
-};
 use chrono::{Duration, Utc};
 use sb_slicer::activity::{SLICER_ERROR, SlicerActivities};
-use sb_slicer::models::{Arrange, SlicePlateInput, SliceProgress, TransferUrl};
-use sb_temporal::Stages;
-use sb_transfer::Transfer;
+use sb_slicer::models::SliceProgress;
 use sha2::{Digest, Sha256};
+use support::{activities, input, serve, url};
 use temporalio_sdk::activities::ActivityError;
 use temporalio_sdk::testing::{ActivityEnvironment, ActivityEnvironmentError};
-
-#[derive(Default)]
-struct Seen {
-    gets: Vec<String>,
-    puts: BTreeMap<String, Vec<u8>>,
-}
-
-type Shared = Arc<Mutex<Seen>>;
-
-async fn blob(State(s): State<Shared>, UrlPath(name): UrlPath<String>) -> String {
-    s.lock().unwrap().gets.push(name.clone());
-    format!("contents of {name}")
-}
-
-async fn sink(State(s): State<Shared>, UrlPath(name): UrlPath<String>, body: Bytes) -> StatusCode {
-    s.lock().unwrap().puts.insert(name, body.to_vec());
-    StatusCode::OK
-}
-
-async fn serve() -> (String, Shared) {
-    let state: Shared = Arc::default();
-    let app = Router::new()
-        .route("/blob/{name}", get(blob))
-        .route("/sink/{name}", put(sink))
-        .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (base, state)
-}
-
-fn url(base: &str, path: &str) -> TransferUrl {
-    TransferUrl {
-        url: format!("{base}{path}"),
-        headers: BTreeMap::new(),
-        expires_at: Utc::now() + Duration::hours(1),
-    }
-}
-
-fn input(base: &str) -> SlicePlateInput {
-    SlicePlateInput {
-        input_3mf: url(base, "/blob/input"),
-        plate: 1,
-        machine_preset: url(base, "/blob/machine"),
-        process_preset: url(base, "/blob/process"),
-        filament_presets: vec![url(base, "/blob/f1"), url(base, "/blob/f2")],
-        sliced_3mf: url(base, "/sink/sliced"),
-        slicedata: None,
-        arrange: Arrange::No,
-        allow_newer_file: true,
-        debug: 1,
-    }
-}
-
-fn fake(mode: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    match mode {
-        "" => dir.join("fake-bambu-studio.sh"),
-        mode => dir.join("fake").join(format!("{mode}.sh")),
-    }
-}
-
-fn activities(mode: &str) -> SlicerActivities {
-    SlicerActivities {
-        cli: fake(mode),
-        transfer: Transfer::new(),
-        stages: Stages::register(&prometheus::Registry::new()),
-    }
-}
 
 fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))

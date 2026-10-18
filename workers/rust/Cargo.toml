@@ -11,6 +11,8 @@ temporalio-sdk = { version = "=1.1.0", features = ["testing"] }
 temporalio-client = "=1.1.0"
 temporalio-common = "=1.1.0"
 temporalio-macros = "=1.1.0"
+# `#[workflow_methods]` expands to `::temporalio_workflow` paths.
+temporalio-workflow = "=1.1.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

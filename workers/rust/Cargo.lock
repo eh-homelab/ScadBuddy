@@ -2155,6 +2155,23 @@ dependencies = [
 [[package]]
 name = "scadbuddy-slicer"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "prometheus",
+ "sb-slicer",
+ "sb-temporal",
+ "sb-transfer",
+ "serde",
+ "serde_json",
+ "temporalio-client",
+ "temporalio-common",
+ "temporalio-sdk",
+ "temporalio-workflow",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "schannel"
