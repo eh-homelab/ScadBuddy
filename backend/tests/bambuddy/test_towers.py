@@ -23,7 +23,7 @@ from scadbuddy.render.bambu3mf import (
     rezipped,
     write_plates_3mf,
 )
-from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes, read_objects
+from scadbuddy.render.objects3mf import plate_boxes, read_objects
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     PRIME_TOWER_BRIM,
@@ -159,11 +159,9 @@ def test_objects_that_leave_no_room_keep_the_authors_tower(tmp_path: Path) -> No
         assert towers_within_reach(payload, H2C) is payload
 
 
-def test_a_painted_mirrored_object_is_boxed_though_it_cannot_be_read_whole(
-    tmp_path: Path,
-) -> None:
-    """2440's objects are mirrored and painted, which Arrange refuses (#4015); the tower
-    needs only their box, which the mirror moves to the other side of the item."""
+def test_a_painted_mirrored_object_is_boxed(tmp_path: Path) -> None:
+    """2440's objects are mirrored and painted; the tower needs only their box, which the
+    mirror moves to the other side of the item. Arrange reads them too since #4015."""
     payload = _laid_out_on_an_a1_mini(tmp_path)
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         root = archive.read(ROOT_MODEL_NAME).decode()
@@ -176,8 +174,7 @@ def test_a_painted_mirrored_object_is_boxed_though_it_cannot_be_read_whole(
     box = plate_boxes(painted).boxes[1]
 
     assert np.allclose(box[1] - box[0], before[1] - before[0])
-    with pytest.raises(UnreadableObjectsError, match="painted and mirrored"):
-        read_objects(painted)
+    assert read_objects(painted)
 
 
 def _painted(payload: bytes) -> bytes:
