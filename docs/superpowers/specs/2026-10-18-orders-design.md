@@ -285,7 +285,7 @@ The `order_item_quote` operation, on the `library` queue, as activities of one
    pricing a slot at nothing.
 4. **Price.** For each slot: `used_g × cost_per_kg / 1000` at the slot's filament; a
    slot with no `filament_id` fails the quote naming the slot. Then machine time
-   (`prediction` summed over plates × rate), setup (per plate), labour, markup on the
+   (`print_time_seconds` summed over plates × rate), setup (per plate), labour, markup on the
    sum, rounding per §3.6; times `quantity`. The result is the quote's `lines`.
 5. **Record** the quote (`accepted=false`) and publish `order_item.changed`. The
    browser shows it with "Accept"; the flow accepts it or asks (§7.2).
@@ -348,7 +348,8 @@ path and editable by hand:
 - `order_item_id`, `id`, `attempt` (1, 2, …), `quantity` (made in this attempt),
 - `print_run_id`, `sliced_sha256`, `sliced_blob_key` (the sliced file kept as a
   `library` blob with a `blob_refs` row named `order_item_fulfilment:<id>`, so the
-  render and slice sweeps never take it; F3's snapshot and piece kinds are swept),
+  blob sweep never takes it: `store/refs.py` `sweep_blobs` removes every blob of a
+  swept kind that no row names),
 - `printer` (`{serial, name}` once #3823's registry exists; `{bambuddy_printer_id,
   name}` meanwhile), `started_at`, `finished_at`,
 - `outcome` (`succeeded`, `failed`, `partial`, `unknown`), `failure_reason`,
@@ -462,6 +463,7 @@ for item in order["items"]:
     out = queue_print({"order_item_id": item["id"]}, {})   # §5.4: the accepted quote's file
     if out["error"] == "requote_needed":                    # its sliced file is gone or stale
         quote = tool("order_item_quote", {"order_id": order["id"], "item_id": item["id"]})
+        # in a flow the tool follows its operation to the answer (§7.3); this is the quote
         a = wait_for_human(f"{item['title']} re-quoted at {quote['total_minor']} minor units "
                            f"(accepted {item['accepted_quote']['total_minor']}). Accept and print?")
         if a.answer.strip().lower() != "yes":
@@ -490,10 +492,17 @@ What this relies on, and what the design adds for it:
   print of the wrong file (Ruling 2).
 - A person is asked only where the grant does not cover the call: `queue_print` is
   covered by the trigger's standing grant (`printers`, `max_prints`, `max_filament_g`,
-  F13); `order_notify_customer` is outward and is covered only by a rule naming it.
-  `GrantRule` gains one bound, `orders: [ids]`, for the order tools, so a standing
-  grant can say "any order" or a run grant "this order only"; the flow narrows the
-  grant it hands the child agent to this order (10-11 §4.3: narrow, never widen).
+  F13), and the order tools that are `outward` (§7.3: `order_accept`,
+  `order_item_accept_quote`, `order_item_fulfil`, `order_ship`,
+  `order_notify_customer`) only by a rule naming each. A flow's `tool()` gates only an
+  outward tool (F11), so those are the tools the new bound reaches: `GrantRule` gains
+  `orders: [ids]`, so a standing grant can say "any order" or a run grant "this order
+  only", and the flow narrows the grant it hands the child agent to this order (10-11
+  §4.3: narrow, never widen). The `write` order tools (a customer, an item, a quote, an
+  attachment) are ungated in a flow as every library write is, scoped by the
+  principal and nothing else; the bound does not pretend to cover them. In the
+  script above the child's grant names `order_item_fulfil` on this order, and it adds
+  the photo and the timelapse with `order_attach`, a `write` tool that needs no rule.
 - The run is one per order and loops over the items, as the 10-01 spec says a
   campaign does. **No subflow.** Where a shop wants one run per line item (parallel
   printers, independent resets), the script starts one with
@@ -509,15 +518,26 @@ What this relies on, and what the design adds for it:
 
 ### 7.3 Agent tools
 
-`agent/src/tools/orders.ts`, one `defineTool` per route of §4, named `customer_list`,
-`customer_get`, `customer_upsert`, `order_list`, `order_get`, `order_create`,
-`order_item_add`, `order_item_quote`, `order_item_accept_quote`, `order_accept`,
-`order_item_fulfil`, `order_attach` (by `workspace_path`, as uploads are, #2329),
-`order_ship`, `order_costs`, `price_book_get`, `price_book_set`. All are `write` or
-`read` tier: local records. `order_notify_customer` is the one `outward` tool: it
-composes from a message template and sends through a plugin the shop configured
-(an email or messaging MCP plugin, #297), or, with none, returns the text for the
-person to send. Every route of §4 is covered, or named in `coverage.ts` with a reason.
+`agent/src/tools/orders.ts`, one `defineTool` per route of §4, in three tiers:
+
+- `read`: `customer_list`, `customer_get`, `order_list`, `order_get`, `order_costs`,
+  `price_book_get`.
+- `write`, a record the shop keeps: `customer_upsert`, `order_create`, `order_item_add`,
+  `order_item_quote`, `order_attach` (by `workspace_path`, as uploads are, #2329),
+  `price_book_set`.
+- `outward`, a step that commits the shop to the customer or counts work as done:
+  `order_accept`, `order_item_accept_quote` (the price), `order_item_fulfil` (the
+  made quantity), `order_ship`, and `order_notify_customer`, which composes from a
+  message template and sends through a plugin the shop configured (an email or
+  messaging MCP plugin, #297), or, with none, returns the text for the person to send.
+  In the panel an outward call parks for the person as any does; in a flow it is
+  covered by a grant rule naming it (§7.2) or parks the same way.
+
+`order_item_quote` runs an operation (§4). The agent's tool follows it as every command
+tool does (`tools/command.ts`: the answer, or `{status: "running", operation_id}` past
+the follow window); in a flow the activity follows it to the answer, as `queue_print`
+follows a print run, so a script gets the quote. Every route of §4 is covered, or named
+in `coverage.ts` with a reason.
 Activity kinds `order.quote`, `order.print`, `order.fulfil` record the work by
 principal, and a route attributes it with `attribute_request` as `render_model` does.
 
