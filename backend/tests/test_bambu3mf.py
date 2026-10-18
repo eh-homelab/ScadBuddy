@@ -2197,3 +2197,30 @@ def test_a_paint_code_split_by_a_read_window_is_read_whole(monkeypatch: pytest.M
 def test_a_paint_code_that_does_not_decode_names_nothing() -> None:
     payload = _cats({"7": "F"})  # a split with no children
     assert hint_painted_slots(payload) is payload
+
+
+def test_painting_past_the_decode_cap_names_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each distinct code is held and decoded once, so their digits are capped: past it
+    the file is left as it is, and the slice is still checked (``sliced_as_planned``)."""
+    payload = _cats({"6": single_code(3), "7": single_code(2)})
+    monkeypatch.setattr(bambu3mf, "MAX_HINT_PAINT_DIGITS", 2)
+    assert hint_painted_slots(payload) is payload
+
+
+def test_painting_in_the_root_model_is_named_too() -> None:
+    """An object whose mesh is in the root, not a component file: Bambuddy reads no
+    painting there at all."""
+    payload = _cats({})
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = archive.read("3D/3dmodel.model").decode()
+    inline = (
+        '<object id="9" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/>'
+        '<vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices><triangles>'
+        '<triangle v1="0" v2="1" v3="2" paint_color="8"/></triangles></mesh></object>'
+    )
+    root = root.replace(
+        '<object id="7" type="model"><components>',
+        inline + '<object id="7" type="model"><components><component objectid="9"/>',
+    )
+    hinted = hint_painted_slots(_with_entries(payload, {"3D/3dmodel.model": root.encode()}))
+    assert _bambuddy_slots(hinted, 2) == {1, 2}

@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from array import array
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -1761,45 +1761,71 @@ _SETTINGS_OBJECT = re.compile(rb'(<object\s+id="(\d+)"[^>]*>)(.*?)(</object>)', 
 _ANY_ID = re.compile(rb'\sid="(\d+)"')
 
 
-def _painted_states(archive: zipfile.ZipFile, name: str) -> set[int]:
+#: The most digits of distinct paint codes :func:`hint_painted_slots` decodes in one
+#: file. Each distinct code is held and decoded once, so this bounds both; a file past
+#: it is left without hints (the slice is still checked, ``sliced_as_planned``). A real
+#: two-colour project's codes are a few thousand digits.
+MAX_HINT_PAINT_DIGITS = 4_000_000
+
+
+class _TooMuchPaintError(ValueError):
+    """More distinct painting than :data:`MAX_HINT_PAINT_DIGITS`."""
+
+
+class _Codes:
+    """Distinct paint codes, counted against :data:`MAX_HINT_PAINT_DIGITS` as they are
+    added, each decoded once."""
+
+    def __init__(self) -> None:
+        self.seen: dict[bytes, frozenset[int]] = {}
+        self.digits = 0
+
+    def states(self, codes: Iterable[bytes]) -> set[int]:
+        found: set[int] = set()
+        for code in codes:
+            known = self.seen.get(code)
+            if known is None:
+                self.digits += len(code)
+                if self.digits > MAX_HINT_PAINT_DIGITS:
+                    raise _TooMuchPaintError("the painting is past what is decoded for hints")
+                try:
+                    known = frozenset(states(code.decode("ascii")))
+                except PaintCodeError:
+                    known = frozenset()  # left out, never guessed at
+                self.seen[code] = known
+            found |= known
+        return found
+
+
+def _painted_states(archive: zipfile.ZipFile, name: str, codes: _Codes) -> set[int]:
     """The extruders ``name``'s triangles are painted with, read as Bambu Studio reads
-    a code (:func:`~scadbuddy.render.paint.states`). Each distinct code is decoded once;
-    a code that does not decode is left out, never guessed at."""
-    codes: set[bytes] = set()
+    a code (:func:`~scadbuddy.render.paint.states`), in windows overlapping by more
+    than a code, so a code a window boundary splits is read whole from the next."""
+    found: set[int] = set()
     tail = b""
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             window = tail + chunk
-            codes.update(_ANY_PAINT_CODE.findall(window))
+            found |= codes.states(set(_ANY_PAINT_CODE.findall(window)))
             tail = window[-_CODE_OVERLAP:]
-    return _decoded(codes)
-
-
-def _decoded(codes: set[bytes]) -> set[int]:
-    found: set[int] = set()
-    for code in codes:
-        try:
-            found |= states(code.decode("ascii"))
-        except PaintCodeError:
-            continue
     return found
 
 
 def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[int]]:
     """Each root object's id and the extruders its painting prints with: its own mesh's,
-    and each component's, whether in another model file or in the root."""
-    root = ET.fromstring(_read_capped(archive, ROOT_MODEL_NAME, MAX_UNCOMPRESSED_BYTES))
-    objects = list(root.iter(f"{{{CORE_NS}}}object"))
-    own = {
-        obj.get("id", ""): _decoded(
-            {
-                code.encode("ascii")
-                for triangle in obj.iter(f"{{{CORE_NS}}}triangle")
-                if (code := triangle.get(PAINT_ATTRIBUTE))
-            }
-        )
-        for obj in objects
-    }
+    and each component's, whether in another model file or in the root. The root is
+    read by :func:`parse_model`, its meshes as arrays."""
+    model = parse_model(archive, ROOT_MODEL_NAME)
+    codes = _Codes()
+    objects = list(model.root.iter(f"{{{CORE_NS}}}object"))
+    own: dict[str, set[int]] = {}
+    for obj in objects:
+        found: set[int] = set()
+        for mesh in obj.iter(f"{{{CORE_NS}}}mesh"):
+            arrays = model.meshes.get(mesh)
+            if arrays is not None and arrays.paint:
+                found |= codes.states({code.encode("ascii") for code in arrays.paint if code})
+        own[obj.get("id", "")] = found
     files: dict[str, set[int]] = {}
     slots: dict[str, set[int]] = {}
     for obj in objects:
@@ -1810,7 +1836,7 @@ def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[in
                 found |= own.get(component.get("objectid", ""), set())
             elif path in names:
                 if path not in files:
-                    files[path] = _painted_states(archive, path)
+                    files[path] = _painted_states(archive, path, codes)
                 found |= files[path]
         if found:
             slots[obj.get("id", "")] = found
@@ -1838,10 +1864,11 @@ def hint_painted_slots(payload: bytes) -> bytes:
         names = set(archive.namelist())
         if MODEL_SETTINGS_NAME not in names or ROOT_MODEL_NAME not in names:
             return payload
-        settings = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_SETTINGS_BYTES)
         try:
+            settings = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_SETTINGS_BYTES)
             hints = _object_slots(archive, names)
-        except ET.ParseError:
+        except (ET.ParseError, ValueError):
+            # Unreadable, or past a cap: no hint, and the slice is still checked.
             return payload
     if not hints:
         return payload
