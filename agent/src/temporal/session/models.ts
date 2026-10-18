@@ -75,6 +75,8 @@ export type SessionTurnInput = {
   attempt?: string
   message?: Message
   continuation?: Continuation
+  /** How long a parked call holds the turn's process before the turn releases it (`park_hold_seconds`, §5.4). */
+  parkHoldSeconds?: number
   traceparent?: string
 }
 

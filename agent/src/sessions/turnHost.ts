@@ -8,7 +8,8 @@ import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { QuestionGate, QuestionVerdict, UserQuestion } from '../harness/questions.js'
-import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
+import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
+import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
 import { SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
@@ -56,9 +57,19 @@ import type { WarmEntry } from './warm.js'
 // assistant message one after another, so they park in turn. A call refused after its
 // entry opened (the open's answer lost, Claude Code dropping the request) withdraws the
 // entry (Update `withdraw_input`), so nobody can approve a call that will never run; a read
-// of the row that fails is tried again on the next tick. The hold's end and the release
-// (park_hold_seconds) are Task 5.4's; an attention request and a browser call's tab wait
-// still read NO_PARKS.
+// of the row that fails is tried again on the next tick. An attention request and a browser
+// call's tab wait still read NO_PARKS.
+//
+// Release (§5.4 "Release"). A hold lasts `park_hold_seconds` (the input's parkHoldSeconds);
+// past it, or at a shutdown, the turn lets its process go: the warm entry is closed (not cut:
+// its mirror keeps the results Claude Code writes as it ends, a synthetic one for each call
+// it was asked about), its spend is written as a stopped placement's, and the activity returns
+// `released` with the entries it held, which stay open in the workflow. Once each is decided
+// the workflow places the turn again with a `parked` continuation: each approved call is run
+// once, outside the model, through the tool layer (deps.runCall, toolActivities.ts
+// `decidedCalls`, its Idempotency-Key the request id), and the model is told in one message
+// how each call went. That message goes in once: the continuation has its own transcript mark,
+// and a later placement of it whose message landed resumes with RESTARTED_PROMPT instead.
 //
 // A shutdown (`stop`) gives the running turns their grace, then cuts the rest: only those fail
 // with the retryable ShuttingDown, which places the turn on another replica; a turn that ended
@@ -115,12 +126,35 @@ export type TurnHostDeps = {
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
+  /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
+  runCall?: (call: DecidedCall) => Promise<DecidedRun>
+}
+
+/** A placement's holds (§5.4): the calls held now, the hold's length, and the release that ends them all. */
+type Holds = {
+  held: Set<string>
+  holdMs: number
+  /** Releases the turn if it holds a call; whether it did. */
+  release: () => boolean
+  /** Aborts once the turn is released. */
+  released: AbortSignal
+  /** The calls the release took (held as it came): the entries the workflow waits on. */
+  taken: string[]
+}
+
+/** A parked continuation's call (§5.4 step 5): as `open_input` named it, and how its entry ended. */
+type ParkedCall = Extract<Continuation, { kind: 'parked' }>['calls'][number]
+
+/** The questions of a parked AskUserQuestion, in order (its card, `{questions}`). */
+function questionsOf(input: unknown): string[] {
+  const questions = (input as { questions?: unknown } | null)?.questions
+  return Array.isArray(questions) ? questions.map((q) => (typeof (q as { question?: unknown })?.question === 'string' ? (q as { question: string }).question : '')) : []
 }
 
 /** An entry's response row, as resolve_input (or a grant, or the flow's refusal) wrote it. */
 type Response = { outcome: string; response: { answers?: unknown } | null; reason: string | null; responder: { kind?: string } | null }
 
-type Running = { attempt: string; cut: (why: Cut) => void; done: Promise<void> }
+type Running = { attempt: string; cut: (why: Cut) => void; release: () => boolean; done: Promise<void> }
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -142,6 +176,25 @@ function cardOf(q: UserQuestion, secrets: readonly string[]): UserQuestion {
 }
 
 const within = (ms: number, work: Promise<unknown>) => Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
+
+/** Why a released placement stopped: what its process is closed with, and its tally's stop. */
+const RELEASED_TEXT = 'a call waited longer than the turn holds its process; the turn goes on once it is decided'
+/** How long a released call's gate waits for its process to go before it answers (the answer reaches nobody). */
+const RELEASED_ANSWER_MS = 10_000
+/** A held call's default hold, when the workflow names none (park_hold_seconds' default). */
+const PARK_HOLD_S = 300
+
+/** Until `signal` aborts or `ms` passes. */
+const until = (signal: AbortSignal, ms: number) =>
+  new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve()
+    const timer = setTimeout(resolve, ms)
+    timer.unref()
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer)
+      resolve()
+    }, { once: true })
+  })
 
 export class TurnHost {
   readonly #deps: TurnHostDeps
@@ -180,6 +233,8 @@ export class TurnHost {
    */
   async stop({ graceMs, abortWaitMs }: { graceMs: number; abortWaitMs: number }): Promise<void> {
     this.drain()
+    // A turn holding a call would not end in the grace: it is released (§5.4), and goes on elsewhere once decided.
+    for (const r of this.#running.values()) r.release()
     const ended = () => Promise.all([...this.#running.values()].map((r) => r.done))
     await within(graceMs, ended())
     if (this.#running.size === 0) return
@@ -210,10 +265,26 @@ export class TurnHost {
       // A shutdown leaves the process to end as a stopped turn's does; any other cut is a placement nobody waits on any more.
       if (why !== 'shutdown') for (const entry of entries) void this.#deps.core.warm.cut(entry, CUT_TEXT[why])
     }
-    const self: Running = { attempt, cut: cutOff, done }
+    const releasing = new AbortController()
+    const closing: Promise<void>[] = []
+    const holds: Holds = {
+      held: new Set(),
+      holdMs: (input.parkHoldSeconds ?? PARK_HOLD_S) * 1000,
+      released: releasing.signal,
+      taken: [],
+      release: () => {
+        if (releasing.signal.aborted || cut !== undefined || holds.held.size === 0) return false
+        holds.taken = [...holds.held]
+        releasing.abort(new Error(RELEASED_TEXT))
+        // Closed, not cut: its mirror keeps what Claude Code writes as it ends.
+        for (const entry of entries) closing.push(this.#deps.core.warm.abandon(entry, RELEASED_TEXT, 'close'))
+        return true
+      },
+    }
+    const self: Running = { attempt, cut: cutOff, release: holds.release, done }
     this.#running.set(id, self)
     try {
-      return await this.#run(input, attempt, control, controller, () => cut, cutOff, entries)
+      return await this.#run(input, attempt, control, controller, () => cut, cutOff, entries, holds, closing)
     } finally {
       if (this.#running.get(id) === self) this.#running.delete(id)
       finished()
@@ -228,18 +299,28 @@ export class TurnHost {
     cutBy: () => Cut | undefined,
     cutOff: (why: Cut) => void,
     entries: WarmEntry[],
+    parks: Holds,
+    closing: Promise<void>[],
   ): Promise<SessionTurnResult> {
     const { sessionId: id, turnId } = input
     const sql = this.#deps.sql
-    const mark = await this.#claim(id, turnId, attempt)
+    const parked = input.continuation?.kind === 'parked' ? input.continuation.calls : undefined
+    // A parked continuation marks the transcript for itself: its outcome message goes in once.
+    const mark = await this.#claim(id, turnId, attempt, parked?.length ? `${turnId}/${parked[0]!.requestId}` : turnId)
     const claim = mark === undefined ? undefined : await runningDurableTurn(sql, id, turnId)
     if (mark === undefined || !claim) throw ApplicationFailure.nonRetryable(`session ${id} is not running turn ${turnId}`, SESSION_GONE)
     const { session, principal } = claim
-    // §5.5: resumed with the restart message only once the turn's prompt is in the transcript.
-    const restarted = input.continuation?.kind === 'restarted' && (!input.message || (await this.#landed(id, mark)))
-    const text = restarted ? RESTARTED_PROMPT : (input.message?.text ?? '')
+    // §5.5: resumed with the restart message only once the turn's prompt is in the transcript;
+    // a parked continuation's, once its outcome message is.
+    const landed = (input.continuation?.kind === 'restarted' && input.message) || parked?.length ? await this.#landed(id, mark) : false
+    const restarted = (input.continuation?.kind === 'restarted' && (!input.message || landed)) || (parked !== undefined && landed)
+    const text = restarted
+      ? RESTARTED_PROMPT
+      : parked
+        ? await this.#decided(id, parked, controller.signal, () => control.heartbeat({ pushed: false }))
+        : (input.message?.text ?? '')
     if (!text) throw ApplicationFailure.nonRetryable(`turn ${turnId} of session ${id} has no message`, SESSION_GONE)
-    const images = restarted ? [] : await this.#images(id, input.message?.images ?? [])
+    const images = restarted || parked ? [] : await this.#images(id, input.message?.images ?? [])
     const prompt = images.length ? userPrompt(text, images) : text
 
     const onCancel = () => {
@@ -274,7 +355,7 @@ export class TurnHost {
       userText: input.message?.text ?? text,
       signal: controller.signal,
       interrupt: () => controller.abort(new Error('the turn was interrupted')),
-      gates: (ctx) => this.#gates(turnId, control, controller.signal, ctx.secrets, ctx.shown, ctx.turn.run.questionGate !== undefined),
+      gates: (ctx) => this.#gates(turnId, control, controller.signal, parks, ctx.secrets, ctx.shown, ctx.turn.run.questionGate !== undefined),
       // The prompt goes in right after the acquire.
       onAcquired: ({ entry }) => {
         entries.push(entry)
@@ -312,7 +393,14 @@ export class TurnHost {
       const run = await core.run(prompt)
       clearInterval(fence)
       result = run.result
-      const stopped = controller.signal.aborted ? (controller.signal.reason instanceof Error ? controller.signal.reason.message : 'the turn was interrupted') : undefined
+      const released = parks.released.aborted
+      const stopped = released
+        ? RELEASED_TEXT
+        : controller.signal.aborted
+          ? controller.signal.reason instanceof Error
+            ? controller.signal.reason.message
+            : 'the turn was interrupted'
+          : undefined
       const end: TallyInput = {
         stopped,
         interrupted: stopped,
@@ -328,6 +416,12 @@ export class TurnHost {
       outcome = tally.outcome
       await this.#write(session, turnId, tally, end, spend, core.runningUsd())
       const why = cutBy()
+      // Released, and not since moved or ended: the process is gone once its last results have landed.
+      if (released && (why === undefined || why === 'shutdown')) {
+        await Promise.all(closing)
+        await this.#deps.core.warm.landed(id)
+        return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
+      }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
       return this.#result(tally, run.secrets)
@@ -346,6 +440,7 @@ export class TurnHost {
     turnId: string,
     control: TurnControl,
     stop: AbortSignal,
+    holds: Holds,
     secrets: () => readonly string[],
     shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>,
     asks: boolean,
@@ -377,11 +472,23 @@ export class TurnHost {
       parkedAs.set(call.id, opened.request_id)
       // Settled at once: a grant's or the flow's row is there already; a read call or a malformed question has none.
       if (opened.resolution) return { requestId: opened.request_id, row: await this.#row(opened.request_id), early: opened.resolution }
+      const rid = opened.request_id
+      holds.held.add(rid)
+      // Past the hold, the turn lets its process go (§5.4 "Release"); the entry stays open.
+      const timer = setTimeout(() => holds.release(), holds.holdMs)
+      timer.unref()
       try {
-        return { requestId: opened.request_id, row: await this.#hold(opened.request_id, signal) }
+        return { requestId: rid, row: await this.#hold(rid, AbortSignal.any([signal, holds.released])) }
       } catch (err) {
-        if (!stop.aborted) withdraw(call.id, 'the call stopped waiting')
+        if (holds.released.aborted) {
+          // Its answer reaches nobody once the process is gone: it is not given before then, so the
+          // transcript keeps the closing result, not a refusal.
+          await until(AbortSignal.any([stop, signal]), RELEASED_ANSWER_MS)
+        } else if (!stop.aborted) withdraw(call.id, 'the call stopped waiting')
         throw err
+      } finally {
+        clearTimeout(timer)
+        holds.held.delete(rid)
       }
     }
     const approvalGate: ApprovalGate = async (request): Promise<ApprovalVerdict> => {
@@ -475,21 +582,59 @@ export class TurnHost {
   }
 
   /**
-   * Takes the turn for this placement: `turn_attempt` is it from now on, and the turn's mark
-   * (the main transcript's last entry before its first placement) is set once. The mark, or
-   * undefined when the row does not run this turn.
+   * Takes the turn for this placement: `turn_attempt` is it from now on, and the mark (the main
+   * transcript's last entry before the first placement of `markKey`: the turn, or a parked
+   * continuation of it) is set once. The mark, or undefined when the row does not run this turn.
    */
-  async #claim(id: string, turnId: string, attempt: string): Promise<number | undefined> {
+  async #claim(id: string, turnId: string, attempt: string, markKey: string): Promise<number | undefined> {
     const [row] = await this.#deps.sql<{ turn_mark: string }[]>`
       UPDATE ai_sessions SET
         turn_attempt = ${attempt},
-        turn_mark = CASE WHEN turn_mark_turn = ${turnId} THEN turn_mark ELSE (
+        turn_mark = CASE WHEN turn_mark_turn = ${markKey} THEN turn_mark ELSE (
           SELECT coalesce(max(e.id), 0) FROM ai_session_entries e WHERE e.session_id = ai_sessions.id::text AND e.subpath = ''
         ) END,
-        turn_mark_turn = ${turnId}
+        turn_mark_turn = ${markKey}
       WHERE id = ${id} AND durable_turn_id = ${turnId} AND status IN ('running', 'waiting_approval', 'waiting_input')
       RETURNING turn_mark::text`
     return row ? Number(row.turn_mark) : undefined
+  }
+
+  /**
+   * A parked continuation's calls, each decided while the turn was released (§5.4 step 5): an
+   * approved call run once (deps.runCall), the others as they ended. What the model is told,
+   * in one message: its own process marked each call's outcome unknown, and this settles it.
+   */
+  async #decided(id: string, calls: readonly ParkedCall[], signal: AbortSignal, heartbeat: () => void): Promise<string> {
+    const said: string[] = []
+    for (const call of calls) said.push(await this.#outcome(id, call, signal, heartbeat))
+    return `${said.join('\n\n')}\n\nContinue the task.`
+  }
+
+  async #outcome(id: string, call: ParkedCall, signal: AbortSignal, heartbeat: () => void): Promise<string> {
+    const { requestId, toolUseId, tool, resolution } = call
+    if (resolution.kind === 'answer') {
+      const asked = `Your question (id ${toolUseId}) was paused waiting for the user's answer.`
+      const row = await this.#row(requestId)
+      const answers = Array.isArray(row?.response?.answers) ? row.response.answers.filter((a): a is string => typeof a === 'string') : []
+      if (resolution.outcome !== 'answered' || answers.length === 0) {
+        return `${asked} The user did not answer: ${row?.reason ?? (resolution.outcome === 'timed_out' ? 'nobody answered in time' : 'the request was cancelled')}.`
+      }
+      const questions = questionsOf(call.input)
+      return `${asked} The user answered:\n${answers.map((a, i) => (questions[i] ? `${questions[i]}: ${a}` : a)).join('\n')}`
+    }
+    const paused = `Your call \`${tool}\` (id ${toolUseId}) was paused waiting for approval.`
+    if (resolution.outcome !== 'approved') {
+      const row = await this.#row(requestId)
+      const said = row?.responder?.kind === 'flow' && resolution.outcome === 'denied' ? 'flow_denied' : resolution.outcome
+      return `${paused} ${refusal(tool, requestId, said, row?.reason)}`
+    }
+    const run: DecidedRun = this.#deps.runCall
+      ? await this.#deps.runCall({ sessionId: id, requestId, toolUseId, tool, input: call.input, signal, heartbeat })
+      : { ran: false, text: 'this replica cannot run a call outside the conversation' }
+    if (!run.ran) return `${paused} It was approved, but it was not run: ${run.text}`
+    return run.ok
+      ? `${paused} It was approved and ScadBuddy ran it once. Result:\n${run.text}`
+      : `${paused} It was approved and ScadBuddy ran it once, and it failed:\n${run.text}`
   }
 
   /** Whether a user entry (the turn's prompt, or a tool result after it) landed in the main transcript after the mark. */

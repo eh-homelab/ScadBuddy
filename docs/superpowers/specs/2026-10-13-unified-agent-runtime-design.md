@@ -946,10 +946,11 @@ done. Their conversation exists only in workflow state.
 
 - **Unverified, checked by a plan task before it is relied on:**
   - the DurableSession transcript resumes under the TypeScript CLI (Task 7.1);
-  - Visibility `STARTS_WITH` (Task 9.2);
-  - that `q.close()` during a held `canUseTool` writes E3's synthetic result and not
-    E4's (Task 5.4). Both are error results the continuation message overrides, so this
-    only changes the wording the model sees.
+  - Visibility `STARTS_WITH` (Task 9.2).
+- **Verified by Task 5.4:** closing a released turn's process while its `canUseTool` is
+  held leaves an `is_error` tool result for the parked call in its transcript
+  (`agent/test/sessionRelease.temporal.test.ts`). The continuation message settles it
+  either way.
 - **The `Recreate` deploy restarts every turn** (§5.5) until Phase 11 versions the queues
   and moves the pod to `RollingUpdate` (D6).
 - **Warm memory.** 8 × about 206 MiB, plus remote MCP connections and the service itself,

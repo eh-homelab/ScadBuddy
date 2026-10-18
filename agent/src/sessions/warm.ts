@@ -501,6 +501,21 @@ export class WarmSessions {
     return this.drop(slot, `cut off: ${reason}`, 'close')
   }
 
+  /**
+   * Once every append of the session's closed processes has landed: the closing results a
+   * process writes as it ends (a released turn's synthetic tool results), which the next
+   * placement's transcript mark must come after. A spawn waits for the same (acquireNow).
+   */
+  async landed(sessionId: string): Promise<void> {
+    for (;;) {
+      const mirror = this.draining.get(sessionId)
+      if (!mirror) return
+      const pending = mirror.pending
+      await pending
+      if (mirror.pending === pending) return
+    }
+  }
+
   /** Closes every process (shutdown): an idle one may end on its own first; a running turn's is closed at once. */
   async close(): Promise<void> {
     this.reserved.clear()

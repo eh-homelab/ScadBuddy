@@ -61,7 +61,7 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
@@ -522,6 +522,23 @@ if (database) {
 // `agent-sessions.<identity>`, beside HOST_QUEUE (temporal/session/hostWorkers.ts says why), on
 // this replica's warm processes. `acquire_worker` on agent-tools hands it out.
 const SESSION_HOST_QUEUE = sessionHostQueue(replicaIdentity())
+// What a durable session's tool runs with: its activities on agent-tools, and a released
+// AgentSession turn's approved call (§5.4 step 5), which runs on the turn's own replica.
+const durableToolDeps: ToolActivityDeps | undefined = temporal
+  ? {
+      services: toolServices,
+      sessions: new PgSessionOwners(temporal.sql),
+      approvals: new PgApprovalRecords(temporal.sql),
+      flows: new PgFlowRuns(temporal.sql),
+      audit,
+      answers: new PgAnswers(temporal.sql),
+      currentTiers: liveTokenTiers(tokens),
+      // A result's images, for the durable segment's view_tool_images (#2320).
+      blobs: new SessionBlobs(temporal.sql),
+      // A flow call's images, sealed under its run's payload key (#2477).
+      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
+    }
+  : undefined
 // A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
 const turnHost =
   temporal && sessions
@@ -531,6 +548,7 @@ const turnHost =
         images: new SessionBlobs(temporal.sql),
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
+        ...(durableToolDeps ? { runCall: decidedCalls(DURABLE_TOOLS, durableToolDeps) } : {}),
       })
     : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
@@ -665,26 +683,14 @@ const background =
       })
     : undefined
 const temporalWorker =
-  temporal && operationStore && turnToolDeps
+  temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
         // Polled as this replica: a poller listing names it (affinity.ts `liveHostQueues`, pluginSessions.ts).
         identity: workerIdentity(replicaIdentity()),
         activities: {
-          ...toolActivities(DURABLE_TOOLS, {
-            services: toolServices,
-            sessions: new PgSessionOwners(temporal.sql),
-            approvals: new PgApprovalRecords(temporal.sql),
-            flows: new PgFlowRuns(temporal.sql),
-            audit,
-            answers: new PgAnswers(temporal.sql),
-            currentTiers: liveTokenTiers(tokens),
-            // A result's images, for the durable segment's view_tool_images (#2320).
-            blobs: new SessionBlobs(temporal.sql),
-            // A flow call's images, sealed under its run's payload key (#2477).
-            ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
-          }),
+          ...toolActivities(DURABLE_TOOLS, durableToolDeps),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           ...sessionGateActivities(temporal.sql),

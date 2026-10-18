@@ -1,0 +1,382 @@
+import { spawn } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { ApplicationFailure } from '@temporalio/common'
+import { WorkflowNotFoundError } from '@temporalio/client'
+import type { TestWorkflowEnvironment } from '@temporalio/testing'
+import { bundleWorkflowCode, Worker } from '@temporalio/worker'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
+import { createApp } from '../src/app.js'
+import { AuditLog } from '../src/audit/log.js'
+import { tiersUpTo } from '../src/auth/principal.js'
+import { connectDatabase, type Database } from '../src/db.js'
+import { PgEventListener } from '../src/events/pgListener.js'
+import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
+import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { runHarness } from '../src/harness/run.js'
+import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { originPolicy } from '../src/http/origins.js'
+import { SessionBlobs } from '../src/sessions/blobs.js'
+import { DurableTurns } from '../src/sessions/durable.js'
+import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import type { InputEntry } from '../src/sessions/protocol.js'
+import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
+import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TurnHost } from '../src/sessions/turnHost.js'
+import { TASK_QUEUE } from '../src/temporal/names.js'
+import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
+import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
+import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
+import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
+import { ACQUIRE_WORKER_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, SHUTTING_DOWN_FAILURE, sessionHostQueue, UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
+import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
+import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
+import { createHarnessServer } from '../src/tools/projections.js'
+import { defineTool, idempotencyKey, text } from '../src/tools/registry.js'
+import { services } from './helpers/mcp.js'
+import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { fixedCredentials } from './support/fixedCredentials.js'
+import { MemoryCredentials } from './support/memoryCredentials.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { browser, manager, tempPaths } from './support/sessions.js'
+import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+
+// A park that outlasts its hold releases the process (unified runtime spec 2026-10-13 §5.4
+// "Release" and "Continue after a release", plan Task 5.4), end to end: AgentSession on a
+// Temporal dev server, one replica running the real TurnHost and the real Claude Code against
+// the fake Anthropic endpoint, `park_hold_seconds` at 1. The outward tool is a ScadBuddy
+// registry tool (`ship`) served by the harness server, as every ScadBuddy tool is, so the
+// released call runs through the same layer (toolActivities.ts `decidedCalls`). Its command
+// stands in for a backend one: `backend` records each send's Idempotency-Key and acts only on
+// a key it has not seen, as the backend's operation record does.
+
+let cliMissing: string | undefined
+try {
+  bundledCliPath()
+} catch (err) {
+  cliMissing = (err as Error).message
+}
+const skip = !TEMPORAL_CLI
+  ? TEMPORAL_SKIP
+  : cliMissing
+    ? ` (skipped: ${cliMissing})`
+    : TEST_DATABASE_URL
+      ? ''
+      : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`
+
+const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url))
+const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
+const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+const SHIP = 'mcp__scadbuddy__ship'
+const sha = (s: string) => createHash('sha256').update(s).digest('hex')
+
+/** The last message of a request: what the model is answering now. */
+const lastMessage = (r: RecordedRequest) => JSON.stringify(r.body?.messages?.at(-1) ?? null)
+
+describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeout: 180_000 }, () => {
+  let env: TestWorkflowEnvironment
+  let workflowWorker: Worker
+  let workflowRun: Promise<void>
+  let fake: FakeAnthropic
+  let script: (r: RecordedRequest) => Reply | Promise<Reply>
+  let db: Database
+  let schema: string
+  let url: string
+  let drop: () => Promise<void>
+  let m: SessionManager
+  let pool: Database
+  let listener: PgEventListener
+  let tools: AgentWorker
+  let hosts: HostWorkers
+  let turnHost: TurnHost
+  let spawned: number
+  /** Claude Code processes that have exited. */
+  let exited: number
+  /** Every send of `ship`'s command: its key and what. */
+  let sends: { key: string; what: string }[]
+  /** What the stand-in backend did: once per key. */
+  let effects: string[]
+  /** How many of the next released calls' placements die right after the call ran (a worker lost mid-continuation). */
+  let diesAfterRun: number
+
+  beforeAll(async () => {
+    env = await localTemporal()
+    workflowWorker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: SESSION_QUEUE,
+      workflowBundle: await bundleWorkflowCode({ workflowsPath: WORKFLOWS }),
+      // Below the routes' floor of 30 s: the workflow reads what the activity gives it.
+      activities: { [SESSION_SETTINGS_ACTIVITY]: async () => ({ ...RUNTIME_DEFAULTS, park_hold_seconds: 1 }) },
+    })
+    workflowRun = workflowWorker.run()
+  }, 180_000)
+  afterAll(async () => {
+    workflowWorker?.shutdown()
+    await workflowRun
+    await env?.teardown()
+  })
+
+  const ship = defineTool({
+    name: 'ship',
+    description: 'Ships something out of ScadBuddy',
+    input: z.object({ what: z.string() }),
+    risk: 'outward',
+    routes: ['POST /api/v1/workflows/{definition_id}/runs'],
+    handler: async ({ what }, ctx) => {
+      const key = idempotencyKey(ctx)
+      sends.push({ key, what })
+      if (!sends.slice(0, -1).some((s) => s.key === key)) effects.push(what)
+      return text(`shipped ${what}`)
+    },
+  })
+
+  beforeEach(async () => {
+    fake = await startFakeAnthropic((r) => script(r))
+    ;({ db, schema, url, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
+    spawned = 0
+    exited = 0
+    sends = []
+    effects = []
+    diesAfterRun = 0
+    script = () => ({ text: 'ok' })
+    const paths = await tempPaths()
+    await ensureStateDirs(paths)
+    pool = connectDatabase(url, { searchPath: schema })
+    const tag = randomUUID().slice(0, 8)
+    const identity = `release-${tag}`
+    const hostQueue = sessionHostQueue(identity)
+    const audit = new AuditLog({ sql: pool.sql })
+    const principal = { id: browser.id, kind: 'browser' as const, tiers: tiersUpTo('outward') }
+    m = manager({
+      sql: pool.sql,
+      paths,
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-release-test-token' }),
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+      mcpServers: (session) => ({ scadbuddy: createHarnessServer([ship], services(), principal, session.id) }),
+      tierOf: (n) => (n === SHIP ? 'outward' : undefined),
+      warm: { maxEntries: 8 },
+      audit,
+      run: (run) =>
+        runHarness({
+          ...run,
+          spawnClaudeCodeProcess: (o) => {
+            spawned++
+            const child = spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
+            child.once('exit', () => exited++)
+            return child
+          },
+        }),
+    })
+    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, sessionHostQueue: hostQueue })
+    m.durable = new DurableGate(env.client, { timeoutMs: 30_000 })
+    listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
+    listener.start()
+    const runCall = decidedCalls([ship], {
+      services: services(),
+      sessions: new PgSessionOwners(pool.sql),
+      approvals: new PgApprovalRecords(pool.sql),
+      audit,
+    })
+    turnHost = new TurnHost({
+      core: m.turnCore,
+      sql: pool.sql,
+      images: new SessionBlobs(pool.sql),
+      hostQueue,
+      listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
+      runCall: async (call) => {
+        const run = await runCall(call)
+        if (diesAfterRun > 0) {
+          diesAfterRun--
+          // As a worker lost after the call ran and before its turn went on: the turn is placed again.
+          throw ApplicationFailure.retryable('the agent service is shutting down', SHUTTING_DOWN_FAILURE)
+        }
+        return run
+      },
+    })
+    const acquire = acquireActivities({ warm: m.warm, hostQueue, identity, liveHosts: async () => new Set([hostQueue]) })
+    tools = AgentWorker.start({
+      address: env.address,
+      namespace: 'default',
+      taskQueue: TASK_QUEUE,
+      identity: workerIdentity(identity),
+      activities: {
+        ...acquire,
+        ...sessionFinishActivities(pool.sql, m.events),
+        ...sessionGateActivities(pool.sql),
+        ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql) }),
+      },
+      shutdownGraceMs: 1_000,
+      log: () => {},
+    })
+    hosts = startHostWorkers({
+      address: env.address,
+      namespace: 'default',
+      identity,
+      pinned: { pinned_probe: async () => 'pinned' },
+      sessions: {
+        activities: { ...sessionTurnActivity(turnHost, { client: env.client }), ...releaseActivities(m.warm), [ACQUIRE_WORKER_ACTIVITY]: acquire[ACQUIRE_WORKER_ACTIVITY] },
+        slots: 10,
+        shutdownGraceMs: 2_000,
+        shutdownForceMs: 3_000,
+      },
+      shutdownGraceMs: 1_000,
+    })
+    await Promise.all([tools.running(), hosts.pinned.running(), hosts.sessions!.running()])
+    await pollUntil(async () => (await polled(SESSION_QUEUE, 1)) && (await polled(TASK_QUEUE, 2)) && (await polled(hostQueue, 2)), true)
+  }, 90_000)
+  afterEach(async () => {
+    for (const { id } of await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions`) {
+      await env.client.workflow
+        .getHandle(sessionWorkflowId(id))
+        .terminate('the test ended')
+        .catch((err: unknown) => {
+          if (!(err instanceof WorkflowNotFoundError)) throw err
+        })
+    }
+    const hosted = turnHost.stop({ graceMs: 1_000, abortWaitMs: 1_000 })
+    await Promise.all([tools.stop(), hosts.stop(), m.stopTurns({ graceMs: 1_000, abortWaitMs: 1_000, others: hosted })])
+    await listener.close()
+    await fake.close()
+    await pool.close()
+    await drop()
+  }, 60_000)
+
+  async function polled(queue: string, type: 1 | 2): Promise<boolean> {
+    const { pollers } = await env.client.workflowService.describeTaskQueue({ namespace: 'default', taskQueue: { name: queue }, taskQueueType: type })
+    return (pollers ?? []).length > 0
+  }
+  const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 60_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
+
+  function app() {
+    return createApp({
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: false, reason: 'unused' },
+      credentials: new MemoryCredentials(),
+      testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      approvals: m.approvals,
+      sessions: m,
+    })
+  }
+  async function listed(): Promise<InputEntry[]> {
+    const res = await app().request('/api/v1/ai/pending-input', { headers: READ })
+    expect(res.status).toBe(200)
+    return ((await res.json()) as { entries: InputEntry[] }).entries
+  }
+  async function respond(id: string, body: unknown): Promise<{ status: number; body: unknown }> {
+    const res = await app().request(`/api/v1/ai/pending-input/${id}`, { method: 'POST', headers: UI, body: JSON.stringify(body) })
+    return { status: res.status, body: await res.json() }
+  }
+
+  /** The model ships the box, then answers whatever the outcome message says with `reply`. */
+  const shipsTheBox = (reply: string) => (r: RecordedRequest) =>
+    lastMessage(r).includes('was paused waiting for approval') ? { text: reply } : lastMessage(r).includes('tool_result') ? { text: 'waiting' } : { toolUse: { name: SHIP, input: { what: 'box' } } }
+
+  /** The parked call's results in the session's transcript (ai_session_entries). */
+  async function resultsOf(id: string, toolUseId: string) {
+    const store = new PostgresSessionStore(pool.sql, { keys: testPayloadKeys(pool.sql) })
+    return ((await store.load({ projectKey: '', sessionId: id })) ?? []).flatMap((e) => {
+      const content = (e as { message?: { content?: unknown } }).message?.content
+      return Array.isArray(content) ? content.filter((b: { type?: string; tool_use_id?: string }) => b.type === 'tool_result' && b.tool_use_id === toolUseId) : []
+    })
+  }
+
+  /** A session whose one call parked, and whose process has since been released and has ended: the entry, still open. */
+  async function released(prompt = 'ship the box') {
+    const started = await m.start(browser, { origin: 'chat', prompt })
+    const id = started.session.id
+    await pollUntil(async () => (await listed()).length, 1)
+    const [entry] = await listed()
+    // Released past the hold: no process (exited, its closing result in the transcript), nothing
+    // run, and the entry still waits in the workflow.
+    await pollUntil(() => m.warm.size(), 0)
+    await pollUntil(() => exited, 1)
+    await pollUntil(async () => (await resultsOf(id, entry!.id.split(':').at(-1)!)).length, 1)
+    expect(spawned).toBe(1)
+    expect(effects).toEqual([])
+    expect((await listed()).map((e) => e.id)).toEqual([entry!.id])
+    return { started, id, entry: entry! }
+  }
+
+  it('a released approval resumes, and its call runs once, keyed by its request id, and the model reads how it went', async () => {
+    script = shipsTheBox('shipped, thanks')
+    const { started, entry } = await released()
+    const asked = fake.messageCalls().length
+    expect(await respond(entry.id, { kind: 'approval', decision: 'approve' })).toEqual({ status: 200, body: expect.objectContaining({ outcome: 'approved' }) })
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(effects).toEqual(['box'])
+    expect(sends).toEqual([{ key: sha(entry.id), what: 'box' }])
+    // A new process resumed the turn, and its first request carries the outcome.
+    expect(spawned).toBe(2)
+    expect(fake.messageCalls().slice(asked).map(lastMessage), 'the requests after the release').toHaveLength(1)
+    const told = lastMessage(fake.messageCalls().at(-1)!)
+    expect(told).toContain(`Your call \`${SHIP}\` (id ${entry.id.split(':').at(-1)}) was paused waiting for approval. It was approved and ScadBuddy ran it once.`)
+    expect(told).toContain('shipped box')
+    expect(await listed()).toEqual([])
+  })
+
+  it("the closed process wrote the parked call's synthetic result into the transcript (spec §12)", async () => {
+    script = shipsTheBox('ok')
+    const { started, id, entry } = await released()
+    expect(await resultsOf(id, entry.id.split(':').at(-1)!)).toEqual([expect.objectContaining({ is_error: true })])
+    await respond(entry.id, { kind: 'approval', decision: 'deny' })
+    await started.turn!.done
+  })
+
+  it('a denied released call is reported in the gate`s words, and not run', async () => {
+    script = shipsTheBox('understood')
+    const { started, entry } = await released()
+    expect((await respond(entry.id, { kind: 'approval', decision: 'deny' })).status).toBe(200)
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(sends).toEqual([])
+    expect(lastMessage(fake.messageCalls().at(-1)!)).toContain(`The user denied ${SHIP} (approval ${entry.id}); it was not run.`)
+  })
+
+  it('a released question resumes with its answer, which the model reads in the outcome message', async () => {
+    const colour = {
+      question: 'Which colour?',
+      header: 'Colour',
+      multiSelect: false,
+      options: [
+        { label: 'Red', description: 'warm' },
+        { label: 'Blue', description: 'cool' },
+      ],
+    }
+    script = (r) =>
+      lastMessage(r).includes("was paused waiting for the user's answer")
+        ? { text: 'blue it is' }
+        : lastMessage(r).includes('tool_result')
+          ? { text: 'waiting' }
+          : { toolUse: { name: 'AskUserQuestion', input: { questions: [colour] } } }
+    const { started, entry } = await released('paint it')
+    expect(entry).toMatchObject({ kind: 'answer', tool: 'ask_user' })
+    expect((await respond(entry!.id, { kind: 'answer', answers: { 'Which colour?': 'Blue' } })).status).toBe(200)
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(spawned).toBe(2)
+    const told = lastMessage(fake.messageCalls().at(-1)!)
+    expect(told).toContain(`Your question (id ${entry!.id.split(':').at(-1)}) was paused waiting for the user's answer. The user answered:`)
+    expect(told).toContain('Which colour?: Blue')
+  })
+
+  it('an approved released call runs once across a placement lost after it ran: the second send is answered from the record', async () => {
+    script = shipsTheBox('shipped once')
+    diesAfterRun = 1
+    const { started, entry } = await released()
+    expect((await respond(entry.id, { kind: 'approval', decision: 'approve' })).status).toBe(200)
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // Sent twice (the lost placement's, then the next one's), with one key, and done once.
+    expect(sends).toEqual([
+      { key: sha(entry.id), what: 'box' },
+      { key: sha(entry.id), what: 'box' },
+    ])
+    expect(effects).toEqual(['box'])
+    expect(lastMessage(fake.messageCalls().at(-1)!)).toContain('It was approved and ScadBuddy ran it once.')
+  })
+})

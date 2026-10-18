@@ -22,7 +22,7 @@ import { END_SIGNAL, INTERRUPT_SIGNAL } from '../../gate/names.js'
 import type { Owner, ServerEvent } from '../../sessions/protocol.js'
 import type { RuntimeSettings } from '../../sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../names.js'
-import { type GateHost, type GateTurn, SessionGate } from './gate.js'
+import { type GateHost, type GateTurn, type Resolution, SessionGate } from './gate.js'
 import {
   type AcquireInput,
   BUDGET_EXHAUSTED,
@@ -94,12 +94,15 @@ import {
 //
 // Parks (§5.4): the turn's activity sends `open_input` for each call it parks, and holds
 // while the entry is answered here (`respond`), times out or is cancelled; the answer
-// reaches it as the entry's row in ai_input_responses. A release (Task 5.4) is failed here.
+// reaches it as the entry's row in ai_input_responses. A hold past `park_hold_seconds` (or
+// a shutdown) releases the process: the activity returns `released` with the entries it held,
+// nothing runs while they wait here, and once each is decided the turn is placed again with a
+// `parked` continuation (each call as `open_input` named it, and how it ended), which runs the
+// approved ones once and tells the model how each went. A Stop while they wait ends the turn.
 
 const SHORT = '30s'
 /** How many times one turn is placed on a worker (§5.2 "Recovery"). */
 const PLACEMENTS = 3
-const NO_PARKS = 'the turn parked a call, which this build cannot wait for yet'
 
 const sendUpdate = defineUpdate<SendAnswer, [Message]>(SEND_MESSAGE_UPDATE)
 const interruptSignal = defineSignal<[{ reason?: string }?]>(INTERRUPT_SIGNAL)
@@ -175,6 +178,12 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   let ended = false
   let home: string | undefined = start.host_queue ?? undefined
   let running: CancellationScope | undefined
+  /**
+   * The running turn's parked calls, by request id, as `open_input` named them: what a released
+   * turn's continuation runs once each is decided (§5.4 step 5). Already in this history (the
+   * Update's argument), so keeping it adds nothing to it.
+   */
+  const parkedCalls = new Map<string, { toolUseId: string; tool: string; input: unknown }>()
 
   const host: GateHost = {
     // The turn's calls are decided in its activity (spec §5.4); the gate only holds their entries.
@@ -234,6 +243,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       const requestId = await gate.open({ id: call.id, name: call.name, input: call.input }, () => runs(turn_id))
       // Settled at once: no entry waits, and the activity is told how.
       if (!gate.isParked(requestId)) return { request_id: requestId, resolution: await gate.resolution(requestId) }
+      parkedCalls.set(requestId, { toolUseId: call.id, tool: call.name, input: call.input })
       return { request_id: requestId }
     },
     {
@@ -337,21 +347,37 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     // The entries' timers as Settings has them now (Python's gate_settings).
     if (patched(GATE_SETTINGS_PATCH)) await gate.loadSettings()
     if (interrupted !== undefined) return { outcome: 'interrupted' }
-    const input: SessionTurnInput = {
+    let input: SessionTurnInput = {
       sessionId: start.session_id,
       turnId: current.turn_id,
+      parkHoldSeconds: settings.park_hold_seconds,
       ...(sent ? { message: sent } : {}),
       ...(continuation ? { continuation } : {}),
     }
     running = new CancellationScope()
     let outcome: TurnEnd
     try {
-      const result = await running.run(() => placeTurn(input, settings))
+      let result = await running.run(() => placeTurn(input, settings))
+      // Released (§5.4 "Release"): the turn's process closed on a long park, and nothing runs
+      // while its entries wait. Once every one is decided the turn is placed again, to run the
+      // decided calls and go on; a Stop meanwhile ends it. A continuation may park and release again.
+      while (result.status === 'released') {
+        running = undefined
+        const next = await decided(result.parked ?? [])
+        if (next === undefined) {
+          result = { status: 'interrupted', hostQueue: result.hostQueue }
+          break
+        }
+        input = { sessionId: start.session_id, turnId: current.turn_id, parkHoldSeconds: settings.park_hold_seconds, continuation: next }
+        running = new CancellationScope()
+        result = await running.run(() => placeTurn(input, settings))
+      }
       if (result.hostQueue) home = result.hostQueue
       // The classic turn's error code, when it wrote one (turnCore.ts `tallyTurn`), is the session's too.
       const said = result.code !== undefined ? { code: result.code, ...(result.error !== undefined ? { message: result.error.slice(0, MESSAGE_MAX) } : {}) } : {}
       const tail = result.tail?.length ? { tail: result.tail } : {}
-      if (result.status === 'released') outcome = { outcome: 'failed', message: NO_PARKS }
+      // The loop above continues every release; the types cannot see that a Stop's `break` set `interrupted`.
+      if (result.status === 'released') outcome = { outcome: 'failed', message: 'the turn was released and not continued' }
       else if (result.status === 'failed') outcome = { outcome: 'failed', message: (result.error ?? 'the turn ended without a result').slice(0, MESSAGE_MAX), ...said, ...tail }
       else if (result.status === 'done') outcome = { outcome: 'done', ...said, ...tail }
       else outcome = { outcome: result.status, ...tail }
@@ -368,8 +394,25 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     return outcome
   }
 
+  /**
+   * The continuation of a released turn, once each of its parked entries is decided (by a
+   * person, a grant or its timer, all in the gate): each call with how it ended. Undefined
+   * when a Stop came first; closeTurn then cancels the entries still waiting. A released
+   * turn with no entry the workflow knows (it parked none) continues as restarted.
+   */
+  async function decided(requestIds: readonly string[]): Promise<Continuation | undefined> {
+    const known = requestIds.filter((rid) => parkedCalls.has(rid))
+    const resolutions = new Map<string, Resolution>()
+    for (const rid of known) void gate.resolution(rid).then((r) => resolutions.set(rid, r))
+    await condition(() => interrupted !== undefined || resolutions.size === known.length)
+    if (interrupted !== undefined) return undefined
+    if (known.length === 0) return { kind: 'restarted' }
+    return { kind: 'parked', calls: known.map((rid) => ({ requestId: rid, ...parkedCalls.get(rid)!, resolution: resolutions.get(rid)! })) }
+  }
+
   async function closeTurn(current: TurnStart, result: TurnEnd): Promise<void> {
     const reason = interrupted ?? THE_TURN_ENDED
+    parkedCalls.clear()
     await gate.cancelAll(reason)
     await gate.settle(reason)
     // Once this is written the row is idle, and a send may come before it returns.
