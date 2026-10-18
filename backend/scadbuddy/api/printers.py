@@ -10,7 +10,6 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-import aiomqtt
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
@@ -18,8 +17,8 @@ from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.core.problems import ApiError
+from scadbuddy.printers.address import UnsafeAddressError, lan_address
 from scadbuddy.printers.component import PROBE_TIMEOUT, PrintersDep
-from scadbuddy.printers.lan import MQTT_PORT, CertificateMismatchError
 from scadbuddy.printers.models import BambuddyLink, LanLink, PrinterCreate, PrinterPatch, PrinterRow
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
@@ -182,23 +181,9 @@ async def unlink_bambuddy(printers: PrintersDep, printer_id: str) -> PrinterRow:
     return await _call(lambda: printers.store.unlink_bambuddy(printer_id))
 
 
-def _probe_failure(error: BaseException, host: str) -> str:
-    """Why the probe failed, in words: never the access code, which none of these
-    carry (aiomqtt's errors are paho's reason codes)."""
-    if isinstance(error, TimeoutError):
-        return (
-            f"the printer at {host} did not answer within {PROBE_TIMEOUT:.0f} s; check the"
-            " address, the serial and that LAN mode is on"
-        )
-    if isinstance(error, CertificateMismatchError):
-        return str(error)
-    if isinstance(error, aiomqtt.MqttCodeError):
-        return f"the printer refused the connection ({error.rc}); check the access code"
-    if isinstance(error, aiomqtt.MqttError):
-        return "the printer's MQTT connection failed; check the access code and LAN mode"
-    if isinstance(error, OSError):
-        return f"could not reach {host}:{MQTT_PORT} ({error.strerror or type(error).__name__})"
-    return f"the probe failed ({type(error).__name__})"
+#: Every way a probe fails, said one way (the security review of Task 3): a reason per
+#: failure would make the route an oracle for which hosts and ports answer.
+PROBE_FAILED = "the printer did not answer at that address"
 
 
 @router.put(
@@ -208,7 +193,8 @@ def _probe_failure(error: BaseException, host: str) -> str:
     description=(
         "Tests the address and the 8-digit access code by asking the printer for its "
         "state (within 10 s), pins the certificate it presents, then stores the code "
-        "sealed. 502 with the reason when the printer does not answer; 503 when the "
+        "sealed. 422 when the host is not a private LAN address; 502 when the printer "
+        "does not answer there (one message, whatever failed); 503 when the "
         "secret key file is not configured. The code is never returned."
     ),
 )
@@ -218,12 +204,17 @@ async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> Pri
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING)
     try:
         async with asyncio.timeout(PROBE_TIMEOUT):
+            # Refused before anything is dialled; the probe checks again as it connects.
+            await lan_address(body.host)
             _, cert_sha256 = await printers.probe(body.host, row.serial, body.access_code)
-    except Exception as error:  # every failure is the printer's answer, as a 502
-        logger.info(
+    except UnsafeAddressError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except Exception as error:  # every failure is the one 502
+        # The kind only: never the host, the code, or the error's text.
+        logger.debug(
             "LAN probe failed", extra={"printer_id": printer_id, "error": type(error).__name__}
         )
-        raise ApiError(status.HTTP_502_BAD_GATEWAY, _probe_failure(error, body.host)) from None
+        raise ApiError(status.HTTP_502_BAD_GATEWAY, PROBE_FAILED) from None
     return await _call(lambda: printers.store.link_lan(printer_id, body, cert_sha256=cert_sha256))
 
 

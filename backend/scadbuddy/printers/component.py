@@ -22,6 +22,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import settings_kek
+from scadbuddy.printers.address import lan_address
 from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.store import PrinterStore
@@ -39,7 +40,7 @@ Probe = Callable[[str, str, str], Awaitable[tuple[LanReport, str]]]
 async def lan_probe(host: str, serial: str, access_code: str) -> tuple[LanReport, str]:
     """Pin the certificate the printer presents now, then ask it for its state over
     that pin: the moment the user types the access code is the trust-on-first-use."""
-    sha256 = await asyncio.to_thread(fetch_cert_sha256, host)
+    sha256 = await asyncio.to_thread(fetch_cert_sha256, await lan_address(host))
     report = await LanPrinter(host, serial, access_code, sha256).probe(timeout=PROBE_TIMEOUT)
     return report, sha256
 

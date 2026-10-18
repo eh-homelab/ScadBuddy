@@ -4,9 +4,11 @@ Task 2). A ``PrinterRow`` never carries the access code: only whether one is sto
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+from scadbuddy.printers.address import valid_host
 
 #: How a run reaches the printer: through Bambuddy, over the LAN, or ``auto`` (the LAN
 #: when the printer is reachable there, else Bambuddy).
@@ -63,11 +65,19 @@ class BambuddyLink(BaseModel):
     bambuddy_printer_id: int = Field(ge=1)
 
 
+def _host(value: str) -> str:
+    if not valid_host(value):
+        raise ValueError("an IP address or a host name, with no scheme, port or path")
+    return value
+
+
 class LanLink(BaseModel):
     """What the user types to link a printer over the LAN. ``access_code`` is kept out
     of ``repr`` and never stored in the clear."""
 
     model_config = ConfigDict(extra="forbid")
 
-    host: str = Field(min_length=1, max_length=253)
+    #: An IP literal or an RFC 1123 host name; where it may point is checked at every
+    #: connect (`address.lan_address`).
+    host: Annotated[str, AfterValidator(_host)] = Field(min_length=1, max_length=253)
     access_code: str = Field(min_length=8, max_length=8, pattern=r"^[0-9]+$", repr=False)

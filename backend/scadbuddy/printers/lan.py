@@ -21,7 +21,8 @@ documented there: Task 7 measures them on a printer, so this module sets neither
 The printer's certificate is self-signed and names no host, so verification is by pin,
 never off: `fetch_cert_sha256` reads the leaf certificate's SHA-256 once, when the user
 types the access code, and every later connection checks the presented certificate
-against it right after the handshake (`pinned_context`). Nothing here connects
+against it right after the handshake (`pinned_context`). Every connection dials the
+address `address.lan_address` checks at that moment (a private LAN address). Nothing here connects
 unpinned except `fetch_cert_sha256`, which sends nothing. No log record, exception or
 ``repr`` here carries the access code.
 """
@@ -42,6 +43,7 @@ from typing import Any, BinaryIO
 
 import aiomqtt
 
+from scadbuddy.printers.address import lan_address
 from scadbuddy.printers.lan_models import LanReport, ProjectFile
 
 MQTT_PORT = 8883
@@ -203,9 +205,11 @@ class LanPrinter:
     def request_topic(self) -> str:
         return f"device/{self.serial}/request"
 
-    def _client(self) -> aiomqtt.Client:
+    async def _client(self) -> aiomqtt.Client:
+        """A client for the address `lan_address` checks now: every connect is checked
+        again, and dials that address, never the name."""
         return aiomqtt.Client(
-            self.host,
+            await lan_address(self.host),
             MQTT_PORT,
             username=USERNAME,
             password=self._access_code,
@@ -225,7 +229,7 @@ class LanPrinter:
         """Each report, merged over the ones before, for as long as the connection
         lasts. A message that is not a JSON object with a ``print`` object is skipped."""
         merged: dict[str, Any] | None = None
-        async with self._client() as client:
+        async with await self._client() as client:
             await client.subscribe(self.report_topic)
             await client.publish(self.request_topic, json.dumps(pushall_command()))
             async for message in client.messages:
@@ -236,20 +240,21 @@ class LanPrinter:
                 yield LanReport(serial=self.serial, received_at=datetime.now(UTC), print=merged)
 
     async def publish(self, command: dict[str, Any]) -> None:
-        async with self._client() as client:
+        async with await self._client() as client:
             await client.publish(self.request_topic, json.dumps(command))
 
     async def upload(self, data: BinaryIO, remote_name: str) -> str:
         """Send ``data`` over implicit FTPS as ``remote_name`` (a path on the printer;
         which directory is Task 7's measurement) and return the md5 (hex) of what was
         sent, which ``print.project_file`` names."""
-        return await asyncio.to_thread(self._upload, data, remote_name)
+        address = await lan_address(self.host)
+        return await asyncio.to_thread(self._upload, address, data, remote_name)
 
-    def _upload(self, data: BinaryIO, remote_name: str) -> str:
+    def _upload(self, address: str, data: BinaryIO, remote_name: str) -> str:
         md5 = hashlib.md5(usedforsecurity=False)
         ftp = ImplicitFtpTls(context=pinned_context(self.cert_sha256), timeout=FTP_TIMEOUT)
         try:
-            ftp.connect(self.host, FTPS_PORT)
+            ftp.connect(address, FTPS_PORT)
             ftp.login(USERNAME, self._access_code)
             ftp.prot_p()
             ftp.store_no_unwrap(f"STOR {remote_name}", data, md5.update)

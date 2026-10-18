@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import aiomqtt
 import httpx
 import pytest
 import respx
@@ -205,12 +206,27 @@ def test_lan_link_never_returns_code(client: TestClient) -> None:
     assert unlinked.status_code == 200 and unlinked.json()["has_access_code"] is False
 
 
-def test_lan_link_probe_failure_is_502(client: TestClient) -> None:
+GENERIC = "the printer did not answer at that address"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        ConnectionRefusedError(111, "Connection refused"),
+        OSError(113, "No route to host"),
+        aiomqtt.MqttCodeError(5),
+        aiomqtt.MqttError("boom"),
+        RuntimeError("anything"),
+    ],
+)
+def test_lan_link_probe_failure_is_502(client: TestClient, failure: BaseException) -> None:
+    """Security review: every failure is one message, so the route is no port scanner."""
     printers = registry(client)
     printers.store.kek = KEK
 
     async def probe(host: str, serial: str, code: str) -> tuple[LanReport, str]:
-        raise TimeoutError
+        raise failure
 
     printers.probe = probe
     pid = create(client)["id"]
@@ -220,9 +236,34 @@ def test_lan_link_probe_failure_is_502(client: TestClient) -> None:
     )
 
     assert response.status_code == 502
-    assert "did not answer" in response.json()["detail"]
-    assert CODE not in response.text
+    assert response.json()["detail"] == GENERIC
+    assert CODE not in response.text and "10.0.0.9" not in response.text
     assert client.get(f"/api/v1/printers/{pid}").json()["has_access_code"] is False
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "::1", "169.254.169.254", "0.0.0.0", "8.8.8.8", "localhost"]
+)
+def test_lan_link_refuses_an_address_off_the_lan(client: TestClient, host: str) -> None:
+    printers = registry(client)
+    printers.store.kek = KEK
+    calls: list[tuple[str, str, str]] = []
+    printers.probe = _probe_ok(calls)
+    pid = create(client)["id"]
+
+    response = client.put(f"/api/v1/printers/{pid}/lan", json={"host": host, "access_code": CODE})
+
+    assert response.status_code == 422, response.text
+    assert calls == []
+
+
+def test_lan_link_refuses_a_host_that_is_not_one(client: TestClient) -> None:
+    pid = create(client)["id"]
+    response = client.put(
+        f"/api/v1/printers/{pid}/lan",
+        json={"host": "http://10.0.0.9/", "access_code": CODE},
+    )
+    assert response.status_code == 422
 
 
 def test_lan_link_without_kek_is_503(client: TestClient) -> None:
