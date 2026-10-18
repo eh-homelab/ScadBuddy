@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRealtime, resetRealtime, type RealtimeListener } from './realtime'
 import { CURSOR_HEADER, trackRequest } from './readCursor'
-import { RESYNC_WAIT_MS, useAsync } from './useAsync'
+import { RESYNC_WAIT_MS, SIGNAL_READ_MIN_MS, useAsync } from './useAsync'
 
 let signals: RealtimeListener[] = []
 
@@ -37,6 +37,48 @@ it('reads once on mount and again on each signal, coalescing a burst', async () 
   })
   await waitFor(() => expect(result.current.data).toBe(2))
   expect(reads).toBe(2)
+})
+
+// #4149 — however often a topic is signalled, one read is in flight and one waits behind
+// it, each at least SIGNAL_READ_MIN_MS after the last: a signal can never become a storm.
+it('keeps one signalled read in flight and one waiting, spaced by the minimum interval', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: false })
+  try {
+    const { load, resolvers } = deferred<number>()
+    const { result } = renderHook(() => useAsync(load, [], ['models']))
+    await act(async () => resolvers[0]?.(0))
+    expect(result.current.data).toBe(0)
+    // A signal while nothing is in flight reads at once.
+    await act(async () => signals[0]?.('resync'))
+    expect(resolvers).toHaveLength(2)
+    // Signals while it is in flight all wait for one read behind it.
+    await act(async () => {
+      for (let i = 0; i < 50; i++) signals[0]?.('resync')
+      await vi.advanceTimersByTimeAsync(SIGNAL_READ_MIN_MS * 4)
+    })
+    expect(resolvers).toHaveLength(2)
+    await act(async () => resolvers[1]?.(1))
+    expect(resolvers).toHaveLength(3)
+    // Answered at once, the next waits out the interval since the last started.
+    await act(async () => resolvers[2]?.(2))
+    await act(async () => signals[0]?.('resync'))
+    expect(resolvers).toHaveLength(3)
+    await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_MIN_MS))
+    expect(resolvers).toHaveLength(4)
+    await act(async () => resolvers[3]?.(3))
+    expect(result.current.data).toBe(3)
+    // A storm of signals reads at most once per interval.
+    for (let i = 0; i < 40; i++) {
+      await act(async () => {
+        signals[0]?.('resync')
+        await vi.advanceTimersByTimeAsync(10)
+        for (const resolve of resolvers) resolve(i)
+      })
+    }
+    expect(resolvers.length).toBeLessThanOrEqual(4 + Math.ceil((40 * 10) / SIGNAL_READ_MIN_MS) + 1)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('keeps the data on screen, not loading, while a refresh is in flight', async () => {
