@@ -22,6 +22,8 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, get_render
+from scadbuddy.api.library_print import start_library_run
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -48,6 +50,7 @@ from tests.api.test_print_library import flow_copy_routes, run_library, uploaded
 from tests.api.test_print_run_choices import body as run_body
 from tests.api.test_print_run_choices import run_routes
 from tests.api.test_send import configure
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -879,6 +882,103 @@ def test_a_native_id_is_404_to_arrange_on_bambuddy(client: TestClient) -> None:
 
 
 # --- Task 8: filing saved outputs ----------------------------------------------------------
+
+
+#: A valid body for each `/print/library/{file_id}/*` route that takes one, by its path's
+#: end and method; any other takes `{}`. A route added with a body of its own needs an
+#: entry, or the sweep below sees its 422.
+ROUTE_BODIES: dict[tuple[str, str], dict[str, Any]] = {
+    ("run", "POST"): run_body(),
+    ("check", "POST"): run_body(),
+    ("preview-slice", "POST"): run_body(),
+    ("{file_id}", "PATCH"): {"filename": "x.3mf"},
+}
+
+
+def _file_id_routes() -> list[tuple[str, str]]:
+    """Every `/print/library/{file_id}…` route of the app, as (method, path), read from
+    its OpenAPI (FastAPI 0.143 keeps an included router's routes inside it)."""
+    app = create_app(
+        Settings(
+            data_dir=Path("/nonexistent"),
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        )
+    )
+    return sorted(
+        (method.upper(), path)
+        for path, item in app.openapi()["paths"].items()
+        if path.startswith("/api/v1/print/library/{file_id}")
+        for method in item
+    )
+
+
+FILE_ID_ROUTES = _file_id_routes()
+
+
+def _call(client: TestClient, method: str, path: str, file_id: int) -> httpx.Response:
+    url = path.format(file_id=file_id, job_id=1, index=1)
+    body = ROUTE_BODIES.get((path.rsplit("/", 1)[-1], method), {})
+    response: httpx.Response = (
+        client.get(url)
+        if method == "GET"
+        else client.request(method, url, json=body, headers=press())
+    )
+    return response
+
+
+@respx.mock
+@pytest.mark.parametrize(("method", "path"), FILE_ID_ROUTES)
+def test_every_file_route_is_404_for_a_bambuddy_id_on_native(
+    native_client: TestClient, method: str, path: str
+) -> None:
+    """One id space at a time (#3827): on native, Bambuddy's file 5 is no file to any
+    route, and none asks Bambuddy about it."""
+    configure(native_client)
+
+    response = _call(native_client, method, path, 5)
+
+    assert response.status_code == 404, response.text
+    assert list(respx.calls) == []
+
+
+@respx.mock
+@pytest.mark.parametrize(("method", "path"), FILE_ID_ROUTES)
+def test_every_file_route_is_404_for_a_native_id_on_bambuddy(
+    client: TestClient, method: str, path: str
+) -> None:
+    configure(client)
+
+    response = _call(client, method, path, 1_000_000_005)
+
+    assert response.status_code == 404, response.text
+    assert list(respx.calls) == []
+
+
+@pytest.mark.parametrize(("file_id", "native"), [(1_000_000_005, None), (5, object())])
+async def test_a_batch_run_of_the_other_librarys_file_is_404(file_id: int, native: Any) -> None:
+    """A batch's Queue all starts runs past the routes, so `start_library_run` refuses
+    the other library's file itself, before it accepts anything."""
+    unused: Any = None
+    with pytest.raises(ApiError) as raised:
+        await start_library_run(
+            file_id,
+            PrintRunRequest.model_validate(run_body()),
+            runs=unused,
+            activity=unused,
+            store=unused,
+            paths=unused,
+            budget=unused,
+            downloads=None,
+            native=native,
+        )
+    assert raised.value.status == 404
+
+
+def test_the_sweep_covers_the_print_routes() -> None:
+    assert ("POST", "/api/v1/print/library/{file_id}/run") in FILE_ID_ROUTES
+    assert ("GET", "/api/v1/print/library/{file_id}/choices") in FILE_ID_ROUTES
 
 
 @pytest.fixture

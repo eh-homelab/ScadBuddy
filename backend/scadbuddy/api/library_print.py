@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Sequen
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -123,7 +123,12 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.print_library.reads import LibraryReads, reads_for
+from scadbuddy.print_library.reads import (
+    LibraryReads,
+    check_served,
+    reads_for,
+    served_reads,
+)
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
@@ -133,7 +138,22 @@ from scadbuddy.workflows.print_models import SourceSpec
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/print/library", tags=["print"])
+
+async def _served_file_id(request: Request, library: PrintLibraryDep) -> None:
+    """Every ``/{file_id}`` route's 404 for an id of the library that does not serve
+    (#3827), before it reads, records or starts anything, so a route added later cannot
+    read the other library's file. The path's own validation answers a non-integer."""
+    raw = request.path_params.get("file_id")
+    if raw is None:
+        return
+    try:
+        file_id = int(raw)
+    except ValueError:
+        return
+    check_served(file_id, await library.serving_native())
+
+
+router = APIRouter(prefix="/print/library", tags=["print"], dependencies=[Depends(_served_file_id)])
 
 #: The operations record's subject for a library operation on several files, or none yet.
 LIBRARY_FILES_SUBJECT = "library-files"
@@ -1048,7 +1068,7 @@ async def get_library_choices(
     remembered = store.library_choices(file_id)
     native = await library.serving_native()
     async with client_for(settings) as client:
-        files = reads_for(file_id, client, native)
+        files = served_reads(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
         source = LibrarySource.load(
             client,
@@ -1112,7 +1132,7 @@ async def get_library_filaments(
     settings = store.load()
     native = await library.serving_native()
     async with client_for(settings) as client:
-        files = reads_for(file_id, client, native)
+        files = served_reads(file_id, client, native)
         return await filament_options_for_library(
             client,
             uploads,
@@ -1204,7 +1224,9 @@ async def start_library_run(
     no response of its own reads the run's ``status`` instead. Only ``http`` asking for
     ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
     calls it, the answer is always the run. ``native`` is the native library that serves,
-    if one does (#3827)."""
+    if one does (#3827), and a file of the library that does not serve is its 404, before
+    anything is accepted."""
+    check_served(file_id, native)
 
     async def prepare(source: SourceSpec) -> SourceSpec:
         filaments = await _run_filaments(store, paths, budget, file_id, downloads, native)
@@ -1239,7 +1261,7 @@ async def _run_filaments(
     why a file cannot print."""
     try:
         async with client_for(store.load()) as client:
-            files = reads_for(file_id, client, native)
+            files = served_reads(file_id, client, native)
             file = await files.library_file(file_id)
             if not file.file_hash:
                 return None
@@ -1397,7 +1419,7 @@ async def post_library_check(
     settings = store.load()
     native = await library.serving_native()
     async with client_for(settings) as client:
-        files = reads_for(file_id, client, native)
+        files = served_reads(file_id, client, native)
         return await check_for_library(
             client,
             uploads,

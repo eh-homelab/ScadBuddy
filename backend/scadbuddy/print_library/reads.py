@@ -66,6 +66,15 @@ def served_reads(
     return reads_for(file_id, client, None)
 
 
+def check_served(file_id: int, native: object | None) -> None:
+    """The 404 for an id of the library that does not serve (one id space at a time): a
+    Bambuddy-range id on ``native``, a native id on ``bambuddy`` (``native`` None)."""
+    if is_native_id(file_id) != (native is not None):
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"library file {file_id} not found", file_id=file_id
+        )
+
+
 def reads_of(files: LibraryReads | None, client: BambuddyClient | None) -> LibraryReads:
     """``files`` when given, else Bambuddy's ``client``, one of which a read needs."""
     if files is not None:
