@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import threading
+import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -27,6 +28,7 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
+from scadbuddy.render import split as split_module
 from scadbuddy.render.bambu3mf import plates_of, single_plate
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, write_glb
@@ -1710,6 +1712,16 @@ def test_a_layout_part_without_paint_is_saved_as_before(tmp_path: Path) -> None:
     assert PlateLayout.load(tmp_path / LAYOUT_NAME).plates[0].parts[0].paint is None
 
 
+class _WatchedET:
+    """`xml.etree.ElementTree` with its `fromstring` replaced."""
+
+    def __init__(self, fromstring: Callable[..., ET.Element]) -> None:
+        self.fromstring = fromstring
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(ET, name)
+
+
 @pytest.mark.parametrize(("drawn", "plates", "hollow"), STAGE_CASES)
 async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
     paths: DataPaths,
@@ -1738,7 +1750,9 @@ async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
 
     with (
         _stage_patches(_stage_openscad(drawn, plates, hollow)),
-        mock.patch.object(jobs, "split_by_material", watched("split", split_by_material)),
+        # At the parse itself, not at `jobs`' name for it: a split reached through any
+        # other module (`solids.solid_mesh`, `PlateLayout.load`) is held to it too.
+        mock.patch.object(split_module, "ET", _WatchedET(watched("split", ET.fromstring))),
         mock.patch.object(jobs, "write_glb", watched("write_glb", write_glb)),
     ):
         prepared, config = await prepare_source(

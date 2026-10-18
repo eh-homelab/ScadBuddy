@@ -496,7 +496,9 @@ async def plate_layout(
                     diagnostics_dropped=error.diagnostics_dropped,
                     missing_files=error.missing_files,
                 ) from error
-            # Off the loop, as every mesh parse (#3788): see `_render_solids`.
+            # Off the loop, as every mesh parse (#3788): see `_render_solids`. A plain
+            # `to_thread`, not `_thread_to_end`: the parse only reads, so a cancelled
+            # attempt's thread finishing late writes nothing its retry could see.
             split = await asyncio.to_thread(split_by_material, raw)
             if not split:
                 if may_be_empty:

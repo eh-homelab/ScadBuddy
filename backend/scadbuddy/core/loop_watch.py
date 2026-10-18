@@ -108,6 +108,8 @@ class LoopWatch:
             except RuntimeError:
                 return  # the loop is closed
             if ran.wait(self.threshold):
+                if self._stopping.is_set():
+                    return  # a probe the shutdown left waiting is no stall either
                 self._check_probe(loop_thread)
                 continue
             if self._stopping.is_set() or loop.is_closed():
