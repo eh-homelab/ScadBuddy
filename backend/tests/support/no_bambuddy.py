@@ -9,7 +9,13 @@
   (``scadbuddy/bambuddy/client.py`` ``_call_span``, ``f"bambuddy.{operation}"``,
   ``SpanKind.CLIENT``).
 
-On exit it raises :class:`BambuddyCalledError` naming each span and each request.
+On exit it raises :class:`BambuddyCalledError` naming each span and each request. It
+is an ``Exception``, not an ``AssertionError``, so a test's own
+``pytest.raises(AssertionError)`` cannot swallow a leak. When the block itself raises an
+``Exception`` (most likely the code under test failing on a 599), the window raises
+``BambuddyCalledError`` from it if anything was recorded; a ``BaseException`` (pytest's
+``Failed``, a cancellation) passes through unchecked. Entering does not clear the shared
+exporter: the window looks only at spans finished after it opened.
 
 Two things it relies on, read in the code it runs against:
 
@@ -27,6 +33,12 @@ Two things it relies on, read in the code it runs against:
   when there are none, so a strict outer router still refuses what it does not mock.
   An outer router's Bambuddy route is therefore never called inside the window: give
   that router ``assert_all_called=False`` if its setup routes are not all called before.
+  This leans on respx's internals (``Mocker.routers`` and its order), which is why
+  ``pyproject.toml`` bounds respx to 0.23.x; a bump must keep
+  ``test_an_outer_mock_of_bambuddy_does_not_hide_a_call`` green. One gap: a router
+  opened with ``using="httpx"`` (respx's ``HTTPXMocker``) patches httpx's transport
+  lookup, above httpcore, and would answer a Bambuddy request before this one sees it.
+  No test uses one.
 """
 
 from collections.abc import Iterator
@@ -45,7 +57,7 @@ from scadbuddy.core.tracing import span
 FORBIDDEN_STATUS = 599
 
 
-class BambuddyCalledError(AssertionError):
+class BambuddyCalledError(Exception):
     """A Bambuddy span or request inside a :func:`forbid_bambuddy` window."""
 
 
@@ -125,21 +137,26 @@ class _Forbidder(respx.MockRouter):
 def forbid_bambuddy(spans: InMemorySpanExporter, base_url: str) -> Iterator[BambuddyRecord]:
     """Fail on any Bambuddy span or any request to ``base_url`` made inside the block."""
     record = BambuddyRecord()
-    spans.clear()
+    before = len(spans.get_finished_spans())
     router = _Forbidder(httpx.URL(base_url), record)
     try:
         with router, span("test.no_bambuddy"):
             yield record
     except Exception as error:
         # The code under test failed, most likely on a 599: name the call, not the symptom.
-        _check(spans, record, cause=error)
+        _check(spans, before, record, cause=error)
         raise
-    _check(spans, record)
+    _check(spans, before, record)
 
 
 def _check(
-    spans: InMemorySpanExporter, record: BambuddyRecord, *, cause: Exception | None = None
+    spans: InMemorySpanExporter,
+    before: int,
+    record: BambuddyRecord,
+    *,
+    cause: Exception | None = None,
 ) -> None:
-    record.spans = [s.name for s in spans.get_finished_spans() if s.name.startswith("bambuddy.")]
+    finished = spans.get_finished_spans()[before:]
+    record.spans = [s.name for s in finished if s.name.startswith("bambuddy.")]
     if record.requests or record.spans:
         raise BambuddyCalledError(f"Bambuddy was called:\n{record.summary()}") from cause

@@ -10,10 +10,12 @@ item without one); a native run must. The encoding, from two sources that agree:
   tray id, with the virtual (external) tray ids turned into ``-1``
   (``src/slic3r/GUI/SelectMachine.cpp:1463-1504``; ``VIRTUAL_TRAY_MAIN_ID`` 255 and
   ``VIRTUAL_TRAY_DEPUTY_ID`` 254, ``src/slic3r/GUI/DeviceCore/DevDefs.h:86-87``).
-  ``use_ams`` is false only when the mapped filaments use external spools and no AMS
-  tray (``SelectMachine.cpp:3358-3373``, ``_HasExt``/``_HasAms`` over the mapping).
+  ``use_ams`` is false when the printer has no AMS, and otherwise only when the mapped
+  filaments use external spools and no AMS tray (``SelectMachine.cpp:3358-3373``,
+  ``obj_->HasAms()`` then ``_HasExt``/``_HasAms`` over the mapping).
 - Bambuddy, which prints over LAN MQTT itself, sends the flat array as one global tray
-  id per slot: ``ams_id * 4 + slot_id`` for an AMS, the AMS-HT's own id at 128+, and
+  id per slot: ``ams_id * 4 + slot_id`` for an AMS, the AMS-HT's own id at 128+, the
+  A2L AMS-Lite's local slot (unit 16, see ``AMS_LITE_ID``), and
   ``-1`` for an unmapped slot *and* for an external spool, since "firmware doesn't
   accept raw 254/255" there (the H2D failure ``0700_8012``); ``ams_mapping2`` carries
   the external spool as ``{ams_id: 255, slot_id: 0}`` on a single-nozzle printer and
@@ -44,8 +46,14 @@ UNMAPPED = 255
 #: Bambu Studio's virtual tray ids: the main (right) extruder's holder and the deputy's.
 VIRTUAL_TRAY_MAIN_ID = 255
 VIRTUAL_TRAY_DEPUTY_ID = 254
-#: An AMS id at or above this is an AMS-HT, one tray per unit (``trays.unit_label``).
-HT_BASE = 128
+#: The unit ids a printer reports (Bambuddy ``bambu_mqtt.py:121-127`` at ``0d427510``: "regular
+#: AMS 0-3, AMS-HT 128-135", and the A2L's AMS-Lite at 16): one AMS-HT tray per unit.
+AMS_IDS = range(0, 4)
+HT_IDS = range(128, 136)
+#: The A2L's AMS-Lite, which the wire names by its own unit id with a local slot 0-3, in
+#: both arrays: "CONFIRMED from the firmware's own `ams_mapping2` ({ams_id:16, slot_id:0-3})"
+#: and the flat value the local slot (``bambu_mqtt.py:115``, ``:158-179``, ``:6020-6027``).
+AMS_LITE_ID = 16
 TRAYS_PER_AMS = 4
 
 
@@ -59,7 +67,8 @@ class AmsMapping(BaseModel):
     ams_mapping: list[int]
     #: Per filament slot: ``{ams_id, slot_id}``; ``{255, 255}`` unmapped; external ``{255|254, 0}``.
     ams_mapping2: list[AmsSlot]
-    #: False only when the mapped slots use external spools and no AMS tray.
+    #: False when the printer has no AMS, or the mapped slots use external spools and no
+    #: AMS tray.
     use_ams: bool
 
 
@@ -67,24 +76,43 @@ def _slot(ams_id: int, tray_id: int, *, dual_nozzle: bool) -> tuple[int, AmsSlot
     if ams_id == EXTERNAL and tray_id in (0, 1):
         side = VIRTUAL_TRAY_DEPUTY_ID + tray_id if dual_nozzle else VIRTUAL_TRAY_MAIN_ID
         return -1, AmsSlot(ams_id=side, slot_id=0)
-    if HT_BASE <= ams_id < EXTERNAL - 1 and tray_id == 0:
+    if ams_id in HT_IDS and tray_id == 0:
         return ams_id, AmsSlot(ams_id=ams_id, slot_id=0)
-    if 0 <= ams_id < HT_BASE and 0 <= tray_id < TRAYS_PER_AMS:
+    if ams_id == AMS_LITE_ID and 0 <= tray_id < TRAYS_PER_AMS:
+        return tray_id, AmsSlot(ams_id=ams_id, slot_id=tray_id)
+    if ams_id in AMS_IDS and 0 <= tray_id < TRAYS_PER_AMS:
         return ams_id * TRAYS_PER_AMS + tray_id, AmsSlot(ams_id=ams_id, slot_id=tray_id)
     raise ValueError(f"no such tray: AMS {ams_id} tray {tray_id}")
 
 
-def ams_mapping(plan: FilamentPlan, filament_count: int, *, dual_nozzle: bool) -> AmsMapping:
-    """The mapping for a plate of ``filament_count`` filament slots (from the sliced
-    plate) printed with ``plan``'s trays. A slot the plan leaves out is unmapped. A
-    positive (inventory) spool id raises ``ValueError``: a native plan is trays only."""
-    flat = [-1] * filament_count
-    detail = [AmsSlot(ams_id=UNMAPPED, slot_id=UNMAPPED) for _ in range(filament_count)]
+def ams_mapping(
+    plan: FilamentPlan,
+    project_filament_count: int,
+    *,
+    dual_nozzle: bool,
+    printer_has_ams: bool,
+) -> AmsMapping:
+    """The mapping for ``plan``'s trays.
+
+    ``project_filament_count`` is the number of filament slots the *project* has, at
+    least its largest slot id, not the number the plate prints with: Bambu Studio sizes
+    both arrays by the project's filaments (``SelectMachine.cpp:1463``,
+    ``filament_presets.size()``) and Bambuddy by the largest slot used
+    (``print_scheduler.py:4180-4184`` at ``0d427510``), while a sliced plate lists only
+    the filaments it uses (``bambuddy/filaments3mf.py``). A slot the plan leaves out is
+    unmapped. ``printer_has_ams`` is whether the printer's report has any AMS unit:
+    without one, ``use_ams`` is false whatever is mapped (``SelectMachine.cpp:3358-3373``,
+    the ``else`` at ``:3371-3373``; Bambuddy: "P1S/P1P with no AMS rejects use_ams=True",
+    ``bambu_mqtt.py:6056-6058``), and an AMS tray in the plan is refused. A positive
+    (inventory) spool id raises ``ValueError``: a native plan is trays only."""
+    count = project_filament_count
+    flat = [-1] * count
+    detail = [AmsSlot(ams_id=UNMAPPED, slot_id=UNMAPPED) for _ in range(count)]
     seen: set[int] = set()
     has_ams = has_external = False
     for choice in plan.slots:
-        if not 1 <= choice.slot_id <= filament_count:
-            raise ValueError(f"slot {choice.slot_id} is not one of the plate's {filament_count}")
+        if not 1 <= choice.slot_id <= count:
+            raise ValueError(f"slot {choice.slot_id} is not one of the project's {count}")
         if choice.slot_id in seen:
             raise ValueError(f"slot {choice.slot_id} is chosen twice")
         seen.add(choice.slot_id)
@@ -97,8 +125,9 @@ def ams_mapping(plan: FilamentPlan, filament_count: int, *, dual_nozzle: bool) -
         flat[index], detail[index] = _slot(*tray, dual_nozzle=dual_nozzle)
         if tray[0] == EXTERNAL:
             has_external = True
+        elif not printer_has_ams:
+            raise ValueError(f"no such tray: AMS {tray[0]} on a printer with no AMS")
         else:
             has_ams = True
-    return AmsMapping(
-        ams_mapping=flat, ams_mapping2=detail, use_ams=not (has_external and not has_ams)
-    )
+    use_ams = printer_has_ams and not (has_external and not has_ams)
+    return AmsMapping(ams_mapping=flat, ams_mapping2=detail, use_ams=use_ams)

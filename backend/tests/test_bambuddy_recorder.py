@@ -19,6 +19,7 @@ RECORDER_PY = (
     Path(__file__).resolve().parents[2] / "e2e-stack" / "bambuddy-recorder" / "recorder.py"
 )
 RECORDINGS = Path(__file__).parent / "bambuddy" / "recordings"
+FAKE_REPORT = Path(__file__).resolve().parents[2] / "e2e-stack" / "fake-printer" / "report.json"
 
 pytestmark = pytest.mark.skipif(
     not RECORDER_PY.is_file(), reason=f"{RECORDER_PY} is not in this tree"
@@ -49,7 +50,8 @@ def recorder() -> Iterator[str]:
 
 
 def _call(url: str, method: str = "GET") -> tuple[int, Any]:
-    request = urllib.request.Request(url, method=method, data=b"" if method == "POST" else None)
+    data = b"" if method in ("POST", "PUT", "PATCH") else None
+    request = urllib.request.Request(url, method=method, data=data)
     try:
         with urllib.request.urlopen(request, timeout=5) as answer:
             status, body = answer.status, answer.read()
@@ -77,6 +79,8 @@ def test_anything_else_fails_and_everything_is_listed(recorder: str) -> None:
     assert _call(f"{recorder}/api/v1/printers/")[0] == 599
     assert _call(f"{recorder}/api/v1/library/files/", "POST")[0] == 599
     _call(f"{recorder}/api/v1/inventory/spools")
+    assert _call(f"{recorder}/api/v1/printers/", "OPTIONS")[0] == 599
+    assert _call(f"{recorder}/api/v1/printers/1", "PURGE")[0] == 599
 
     status, recorded = _call(f"{recorder}/__recorded")
     assert status == 200
@@ -84,8 +88,21 @@ def test_anything_else_fails_and_everything_is_listed(recorder: str) -> None:
         ("GET", "/api/v1/printers/"),
         ("POST", "/api/v1/library/files/"),
         ("GET", "/api/v1/inventory/spools"),
+        ("OPTIONS", "/api/v1/printers/"),
+        ("PURGE", "/api/v1/printers/1"),
     ]
     assert all(r["at"] for r in recorded)
 
     assert _call(f"{recorder}/__reset", "POST")[0] == 204
     assert _call(f"{recorder}/__recorded") == (200, [])
+
+
+def test_the_tagged_spool_is_the_fake_printers_tagged_tray() -> None:
+    """The overlay links them by RFID only if the two fakes name the same spool."""
+    module = _load()
+    report = json.loads(FAKE_REPORT.read_text())["print"]
+    trays = [tray for unit in report["ams"]["ams"] for tray in unit["tray"]]
+    tagged = [t for t in trays if t.get("tray_uuid", "0" * 32) != "0" * 32]
+    assert [(t["tray_uuid"], t["tag_uid"]) for t in tagged] == [
+        (module.TAGGED_TRAY_UUID, module.TAGGED_TAG_UID)
+    ]

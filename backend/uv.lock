@@ -1930,7 +1930,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-split", specifier = ">=0.11" },
     { name = "pytest-xdist", specifier = ">=3.8" },
-    { name = "respx", specifier = ">=0.22" },
+    { name = "respx", specifier = ">=0.23,<0.24" },
     { name = "ruff", specifier = ">=0.7" },
     { name = "types-aiobotocore", extras = ["s3"], specifier = ">=2.21,<3" },
     { name = "types-jsonschema", specifier = ">=4.26.0.20261006" },

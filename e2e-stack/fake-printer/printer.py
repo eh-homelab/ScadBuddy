@@ -11,9 +11,18 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   ``pushing.pushall`` is answered with the whole report (``report.json``, in the shape of
   ``mqtt.md``'s ``pushing.pushall`` example, one AMS tray tagged); every report is the
   whole object, as the X1 series sends (``mqtt.md``, ``print.push_status``).
-  ``print.project_file`` is recorded and runs ``gcode_state`` ``PREPARE`` then
-  ``RUNNING`` (``mc_percent`` 0 to 100 over ``FAKE_PRINT_SECONDS``) then ``FINISH``;
-  ``print.stop`` ends a print ``FAILED``.
+  ``print.project_file`` is recorded and echoed on the report topic with its ``url``
+  and a ``result``, as a printer echoes a dispatch there ~2 s before ``PREPARE``
+  (Bambuddy ``bambu_mqtt.py:2067-2101`` at ``0d427510``, which reads only a
+  ``result`` of ``SUCCESS``). Its ``url`` must name a file uploaded under the upload
+  directory (``resolve_url``); then it runs ``gcode_state`` ``PREPARE``, ``RUNNING``
+  (``mc_percent`` 0 to 100 over ``FAKE_PRINT_SECONDS``) and ``FINISH``. Otherwise the echo
+  says ``result: FAIL`` with a reason, the print goes ``FAILED`` with a non-zero
+  ``print_error`` and the refusal is listed. The failure's values are made up: what a
+  printer answers for a missing file is not measured. ``print.stop`` ends a print
+  ``FAILED``. An ACL lets ``bblp`` use only ``device/<serial>/request`` and
+  ``device/<serial>/report``: mosquitto 2 grants a ``#`` subscription but delivers it
+  nothing else, and drops a publish to any other topic.
 - **Implicit FTPS** on ``FAKE_PRINTER_FTPS_PORT`` (990), user ``bblp``, with the same
   certificate (OpenBambuAPI ``ftp.md``: "TLS: implicit"). pyftpdlib speaks explicit TLS
   (``AUTH TLS``); its handler is made implicit by securing the control connection as it
@@ -25,7 +34,12 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   ``FAKE_PRINTER_SDCARD`` (``/sdcard``), each recorded with its size and md5.
 - **Control** on ``FAKE_PRINTER_CONTROL_PORT`` (8081), plain HTTP, never a printer path:
   ``GET /__received`` answers ``{"mqtt": [<command>...], "ftps": [{"name", "size",
-  "md5"}...]}`` and ``POST /__reset`` clears it. It answers once the printer is up.
+  "md5"}...], "refused": [{"url", "reason"}...]}`` and ``POST /__reset`` clears it. It
+  answers once the printer is up; ``python printer.py --health`` checks that.
+
+The certificate is made at the first start and kept in ``FAKE_PRINTER_STATE``, as a
+printer's is stable: a LAN client pins its SHA-256 when it is linked (3a's
+``LanPrinter``), so a new one at each restart would break the pin.
 
 The upload directory, ``FAKE_PRINTER_UPLOAD_DIR``, is made at start so a ``STOR`` into
 it works. Which directory a real printer takes a print in, and the ``url`` it then
@@ -57,10 +71,12 @@ import logging
 import os
 import signal
 import ssl
+import sys
 import threading
+import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import aiomqtt
@@ -80,6 +96,9 @@ USERNAME = "bblp"
 #: the module docstring.
 DEFAULT_UPLOAD_DIR = "/"
 REPORT = Path(__file__).with_name("report.json")
+#: ``print_error`` for a ``project_file`` whose file is missing. Made up (not measured on
+#: a printer); a client should only rely on it being non-zero.
+FILE_NOT_FOUND = 0x0500_C010
 #: Seconds between two RUNNING reports.
 TICK = 0.25
 #: mosquitto's PBKDF2-SHA512 password hash (``$7$``), with its default iterations.
@@ -129,6 +148,7 @@ class Received:
 
     mqtt: list[dict[str, Any]] = field(default_factory=list)
     ftps: list[dict[str, Any]] = field(default_factory=list)
+    refused: list[dict[str, Any]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add_mqtt(self, command: dict[str, Any]) -> None:
@@ -139,14 +159,19 @@ class Received:
         with self.lock:
             self.ftps.append(entry)
 
+    def refuse(self, entry: dict[str, Any]) -> None:
+        with self.lock:
+            self.refused.append(entry)
+
     def snapshot(self) -> dict[str, list[dict[str, Any]]]:
         with self.lock:
-            return {"mqtt": list(self.mqtt), "ftps": list(self.ftps)}
+            return {"mqtt": list(self.mqtt), "ftps": list(self.ftps), "refused": list(self.refused)}
 
     def reset(self) -> None:
         with self.lock:
             self.mqtt.clear()
             self.ftps.clear()
+            self.refused.clear()
 
 
 def mosquitto_password(password: str, salt: bytes | None = None) -> str:
@@ -219,7 +244,13 @@ def _ftp_server(config: Config, cert: Path, key: Path, received: Received) -> FT
             ha-bambulab): under TLS 1.3 the server's post-handshake session tickets sit
             unread in the client's socket, its close sends a RST, and the server drops
             what it had not read yet. Measured here with 1.3 allowed: a 200,000-byte
-            ``STOR`` arrived as 98,304; Bambuddy saw the same "RST after ~80 KiB"."""
+            ``STOR`` arrived as 98,304; Bambuddy saw the same "RST after ~80 KiB".
+
+            The cap also hides that defect from this fake's clients: 3a's LAN client
+            (``scadbuddy/printers/lan.py`` ``LanPrinter.upload``, ``pinned_context``,
+            on ``feat/printer-registry``) needs the same fix on its side, a TLS 1.2
+            maximum on its FTPS context or a drained ``unwrap`` before close, so that a
+            printer that negotiates 1.3 does not truncate every upload."""
             built = cls.ssl_context is not None
             context: SSL.Context = super().get_ssl_context()
             if not built:  # a context is fixed once it has made a connection
@@ -279,6 +310,23 @@ def _control_server(config: Config, received: Received) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((config.host, config.control_port), Control)
 
 
+def resolve_url(url: str, file: str = "") -> str | None:
+    """The SD-card path a ``project_file`` names, or ``None``.
+
+    The forms seen in the sources: ``ftp://<name>`` (Bambuddy's dispatch, a file in the
+    root, ``bambu_mqtt.py:6120`` at ``0d427510``), ``ftp:///<path>`` and
+    ``file:///mnt/sdcard/<path>`` (OpenBambuAPI ``mqtt.md``, ``print.project_file``, at
+    ``cc383a2c``), plus ``file:///sdcard/<path>``. With no ``url``, the command's
+    ``file``. Which form a real printer takes is plan 3a Task 7's measurement."""
+    if not url:
+        return "/" + file.lstrip("/") if file else None
+    for prefix in ("file:///mnt/sdcard", "file:///sdcard", "ftp://"):
+        if url.startswith(prefix):
+            rest = url[len(prefix) :].lstrip("/")
+            return "/" + rest if rest else None
+    return None
+
+
 class FakePrinter:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -300,10 +348,18 @@ class FakePrinter:
         state = self.config.state
         state.mkdir(parents=True, exist_ok=True)
         cert, key = state / "cert.pem", state / "key.pem"
-        _certificate(self.config.host, cert, key)
+        if not (cert.is_file() and key.is_file()):
+            _certificate(self.config.host, cert, key)
         passwd = state / "passwd"
         passwd.write_text(f"{USERNAME}:{mosquitto_password(self.config.access_code)}\n")
         passwd.chmod(0o600)
+        acl = state / "acl"
+        acl.write_text(
+            f"user {USERNAME}\n"
+            f"topic readwrite {self.request_topic}\n"
+            f"topic readwrite {self.report_topic}\n"
+        )
+        acl.chmod(0o600)
         conf = state / "mosquitto.conf"
         conf.write_text(
             "\n".join(
@@ -311,6 +367,7 @@ class FakePrinter:
                     "per_listener_settings false",
                     "allow_anonymous false",
                     f"password_file {passwd}",
+                    f"acl_file {acl}",
                     "persistence false",
                     "log_dest stderr",
                     f"listener {self.config.mqtt_port} {self.config.host}",
@@ -411,21 +468,58 @@ class FakePrinter:
         if command.get("command") == "project_file":
             if self._printing is not None:
                 self._printing.cancel()
-            self._printing = asyncio.create_task(self._print(client, command))
+                self._printing = None
+            url = str(command.get("url") or "")
+            path = resolve_url(url, str(command.get("file") or ""))
+            reason = self._missing(path)
+            await self._echo(client, command, url, reason)
+            if reason is not None:
+                self.received.refuse({"url": url, "reason": reason})
+                self.state.update(gcode_state="FAILED", print_error=FILE_NOT_FOUND)
+                await self._publish(client)
+                return
+            assert path is not None
+            self._printing = asyncio.create_task(self._print(client, command, path))
         elif command.get("command") == "stop" and self._printing is not None:
             self._printing.cancel()
             self._printing = None
             self.state.update(gcode_state="FAILED", mc_remaining_time=0)
             await self._publish(client)
 
-    async def _print(self, client: aiomqtt.Client, command: dict[str, Any]) -> None:
+    def _missing(self, path: str | None) -> str | None:
+        """Why ``path`` cannot be printed, or ``None`` when it can."""
+        if path is None:
+            return "the url names no file"
+        upload_dir = "/" + self.config.upload_dir.strip("/")
+        if PurePosixPath(path).parent != PurePosixPath(upload_dir):
+            return f"{path} is not in the upload directory {upload_dir}"
+        if not (self.config.sdcard / path.lstrip("/")).is_file():
+            return f"{path} was never uploaded"
+        return None
+
+    async def _echo(
+        self, client: aiomqtt.Client, command: dict[str, Any], url: str, reason: str | None
+    ) -> None:
+        echo = {
+            "command": "project_file",
+            "sequence_id": command.get("sequence_id", ""),
+            "param": command.get("param", ""),
+            "url": url,
+            "result": "SUCCESS" if reason is None else "FAIL",
+        }
+        if reason is not None:
+            echo["reason"] = reason
+        await client.publish(self.report_topic, json.dumps({"print": echo}))
+
+    async def _print(self, client: aiomqtt.Client, command: dict[str, Any], path: str) -> None:
         seconds = self.config.print_seconds
         self.state.update(
+            print_error=0,
             gcode_state="PREPARE",
             mc_percent=0,
             mc_remaining_time=max(1, round(seconds / 60)),
             subtask_name=command.get("subtask_name", ""),
-            gcode_file=command.get("param", ""),
+            gcode_file=PurePosixPath(path).name,
             layer_num=0,
             total_layer_num=100,
         )
@@ -446,7 +540,19 @@ class FakePrinter:
         self._printing = None
 
 
+def health() -> None:
+    """``--health``: exit non-zero unless the control port answers (the HEALTHCHECK)."""
+    host = os.environ.get("FAKE_PRINTER_HOST", "0.0.0.0")
+    host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    port = os.environ.get("FAKE_PRINTER_CONTROL_PORT", "8081")
+    with urllib.request.urlopen(f"http://{host}:{port}/__received", timeout=1):
+        pass
+
+
 def main() -> None:
+    if sys.argv[1:] == ["--health"]:
+        health()
+        return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     config = Config.from_env()
 

@@ -1,31 +1,70 @@
 {
-  "about": "ams_mapping / ams_mapping2 / use_ams per filament slot, from a native plan's trays (#3818 tier A, Task 7; scadbuddy/printers/ams_mapping.py cites each encoding). A slot is {slot_id (1-based), ams_id, tray_id} as bambuddy/trays.py numbers trays: the external holders are ams_id 255, tray 0 (Ext-L, vt_tray 254) and tray 1 (Ext-R, vt_tray 255).",
+  "about": "ams_mapping / ams_mapping2 / use_ams per filament slot, from a native plan's trays (#3818 tier A, Task 7; scadbuddy/printers/ams_mapping.py cites each encoding). A slot is {slot_id (1-based), ams_id, tray_id} as bambuddy/trays.py numbers trays: the external holders are ams_id 255, tray 0 (Ext-L, vt_tray 254) and tray 1 (Ext-R, vt_tray 255). printer_has_ams is whether the printer reports any AMS unit (true when left out). filament_count is the project's filament slots.",
   "vectors": [
     {
       "name": "AMS-A slot 1",
       "dual_nozzle": false,
       "filament_count": 1,
-      "slots": [{"slot_id": 1, "ams_id": 0, "tray_id": 0}],
-      "ams_mapping": [0],
-      "ams_mapping2": [{"ams_id": 0, "slot_id": 0}],
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 0,
+          "tray_id": 0
+        }
+      ],
+      "ams_mapping": [
+        0
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 0,
+          "slot_id": 0
+        }
+      ],
       "use_ams": true
     },
     {
       "name": "AMS-B slot 3",
       "dual_nozzle": false,
       "filament_count": 1,
-      "slots": [{"slot_id": 1, "ams_id": 1, "tray_id": 2}],
-      "ams_mapping": [6],
-      "ams_mapping2": [{"ams_id": 1, "slot_id": 2}],
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 1,
+          "tray_id": 2
+        }
+      ],
+      "ams_mapping": [
+        6
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 1,
+          "slot_id": 2
+        }
+      ],
       "use_ams": true
     },
     {
       "name": "AMS-HT 128",
       "dual_nozzle": true,
       "filament_count": 1,
-      "slots": [{"slot_id": 1, "ams_id": 128, "tray_id": 0}],
-      "ams_mapping": [128],
-      "ams_mapping2": [{"ams_id": 128, "slot_id": 0}],
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 128,
+          "tray_id": 0
+        }
+      ],
+      "ams_mapping": [
+        128
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 128,
+          "slot_id": 0
+        }
+      ],
       "use_ams": true
     },
     {
@@ -33,11 +72,31 @@
       "dual_nozzle": false,
       "filament_count": 2,
       "slots": [
-        {"slot_id": 1, "ams_id": 255, "tray_id": 0},
-        {"slot_id": 2, "ams_id": 0, "tray_id": 1}
+        {
+          "slot_id": 1,
+          "ams_id": 255,
+          "tray_id": 0
+        },
+        {
+          "slot_id": 2,
+          "ams_id": 0,
+          "tray_id": 1
+        }
       ],
-      "ams_mapping": [-1, 1],
-      "ams_mapping2": [{"ams_id": 255, "slot_id": 0}, {"ams_id": 0, "slot_id": 1}],
+      "ams_mapping": [
+        -1,
+        1
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 255,
+          "slot_id": 0
+        },
+        {
+          "ams_id": 0,
+          "slot_id": 1
+        }
+      ],
       "use_ams": true
     },
     {
@@ -45,20 +104,53 @@
       "dual_nozzle": true,
       "filament_count": 2,
       "slots": [
-        {"slot_id": 1, "ams_id": 255, "tray_id": 0},
-        {"slot_id": 2, "ams_id": 0, "tray_id": 0}
+        {
+          "slot_id": 1,
+          "ams_id": 255,
+          "tray_id": 0
+        },
+        {
+          "slot_id": 2,
+          "ams_id": 0,
+          "tray_id": 0
+        }
       ],
-      "ams_mapping": [-1, 0],
-      "ams_mapping2": [{"ams_id": 254, "slot_id": 0}, {"ams_id": 0, "slot_id": 0}],
+      "ams_mapping": [
+        -1,
+        0
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 254,
+          "slot_id": 0
+        },
+        {
+          "ams_id": 0,
+          "slot_id": 0
+        }
+      ],
       "use_ams": true
     },
     {
       "name": "external right on a dual-nozzle printer",
       "dual_nozzle": true,
       "filament_count": 1,
-      "slots": [{"slot_id": 1, "ams_id": 255, "tray_id": 1}],
-      "ams_mapping": [-1],
-      "ams_mapping2": [{"ams_id": 255, "slot_id": 0}],
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 255,
+          "tray_id": 1
+        }
+      ],
+      "ams_mapping": [
+        -1
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 255,
+          "slot_id": 0
+        }
+      ],
       "use_ams": false
     },
     {
@@ -66,14 +158,35 @@
       "dual_nozzle": true,
       "filament_count": 3,
       "slots": [
-        {"slot_id": 1, "ams_id": 0, "tray_id": 3},
-        {"slot_id": 3, "ams_id": 129, "tray_id": 0}
+        {
+          "slot_id": 1,
+          "ams_id": 0,
+          "tray_id": 3
+        },
+        {
+          "slot_id": 3,
+          "ams_id": 129,
+          "tray_id": 0
+        }
       ],
-      "ams_mapping": [3, -1, 129],
+      "ams_mapping": [
+        3,
+        -1,
+        129
+      ],
       "ams_mapping2": [
-        {"ams_id": 0, "slot_id": 3},
-        {"ams_id": 255, "slot_id": 255},
-        {"ams_id": 129, "slot_id": 0}
+        {
+          "ams_id": 0,
+          "slot_id": 3
+        },
+        {
+          "ams_id": 255,
+          "slot_id": 255
+        },
+        {
+          "ams_id": 129,
+          "slot_id": 0
+        }
       ],
       "use_ams": true
     },
@@ -81,10 +194,133 @@
       "name": "only external, with an unused slot after it",
       "dual_nozzle": false,
       "filament_count": 2,
-      "slots": [{"slot_id": 1, "ams_id": 255, "tray_id": 0}],
-      "ams_mapping": [-1, -1],
-      "ams_mapping2": [{"ams_id": 255, "slot_id": 0}, {"ams_id": 255, "slot_id": 255}],
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 255,
+          "tray_id": 0
+        }
+      ],
+      "ams_mapping": [
+        -1,
+        -1
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 255,
+          "slot_id": 0
+        },
+        {
+          "ams_id": 255,
+          "slot_id": 255
+        }
+      ],
       "use_ams": false
+    },
+    {
+      "name": "A2L AMS-Lite slot 3 (unit 16, local slot)",
+      "dual_nozzle": false,
+      "filament_count": 1,
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 16,
+          "tray_id": 2
+        }
+      ],
+      "ams_mapping": [
+        2
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 16,
+          "slot_id": 2
+        }
+      ],
+      "use_ams": true
+    },
+    {
+      "name": "AMS-HT 135, the last HT id",
+      "dual_nozzle": true,
+      "filament_count": 1,
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 135,
+          "tray_id": 0
+        }
+      ],
+      "ams_mapping": [
+        135
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 135,
+          "slot_id": 0
+        }
+      ],
+      "use_ams": true
+    },
+    {
+      "name": "no AMS, nothing mapped",
+      "dual_nozzle": false,
+      "printer_has_ams": false,
+      "filament_count": 1,
+      "slots": [],
+      "ams_mapping": [
+        -1
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 255,
+          "slot_id": 255
+        }
+      ],
+      "use_ams": false
+    },
+    {
+      "name": "no AMS, the external spool",
+      "dual_nozzle": false,
+      "printer_has_ams": false,
+      "filament_count": 1,
+      "slots": [
+        {
+          "slot_id": 1,
+          "ams_id": 255,
+          "tray_id": 0
+        }
+      ],
+      "ams_mapping": [
+        -1
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 255,
+          "slot_id": 0
+        }
+      ],
+      "use_ams": false
+    },
+    {
+      "name": "an AMS printer, nothing mapped",
+      "dual_nozzle": false,
+      "filament_count": 2,
+      "slots": [],
+      "ams_mapping": [
+        -1,
+        -1
+      ],
+      "ams_mapping2": [
+        {
+          "ams_id": 255,
+          "slot_id": 255
+        },
+        {
+          "ams_id": 255,
+          "slot_id": 255
+        }
+      ],
+      "use_ams": true
     }
   ]
 }

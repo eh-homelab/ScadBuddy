@@ -5,12 +5,14 @@ FTPS, and the print states a ``project_file`` runs through.
 It runs here in-process, with its own mosquitto (``mosquitto`` on PATH, or
 ``SCADBUDDY_TEST_MQTT`` naming the binary or a script that runs one), and skips without
 one. The client below speaks the protocol the way 3a's ``LanPrinter``
-(``scadbuddy/printers/lan.py`` on ``feat/printer-registry``) does: aiomqtt with TLS and
-no certificate check, ``pushing.pushall`` then the reports, and ha-bambulab's implicit
+(``scadbuddy/printers/lan.py`` on ``feat/printer-registry``) does: aiomqtt over TLS,
+``pushing.pushall`` then the reports, and ha-bambulab's implicit
 FTPS (the control socket wrapped at connect, each data connection wrapped with the
 control connection's session, no ``unwrap`` at the end of a ``STOR``). That module is not
 on main yet; once it is, this test drives it instead (its ports are fixed at 8883/990,
-so the fake's are configurable for now).
+so the fake's are configurable for now). One difference: this client verifies the
+fake's certificate, which names ``127.0.0.1``, where ``LanPrinter`` pins a printer's
+SHA-256 (``test_the_certificate_survives_a_restart`` keeps that pin meaningful).
 """
 
 import asyncio
@@ -233,12 +235,19 @@ async def _states_until(lan: _Lan, final: str, command: dict[str, Any]) -> list[
 
 
 async def test_a_probe_gets_the_whole_report(lan: _Lan) -> None:
+    """An H2C's report: two extruders and a rack (nozzle ids from 16), as 3a's
+    ``status_from_report`` reads ``device`` (``scadbuddy/printers/status.py`` on
+    ``feat/printer-registry``); once that is on main, parse it with that instead."""
     report = await lan.probe()
     assert report["command"] == "push_status"
     assert report["gcode_state"] == "IDLE"
     trays = [tray for unit in report["ams"]["ams"] for tray in unit["tray"]]
     tagged = [tray for tray in trays if tray.get("tray_uuid", "0" * 32) != "0" * 32]
     assert len(tagged) == 1 and tagged[0]["tag_uid"] != "0" * 16
+    device = report["device"]
+    assert [e["id"] for e in device["extruder"]["info"]] == [0, 1]
+    nozzle_ids = [n["id"] for n in device["nozzle"]["info"]]
+    assert {0, 1} <= set(nozzle_ids) and any(i >= 16 for i in nozzle_ids)
 
 
 async def test_a_print_is_uploaded_recorded_and_runs_to_finish(lan: _Lan) -> None:
@@ -247,11 +256,15 @@ async def test_a_print_is_uploaded_recorded_and_runs_to_finish(lan: _Lan) -> Non
     assert md5 == hashlib.md5(data, usedforsecurity=False).hexdigest()
 
     states = await _states_until(lan, "FINISH", _project_file(md5))
+    assert {"command": "project_file", "url": "ftp://job.3mf", "result": "SUCCESS"}.items() <= (
+        states[1].items()
+    )
     names = [report["gcode_state"] for report in states]
     assert names[0] == "IDLE"
     assert names.index("PREPARE") < names.index("RUNNING") < names.index("FINISH")
     assert states[-1]["mc_percent"] == 100
     assert states[-1]["subtask_name"] == "job"
+    assert states[-1]["gcode_file"] == "job.3mf"
 
     received = lan.control("GET", "/__received")
     assert received["ftps"] == [{"name": "/job.3mf", "size": len(data), "md5": md5}]
@@ -261,10 +274,11 @@ async def test_a_print_is_uploaded_recorded_and_runs_to_finish(lan: _Lan) -> Non
     assert sent == _project_file(md5)
 
     assert lan.control("POST", "/__reset") is None
-    assert lan.control("GET", "/__received") == {"mqtt": [], "ftps": []}
+    assert lan.control("GET", "/__received") == {"mqtt": [], "ftps": [], "refused": []}
 
 
 async def test_a_stop_fails_the_print(lan: _Lan) -> None:
+    await asyncio.to_thread(lan.upload, b"x", "/job.3mf")
     stop = {"print": {"command": "stop", "sequence_id": "8", "param": ""}}
     seen: list[str] = []
     async with asyncio.timeout(30):
@@ -310,3 +324,74 @@ async def test_each_upload_is_its_own_session(lan: _Lan) -> None:
     second = await asyncio.to_thread(lan.upload, b"two", "/two.3mf")
     received = lan.control("GET", "/__received")["ftps"]
     assert [(e["name"], e["md5"]) for e in received] == [("/one.3mf", first), ("/two.3mf", second)]
+
+
+@pytest.mark.parametrize(
+    ("upload", "url", "reason"),
+    [
+        (None, "ftp://job.3mf", "never uploaded"),
+        ("/x/job.3mf", "ftp://job.3mf", "never uploaded"),
+        ("/x/job.3mf", "ftp:///x/job.3mf", "not in the upload directory"),
+        (None, "https://elsewhere/job.3mf", "names no file"),
+    ],
+    ids=["nothing uploaded", "uploaded elsewhere", "outside the upload dir", "no file url"],
+)
+async def test_a_project_file_naming_no_uploaded_file_fails(
+    lan: _Lan, tmp_path: Path, upload: str | None, url: str, reason: str
+) -> None:
+    (tmp_path / "sdcard" / "x").mkdir()
+    if upload is not None:
+        await asyncio.to_thread(lan.upload, b"x", upload)
+    command = _project_file("")
+    command["print"]["url"] = url
+    states = await _states_until(lan, "FAILED", command)
+    assert states[1]["result"] == "FAIL" and reason in states[1]["reason"]
+    assert states[-1]["print_error"] != 0
+    assert "RUNNING" not in [s["gcode_state"] for s in states]
+    refused = lan.control("GET", "/__received")["refused"]
+    assert [r["url"] for r in refused] == [url] and reason in refused[0]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("url", "file", "path"),
+    [
+        ("ftp://job.3mf", "", "/job.3mf"),
+        ("ftp:///cache/job.3mf", "", "/cache/job.3mf"),
+        ("file:///mnt/sdcard/job.3mf", "", "/job.3mf"),
+        ("file:///sdcard/a/job.3mf", "", "/a/job.3mf"),
+        ("", "job.3mf", "/job.3mf"),
+        ("", "", None),
+        ("ftp://", "", None),
+        ("https://x/job.3mf", "", None),
+    ],
+)
+def test_resolve_url(url: str, file: str, path: str | None) -> None:
+    assert _load().resolve_url(url, file) == path
+
+
+async def test_bblp_may_use_only_its_printers_topics(lan: _Lan) -> None:
+    """The broker's ACL: a topic other than the printer's two is neither delivered nor
+    published to; the report that follows it is."""
+    async with lan._client() as client:
+        await client.subscribe("elsewhere/topic")
+        await client.subscribe(f"device/{SERIAL}/report")
+        await client.publish("elsewhere/topic", b"{}")
+        pushall = {"pushing": {"sequence_id": "0", "command": "pushall"}}
+        await client.publish(f"device/{SERIAL}/request", json.dumps(pushall))
+        async with asyncio.timeout(10):
+            async for message in client.messages:
+                assert str(message.topic) == f"device/{SERIAL}/report"
+                break
+
+
+async def test_the_certificate_survives_a_restart(tmp_path: Path) -> None:
+    module = _load()
+    state = tmp_path / "state"
+    state.mkdir()
+    printer = module.FakePrinter(
+        module.Config(serial=SERIAL, access_code=ACCESS_CODE, state=state, sdcard=tmp_path)
+    )
+    printer._broker_files()
+    first = (state / "cert.pem").read_bytes()
+    printer._broker_files()
+    assert (state / "cert.pem").read_bytes() == first

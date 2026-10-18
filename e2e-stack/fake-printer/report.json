@@ -1,5 +1,5 @@
 {
-  "about": "The fake printer's report (e2e-stack/fake-printer/printer.py): the shape of OpenBambuAPI mqtt.md's pushing.pushall example (Doridian/OpenBambuAPI cc383a2c), with an H2C's units: AMS 0 (tray 0 tagged, tray 1 untagged, tray 2 empty, tray 3 untagged), one AMS-HT (128) and the external holder. Every value is made up; the one non-zero tray_uuid/tag_uid is the Bambuddy recorder's tagged spool (e2e-stack/bambuddy-recorder/recorder.py).",
+  "about": "The fake printer's report (e2e-stack/fake-printer/printer.py): the shape of OpenBambuAPI mqtt.md's pushing.pushall example (Doridian/OpenBambuAPI cc383a2c), with an H2C's units: AMS 0 (tray 0 tagged, tray 1 untagged, tray 2 empty, tray 3 untagged), one AMS-HT (128) and the external holder. The device block (two extruders, the mounted nozzles 0 and 1, rack slots from 16) is 3a's lan-report-h2c.json's (backend/tests/printers/fixtures on feat/printer-registry, c0e243a27), serial numbers made up. One external holder (vt_tray 254) only: whether an H2C reports a second one is not known. Every other value is made up; the one non-zero tray_uuid/tag_uid is the Bambuddy recorder's tagged spool (e2e-stack/bambuddy-recorder/recorder.py).",
   "print": {
     "command": "push_status",
     "sequence_id": "0",
@@ -35,7 +35,9 @@
           "tray": [
             {
               "id": "0",
-              "cols": ["F5547CFF"],
+              "cols": [
+                "F5547CFF"
+              ],
               "tray_color": "F5547CFF",
               "tray_type": "PLA",
               "tray_sub_brands": "PLA Basic",
@@ -50,7 +52,9 @@
             },
             {
               "id": "1",
-              "cols": ["FFFFFFFF"],
+              "cols": [
+                "FFFFFFFF"
+              ],
               "tray_color": "FFFFFFFF",
               "tray_type": "PLA",
               "tray_sub_brands": "",
@@ -63,10 +67,14 @@
               "tag_uid": "0000000000000000",
               "tray_uuid": "00000000000000000000000000000000"
             },
-            {"id": "2"},
+            {
+              "id": "2"
+            },
             {
               "id": "3",
-              "cols": ["000000FF"],
+              "cols": [
+                "000000FF"
+              ],
               "tray_color": "000000FF",
               "tray_type": "PETG",
               "tray_sub_brands": "",
@@ -88,7 +96,9 @@
           "tray": [
             {
               "id": "0",
-              "cols": ["F95959FF"],
+              "cols": [
+                "F95959FF"
+              ],
               "tray_color": "F95959FF",
               "tray_type": "PETG",
               "tray_sub_brands": "",
@@ -113,7 +123,9 @@
     },
     "vt_tray": {
       "id": "254",
-      "cols": ["00000000"],
+      "cols": [
+        "00000000"
+      ],
       "tray_color": "00000000",
       "tray_type": "",
       "tray_sub_brands": "",
@@ -124,6 +136,55 @@
       "nozzle_temp_max": "0",
       "tag_uid": "0000000000000000",
       "tray_uuid": "00000000000000000000000000000000"
+    },
+    "device": {
+      "extruder": {
+        "info": [
+          {
+            "id": 0,
+            "snow": 1,
+            "temp": 14418140
+          },
+          {
+            "id": 1,
+            "snow": 32768,
+            "temp": 5767327
+          }
+        ],
+        "state": 18
+      },
+      "nozzle": {
+        "exist": 196611,
+        "info": [
+          {
+            "id": 0,
+            "diameter": "0.4",
+            "type": "HS01",
+            "sn": "FAKE-NOZZLE-0"
+          },
+          {
+            "id": 1,
+            "diameter": "0.4",
+            "type": "HH01",
+            "sn": "FAKE-NOZZLE-1"
+          },
+          {
+            "id": 16,
+            "diameter": "0.2",
+            "type": "HS00",
+            "sn": "FAKE-NOZZLE-16",
+            "wear": 3,
+            "stat": 1
+          },
+          {
+            "id": 17,
+            "diameter": "0.6",
+            "type": "HH01",
+            "sn": "N/A",
+            "stat": 0
+          }
+        ]
+      }
     }
   }
 }

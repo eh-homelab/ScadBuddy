@@ -18,8 +18,8 @@ image's build context is its own folder. A trailing slash and a query string do 
 change which path answers.
 
 Its own paths are never Bambuddy's ``/api/v1/*``: ``GET /__recorded`` answers
-``[{"method", "path", "at"}...]`` for every other request since the last
-``POST /__reset``. A request's query string, headers and body are never kept.
+``[{"method", "path", "at"}...]`` for every other request, of any method, since the
+last ``POST /__reset``. A request's query string, headers and body are never kept.
 
 Usage: ``python recorder.py`` (the image's entrypoint), on ``RECORDER_PORT`` (8000).
 """
@@ -111,20 +111,12 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
             else:
                 self._send(FORBIDDEN_STATUS, {"detail": "the recorder answers no hot-path call"})
 
-        def do_GET(self) -> None:
-            self._handle()
-
-        def do_POST(self) -> None:
-            self._handle()
-
-        def do_PUT(self) -> None:
-            self._handle()
-
-        def do_PATCH(self) -> None:
-            self._handle()
-
-        def do_DELETE(self) -> None:
-            self._handle()
+        def __getattr__(self, name: str) -> Any:
+            # Every method is recorded (``BaseHTTPRequestHandler`` dispatches by
+            # ``do_<METHOD>`` and answers 501, unrecorded, when there is none).
+            if name.startswith("do_"):
+                return self._handle
+            raise AttributeError(name)
 
         def do_HEAD(self) -> None:
             recorded.add(self.command, urlsplit(self.path).path)

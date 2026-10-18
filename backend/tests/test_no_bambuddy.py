@@ -63,6 +63,25 @@ async def test_spans_from_before_the_window_do_not_count(spans: InMemorySpanExpo
     assert record.spans == []
 
 
+async def test_spans_from_before_the_window_are_kept(spans: InMemorySpanExporter) -> None:
+    with span("before"):
+        pass
+    with forbid_bambuddy(spans, "http://bambuddy.test"):
+        pass
+    assert "before" in [s.name for s in spans.get_finished_spans()]
+
+
+async def test_a_leak_is_not_an_assertion_error(spans: InMemorySpanExporter) -> None:
+    """A test's own ``pytest.raises(AssertionError)`` must not swallow a leak."""
+    with (
+        pytest.raises(BambuddyCalledError) as caught,
+        forbid_bambuddy(spans, "http://bambuddy.test"),
+    ):
+        async with httpx.AsyncClient() as http:
+            await http.get("http://bambuddy.test/api/v1/version")
+    assert not isinstance(caught.value, AssertionError)
+
+
 async def test_other_hosts_pass(spans: InMemorySpanExporter, respx_mock: respx.MockRouter) -> None:
     respx_mock.get("http://api.test/x").respond(200)
     with forbid_bambuddy(spans, "http://bambuddy.test"):

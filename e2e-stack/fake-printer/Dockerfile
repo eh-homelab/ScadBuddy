@@ -16,6 +16,9 @@
 # printer is one container, as a real one is one address.
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
+# mosquitto is whatever 2.x trixie carries at build time (2.0.21 on 2026-10-18): it is
+# not pinned, as DL3008 is ignored repo-wide (.hadolint.yaml). The password hash
+# printer.py writes ($7$, PBKDF2-SHA512) is the same across 2.x.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends mosquitto \
     && rm -rf /var/lib/apt/lists/*
@@ -33,5 +36,5 @@ USER 10001
 WORKDIR /app
 EXPOSE 8883 990 8081 50000-50009
 HEALTHCHECK --interval=2s --timeout=2s --retries=30 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/__received', timeout=1)"]
+    CMD ["python", "/app/printer.py", "--health"]
 ENTRYPOINT ["python", "/app/printer.py"]
