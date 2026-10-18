@@ -29,7 +29,7 @@ from scadbuddy.render.runner import (
     run_openscad,
     template_note,
 )
-from scadbuddy.render.schema import CustomizerSchema, Option, Parameter, build_schema
+from scadbuddy.render.schema import CustomizerSchema, Option, Parameter, ParamValue, build_schema
 from tests.conftest import FIXTURES, load_fixture_param, load_fixture_source
 
 
@@ -372,6 +372,83 @@ async def test_an_export_error_fails_the_run_though_openscad_exits_0(tmp_path: P
     assert str(raised.value) == "openscad could not export: Can't add triangle to 3MF model."
     assert raised.value.returncode == 0
     assert any("EXPORT-ERROR" in line for line in raised.value.log_tail)
+
+
+#: #4091: the same refusal through `render_3mf`, writing the 0-byte 3MF OpenSCAD leaves.
+EMPTY_3MF_OPENSCAD = """#!/bin/sh
+%s
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then : > "$2"; fi
+  shift
+done
+"""
+
+
+def _empty_3mf_openscad(tmp_path: Path, logged: str) -> Config:
+    binary = tmp_path / "empty-3mf-openscad"
+    binary.write_text(EMPTY_3MF_OPENSCAD % logged, encoding="utf-8")
+    binary.chmod(0o755)
+    (tmp_path / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    return Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+
+@pytest.mark.parametrize(
+    "logged",
+    [
+        'echo "EXPORT-ERROR: Can\'t add triangle to 3MF model."',
+        # No EXPORT-ERROR line at all: an empty 3MF after exit 0 is the same failure.
+        "echo 'Top level object is a 3D object (PolySet):'",
+    ],
+)
+async def test_an_empty_3mf_says_why_and_names_the_changed_parameters(
+    tmp_path: Path, logged: str
+) -> None:
+    config = _empty_3mf_openscad(tmp_path, logged)
+    schema = _schema(
+        Parameter(name="licks", type="integer", initial=4),
+        Parameter(name="core_size", type="number", initial=1),
+        Parameter(name="label", type="string", initial="hi"),
+    )
+    params: dict[str, ParamValue] = {"licks": 8, "core_size": 1, "label": "flame"}
+
+    with pytest.raises(OpenSCADError) as raised:
+        await render_3mf(
+            tmp_path / "model.scad", schema, params, tmp_path / "out.3mf", config=config
+        )
+
+    message = str(raised.value)
+    assert message.startswith("OpenSCAD could not write the 3MF")
+    assert "openscad/openscad#6716" in message
+    assert 'this render set licks = 8, label = "flame". Change them' in message
+    assert raised.value.returncode == 0
+
+
+async def test_an_empty_3mf_with_the_defaults_says_so(tmp_path: Path) -> None:
+    config = _empty_3mf_openscad(tmp_path, "")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await render_3mf(
+            tmp_path / "model.scad", _schema(), {}, tmp_path / "out.3mf", config=config
+        )
+
+    assert "this render used the template's defaults" in str(raised.value)
+
+
+async def test_a_solid_render_keeps_the_short_export_error(tmp_path: Path) -> None:
+    """A colour's solid render is a fallback (#1587): its warning stays one line."""
+    config = _empty_3mf_openscad(tmp_path, 'echo "EXPORT-ERROR: Can\'t add triangle to 3MF model."')
+
+    with pytest.raises(OpenSCADError) as raised:
+        await render_3mf(
+            tmp_path / "model.scad",
+            _schema(),
+            {},
+            tmp_path / "out.3mf",
+            config=config,
+            failure_is_fallback=True,
+        )
+
+    assert str(raised.value) == "openscad could not export: Can't add triangle to 3MF model."
 
 
 # ── #281: free-text values that would steer import()/surface() off the model ──
