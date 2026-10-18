@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import MAX_CODE_DIGITS, states
+from scadbuddy.render.paint import MAX_CODE_DIGITS, PaintCodeError, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -1748,6 +1748,125 @@ def state_nozzles(
                         )
                     target.write(chunk)
     return buffer.getvalue()
+
+
+#: A paint code anywhere in a model file, captured: what :func:`hint_painted_slots`
+#: decodes. Read in windows overlapping by more than a code's length, so a code that a
+#: window boundary splits is read whole from the next window.
+_ANY_PAINT_CODE = re.compile(rb'\s%s="(%s)"' % (PAINT_ATTRIBUTE.encode(), _CODE))
+_CODE_OVERLAP = MAX_CODE_DIGITS + 64
+#: The name a slot hint's part carries in the 3MF, so a person reading it knows it.
+SLOT_HINT_NAME = "ScadBuddy slot hint"
+_SETTINGS_OBJECT = re.compile(rb'(<object\s+id="(\d+)"[^>]*>)(.*?)(</object>)', re.S)
+_ANY_ID = re.compile(rb'\sid="(\d+)"')
+
+
+def _painted_states(archive: zipfile.ZipFile, name: str) -> set[int]:
+    """The extruders ``name``'s triangles are painted with, read as Bambu Studio reads
+    a code (:func:`~scadbuddy.render.paint.states`). Each distinct code is decoded once;
+    a code that does not decode is left out, never guessed at."""
+    codes: set[bytes] = set()
+    tail = b""
+    with archive.open(name) as entry:
+        while chunk := entry.read(_CHUNK):
+            window = tail + chunk
+            codes.update(_ANY_PAINT_CODE.findall(window))
+            tail = window[-_CODE_OVERLAP:]
+    return _decoded(codes)
+
+
+def _decoded(codes: set[bytes]) -> set[int]:
+    found: set[int] = set()
+    for code in codes:
+        try:
+            found |= states(code.decode("ascii"))
+        except PaintCodeError:
+            continue
+    return found
+
+
+def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[int]]:
+    """Each root object's id and the extruders its painting prints with: its own mesh's,
+    and each component's, whether in another model file or in the root."""
+    root = ET.fromstring(_read_capped(archive, ROOT_MODEL_NAME, MAX_UNCOMPRESSED_BYTES))
+    objects = list(root.iter(f"{{{CORE_NS}}}object"))
+    own = {
+        obj.get("id", ""): _decoded(
+            {
+                code.encode("ascii")
+                for triangle in obj.iter(f"{{{CORE_NS}}}triangle")
+                if (code := triangle.get(PAINT_ATTRIBUTE))
+            }
+        )
+        for obj in objects
+    }
+    files: dict[str, set[int]] = {}
+    slots: dict[str, set[int]] = {}
+    for obj in objects:
+        found = set(own[obj.get("id", "")])
+        for component in obj.iter(f"{{{CORE_NS}}}component"):
+            path = (component.get(f"{{{PRODUCTION_NS}}}path") or "").lstrip("/")
+            if not path or path == ROOT_MODEL_NAME:
+                found |= own.get(component.get("objectid", ""), set())
+            elif path in names:
+                if path not in files:
+                    files[path] = _painted_states(archive, path)
+                found |= files[path]
+        if found:
+            slots[obj.get("id", "")] = found
+    return slots
+
+
+def hint_painted_slots(payload: bytes) -> bytes:
+    """``payload`` with every filament an object's painting prints with named on a part
+    of that object that prints nothing (#4013), else unchanged.
+
+    Bambuddy, slicing one plate, gives each filament slot it thinks the plate leaves
+    unused the preset of one it uses (``substitute_unused_plate_filaments``). It finds
+    the used slots from each object's and part's ``extruder`` and from the painting, but
+    reads the painting as one slot per hex digit, which is not Bambu Studio's encoding:
+    a triangle painted with filament 2 is ``8``, read as slot 8. Slot 2 is then
+    "unused", and the black spool slices with the glow preset and colour. Each hint is
+    a ``negative_part`` with no geometry, carrying an ``extruder`` Bambuddy does read.
+    Bambu Studio loads a part with no component and cuts nothing with it, so the plate
+    slices as before (library 5065 against 4962: the same toolchanges, 1 s apart). A
+    part id past every id in the settings keeps a hint from naming a real part or
+    object file.
+
+    Only for a file :func:`nozzles_statable` accepts, which has bounded it."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        names = set(archive.namelist())
+        if MODEL_SETTINGS_NAME not in names or ROOT_MODEL_NAME not in names:
+            return payload
+        settings = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_SETTINGS_BYTES)
+        try:
+            hints = _object_slots(archive, names)
+        except ET.ParseError:
+            return payload
+    if not hints:
+        return payload
+    next_id = max((int(found) for found in _ANY_ID.findall(settings)), default=0) + 1
+
+    def hinted(match: re.Match[bytes]) -> bytes:
+        nonlocal next_id
+        slots = hints.get(match.group(2).decode("ascii"))
+        if not slots:
+            return match.group(0)
+        parts = b""
+        for slot in sorted(slots):
+            parts += (
+                b'    <part id="%d" subtype="negative_part">\n'
+                b'      <metadata key="name" value="%s"/>\n'
+                b'      <metadata key="extruder" value="%d"/>\n'
+                b"    </part>\n  " % (next_id, SLOT_HINT_NAME.encode(), slot)
+            )
+            next_id += 1
+        return match.group(1) + match.group(3) + parts + match.group(4)
+
+    changed = _SETTINGS_OBJECT.sub(hinted, settings)
+    if changed == settings:
+        return payload
+    return rezipped(payload, {MODEL_SETTINGS_NAME: changed})
 
 
 #: Who laid a 3MF out, which decides how a print lays it out for the printer (#1752):

@@ -39,6 +39,7 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
     FilamentMap,
+    hint_painted_slots,
     layout_of,
     plate_origin,
     replate_3mf,
@@ -155,6 +156,11 @@ class Printable:
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
 _RECOLORED = "~"
+#: Ends the :attr:`Target.key` of a copy of two or more filaments that names its
+#: painted slots (:func:`~scadbuddy.render.bambu3mf.hint_painted_slots`, #4013), so a
+#: copy uploaded before that, which slices a painted slot with another's preset, is
+#: not reused for one.
+_SLOT_HINTS = ";slots"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
@@ -211,6 +217,8 @@ class Target:
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
+            if len(self.colours) > 1:
+                key = f"{key}{_SLOT_HINTS}"
         return key
 
     @property
@@ -283,7 +291,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
     keeps its placement and every plate it lays out; only the nozzles and colours are
-    stated (:func:`state_nozzles`). Anything else comes back unchanged.
+    stated (:func:`state_nozzles`). Either way each painted filament is named on a part
+    that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
+    unchanged.
     """
     layout = layout_of(payload)
     if layout == "as_is":
@@ -291,15 +301,17 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return towers_within_reach(
-                state_nozzles(
-                    payload,
-                    nozzle_stats=target.nozzle_stats,
-                    nozzle_volume_type=target.nozzle_volume_type,
-                    filament_colour=colours,
-                    filament_map=target.filament_map,
-                ),
-                target.plate,
+            return hint_painted_slots(
+                towers_within_reach(
+                    state_nozzles(
+                        payload,
+                        nozzle_stats=target.nozzle_stats,
+                        nozzle_volume_type=target.nozzle_volume_type,
+                        filament_colour=colours,
+                        filament_map=target.filament_map,
+                    ),
+                    target.plate,
+                )
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -318,7 +330,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
-    return recolour_3mf(payload, colours) if colours is not None else payload
+    payload = recolour_3mf(payload, colours) if colours is not None else payload
+    # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
+    return hint_painted_slots(payload)
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
@@ -926,7 +940,12 @@ async def _reusable(
         if copy.target_key in keys:
             return keys.index(copy.target_key)
         if extended and copy.target_key.startswith(recoloured):
-            suffix = copy.target_key.removeprefix(recoloured).split(",")
+            colours = copy.target_key.removeprefix(recoloured)
+            if len(own) > 1:
+                if not colours.endswith(_SLOT_HINTS):
+                    return None
+                colours = colours.removesuffix(_SLOT_HINTS)
+            suffix = colours.split(",")
             if [normalise_colour(colour) for colour in suffix] == own:
                 return len(keys)
         return None

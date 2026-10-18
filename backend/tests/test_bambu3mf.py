@@ -31,9 +31,11 @@ from scadbuddy.render.bambu3mf import (
     PLATE_TOP,
     PRESET_PLACEHOLDER,
     PRODUCTION_NS,
+    SLOT_HINT_NAME,
     ArchiveTooLargeError,
     PlateParts,
     cover_names,
+    hint_painted_slots,
     laid_out_plates,
     layout_of,
     nozzles_statable,
@@ -52,6 +54,7 @@ from scadbuddy.render.bambu3mf import (
 from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.jobs import MAX_PLATES
 from scadbuddy.render.objects3mf import read_objects
+from scadbuddy.render.paint import single_code
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint
 from scadbuddy.render.thumbnail import (
@@ -2068,3 +2071,129 @@ def test_an_entry_too_large_to_hold_is_parsed_as_it_inflates(
 
     monkeypatch.setattr(bambu3mf, "_written_mesh", unused)
     _assert_read_alike(_parsed(name, data), expected)
+
+
+# --- #4013: a painted slot is named where Bambuddy reads it ---------------------------
+
+
+def _cats(object_paint: dict[str, str]) -> bytes:
+    """Two plates of one object each, the shape of library file 2440: a root of
+    components, each object's meshes in its own file, and ``object_paint`` (object id to
+    one triangle's paint code) painting a triangle of that object's file."""
+    root = (
+        f'<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter"'
+        f' xmlns="{CORE_NS}" xmlns:p="{PRODUCTION_NS}"><resources>'
+    )
+    files: dict[str, bytes] = {}
+    for object_id in ("6", "7"):
+        path = f"3D/Objects/object_{object_id}.model"
+        code = object_paint.get(object_id)
+        paint = f' paint_color="{code}"' if code else ""
+        files[path] = (
+            f'<model unit="millimeter" xmlns="{CORE_NS}"><resources><object id="1"'
+            ' type="model"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0"'
+            ' z="0"/><vertex x="0" y="1" z="0"/></vertices><triangles>'
+            f'<triangle v1="0" v2="1" v3="2"/><triangle v1="0" v2="2" v3="1"{paint}/>'
+            "</triangles></mesh></object></resources></model>"
+        ).encode()
+        root += (
+            f'<object id="{object_id}" type="model"><components>'
+            f'<component p:path="/{path}" objectid="1"/></components></object>'
+        )
+    root += '</resources><build><item objectid="6"/><item objectid="7"/></build></model>'
+    settings = "<config>\n"
+    for object_id in ("6", "7"):
+        settings += (
+            f'  <object id="{object_id}">\n    <metadata key="extruder" value="1"/>\n'
+            '    <part id="1" subtype="normal_part">\n'
+            '      <metadata key="name" value="body"/>\n    </part>\n  </object>\n'
+        )
+    for plate, object_id in ((1, "6"), (2, "7")):
+        settings += (
+            f'  <plate>\n    <metadata key="plater_id" value="{plate}"/>\n'
+            f'    <model_instance>\n      <metadata key="object_id" value="{object_id}"/>\n'
+            "    </model_instance>\n  </plate>\n"
+        )
+    settings += "</config>\n"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as out:
+        out.writestr("3D/3dmodel.model", root)
+        for name, data in files.items():
+            out.writestr(name, data)
+        out.writestr(MODEL_SETTINGS_NAME, settings)
+        out.writestr(
+            "Metadata/project_settings.config",
+            json.dumps({"filament_colour": ["#D3CFB5", "#27272C"]}),
+        )
+    return buffer.getvalue()
+
+
+def _bambuddy_slots(payload: bytes, plate: int) -> set[int]:
+    """The slots Bambuddy's ``extract_plate_extruder_set_from_3mf`` reads from the
+    settings for ``plate``: each object's and each part's ``extruder``. (It also reads
+    the painting, one slot per hex digit, which names no real slot here.)"""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    objects: dict[str, set[int]] = {}
+    for obj in config.findall(".//object"):
+        found = {int(m.get("value", "0")) for m in obj.findall("metadata[@key='extruder']")}
+        for part in obj.findall(".//part"):
+            found |= {int(m.get("value", "0")) for m in part.findall("metadata[@key='extruder']")}
+        objects[obj.get("id", "")] = found
+    used: set[int] = set()
+    for each in config.findall(".//plate"):
+        if each.find("metadata[@key='plater_id']").get("value") != str(plate):  # type: ignore[union-attr]
+            continue
+        for instance in each.findall("model_instance"):
+            used |= objects[instance.find("metadata").get("value", "")]  # type: ignore[union-attr]
+    return used
+
+
+def test_a_painted_slot_is_named_on_a_part_that_prints_nothing() -> None:
+    """Library file 2440's eyes are painted filament 2 (``8``), which Bambuddy reads as
+    slot 8: plate 2 sliced its black spool with the glow preset and colour. The hint
+    names slot 2 on a negative part of the plate's object, with an id no part has."""
+    payload = _cats({"7": "8"})
+    assert _bambuddy_slots(payload, 2) == {1}
+
+    hinted = hint_painted_slots(payload)
+
+    assert _bambuddy_slots(hinted, 2) == {1, 2}
+    assert _bambuddy_slots(hinted, 1) == {1}
+    with zipfile.ZipFile(io.BytesIO(hinted)) as after:
+        config = ET.fromstring(after.read(MODEL_SETTINGS_NAME))
+        with zipfile.ZipFile(io.BytesIO(payload)) as before:
+            for name in before.namelist():
+                if name != MODEL_SETTINGS_NAME:
+                    assert after.read(name) == before.read(name), name
+    hints = [
+        part
+        for part in config.iter("part")
+        if part.find("metadata[@key='name']").get("value") == SLOT_HINT_NAME  # type: ignore[union-attr]
+    ]
+    assert [(part.get("id"), part.get("subtype")) for part in hints] == [("8", "negative_part")]
+    # Deterministic, so a copy uploaded earlier is found by its hash.
+    assert hint_painted_slots(payload) == hinted
+
+
+def test_each_object_is_named_the_slots_its_own_painting_uses() -> None:
+    # Filament 3 is a ``11`` leaf and then four bits, two hex digits, unlike 1 and 2.
+    hinted = hint_painted_slots(_cats({"6": single_code(3), "7": single_code(2)}))
+    assert _bambuddy_slots(hinted, 1) == {1, 3}
+    assert _bambuddy_slots(hinted, 2) == {1, 2}
+
+
+def test_an_unpainted_file_is_left_alone() -> None:
+
+    plain = _cats({})
+    assert hint_painted_slots(plain) is plain
+
+
+def test_a_paint_code_split_by_a_read_window_is_read_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bambu3mf, "_CHUNK", 7)
+    assert _bambuddy_slots(hint_painted_slots(_cats({"7": "8"})), 2) == {1, 2}
+
+
+def test_a_paint_code_that_does_not_decode_names_nothing() -> None:
+    payload = _cats({"7": "F"})  # a split with no children
+    assert hint_painted_slots(payload) is payload

@@ -245,6 +245,50 @@ async def test_filing_after_a_print_in_the_models_own_colours_reuses_its_copy(
     assert bambuddy.uploaded == ["Demo.3mf", "Demo (2).3mf"]
 
 
+async def test_a_two_filament_copy_from_before_slot_hints_is_not_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy uploaded before #4013 names no painted slot, so Bambuddy slices a painted
+    filament with another's preset; one of two filaments or more is uploaded again, and
+    the new one is reused, by a print and by a filing in the model's own colours."""
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy = SlowBambuddy()
+    uploads = MemoryUploads()
+    meta = output("h").model_copy(update={"colors": ["#FF0000", "#00FF00"]})
+    spools = Target(DEFAULT_PLATE, "0.2", colours=("#ff0000", "#00ff00"))
+    assert spools.key.endswith(";slots")
+    assert not Target(DEFAULT_PLATE, "0.2", colours=("#ff0000",)).key.endswith(";slots")
+    bambuddy.uploaded.append("Demo.3mf")
+    before = LibraryCopy(
+        id=1,
+        folder_id=FOLDER,
+        target_key=spools.key.removesuffix(";slots"),
+        sliced=[SlicedCopy(id=98)],
+    )
+    uploads.copies[meta.id] = [before]
+
+    async def ensure(target: Target) -> send.EnsuredCopy:
+        return await ensure_copy(
+            cast(BambuddyClient, bambuddy),
+            cast(OutputStore, None),
+            cast(BambuddyUploadStore, uploads),
+            meta,
+            StoredSettings(library_folder_id=2),
+            target=target,
+            folder_id=FOLDER,
+            stem="Demo",
+        )
+
+    printed = await ensure(spools)
+    again = await ensure(spools)
+    filed = await ensure(Target(DEFAULT_PLATE, "0.2"))
+
+    assert printed.created and printed.library_file_id != before.id
+    assert (again.created, again.library_file_id) == (False, printed.library_file_id)
+    assert (filed.created, filed.library_file_id) == (False, printed.library_file_id)
+
+
 @pytest.mark.requires_postgres
 async def test_two_replicas_filing_and_printing_at_once_upload_one_copy(
     monkeypatch: pytest.MonkeyPatch, pg_conninfo: str, tmp_path: Path

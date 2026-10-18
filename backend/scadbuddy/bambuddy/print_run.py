@@ -63,6 +63,7 @@ from scadbuddy.bambuddy.filaments import (
     family,
     fold_plates,
     gather_plate_options,
+    normalise_colour,
     plates_named,
     queue_filaments,
     read_inventory,
@@ -1418,6 +1419,40 @@ class QueuedPlate(BaseModel):
     warnings: list[FilamentWarning] = Field(default_factory=list)
 
 
+class SlicedRequirements(Protocol):
+    """The one read :func:`sliced_as_planned` makes; ``BambuddyClient`` is one."""
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements: ...
+
+
+async def sliced_as_planned(
+    client: SlicedRequirements, *, sliced: int, plate_id: int, colours: Sequence[str]
+) -> None:
+    """Refuse a slice whose filaments are not the ones sent for it (#4013), before it is
+    queued: each slot the plate prints with must come back in the colour chosen for it.
+
+    Bambuddy can rewrite a slot it thinks the plate leaves unused with another's preset
+    and colour (``substitute_unused_plate_filaments``), and the slice still succeeds: a
+    black spool then ran a glow profile, and the run said it had printed what was
+    chosen. A slot with no colour chosen, or none read back, is not judged."""
+    requirements = await client.filament_requirements(sliced, plate_id=plate_id)
+    for filament in requirements.filaments:
+        slot = filament.slot_id
+        if not filament.used_in_plate or not 1 <= slot <= len(colours):
+            continue
+        chosen, got = normalise_colour(colours[slot - 1]), normalise_colour(filament.color)
+        if chosen is not None and got is not None and chosen != got:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy sliced plate {plate_id} with filament {slot} in {got}, not the"
+                f" {chosen} chosen for it, so it was not queued: the slice would print"
+                " that spool with another filament's profile.",
+                sliced_library_file_id=sliced,
+            )
+
+
 async def queue_plate(
     client: BambuddyClient,
     *,
@@ -1428,8 +1463,13 @@ async def queue_plate(
 ) -> QueuedPlate:
     """Choose the rack hotends for ``plate``'s sliced file, ``POST /queue/`` once, then
     save the picks, whatever the print's subject: every print is followed and settled
-    (#1073). The pick and the save never raise (spec 2026-10-01 §5): only the queue call
-    can fail."""
+    (#1073). The pick and the save never raise (spec 2026-10-01 §5): only the check that
+    the slice holds the filaments sent for it (:func:`sliced_as_planned`, #4013) and the
+    queue call can fail."""
+    if plate.plan is not None:
+        await sliced_as_planned(
+            client, sliced=sliced, plate_id=plate.plate_id, colours=plate.plan.filament_colours
+        )
     notes: list[FilamentWarning] = []
     choice = (
         await rack_chooser(
