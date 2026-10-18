@@ -10,10 +10,14 @@ The protocol facts, each cited:
   https://github.com/Doridian/OpenBambuAPI/blob/main/mqtt.md, read 2026-10-18).
 - The file goes over implicit FTPS on ``<host>:990``, user ``bblp`` (OpenBambuAPI
   `ftp.md`, same date). ha-bambulab's ``ImplicitFTP_TLS`` wraps the control socket at
-  connect, wraps each data connection reusing the control connection's TLS session,
-  and skips the data connection's TLS ``unwrap`` because some printers time it out
+  connect and wraps each data connection reusing the control connection's TLS session
   (https://github.com/greghesp/ha-bambulab, ``pybambu/bambu_client.py``, read
-  2026-10-18).
+  2026-10-18). Unlike ha-bambulab, the data connection is unwrapped before it closes,
+  and the FTPS context stops at TLS 1.2: a printer serves its FTPS at 1.2 only
+  (Bambuddy ``backend/app/services/virtual_printer/ftp_server.py:702-713`` at
+  maziggy/bambuddy ``0d427510``, read 2026-10-18), and a data connection closed without
+  ``close_notify`` under 1.3 is cut short (measured on PR #4177's fake printer and in
+  ``tests/printers/test_lan_ftps.py``: 200,000 bytes sent, 98,304 arrived).
 
 Which directory a 3MF goes in and the ``url`` the printer then accepts are not
 documented there: Task 7 measures them on a printer, so this module sets neither.
@@ -37,7 +41,7 @@ import json
 import re
 import socket
 import ssl
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, BinaryIO
 
@@ -107,6 +111,15 @@ def pinned_context(cert_sha256_hex: str) -> ssl.SSLContext:
     return context
 
 
+def ftps_context(cert_sha256_hex: str) -> ssl.SSLContext:
+    """`pinned_context`, at most TLS 1.2: a printer's FTPS is 1.2 only (Bambuddy
+    ``virtual_printer/ftp_server.py:702-713`` at ``0d427510``), and under 1.3 a data
+    connection's unread session tickets cut an upload short."""
+    context = pinned_context(cert_sha256_hex)
+    context.maximum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
 def pushall_command() -> dict[str, Any]:
     return {"pushing": {"sequence_id": "0", "command": "pushall"}}
 
@@ -169,19 +182,6 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
             session = self.sock.session if isinstance(self.sock, ssl.SSLSocket) else None
             conn = self.context.wrap_socket(conn, session=session)
         return conn, size
-
-    def store_no_unwrap(
-        self, cmd: str, data: BinaryIO, callback: Callable[[bytes], None] | None = None
-    ) -> str:
-        """``storbinary`` without the data connection's TLS ``unwrap``, which some
-        printers time out (ha-bambulab ``storbinary_no_unwrap``)."""
-        self.voidcmd("TYPE I")
-        with self.transfercmd(cmd) as conn:
-            while block := data.read(FTP_BLOCK):
-                conn.sendall(block)
-                if callback is not None:
-                    callback(block)
-        return self.voidresp()
 
 
 class LanPrinter:
@@ -252,12 +252,13 @@ class LanPrinter:
 
     def _upload(self, address: str, data: BinaryIO, remote_name: str) -> str:
         md5 = hashlib.md5(usedforsecurity=False)
-        ftp = ImplicitFtpTls(context=pinned_context(self.cert_sha256), timeout=FTP_TIMEOUT)
+        ftp = ImplicitFtpTls(context=ftps_context(self.cert_sha256), timeout=FTP_TIMEOUT)
         try:
             ftp.connect(address, FTPS_PORT)
             ftp.login(USERNAME, self._access_code)
             ftp.prot_p()
-            ftp.store_no_unwrap(f"STOR {remote_name}", data, md5.update)
+            # ftplib's own STOR: it unwraps the data connection's TLS before closing it.
+            ftp.storbinary(f"STOR {remote_name}", data, FTP_BLOCK, md5.update)
         finally:
             ftp.close()
         return md5.hexdigest()
