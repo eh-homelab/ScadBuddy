@@ -170,7 +170,10 @@ on shutdown.
   editor checks (the API; not a separate render worker), divided by
   `SCADBUDDY_RENDER_CONCURRENCY`, between 1 and 8, so renders and checks together
   stay at one process per CPU. A value saved in Settings reaches a separate render
-  worker within 30 seconds, at its next per-colour stage. If no
+  worker within 30 seconds (its settings cache), at its next per-colour stage. An
+  in-process worker (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) on the replica that took
+  the save sees it at once, since the save invalidates that cache; on another
+  replica, within the same 30 seconds. If no
   cgroup CPU controller is readable, a warning is logged at the first render and it
   sizes for every CPU it can see; set it by hand there. It reads no memory limit:
   size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
