@@ -34,14 +34,15 @@ from typing import Any
 from claude_agent_sdk import AgentDefinition
 
 from scadbuddy_durable.secrets import Kek
+from scadbuddy_durable.session.models import SEGMENT_TIMEOUT
 
 SERVER = "scadbuddy"
 PREFIX = f"mcp__{SERVER}__"
 # agent/src/main.ts PORT and routes/subagentMcp.ts SUBAGENT_MCP_PATH (tests/test_subagents.py
 # reads both): outside /api/v1/ai/, the prefix the ingress routes to the agent.
 DEFAULT_URL = "http://127.0.0.1:8081/internal/durable/subagent-mcp"
-# A segment's activity runs at most 10 minutes (the plugin's segment_timeout).
-TOKEN_TTL_S = 15 * 60
+# Minted once per segment attempt, so it outlives the longest one (SEGMENT_TIMEOUT).
+TOKEN_TTL_S = int(SEGMENT_TIMEOUT.total_seconds()) + 5 * 60
 _INFO = b"scadbuddy:durable:subagent_mcp:v1"
 
 

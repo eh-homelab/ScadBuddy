@@ -47,6 +47,11 @@ export interface Arranged {
    * model list could not be read: then no name is known, and a slug is not one (#2541).
    */
   filedUnder?: string
+  /**
+   * #3651 — what it was arranged from, so its print opens on the project they are all in.
+   * Set by the Arrange dialog.
+   */
+  from?: { outputIds: string[]; libraryFileIds: number[] }
 }
 
 /**
@@ -334,7 +339,8 @@ export async function backfillOutputs(
  * would read the same are numbered, so the rows can be told apart.
  */
 export function objectNames(output: Output, modelName: (slug: string) => string): Map<string, string> {
-  const objects = output.manifest ?? []
+  // #3637 — one part in two colourings is two entries but one object: named once.
+  const objects = [...new Map((output.manifest ?? []).map((object) => [object.part, object])).values()]
   const base = objects.map((object) => object.bom_piece ?? modelName(object.slug))
   // Counted once, not per object: a manifest runs to thousands of parts.
   const uses = new Map<string, number>()

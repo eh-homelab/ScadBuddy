@@ -1,5 +1,6 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import {
+  isGrpcDeadlineError,
   type Client,
   WithStartWorkflowOperation,
   WorkflowExecutionAlreadyStartedError,
@@ -13,6 +14,7 @@ import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/dura
 import { TASK_QUEUE } from '../temporal/names.js'
 import { SESSION_QUEUE, UNIFIED_SESSIONS_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
+import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
 import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
 import { POOL_BUDGET, POOL_COST, SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
@@ -166,6 +168,8 @@ export type DurableTurnsDeps = {
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
   cancelTimeoutMs?: number
+  /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
+  describe?: DescribeSession
 }
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
@@ -191,6 +195,7 @@ export class DurableTurns {
   readonly #sessionHostQueue: string | undefined
   readonly #sendTimeoutMs: number
   readonly #ready = new Map<SessionRuntime, { until: number; why: string | undefined }>()
+  readonly #describe: DescribeSession
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -203,6 +208,7 @@ export class DurableTurns {
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#sessionHostQueue = deps.sessionHostQueue
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
+    this.#describe = deps.describe ?? durableDescriber(deps.client)
   }
 
   /** The runtime a session that has run nothing would get at its first send: the `unified_sessions` flag (spec 2026-10-13 §5.1). */
@@ -454,6 +460,12 @@ export class DurableTurns {
       }
     } catch (err) {
       if (err instanceof WorkflowNotFoundError) return undefined
+      // #3739: the cause is the one thing that says why a fork keeps failing, so it is
+      // logged; the caller hears only which of the two it was.
+      console.warn(`durable fork: session ${sessionId}'s workflow could not be read: ${String(err)}`)
+      if (isGrpcDeadlineError(err)) {
+        throw new SessionError('unavailable', `no durable session worker answered for session ${sessionId} in time to fork it; try again in a moment`)
+      }
       throw new SessionError('unavailable', `session ${sessionId}'s workflow could not be read to fork it; try again in a moment`)
     }
     throw new SessionError('busy', `session ${sessionId} kept moving while it was read; fork it again once its turn ends`)
@@ -536,28 +548,53 @@ export class DurableTurns {
 
   /**
    * Stops the session's turn: its parked calls are cancelled first, then the Signal.
-   * False when no turn runs, or the session has no workflow yet.
+   * False when no turn runs. When the workflow is gone the turn is ended here, as the
+   * running sweep would end it (#endGone); a first turn whose workflow is not started
+   * yet is left to it.
    */
   async interrupt(session: SessionRecord, reason: string): Promise<boolean> {
-    const [row] = await this.#sql<{ status: SessionStatus }[]>`SELECT status FROM ai_sessions WHERE id = ${session.id}`
+    const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean })[]>`
+      SELECT id, status, event_seq, durable_offset,
+        updated_at < now() - make_interval(secs => ${RUNNING_GRACE_MS / 1000}) AS settled
+      FROM ai_sessions WHERE id = ${session.id}`
     if (!row || !RUNNING.includes(row.status)) return false
     try {
       await this.#gate.cancelInput(session.id, reason)
     } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return false
+      if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
       // Unanswered: the Signal stops the turn and its parked calls all the same.
       if (!(err instanceof DurableUnavailable)) throw err
     }
     try {
       await this.#gate.interrupt(session.id, reason)
     } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return false
+      if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
       if (err instanceof DurableUnavailable) {
         throw new SessionError('unavailable', `session ${session.id}'s workflow could not be reached; interrupt it again in a moment`)
       }
       throw err
     }
     return true
+  }
+
+  /**
+   * Stop on a `running` row whose workflow is gone: nothing there will end the turn,
+   * so it is ended here as DurableRunningSweep would end it, rather than left
+   * `running` until the sweep's next pass (#4018). Described first (within the
+   * describer's deadline), so the ending says which:
+   *   - closed (ended): at once; nothing can start that workflow's turn again.
+   *   - not found, or a describe that fails (which the Signal just answered): only
+   *     past RUNNING_GRACE_MS, as the sweep. Within it a first send's
+   *     update-with-start may still be in flight; ending it would lose the Stop
+   *     (no workflow took the Signal) while the workflow it starts runs the turn
+   *     behind an `idle` row (#4131 review). The sweep ends it later.
+   *   - open again (started meanwhile): its turn is its own; nothing is written.
+   */
+  async #endGone(row: RunningRow & { settled: boolean }): Promise<boolean> {
+    const state = await this.#describe(sessionWorkflowId(row.id)).catch(() => 'not_found' as const)
+    if (state === 'open') return false
+    if (state !== 'closed' && !row.settled) return false
+    return endLostTurn(this.#sql, this.#events, row, state)
   }
 
   /**

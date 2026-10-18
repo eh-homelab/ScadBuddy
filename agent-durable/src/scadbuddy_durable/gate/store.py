@@ -27,6 +27,7 @@ from typing import Any, Literal
 import psycopg
 from psycopg.rows import dict_row
 
+from scadbuddy_durable.gate.canonical import response_hash
 from scadbuddy_durable.gate.ids import parse_durable_request_id
 
 PROTOCOL_VERSION = 1
@@ -95,6 +96,8 @@ class ResolveInput:
     responder: dict[str, str]
     response: Any | None = None
     reason: str | None = None
+    # The response as the person sent it, whose hash is kept for a retry's comparison (#3724).
+    raw_response: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +243,7 @@ async def _resolved(
     responder: dict[str, str],
     response: Any | None,
     reason: str | None,
+    raw_response: Any | None = None,
 ) -> None:
     """Records the end of the entry ``row`` (already deleted, in this transaction)."""
     sid = str(row["session_id"])
@@ -252,8 +256,9 @@ async def _resolved(
     await conn.execute(
         """
         INSERT INTO ai_input_responses
-          (request_id, session_id, kind, outcome, response, responder, reason, hops)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+          (request_id, session_id, kind, outcome, response, responder, reason, hops,
+           response_hash)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             rid,
@@ -264,6 +269,7 @@ async def _resolved(
             json.dumps(responder),
             reason,
             json.dumps(hops),
+            None if raw_response is None else response_hash(raw_response),
         ),
     )
     person = responder.get("kind") != "system"
@@ -584,5 +590,13 @@ async def resolve_input(conn: psycopg.AsyncConnection[Any], args: ResolveInput) 
         )
         if not deleted:
             return False
-        await _resolved(conn, deleted[0], args.outcome, args.responder, args.response, args.reason)
+        await _resolved(
+            conn,
+            deleted[0],
+            args.outcome,
+            args.responder,
+            args.response,
+            args.reason,
+            args.raw_response,
+        )
         return True

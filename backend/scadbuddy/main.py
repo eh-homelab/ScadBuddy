@@ -11,12 +11,13 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Final
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 import scadbuddy.api
@@ -39,6 +40,7 @@ from scadbuddy.api import (
     print_attachments,
     telemetry,
 )
+from scadbuddy.api.accepting import install_accepting_handler, note_preference
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
@@ -51,8 +53,11 @@ from scadbuddy.api.limits import (
     BodySizeGate,
     RouteLimit,
 )
+from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
@@ -61,6 +66,7 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -74,17 +80,24 @@ from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
-from scadbuddy.library.assets import referenced_asset_ids
+from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
-from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.library.settings_store import (
+    NATIVE_LIBRARY_NOT_READY,
+    RECOVER_BAMBUDDY_LIBRARY_SQL,
+    StoreNotReadyError,
+    load_render_store_settings,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
@@ -92,30 +105,47 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
+from scadbuddy.store.backends import UnrecordedSweeper
+from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
-from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
+from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.migrate import migrate_activity
+from scadbuddy.worker import (
+    MAKE_CURRENT_BACKOFF,
+    MAKE_CURRENT_ERROR_AFTER,
+    MAKE_CURRENT_ERROR_EVERY,
+    MAKE_CURRENT_EVERY,
+    deployment_writes,
+    make_current_until_polled,
+    run_inprocess_worker,
+    worker_deps_from_state,
+)
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
+    LIBRARY_DEPLOYMENT_NAME,
     bambuddy_worker,
     connect,
     follow_worker,
+    library_deployment,
     reconcile_lost_operations,
     reconcile_lost_runs,
+    routes_to,
     sandboxed_runner,
 )
-from scadbuddy.workflows.flow_triggers import FlowTriggerFire
+from scadbuddy.workflows.flow_triggers import VersionedFlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
+    ATTACHMENTS_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
@@ -123,16 +153,17 @@ from scadbuddy.workflows.housekeeping import (
     ensure_schedules,
     library_worker,
 )
-from scadbuddy.workflows.operation import OperationWorkflow
+from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
     REFRESH_ACTIVITY,
     UNRUN_FAILURE,
-    PreviewBackfill,
+    VersionedPreviewBackfill,
     ensure_preview_schedule,
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
 
@@ -142,6 +173,12 @@ API_PREFIX = "/api/v1"
 EXCLUDED_URLS: Final = ",".join(
     f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
 )
+
+#: How long a batch print nobody touches is kept (#2718 review): long past any print
+#: it started, which Bambuddy's queue and the print runs keep on their own.
+BATCH_TTL = timedelta(days=7)
+#: A batch with a file still `pending` is what follows that run (#3798): kept longer.
+PENDING_BATCH_TTL = timedelta(days=30)
 
 logger = logging.getLogger(__name__)
 
@@ -218,11 +255,16 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
-    ``stop``, once set, ends it before its next asset (#2140).
+    ``stop``, once set, ends it before its next asset (#2140), and before and after
+    reading the references, which no per-asset check can interrupt (#2554).
     """
+    if stopped(stop):
+        return []
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
+    if stopped(stop):
+        return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
@@ -302,7 +344,10 @@ async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = N
         if stop is not None and stop.is_set():
             # Stopped (#2140): only mark what it removed, which no later sweep could
             # find otherwise -- `reconcile` retries marked copies, never a diff against
-            # the volume. The next sweep's reconcile removes them.
+            # the volume. The next sweep's reconcile removes them. This runs inside the
+            # shutdown's bounded join: one that times out cancels it, and a copy left
+            # unmarked then is never retried, so it stays in the store until something
+            # else removes it (#2554).
             if removed:
                 await remote.mark_swept(removed, cutoff=cutoff)
             return
@@ -332,6 +377,7 @@ async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = Fa
 async def _sweep_blobs_logged(state: AppState) -> None:
     """The Temporal path's blob store: the pieces no job references any more. Only
     the Schedule's sweep runs it, so a failure is logged and fails its activity."""
+    unrecorded = 0
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
@@ -344,19 +390,23 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     state.store.content, state.refs, grace=state.config.job_ttl
                 )
                 backend = state.store.content.backend
-                if isinstance(backend, BambuddyContentBackend):
+                if isinstance(backend, UnrecordedSweeper):
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
-                    removed += await backend.sweep_unrecorded(cutoff=cutoff)
+                    index = state.store.content.index
+                    swept = await backend.sweep_unrecorded(
+                        cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
+                    )
+                    unrecorded = swept if isinstance(swept, int) else len(swept)
             except BaseException:
                 # BaseException on purpose: a cancelled sweep must stay cancelled, not be
                 # replaced by the trim's own failure below.
                 failed = True
                 raise
             finally:
-                # Both steps above need Bambuddy (a stale blob's release is a round
-                # trip too): one that is down must not stop the local cache being
-                # trimmed, or it grows for as long as Bambuddy stays down (#2115).
+                # Both steps above need the remote store (a stale blob's release is a
+                # round trip too): one that is down must not stop the local cache being
+                # trimmed, or it grows for as long as the remote stays down (#2115).
                 if isinstance(state.store.blobs, CachedBlobStore):
                     try:
                         await asyncio.to_thread(state.store.blobs.evict)
@@ -370,6 +420,8 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
+    if unrecorded:
+        logger.info("removed unrecorded uploads", extra={"count": unrecorded})
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
         # A swept piece is no geometry's source any more (`store/geometry.py`).
@@ -499,7 +551,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        await _heartbeating(_sweep_claims_logged(state))
+        await _heartbeating(_sweep_claims_and_batches_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -532,6 +584,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
 
+    @activity.defn(name=ATTACHMENTS_SWEEP)
+    async def sweep_print_attachments() -> None:
+        await _heartbeating(_sweep_print_attachments_logged(state))
+
+    @activity.defn(name=LIBRARY_SWEEP)
+    async def sweep_print_library() -> None:
+        await _heartbeating(_sweep_print_library_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -545,7 +605,42 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
+        sweep_print_attachments,
+        sweep_print_library,
     ]
+
+
+async def _sweep_print_library_logged(state: AppState) -> None:
+    """#3827: the native library's old trash and orphan blobs; nothing on ``bambuddy``."""
+    try:
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
+        done = await sweep_library(native, now=datetime.now(UTC))
+    except Exception:
+        logger.exception("could not sweep the print library")
+        raise
+    if done.purged or done.orphans:
+        logger.info(
+            "swept the print library",
+            extra={"purged": done.purged, "orphans": done.orphans},
+        )
+
+
+async def _sweep_print_attachments_logged(state: AppState) -> None:
+    """#3047: the attachments of archives deleted in Bambuddy."""
+    store = state.components.get(PRINT_ATTACHMENTS)
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            gone = await sweep_gone_archives(client, store)
+        except Exception:
+            logger.exception("could not sweep the attachments of deleted archives")
+            raise
+        if gone:
+            logger.info("forgot the attachments of deleted archives", extra={"count": gone})
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _sweep_activity_logged(state: AppState) -> None:
@@ -590,12 +685,36 @@ async def _prune_jobs_logged(state: AppState) -> None:
         raise
 
 
-async def _sweep_claims_logged(state: AppState) -> None:
+async def _sweep_claims_and_batches_logged(state: AppState) -> None:
+    """The claims sweep, which also forgets batch prints left untouched for `BATCH_TTL`:
+    both are a delete on the prune cadence (`PRUNE_SWEEPS`), so the batch prune rides
+    this activity rather than adding a sweep a replica on an older build could not run
+    (#2718 review). Its failure is logged as the batch prune's own."""
+    # Each its own: one failing never starves the other, as the flow sweeps.
+    failed: Exception | None = None
     try:
         await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
-    except Exception:
+    except Exception as err:
         logger.exception("could not sweep operation claims")
-        raise
+        failed = err
+    try:
+        # #2718 review: a batch print closed without Cancel or Done stays otherwise.
+        pruned = await state.components.get(PRINT_BATCHES).prune(
+            BATCH_TTL, pending_older_than=PENDING_BATCH_TTL
+        )
+        if pruned.count:
+            logger.info("forgot batch prints left untouched", extra={"count": pruned.count})
+        if pruned.pending:
+            # #3798: each still followed a file's run, so a new batch could send it again.
+            logger.warning(
+                "forgot batch prints with a file still being checked",
+                extra={"batches": pruned.pending},
+            )
+    except Exception as err:
+        logger.exception("could not prune batch prints")
+        failed = failed or err
+    if failed is not None:
+        raise failed
 
 
 async def _sweep_flow_runs_logged(state: AppState) -> None:
@@ -661,6 +780,8 @@ async def _with_bambuddy(
     """Run ``sweep`` with a Bambuddy client; nothing to do when Bambuddy is not set up.
     What ``sweep`` raises it has logged, and is raised as it is."""
     settings = await asyncio.to_thread(state.settings_store.load)
+    # Held, not raised in place: a sweep's own ApiError must miss the handler below,
+    # which would log it again as Bambuddy unreachable, or drop it as NOT_CONFIGURED.
     failed: Exception | None = None
     try:
         async with client_for(settings) as client:
@@ -909,6 +1030,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
         links=state.print_links,
+        # This process's own native library when it serves (#3827).
+        library=await state.components.get(PRINT_LIBRARY).serving_native(),
     )
     ops = state.components.get(OPERATIONS)
     activities = [
@@ -978,17 +1101,93 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
             await handoff
 
 
+#: The ``library`` worker's workflows beside ``Housekeeping`` (`library_worker` adds it),
+#: each with its own versioning behavior (#4090): every one is AUTO_UPGRADE, and each
+#: class says why. The deployment has no default, so a workflow added here without one
+#: stops the worker from being built.
+LIBRARY_WORKFLOWS: tuple[type, ...] = (
+    VersionedPreviewBackfill,
+    VersionedOperationWorkflow,
+    VersionedFlowTriggerFire,
+    VersionedStoreMigration,
+)
+
+
+#: How long the library Schedules wait for this build to route the queue before they
+#: are set up anyway (Temporal refusing the build, say), and how often it is asked.
+LIBRARY_ROUTED_WAIT = 60.0
+LIBRARY_ROUTED_POLL = 0.5
+
+
+async def _make_library_current(
+    client: Client, build_id: str, queue: str, routed: asyncio.Event
+) -> None:
+    """Make this API build the ``scadbuddy-library`` deployment's current version, as
+    the render worker does its own (`worker._serve_versioned`, #4090): a new replica
+    then takes every new task of the queue, and an old one only finishes the activity
+    attempts it already holds. It gives up once a newer build is current (#2538). Then
+    it waits, up to `LIBRARY_ROUTED_WAIT`, for the queue itself to route to this build
+    (`routes_to`), and sets ``routed`` whatever came of it. An error other than
+    Temporal's is logged, not raised: the worker keeps serving."""
+    set_current, read_current = deployment_writes(client, build_id, LIBRARY_DEPLOYMENT_NAME)
+    loop = asyncio.get_running_loop()
+    try:
+        await make_current_until_polled(
+            set_current,
+            build_id=build_id,
+            backoff=MAKE_CURRENT_BACKOFF,
+            every=MAKE_CURRENT_EVERY,
+            error_after=MAKE_CURRENT_ERROR_AFTER,
+            error_every=MAKE_CURRENT_ERROR_EVERY,
+            current=read_current,
+        )
+        until = loop.time() + LIBRARY_ROUTED_WAIT
+        while loop.time() < until:
+            with suppress(RPCError):
+                if await routes_to(
+                    client, queue, deployment_name=LIBRARY_DEPLOYMENT_NAME, build_id=build_id
+                ):
+                    return
+            await asyncio.sleep(LIBRARY_ROUTED_POLL)
+        # An error: the Schedules are set up now anyway, and a sweep this build added
+        # that the old build is handed fails, unseen, until its next tick.
+        logger.error(
+            "the library queue does not route to this build yet", extra={"build_id": build_id}
+        )
+    except Exception:
+        logger.exception(
+            "could not make this build current for the library queue",
+            extra={"build_id": build_id},
+        )
+    finally:
+        routed.set()
+
+
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
     sweeps and the preview backfill need the data volume this process holds. Once
-    connected it sets the Schedules up; Temporal down at boot only delays that."""
+    connected it sets the Schedules up; Temporal down at boot only delays that.
+
+    The worker is this build's version of ``scadbuddy-library`` (#4090), in every mode
+    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS` too), and makes its build current once, at
+    the first connect, not at each restart of the worker. It never drains on stop: its
+    workflows are all AUTO_UPGRADE, so the current build takes over what an old replica
+    leaves (README, "Deploying")."""
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
     settings = state.settings
     queue = settings.temporal_task_queue_library
+    build_id = settings.revision
+
+    routed = asyncio.Event()
 
     async def set_up() -> None:
+        # After this build routes the queue (#4090): each set-up triggers a run with this
+        # build's sweeps, which a previous build still routed to would fail as
+        # unregistered.
+        with suppress(TimeoutError):
+            await asyncio.wait_for(routed.wait(), LIBRARY_ROUTED_WAIT)
         paused = await _set_up_housekeeping(
             client,
             queue,
@@ -1001,6 +1200,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             await _backfill_store_logged(state, uploads=True, fonts=False)
 
     schedules = asyncio.create_task(set_up())
+    # Once per process, beside the restart loop below, as the render worker does at its
+    # start: a worker restarted late in a rollout must not take the deployment back from
+    # a newer build (`make_current_until_polled` writes on its first attempt).
+    current = asyncio.create_task(_make_library_current(client, build_id, queue, routed))
     ops = state.components.get(OPERATIONS)
     trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
     activities = [
@@ -1008,6 +1211,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
+        migrate_activity(lambda: state.settings_store.pool, state.settings),
     ]
     try:
         while not stop.is_set():
@@ -1015,14 +1219,16 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire],
+                workflows=LIBRARY_WORKFLOWS,
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                deployment_config=library_deployment(build_id),
             )
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
+        current.cancel()
         schedules.cancel()
         await stop_triggers()
 
@@ -1113,7 +1319,7 @@ async def _end_lost_runs_until(
     store: PrintRunStore,
     operations: OperationStore,
     stop: asyncio.Event,
-    where: Mapping[str, str] | None = None,
+    where: Mapping[str, str],
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
@@ -1189,6 +1395,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # #2788: on the API's /data, so every replica shares it.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
+        # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
+        # (a save never checks a seeded value), `native` needs a content store.
+        if snapshot.stored.library_backend == "native" and state.store.content is None:
+            await state.store.aclose()
+            raise StoreNotReadyError(
+                f"{NATIVE_LIBRARY_NOT_READY}. To start on"
+                f" Bambuddy's library, run {RECOVER_BAMBUDDY_LIBRARY_SQL} in ScadBuddy's"
+                " database, in the schema its SCADBUDDY_DATABASE_URL uses (or, when no"
+                " library_backend is stored, set SCADBUDDY_LIBRARY_BACKEND=bambuddy)."
+            )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
         await asyncio.to_thread(state.settings_store.close)
@@ -1200,6 +1416,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # will not start) releases what is open, the store and its pool included, rather
     # than leaking it for this failed boot.
     try:
+        # Spec 2026-10-16 §4.3: once the store is ready, the rows a migration copied to
+        # its backend are that backend's.
+        switched = await asyncio.to_thread(BlobIndex(pool).switch_migrated, current.store_backend)
+        if switched:
+            logger.info(
+                "switched migrated blobs",
+                extra={"backend": current.store_backend, "rows": switched},
+            )
         state.paths.ensure()
         # Before the built-in sync: an existing models directory becomes revision 1,
         # so what a newer image changes in a built-in is a commit on top of it rather
@@ -1350,14 +1574,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
         # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
         telemetry={"auto_configure": False},
+        # #2794: whether a request follows a 202 itself, for `run_operation`.
+        dependencies=[Depends(note_preference)],
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
+    install_accepting_handler(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
     # A commit made for the agent is authored as the agent (#252).
     app.add_middleware(AgentAuthorship)
+    # What each read saw of the event bus, so the UI need not read twice (#1039).
+    app.add_middleware(EventCursor, events=lambda: state.events)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(

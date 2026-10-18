@@ -10,7 +10,6 @@ fields ``APPLIES`` calls ``live``, on every ``settings.changed`` from any replic
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Callable
 
@@ -66,24 +65,34 @@ def follow_changes(state: AppState) -> Callable[[], None]:
     loop = asyncio.get_running_loop()
     pending: set[asyncio.Task[None]] = set()
 
-    async def reapply() -> None:
+    async def reapply(release: Callable[[], None]) -> None:
         try:
             snapshot = await asyncio.to_thread(state.settings_store.snapshot)
         except Exception:
             logger.exception("could not re-read the settings after a change")
             return
+        finally:
+            # Applied below with no await between: no read sees the gap.
+            release()
         apply_runtime(state, snapshot.runtime)
 
-    def schedule() -> None:
-        task = loop.create_task(reapply())
+    def schedule(release: Callable[[], None]) -> None:
+        task = loop.create_task(reapply(release))
         pending.add(task)
         task.add_done_callback(pending.discard)
+        task.add_done_callback(lambda _: release())  # cancelled before it ran
 
     def on_event(event: Event) -> None:
         if isinstance(event, SettingsChanged) and event.section == "connection":
+            # Until it is applied, a read stamped with this event would show the old
+            # runtime settings: hold reads' cursors back (#1039).
+            settle = getattr(state.events, "settle", None)
+            release: Callable[[], None] = settle() if settle is not None else lambda: None
             # The loop may have closed first, at shutdown.
-            with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(schedule)
+            try:
+                loop.call_soon_threadsafe(schedule, release)
+            except RuntimeError:
+                release()
 
     remove: Callable[[], None] = state.events.add_listener(on_event)
     return remove

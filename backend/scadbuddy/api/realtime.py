@@ -15,10 +15,12 @@ Client → server::
 
     {"type": "subscribe", "topics": ["job:<id>", "models"]}
     {"type": "unsubscribe", "topics": ["models"]}
+    {"type": "check", "id", "since": [<event id>...], "topics": [...]}
 
 Server → client::
 
-    {"type": "subscribed", "topics": [...]}      # the bus is listening for these now
+    {"type": "subscribed", "topics": [...], "last"}  # the bus is listening for these now
+    {"type": "changed", "id", "topics": [...]}   # the answer to a ``check``
     {"type": "event", "id", "kind", "topics", "data"}
     {"type": "resync"}                           # events were lost: re-read everything
     {"type": "ping"}                             # every PING_SECONDS
@@ -31,6 +33,47 @@ snapshot, through the route that already shapes it.
 
 Resume after a reconnect is the same move: the client resubscribes and re-reads on
 ``subscribed``. Replay from an event log (``Last-Event-ID``) is for MCP (#264).
+
+The cursor (#1039)
+------------------
+On a cold page load the first read starts before the socket is open, so the re-read
+on ``subscribed`` usually reads the same thing again. A read can say what it saw
+instead: every API response carries `CURSOR_HEADER`, the id of the last event this
+process had heard when the request arrived. Postgres delivers a NOTIFY only after its
+log row commits, and a change is published after it is made, so that event and
+everything before it in the log is reflected in the read.
+
+A listener that applies an event to in-process state asynchronously (the runtime
+settings, `api/runtime.follow_changes`) holds ``settle()`` from hearing it until it has
+applied it. Meanwhile a read may show less than the last event heard, so it carries
+no cursor and the client reads again.
+
+``subscribed`` carries ``last``, the last event this process had heard once the
+topics were followed; anything after it reaches the client as an ``event`` frame. A
+client whose read saw ``last`` itself has missed nothing. After the bus's listener
+reconnects, ``last`` is left out until it hears a fresh event: a NOTIFY sent during the
+gap was never heard, so the client must ``check``. Otherwise it sends
+``check`` with the ids its read saw, and the server replays the log after the
+earliest of them and answers ``changed`` with the topics an event since touched. An
+unknown or pruned id, a gap, more events than `CHECK_MAX_EVENTS`, a topic this socket
+does not follow, a log that cannot be read, or a bus with no log answers every topic:
+the client re-reads, as it did before.
+
+Replaying by ``seq`` is sound because ``seq`` order is commit order. Every log write is
+`~scadbuddy.core.pg_events.write_event`, which takes ``EVENT_LOG_LOCK``
+(``pg_advisory_xact_lock``) before its INSERT. A transaction-level lock is held until
+the caller's transaction commits, savepoint or not, so a publish that starts while
+another's transaction is open waits for it. No event can commit after one with a
+larger ``seq`` (``tests/test_pg_event_bus.py::test_log_order_is_commit_order``).
+
+An event the publisher drops before it is logged (``scadbuddy_events_dropped_total``:
+the outbox full, or a failed write) never reaches the log or any socket. Without a
+cursor, the cold load's re-read happened to cover such a drop. With one, the drop goes
+unseen there too, as it always did for a page already open.
+
+A socket answers its ``check`` frames in order, on a worker beside the loop that reads
+its frames, so a slow log never holds up its subscribes. Past `CHECK_QUEUE` waiting, a
+``check`` is answered "every topic changed".
 
 Security
 --------
@@ -61,6 +104,9 @@ from urllib.parse import urlsplit
 
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope
+from starlette.types import Send as ASGISend
 
 from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
@@ -106,6 +152,17 @@ RATE_PER_SECOND = 20.0
 #: server refuses anything over ``--ws-max-size`` (the Dockerfile's CMD, 8 MiB, shared
 #: with the LSP bridge's whole-source messages) before it reaches here.
 MAX_FRAME_CHARS = 16_384
+
+#: The response header that carries the read's cursor (#1039; see the module docstring).
+CURSOR_HEADER = "X-ScadBuddy-Last-Event"
+#: The most events a ``check`` replays before it answers "every topic changed".
+CHECK_MAX_EVENTS = 1000
+#: How many events a ``check`` reads from the log at a time.
+CHECK_PAGE = 500
+#: The most cursors one ``check`` may carry: one per request of a read.
+CHECK_MAX_SINCE = 8
+#: The most ``check`` frames one socket keeps waiting for its worker.
+CHECK_QUEUE = 32
 
 #: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -292,7 +349,113 @@ async def _ping(send: Send) -> None:
         await send({"type": "ping"})
 
 
-async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
+def last_heard(events: object) -> str | None:
+    """The id of the last event this process heard, or None: none yet, or a bus with no
+    log to check a cursor against (the in-process one). A read's cursor."""
+    last = getattr(events, "last_event_id", None)
+    if getattr(events, "settling", 0):
+        return None  # a listener is still applying what was heard: a read may lag it
+    return last if isinstance(last, str) and hasattr(events, "replay") else None
+
+
+def live_since(events: object) -> str | None:
+    """`last_heard`, but only when every event after it reaches this process's
+    subscriptions: None after the listener reconnects until it hears a fresh event,
+    since a NOTIFY sent during the gap was never heard here. ``subscribed``'s ``last``."""
+    live = getattr(events, "live_event_id", None)
+    return live if isinstance(live, str) and last_heard(events) is not None else None
+
+
+async def changed_topics(events: object, since: list[str], topics: list[str]) -> list[str]:
+    """Which of ``topics`` an event logged after the earliest of ``since`` touched; all
+    of them when that cannot be told (see "The cursor" in the module docstring)."""
+    replay = getattr(events, "replay", None)
+    positions = getattr(events, "positions", None)
+    if replay is None or positions is None or not since:
+        return topics
+    places = await positions(list(dict.fromkeys(since)))
+    if any(event_id not in places for event_id in since):
+        return topics
+    after = min(places.values())
+    wanted = set(topics)
+    changed: set[str] = set()
+    seen = 0
+    limit = min(CHECK_PAGE, CHECK_MAX_EVENTS)
+    while True:
+        page = await replay(after, limit=limit)
+        if page.gap:
+            return topics
+        for logged in page.events:
+            changed.update(topic for topic in topics_of(logged.event) if topic in wanted)
+            after = logged.seq
+        seen += len(page.events)
+        if len(page.events) < limit or changed == wanted:
+            break  # a short page is the log's end
+        if seen >= CHECK_MAX_EVENTS:
+            return topics
+    return [topic for topic in topics if topic in changed]
+
+
+async def _check(frame: dict[str, Any], topics: set[str], events: object, send: Send) -> None:
+    check_id = frame.get("id")
+    since = frame.get("since")
+    requested = frame.get("topics")
+    if (
+        not isinstance(check_id, int)
+        or not isinstance(since, list)
+        or not 1 <= len(since) <= CHECK_MAX_SINCE
+        or not all(isinstance(e, str) and 0 < len(e) <= 64 for e in since)
+        or not isinstance(requested, list)
+        or not all(valid_topic(topic) for topic in requested)
+    ):
+        await send({"type": "error", "message": "a check needs an id, since and topics"})
+        return
+    requested = list(dict.fromkeys(requested))
+    # Only a followed topic's later events reach the client, so only one may be cleared.
+    followed = [topic for topic in requested if topic in topics]
+    try:
+        changed = set(await changed_topics(events, since, followed)) if followed else set()
+    except Exception:
+        # The log could not be read: the client reads again, as without a cursor.
+        logger.warning("could not check a realtime cursor", exc_info=True)
+        changed = set(followed)
+    changed.update(topic for topic in requested if topic not in topics)
+    await send(
+        {"type": "changed", "id": check_id, "topics": [t for t in requested if t in changed]}
+    )
+
+
+class _Checks:
+    """A socket's ``check`` frames, answered in order by one worker beside its frame
+    loop: a slow log never holds up a subscribe, and several checks sent together (a
+    cold load's views) each get a real answer. Past `CHECK_QUEUE` waiting, a check is
+    answered "every topic changed" at once."""
+
+    def __init__(self, topics: set[str], events: object, send: Send) -> None:
+        self.topics = topics
+        self.events = events
+        self.send = send
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(CHECK_QUEUE)
+
+    async def submit(self, frame: dict[str, Any]) -> None:
+        try:
+            self.queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            requested = frame.get("topics")
+            if isinstance(frame.get("id"), int) and isinstance(requested, list):
+                named = [t for t in dict.fromkeys(requested) if valid_topic(t)]
+                await self.send({"type": "changed", "id": frame["id"], "topics": named})
+            else:
+                await _check(frame, self.topics, self.events, self.send)  # refused, no read
+
+    async def work(self) -> None:
+        while True:
+            await _check(await self.queue.get(), self.topics, self.events, self.send)
+
+
+async def _read(
+    websocket: WebSocket, topics: set[str], send: Send, events: object, checks: _Checks
+) -> None:
     limit = RateLimit(RATE_BURST, RATE_PER_SECOND, time.monotonic)
     while True:
         message = await websocket.receive()
@@ -316,6 +479,9 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
         kind = frame.get("type") if isinstance(frame, dict) else None
         if kind == "pong":
             continue
+        if kind == "check" and isinstance(frame, dict):
+            await checks.submit(frame)
+            continue
         requested = frame.get("topics") if isinstance(frame, dict) else None
         if kind not in ("subscribe", "unsubscribe") or not isinstance(requested, list):
             await send({"type": "error", "message": "expected subscribe or unsubscribe"})
@@ -338,7 +504,12 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
             else:
                 refused.append(topic)
         if accepted:
-            await send({"type": "subscribed", "topics": accepted})
+            ack: dict[str, Any] = {"type": "subscribed", "topics": accepted}
+            # Read with the topics already followed: any event after it is sent (#1039).
+            last = live_since(events)
+            if last is not None:
+                ack["last"] = last
+            await send(ack)
         if refused:
             await send(
                 {
@@ -403,6 +574,30 @@ async def _serve(websocket: WebSocket, state: AppState) -> None:
             # Whichever part ends first ends the session.
             group.cancel_scope.cancel()
 
-        group.start_soon(run, _read(websocket, topics, send))
+        checks = _Checks(topics, state.events, send)
+        group.start_soon(run, _read(websocket, topics, send, state.events, checks))
+        group.start_soon(run, checks.work())
         group.start_soon(run, pump(subscription, topics, send))
         group.start_soon(run, _ping(send))
+
+
+class EventCursor:
+    """Pure ASGI: stamps every API response with `CURSOR_HEADER`, the last event this
+    process had heard when the request arrived (#1039; "The cursor" above)."""
+
+    def __init__(self, app: ASGIApp, events: Callable[[], object]) -> None:
+        self.app = app
+        self.events = events
+
+    async def __call__(self, scope: Scope, receive: Receive, send: ASGISend) -> None:
+        last = last_heard(self.events()) if scope["type"] == "http" else None
+        if last is None or not scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def stamped(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)[CURSOR_HEADER] = last
+            await send(message)
+
+        await self.app(scope, receive, stamped)

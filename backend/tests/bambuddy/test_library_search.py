@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.library_listing import (
     search_library,
 )
 from scadbuddy.bambuddy.models import LibraryListRow
-from scadbuddy.library_search.index import LibraryIndex
+from scadbuddy.library_search.index import LibraryIndex, LibrarySnapshot
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
@@ -311,3 +311,126 @@ async def test_a_failed_background_read_holds_off_the_next_for_a_while() -> None
     for _ in range(20):
         await asyncio.sleep(0)
     assert reads == 3
+
+
+class GatedClient:
+    """A client whose every whole-library read waits for its own gate."""
+
+    def __init__(self) -> None:
+        self.gates: list[asyncio.Event] = []
+
+    async def folders(self) -> list[object]:
+        return []
+
+    async def library_listing(
+        self, *, folder_id: int | None, every_folder: bool = False
+    ) -> list[LibraryListRow]:
+        gate = asyncio.Event()
+        self.gates.append(gate)
+        await gate.wait()
+        return []
+
+
+async def test_a_queued_read_joins_one_started_after_it_was_queued() -> None:
+    """Review of #3666: a read fails, and in the gap before the fresh read queued behind
+    it wakes, a search with nothing kept starts a read. The queued one joins that read
+    rather than start a second whole-library read at once."""
+    reads: list[asyncio.Event] = []
+
+    class Client:
+        async def folders(self) -> list[object]:
+            return []
+
+        async def library_listing(
+            self, *, folder_id: int | None, every_folder: bool = False
+        ) -> list[LibraryListRow]:
+            gate = asyncio.Event()
+            reads.append(gate)
+            await gate.wait()
+            if len(reads) == 1:
+                raise RuntimeError("down")
+            return []
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield Client()  # type: ignore[misc]
+
+    clock = Clock()
+    index = LibraryIndex(shared=0, clock=clock)
+    first = asyncio.ensure_future(index.snapshot("bambuddy", connect))
+    while not reads:
+        await asyncio.sleep(0)
+    gap: list[asyncio.Future[LibrarySnapshot]] = []
+    # Runs as the first read ends, before the queued read wakes: the gap. It must be
+    # registered before the queued read's `asyncio.wait` adds its own callback (done
+    # callbacks run in order), or this test would no longer recreate the gap.
+    index._reading["bambuddy"][1].add_done_callback(
+        lambda _: gap.append(asyncio.ensure_future(index.snapshot("bambuddy", connect)))
+    )
+    clock.now += 1
+    queued = asyncio.ensure_future(index.snapshot("bambuddy", connect, fresh=True))
+    await asyncio.sleep(0.01)
+
+    reads[0].set()
+    with pytest.raises(RuntimeError):
+        await first
+    while len(reads) < 2:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    reads[1].set()
+
+    async with asyncio.timeout(5):  # a second read at once never ends here
+        assert await queued is await gap[0]
+    assert len(reads) == 2
+
+
+async def test_a_late_read_of_an_old_source_never_drops_the_new_one() -> None:
+    """Review of #3666: a URL or key changed while a read of the old one ran."""
+    client = GatedClient()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield client  # type: ignore[misc]
+
+    index = LibraryIndex()
+    old = asyncio.ensure_future(index.snapshot("old", connect))
+    while not client.gates:
+        await asyncio.sleep(0)
+    new = asyncio.ensure_future(index.snapshot("new", connect))
+    while len(client.gates) < 2:
+        await asyncio.sleep(0)
+    client.gates[1].set()
+    kept = await new
+    client.gates[0].set()
+    await old
+
+    assert await index.snapshot("new", connect) is kept
+    assert len(client.gates) == 2
+
+
+async def test_a_request_answered_from_an_old_kept_source_keeps_the_new_read() -> None:
+    """Review of #3694: a request holding pre-change settings, answered from what is
+    kept without reading, must not make the new source's read in flight be dropped."""
+    client = GatedClient()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield client  # type: ignore[misc]
+
+    index = LibraryIndex()
+    old = asyncio.ensure_future(index.snapshot("old", connect))
+    while not client.gates:
+        await asyncio.sleep(0)
+    client.gates[0].set()
+    await old
+
+    new = asyncio.ensure_future(index.snapshot("new", connect))
+    while len(client.gates) < 2:
+        await asyncio.sleep(0)
+    await index.snapshot("old", connect)  # fresh, kept: no read
+    client.gates[1].set()
+    kept = await new
+
+    async with asyncio.timeout(5):  # a dropped read would start another that never ends
+        assert await index.snapshot("new", connect) is kept
+    assert len(client.gates) == 2

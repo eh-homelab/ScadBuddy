@@ -10,6 +10,7 @@ import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
+import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { nestedQueries } from './builtins/nested.js'
@@ -81,7 +82,7 @@ import { type ListedTools, turnToolActivities, turnToolActivity } from './tempor
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
-import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
+import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, subjectDataConverter } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
@@ -484,7 +485,7 @@ if (database && commandKinds.length > 0) {
 const payloadKeys = temporal ? dataKeys : undefined
 // A session's large payloads are files on the data share, by reference (#2243).
 const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
-const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys, payloadStore)] } : undefined
+const dataConverter = payloadKeys ? subjectDataConverter(payloadKeys, payloadStore) : undefined
 if (temporal && !payloadKeys) {
   console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
 }
@@ -553,6 +554,8 @@ const turnToolDeps = temporal
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         ...(settings ? { settings } : {}),
+        // The headless browser's lists (#982), as a classic turn's.
+        browserOrigins: new BrowserOrigins(temporal.sql, settings),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
@@ -857,6 +860,8 @@ const app = createApp({
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(attachments ? { attachments } : {}),
+  // The headless browser's lists and approvals (#982, routes/browserOrigins.ts).
+  ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
   // The panel's background tasks (routes/backgroundTasks.ts).

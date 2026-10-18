@@ -6,8 +6,10 @@ turn. It reads the workflow's live output with the plugin's ``follow_agent`` fro
 (agent/src/sessions/protocol.ts), and appends the events and moves the offset in one
 transaction, so a retried or doubled subscriber writes each event once. A
 ``tool.result`` names the images its call produced (``with_images``, #2478). It ends at
-the turn's last event (``done``, ``error``, ``cancelled``). The turn's result, its
-error and its final status are ``finish_turn``'s, written after this ends.
+the turn's last event (``done``, ``error``, ``cancelled``) or when the workflow closes; a
+stream that ends before either fails, and its retry resumes from the offset (#4019). The
+turn's result, its error and its final status are ``finish_turn``'s, written after this
+ends.
 
 What the log gets of a tool call's input is what the agent's ``scrubForLog`` lets
 through: a sensitive argument's value blanked at any depth, and an input longer than
@@ -27,6 +29,7 @@ from typing import Any
 import psycopg
 from temporalio import activity
 from temporalio.claude_agent_sdk import follow_agent
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
@@ -83,8 +86,11 @@ def translate(
         if not isinstance(text, str) or not text:
             return []
         message = f"durable-{event['offset']}"
+        # A refused credential's notice (runner.py HeldText.mark_notice, #3703):
+        # shown, never retained.
+        notice = {"notice": True} if event.get("notice") is True else {}
         return [
-            {**base, "type": "assistant.text.delta", "messageId": message, "delta": text},
+            {**base, "type": "assistant.text.delta", "messageId": message, "delta": text, **notice},
             {**base, "type": "assistant.text.done", "messageId": message},
         ]
     if kind == "tool_call":
@@ -204,10 +210,13 @@ class SessionEvents:
         # A listed tier is the agent's free string, and a manifest's tier is the agent's
         # SCADBUDDY_DURABLE_TOOLS_JSON: one that is not a tier, from either, is labelled
         # outward, as an unlisted tool is, rather than reaching the transcript as is
-        # (#2839, #3245).
+        # (#2839, #3245). A listed tier that is not a tier labels the tool outward even
+        # when the manifest gives it one: the listing wins, and outward is the safe label.
+        # parse_manifest already said so of a manifest's own (#3581), so only a listed one
+        # is said here, once a turn.
         given = {e.name: e.tier for e in tools.manifest()} | args.tiers
         tiers = {name: tier for name, tier in given.items() if tier in RISK_TIERS}
-        for name in sorted(given.keys() - tiers.keys()):
+        for name in sorted(args.tiers.keys() - tiers.keys()):
             # The tool, never the value: the value is the agent's free string (#3144).
             activity.logger.warning("tool %s has no known tier: labelled outward", name)
         at = [0]
@@ -241,8 +250,10 @@ class SessionEvents:
         # A turn with a prompt ends only after it: an earlier turn's end, left unread when
         # its subscriber was cancelled, is written but does not end this one. A turn
         # carried over by continue-as-new sent its prompt in an earlier run, so it tells
-        # an earlier turn's end by its time instead (#2123).
-        own = not args.prompted
+        # an earlier turn's end by its time instead (#2123), and so does a retry, which
+        # resumes from durable_offset past its prompt or before it (#4019): either way
+        # _before skips an earlier turn's end.
+        own = not args.prompted or (args.since is not None and activity.info().attempt > 1)
         beater = asyncio.create_task(beat())
         try:
             async for event in follow_agent(activity.client(), args.workflow_id, from_offset=at[0]):
@@ -255,6 +266,26 @@ class SessionEvents:
                         written += len(translated)
                 if own and event.get("type") in LAST and not _before(event, args.since):
                     return FollowResult(ended=str(event["type"]), events=written)
+            # The stream also ends when a poll does: the client turns a poll cancelled
+            # (the worker shutting down cancels this activity) or timed out into
+            # WorkflowUpdateRPCTimeoutOrCancelledError, and subscribe ends cleanly on it
+            # while the workflow still runs. Completed, nothing wrote the rest of the turn
+            # (#4019): only a workflow that closed ends it, anything else is retried from
+            # durable_offset.
+            if activity.is_cancelled() and not activity.is_worker_shutdown():
+                raise asyncio.CancelledError  # the workflow's own cancel, past FOLLOW_DRAIN
+            if activity.is_worker_shutdown() or await _running(args.workflow_id):
+                raise StreamEndedError
             return FollowResult(ended="closed", events=written)
         finally:
             beater.cancel()
+
+
+class StreamEndedError(Exception):
+    """The stream ended before the turn did, and the workflow has not closed."""
+
+
+async def _running(workflow_id: str) -> bool:
+    # A describe that fails raises, and is retried: it is never taken for a closed workflow.
+    described = await activity.client().get_workflow_handle(workflow_id).describe()
+    return described.status == WorkflowExecutionStatus.RUNNING

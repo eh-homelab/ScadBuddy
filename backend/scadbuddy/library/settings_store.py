@@ -33,6 +33,7 @@ import json
 import logging
 import time
 import types
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
@@ -60,7 +61,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
-from scadbuddy.core.config import StoreBackend
+from scadbuddy.core.config import LibraryBackend, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import (
@@ -81,11 +82,31 @@ logger = logging.getLogger(__name__)
 #: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
 DisplayUnit = Literal["mm", "in"]
 
+#: How the destination picker orders projects and folders (#3651), as a file explorer
+#: would: most recently touched first (printed or filed here, or written to in
+#: Bambuddy), most recently modified in Bambuddy first, or by name.
+DestinationSort = Literal["touched", "modified", "name"]
+
+#: The longest retention (``print_run_retention_seconds``, ``operation_retention_seconds``,
+#: ``activity_ttl_seconds``): ten years. Each prune computes ``now() - retention`` in
+#: Postgres, which raises "timestamp out of range" for a value a few thousand years long.
+RETENTION_MAX_SECONDS = 3650 * 86400.0
+
 #: Where an env-seeded field's value comes from (#322): a value saved in the UI, the
 #: deployment's ``SCADBUDDY_<FIELD>``, the built-in default, or a clear saved in the UI,
 #: which the environment's value does not override.
 SettingSource = Literal["stored", "env", "default", "cleared"]
 
+#: The S3 store's settings (spec 2026-10-16 §4.2), all read at start.
+S3_FIELDS = (
+    "store_s3_endpoint",
+    "store_s3_region",
+    "store_s3_bucket",
+    "store_s3_prefix",
+    "store_s3_access_key_id",
+    "store_s3_secret_access_key",
+    "store_s3_path_style",
+)
 #: The fields a render worker reads (spec §9): the store and the key it uses. The full
 #: key only when no render key is stored, as the fallback.
 RENDER_FIELDS = (
@@ -94,6 +115,7 @@ RENDER_FIELDS = (
     "bambuddy_render_api_key",
     "bambuddy_api_key",
     "library_folder_id",
+    *S3_FIELDS,
 )
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
@@ -143,7 +165,9 @@ RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
 RACK_ALGORITHM_VERSIONS = "printer_rack_algorithm_versions"
 
 #: The settings `StoreNotReadyError` is decided from.
-STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
+STORE_READINESS = frozenset(
+    {"store_backend", "library_backend", "bambuddy_url", "library_folder_id", *S3_FIELDS}
+)
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
 STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
 
@@ -154,7 +178,59 @@ class RackAlgorithmSupersededError(Exception):
 
 
 class StoreNotReadyError(ValueError):
-    """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs."""
+    """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
+    `store_backend = s3` without the endpoint, bucket, both keys and a prefix, or
+    `library_backend = native` on `store_backend = local`."""
+
+
+S3_NOT_READY = (
+    "the S3 store needs its endpoint, bucket, access key id and secret access key saved first"
+)
+#: A blank prefix (or "/", blank once its outer slashes go): `build_backend` refuses it.
+S3_PREFIX_NOT_READY = "the S3 store needs a prefix saved first"
+NATIVE_LIBRARY_NOT_READY = (
+    "ScadBuddy's own library keeps its files in the blob store: "
+    "set store_backend to s3 or bambuddy first"
+)
+#: What returns a refused start (`native` over the local store) to Bambuddy's library.
+RECOVER_BAMBUDDY_LIBRARY_SQL = (
+    "UPDATE settings SET value = '\"bambuddy\"' WHERE name = 'library_backend';"
+)
+BAMBUDDY_NOT_READY = (
+    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
+)
+
+
+class S3Settings(BaseModel):
+    """What the S3 store connects with (spec 2026-10-16 §4)."""
+
+    endpoint: str
+    region: str = "us-east-1"
+    bucket: str
+    prefix: str
+    access_key_id: str
+    secret_access_key: str = Field(repr=False)
+    path_style: bool = True
+
+
+def _s3_settings(value: Callable[[str], Any]) -> S3Settings | None:
+    """The S3 settings from each ``store_s3_*`` field's ``value``, or ``None`` while the
+    endpoint, the bucket or either key is unset."""
+    s3 = {name.removeprefix("store_s3_"): value(name) for name in S3_FIELDS}
+    if not all(s3[name] for name in ("endpoint", "bucket", "access_key_id", "secret_access_key")):
+        return None
+    return S3Settings.model_validate(s3)
+
+
+def _s3_not_ready(value: Callable[[str], Any]) -> str | None:
+    """Why the S3 store would not start on each ``store_s3_*`` field's ``value``, or
+    ``None``: as `build_backend` decides it, so the prefix counts, without its outer
+    slashes."""
+    if _s3_settings(value) is None:
+        return S3_NOT_READY
+    if not (value("store_s3_prefix") or "").strip("/"):
+        return S3_PREFIX_NOT_READY
+    return None
 
 
 class BambuddyIds(BaseModel):
@@ -224,6 +300,17 @@ class StoredSettings(BambuddyIds):
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     #: Where blobs live. Read at process start by the API and every worker.
     store_backend: StoreBackend = "local"
+    #: Whose library the print routes serve (restart).
+    library_backend: LibraryBackend = "bambuddy"
+    #: The S3 store's connection (:data:`S3_FIELDS`); the secret is sealed as the
+    #: Bambuddy keys are.
+    store_s3_endpoint: str | None = None
+    store_s3_region: str = "us-east-1"
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str = "scadbuddy"
+    store_s3_access_key_id: str | None = None
+    store_s3_secret_access_key: str | None = Field(default=None, repr=False)
+    store_s3_path_style: bool = True
     public_url: str | None = None
     #: The printer model the preview's plate falls back to when no printer is chosen
     #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
@@ -258,11 +345,13 @@ class StoredSettings(BambuddyIds):
     #: a time (:meth:`SettingsStore.set_printer_bed_type`).
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
 
-    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: The default Bambuddy project (#79), set only in Settings (#3188). A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
     #: defaults for the next filing (this, and ``model_projects`` below) rather than
     #: modelling which prints belong to which project: that question is Bambuddy's.
     last_project_id: int | None = None
+    #: How the destination picker opens sorted (#3651); the dialog can re-sort.
+    destination_sort: DestinationSort = "touched"
     #: :func:`model_project_scope` -> the project Generate last filed it into (#1660), so
     #: the picker moves there when the model or the preset is opened, and Generate asks
     #: before filing it elsewhere. Set one key at a time
@@ -282,6 +371,24 @@ class StoredSettings(BambuddyIds):
     #: (#836). Stored like ``printer_print_options``, one key at a time in the jsonb
     #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``.
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
+
+    @field_validator(
+        "print_run_retention_seconds",
+        "operation_retention_seconds",
+        "activity_ttl_seconds",
+    )
+    @classmethod
+    def _bounded_retention(cls, value: float | None) -> float | None:
+        """A retention stored before :data:`RETENTION_MAX_SECONDS` was enforced is read
+        as the maximum, so it cannot fail every prune (or every insert that prunes)."""
+        return None if value is None else min(value, RETENTION_MAX_SECONDS)
+
+    @field_validator("destination_sort", mode="before")
+    @classmethod
+    def _known_sort(cls, value: Any) -> Any:
+        """A sort this version does not know (a newer one wrote it) is the default, so
+        it cannot stop the settings loading."""
+        return value if value in get_args(DestinationSort) else "touched"
 
     @field_validator("printer_rack_algorithms", mode="before")
     @classmethod
@@ -360,6 +467,10 @@ class StoredSettings(BambuddyIds):
             return self.bambuddy_render_api_key, False
         return self.bambuddy_api_key, self.bambuddy_api_key is not None
 
+    def s3_settings(self) -> S3Settings | None:
+        """The S3 store's connection, or ``None`` until it has all it needs."""
+        return _s3_settings(functools.partial(getattr, self))
+
 
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it; ``reset`` names
@@ -388,15 +499,21 @@ class SettingsPatch(BaseModel):
     display_unit: DisplayUnit | None = None
     #: At least a day, past the repeat window: a pruned row would turn a retry of a print
     #: (or an operation) that succeeded into a second one (review #1061).
-    print_run_retention_seconds: float | None = Field(default=None, ge=86400)
-    operation_retention_seconds: float | None = Field(default=None, ge=86400)
-    activity_ttl_seconds: float | None = Field(default=None, ge=86400)
+    print_run_retention_seconds: float | None = Field(
+        default=None, ge=86400, le=RETENTION_MAX_SECONDS
+    )
+    operation_retention_seconds: float | None = Field(
+        default=None, ge=86400, le=RETENTION_MAX_SECONDS
+    )
+    activity_ttl_seconds: float | None = Field(default=None, ge=86400, le=RETENTION_MAX_SECONDS)
     activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
     activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
         default=None, max_length=50
     )
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
+    #: How the destination picker opens sorted (#3651); ``null`` puts back "touched".
+    destination_sort: DestinationSort | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
     #: it: no agent tool writes settings.
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
@@ -437,6 +554,15 @@ class SettingsPatch(BaseModel):
     #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
     #: change applies at the next one; a reset puts one back on the deployment's value.
     store_backend: StoreBackend | None = None
+    library_backend: LibraryBackend | None = None
+    #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
+    store_s3_endpoint: str | None = None
+    store_s3_region: str | None = None
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str | None = None
+    store_s3_access_key_id: str | None = None
+    store_s3_secret_access_key: str | None = None
+    store_s3_path_style: bool | None = None
     store_max_total_bytes: int | None = None
     store_max_count: int | None = None
     worker_cache_max_bytes: int | None = None
@@ -538,6 +664,11 @@ class SettingsStore:
             kwargs={"autocommit": True, "row_factory": dict_row, **TCP_KEEPALIVE},
             name="scadbuddy-settings",
         )
+
+    @property
+    def kek(self) -> Kek | None:
+        """The key the secret settings are sealed with; ``None`` when they are kept plain."""
+        return self._kek
 
     def open(self) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot."""
@@ -656,10 +787,12 @@ class SettingsStore:
             url = changes.get("bambuddy_url", current.bambuddy_url)
             inbox = changes.get("library_folder_id", current.library_folder_id)
             if not url or inbox is None:
-                raise StoreNotReadyError(
-                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                    " saved first"
-                )
+                raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+        if changes.get("store_backend") == "s3":
+            current = self.load()
+            problem = _s3_not_ready(lambda name: changes.get(name, getattr(current, name)))
+            if problem is not None:
+                raise StoreNotReadyError(problem)
         with self._pool.connection() as conn, conn.transaction():
             if (changes.keys() | set(reset)) & STORE_READINESS:
                 self._check_store_ready(conn, changes, reset)
@@ -695,7 +828,9 @@ class SettingsStore:
         rows = conn.execute(
             "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(STORE_READINESS),)
         ).fetchall()
-        stored = {row["name"]: row["value"] for row in rows}
+        # Opened, so a sealed secret counts as the value it holds; one this process
+        # cannot open follows the environment, as `snapshot` reads it.
+        stored = _opened(self._kek, {row["name"]: row["value"] for row in rows})
 
         def deployment(name: str) -> Any:
             # The environment's value, else the default. The inbox is not env-seeded,
@@ -722,10 +857,11 @@ class SettingsStore:
         if backend == "bambuddy" and (
             not merged("bambuddy_url") or merged("library_folder_id") is None
         ):
-            raise StoreNotReadyError(
-                "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                " saved first"
-            )
+            raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+        if backend == "s3" and (problem := _s3_not_ready(merged)) is not None:
+            raise StoreNotReadyError(problem)
+        if merged("library_backend") == "native" and backend == "local":
+            raise StoreNotReadyError(NATIVE_LIBRARY_NOT_READY)
 
     def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
         """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""
@@ -828,15 +964,6 @@ class SettingsStore:
         # The dialog's remembered choices, as for a model: no new section is needed.
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
-
-    def remember_project(self, project_id: int | None) -> StoredSettings:
-        """Remember the project the last send went to, so the picker opens on it."""
-        with self._pool.connection() as conn:
-            if project_id is None:
-                conn.execute("DELETE FROM settings WHERE name = 'last_project_id'")
-            else:
-                _put(conn, "last_project_id", project_id)
-        return self._written("last_project")
 
     def set_model_project(
         self, model_id: str, preset_id: str | None, project: ModelProject | None
@@ -1035,6 +1162,7 @@ class RenderStoreSettings(BaseModel):
     #: True when `api_key` is the full key because no render key is stored.
     key_is_fallback: bool = False
     library_folder_id: int | None = None
+    s3: S3Settings | None = None
 
 
 def load_render_store_settings(
@@ -1062,4 +1190,5 @@ def load_render_store_settings(
         api_key=key,
         key_is_fallback=fallback,
         library_folder_id=stored.library_folder_id,
+        s3=stored.s3_settings(),
     )

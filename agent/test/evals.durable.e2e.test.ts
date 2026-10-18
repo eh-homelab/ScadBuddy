@@ -25,9 +25,10 @@ function textOf(content: unknown): string {
 
 /**
  * A model call's credentials as a failure can show them in CI's log: which headers it
- * carried and whether each is this file's token, never a value (#3506).
+ * carried and whether each is this file's token, never a value (#3506). `scenarioCall`
+ * counts from this scenario's first model call, not from the fake's first (#3567).
  */
-function authOf(call: RecordedRequest, index: number): Record<string, unknown> {
+function authOf(call: RecordedRequest, scenarioCall: number): Record<string, unknown> {
   const header = (name: string) => {
     const value = call.headers[name]
     if (value === undefined) return 'absent'
@@ -38,7 +39,7 @@ function authOf(call: RecordedRequest, index: number): Record<string, unknown> {
     return `${rest.length > 0 ? `${scheme} ` : ''}<${which}, ${secret.length} chars>`
   }
   return {
-    index,
+    scenarioCall,
     authorization: header('authorization'),
     'x-api-key': header('x-api-key'),
     model: call.body?.model,
@@ -111,8 +112,10 @@ describe.skipIf(skip !== undefined)(`eval scenarios in a durable session, script
       // Described, never quoted: CI masks a header that holds a secret, which left #3506's
       // failure saying only that '***' was not '***'.
       expect(
-        calls.flatMap((call, i) => (call.headers.authorization === `Bearer ${TOKEN}` ? [] : [authOf(call, i)])),
-        'model calls without the gateway token',
+        calls.flatMap((call, i) =>
+          call.headers.authorization === `Bearer ${TOKEN}` && call.headers['x-api-key'] === undefined ? [] : [authOf(call, i)],
+        ),
+        'model calls without the gateway token alone',
       ).toEqual([])
       // The append a session sends reached the model, in this mode as in the classic one.
       const withTools = calls.filter((c) => c.body?.tools?.some((t) => t.name.startsWith(DURABLE_EVAL_TOOL_PREFIX)))

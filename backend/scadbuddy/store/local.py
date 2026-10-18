@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from pathlib import Path
+from typing import get_args
 
 from scadbuddy.store import PieceStateLostError
 from scadbuddy.store.content_models import (
@@ -84,7 +85,9 @@ class LocalBlobStore:
         return None
 
 
-_OBJECT = re.compile(r"(piece|snapshot|asset|font)/[0-9a-f]{64}")
+_OBJECT = re.compile(
+    "(" + "|".join(re.escape(kind) for kind in get_args(BlobKind)) + ")/[0-9a-f]{64}"
+)
 _CHUNK = 1 << 20
 
 

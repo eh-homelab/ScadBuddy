@@ -5,6 +5,7 @@ import type {
   PrintOptions,
   PrintOptionsState,
   ProjectView,
+  FolderView,
   BoundingBox,
   CatalogueFont,
   CustomizerSchema,
@@ -292,6 +293,14 @@ export const GALLERY_SLUG = 'creme-coaster'
 /** #425 — templates with their own interface: one that mounts, one that throws. */
 export const UI_DEMO_SLUG = 'ui-demo'
 export const UI_BROKEN_SLUG = 'ui-broken'
+/**
+ * #3777 — a template with a pipeline but no `migrate`, and a page-slot interface: its
+ * saved preset is a version behind, so applying it fails to migrate and the page slot
+ * shows the inputs read-only (RawInputs, capped).
+ */
+export const UNMIGRATED_SLUG = 'ui-unmigrated'
+/** The mock templates with a pipeline that defines no `migrate` (the agent's migrate 422s). */
+export const PIPELINE_WITHOUT_MIGRATE: ReadonlySet<string> = new Set([UNMIGRATED_SLUG])
 /** The commit `ui-demo`'s record is at. */
 export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
 /**
@@ -464,6 +473,25 @@ const modelsSeed: ModelSummary[] = [
     ui_version: commit('6c5b4a3f2e7d'),
     ui: { module: 'ui/index.js', slot: 'page', api: 1 },
   },
+  {
+    slug: UNMIGRATED_SLUG,
+    name: 'Unmigrated Inputs',
+    description: 'A template whose saved inputs cannot be brought up to its version.',
+    // No tags, the oldest date and a name that sorts last, so the catalogue's lists only
+    // gain it at the end.
+    tags: [],
+    updated_at: '2026-08-01T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'mine',
+    version: commit('5b4a3f2e7d6c'),
+    ui_version: commit('4a3f2e7d6c5b'),
+    ui: { module: 'ui/index.js', slot: 'page', api: 1 },
+    inputs_version: 1,
+  },
 ]
 
 /** Phase 4 fields (spec 2026-09-27): inputs_version: 0. */
@@ -483,9 +511,35 @@ export const versionIds = {
   raised: commit('c3d4e5f6a7b8'),
   synced: commit('d9e0f1a2b3c4'),
   builtinFirst: commit('e5f6a7b8c9d0'),
+  // The mocked assistant session's change to gridfinity-bin, and the version before it.
+  binTall: commit('3f9c2a1b7d4e'),
+  binFirst: commit('f0e1d2c3b4a5'),
 }
 
 export const versions: Record<string, ModelVersion[]> = {
+  'gridfinity-bin': [
+    {
+      commit: versionIds.binTall,
+      short: versionIds.binTall.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-10-03T09:00:00Z',
+      message: 'Edit gridfinity-bin source',
+      files: [{ status: 'M', path: 'model.scad' }],
+      current: true,
+    },
+    {
+      commit: versionIds.binFirst,
+      short: versionIds.binFirst.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-14T09:12:00Z',
+      message: 'Add gridfinity-bin',
+      files: [
+        { status: 'A', path: 'model.json' },
+        { status: 'A', path: 'model.scad' },
+      ],
+      current: false,
+    },
+  ],
   [BUILTIN_SLUG]: [
     {
       commit: versionIds.synced,
@@ -614,6 +668,19 @@ export const presets: Record<string, ParamPreset[]> = {
       tags: [],
     },
   ],
+  // #3777 — saved at version 0 of a template now at 1, with an error long enough to wrap.
+  [UNMIGRATED_SLUG]: [
+    {
+      id: 'c1b2c3d4e5f60718293a4b5c6d7e8f90',
+      name: 'Old',
+      origin: 'mine',
+      params: { name: 'Old' },
+      inputs: { params: { name: 'Old' }, v: 0 },
+      description: '',
+      tags: [],
+      updated_at: '2026-08-11T10:00:00Z',
+    },
+  ],
 }
 
 export const schemas: Record<string, CustomizerSchema> = {
@@ -624,6 +691,7 @@ export const schemas: Record<string, CustomizerSchema> = {
   [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
   [UI_DEMO_SLUG]: keychainSchema,
   [UI_BROKEN_SLUG]: keychainSchema,
+  [UNMIGRATED_SLUG]: keychainSchema,
   [MAZE_SLUG]: mazeSchema,
   [DOLLHOUSE_SLUG]: dollhouseSchema,
 }
@@ -889,6 +957,13 @@ export const settingsDefaults = {
   store_max_total_bytes: 53_687_091_200,
   store_max_count: 200_000,
   worker_cache_max_bytes: 10_737_418_240,
+  store_s3_endpoint: null,
+  store_s3_region: 'us-east-1',
+  store_s3_bucket: null,
+  store_s3_prefix: 'scadbuddy',
+  store_s3_access_key_id: null,
+  store_s3_path_style: true,
+  library_backend: 'bambuddy',
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
@@ -919,6 +994,14 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   store_max_total_bytes: 'restart',
   store_max_count: 'restart',
   worker_cache_max_bytes: 'restart',
+  store_s3_endpoint: 'restart',
+  store_s3_region: 'restart',
+  store_s3_bucket: 'restart',
+  store_s3_prefix: 'restart',
+  store_s3_access_key_id: 'restart',
+  store_s3_secret_access_key: 'restart',
+  store_s3_path_style: 'restart',
+  library_backend: 'restart',
 }
 
 export const settings: Settings = {
@@ -936,12 +1019,14 @@ export const settings: Settings = {
   print_run_retention_seconds: null,
   operation_retention_seconds: null,
   last_project_id: null,
+  destination_sort: 'touched',
   render_timeout: 300,
   job_ttl: 3600,
   activity_follow: null,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
+  has_store_s3_secret_access_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
     bambuddy_url: 'stored',
@@ -1038,6 +1123,8 @@ export const projectViews: ProjectView[] = [
     queue_count: 0,
     folder_id: 2,
     folder_name: 'Raegan',
+    modified_at: '2026-09-22T12:45:36Z',
+    touched_at: '2026-09-22T12:45:36Z',
   },
   {
     id: 2,
@@ -1049,7 +1136,24 @@ export const projectViews: ProjectView[] = [
     queue_count: 3,
     folder_id: null,
     folder_name: null,
+    modified_at: '2026-09-10T09:00:00Z',
+    touched_at: '2026-09-30T18:00:00Z',
   },
+]
+
+/**
+ * #3651 — the library folders of no project the destination picker offers, as the mocked
+ * library (`features/library.ts`) has them: its project folder (Lamp) and the inbox are left
+ * out, as the backend leaves them out.
+ */
+export const destinationFolders: FolderView[] = [
+  { id: 1, name: 'MakerWorld', path: 'MakerWorld', parent_id: null, file_count: 2, modified_at: '2026-09-23T08:04:19Z', touched_at: '2026-10-02T08:00:00Z' },
+  { id: 3, name: 'Supplies', path: 'Supplies', parent_id: null, file_count: 0, modified_at: '2026-09-24T04:43:16Z', touched_at: '2026-09-24T04:43:16Z' },
+  { id: 4, name: 'Storage', path: 'Supplies › Storage', parent_id: 3, file_count: 1, modified_at: '2026-09-24T04:43:16Z', touched_at: '2026-09-24T04:43:16Z' },
+  { id: 9, name: 'Bulk', path: 'Bulk', parent_id: null, file_count: 300, modified_at: '2026-09-01T10:00:00Z', touched_at: '2026-09-01T10:00:00Z' },
+  { id: 10, name: 'Spec', path: 'Spec', parent_id: null, file_count: 0, modified_at: null, touched_at: null },
+  { id: 11, name: 'MakerWorld', path: 'Spec › MakerWorld', parent_id: 10, file_count: 0, modified_at: null, touched_at: null },
+  { id: 12, name: 'Work', path: 'Spec › MakerWorld › Work', parent_id: 11, file_count: 3, modified_at: '2026-09-20T12:00:00Z', touched_at: '2026-09-20T12:00:00Z' },
 ]
 
 /** Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults, as the backend serves them. */

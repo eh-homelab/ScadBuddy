@@ -13,7 +13,14 @@ The histories were recorded on 6b's workflow (`SCADBUDDY_RECORD_HISTORIES=1`): `
 `test_outward_host_functions.py::test_printed`); `tooled` on the workflow before #2704
 (a read `tool(...)` and an approved outward one at the tiers the run started with,
 recorded by `test_tool_host_function.py::test_tooled`); `inputted` on the workflow of
-#2483 (`inputs()` of a flow with an inputs schema, #2663). Never re-record them.
+#2483 (`inputs()` of a flow with an inputs schema, #2663); `turned` on the workflow before
+#2937 (an approved outward turn tool on the queue tiered before it parked, recorded once
+by `test_tool_host_function.py::test_an_outward_turn_tool_waits_for_approval` on that
+code; the test no longer records, as it now runs the patched workflow) and
+`requeued` on #2937's (that queue asked for again once approved, recorded by
+`test_an_approved_turn_tool_runs_on_the_replica_live_once_approved` before #3420 raised an
+approved call's schedule-to-start timeout from 60 s to 600 s: replay does not compare
+timeouts, so it still stands for the current code). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -38,7 +45,7 @@ from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.flows_support import Flows, Keys, script
 
 HISTORIES = Path(__file__).parent.parent / "fixtures" / "project_workflow_histories"
-NAMES = ["slept", "answered", "restarted", "printed", "tooled", "inputted"]
+NAMES = ["slept", "answered", "restarted", "printed", "tooled", "inputted", "turned", "requeued"]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
 

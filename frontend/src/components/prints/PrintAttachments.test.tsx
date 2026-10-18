@@ -102,9 +102,14 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     expect(within(captioned).getByRole('link', { name: 'See the gallery' })).toHaveAttribute('href', `/m/${done.slug}`)
 
     await user.click(within(captioned).getByRole('button', { name: 'Remove' }))
-    expect(within(captioned).getByText('Delete it from ScadBuddy and Bambuddy?')).toBeInTheDocument()
-    expect(within(captioned).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
-    await user.click(within(captioned).getByRole('button', { name: 'Delete' }))
+    const confirm = await screen.findByRole('alertdialog', { name: 'Remove On the desk?' })
+    expect(confirm).toHaveTextContent('Delete it from ScadBuddy and Bambuddy?')
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(within(section).getByRole('listitem', { name: 'On the desk' })).toBeInTheDocument()
+
+    await user.click(within(captioned).getByRole('button', { name: 'Remove' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
     expect(await within(section).findByText('No photos or videos added yet.')).toBeInTheDocument()
   })
 

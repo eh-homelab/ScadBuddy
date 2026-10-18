@@ -61,8 +61,8 @@ def test_a_recorded_print_overrides_the_files_last_print(
 
     got = store.get(meta.id)
     assert (got.queue_item_id, got.slice_job_id, got.print_route) == (5, 9, "slice_queue")
-    # Omitted, as `record_send` left it: the file's project still shows.
-    assert got.project_id == 7
+    # Printed into no project: the file's older project no longer shows (#3790 review).
+    assert got.project_id is None
     assert [p.queue_item_id for p in got.plates] == [5]
     [listed] = store.list_for(SLUG)
     assert listed.queue_item_id == 5
@@ -76,7 +76,7 @@ def test_an_output_with_no_row_reads_its_file(tmp_path: Path, prints: OutputPrin
     assert store.list_for(SLUG)[0].queue_item_id == 3
 
 
-def test_a_second_record_keeps_the_project_and_replaces_the_plates(
+def test_a_later_print_into_no_project_clears_the_project_and_replaces_the_plates(
     tmp_path: Path, prints: OutputPrintStore
 ) -> None:
     store = OutputStore(DataPaths(root=tmp_path), prints=prints)
@@ -88,7 +88,7 @@ def test_a_second_record_keeps_the_project_and_replaces_the_plates(
     )
 
     got = store.get(meta.id)
-    assert (got.queue_item_id, got.project_id) == (6, 4)
+    assert (got.queue_item_id, got.project_id) == (6, None)
     assert [p.plate_id for p in got.plates] == [1, 2]
 
 

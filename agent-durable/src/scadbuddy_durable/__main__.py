@@ -23,6 +23,8 @@ log = logging.getLogger("scadbuddy_durable")
 async def run() -> None:
     status = {"status": "ok", "worker": "starting"}
     server = await serve_health("0.0.0.0", PORT, lambda: dict(status))
+    # The port it got: a test starts it on port 0 and reads this line (#3655).
+    log.info("health on port %d", server.sockets[0].getsockname()[1])
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

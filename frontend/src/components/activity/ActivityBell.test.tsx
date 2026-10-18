@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Activity } from '../../api/types'
 import { api } from '../../api/client'
 import { fakeRealtime } from '../../lib/realtime.fake'
-import { seedActivity } from '../../mocks/features/activity'
+import { getRealtime } from '../../lib/realtime'
+import { seedActivity, setActivityListCursor } from '../../mocks/features/activity'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { clearToasts } from '../../lib/toast'
 import { renderPage } from '../../test/utils'
@@ -58,6 +59,106 @@ describe('ActivityBell', () => {
     await user.click(screen.getByRole('button', { name: /Activity, 1 finished/ }))
     expect(screen.getByTestId('activity-bell-count')).not.toBeVisible()
     expect(screen.getByText(/Render box/, { selector: 'li span' })).toBeInTheDocument()
+  })
+
+  describe("and the activity subscription's confirmation (#1039)", () => {
+    afterEach(() => setActivityListCursor(undefined))
+
+    /** How many times the bell reads its followed activity. */
+    function countReads() {
+      const list = vi.spyOn(api, 'listActivity')
+      return () => list.mock.calls.length
+    }
+
+    it("reads once when its read saw the server's last event", async () => {
+      setActivityListCursor('e5')
+      const live = fakeRealtime({ confirmation: { last: 'e5' } })
+      const check = vi.spyOn(getRealtime(), 'check')
+      const reads = countReads()
+      renderPage(<ActivityBell />)
+      await waitFor(() => expect(live.following()).toContain('activity'))
+      await waitFor(() => expect(reads()).toBe(1))
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(1)
+      expect(check).not.toHaveBeenCalledWith(expect.anything(), ['activity'])
+    })
+
+    it('asks from the newest read shown after one an event started', async () => {
+      setActivityListCursor('e5')
+      const live = fakeRealtime({ confirmation: { last: 'e9' } })
+      const check = vi.spyOn(getRealtime(), 'check').mockResolvedValue([])
+      const reads = countReads()
+      renderPage(<ActivityBell />)
+      await waitFor(() => expect(live.following()).toContain('activity'))
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(1)
+      expect(check).toHaveBeenCalledWith(['e5'], ['activity'])
+      check.mockClear()
+      setActivityListCursor('e7')
+      await live.signal('activity', 'activity.changed', { activity_id: 'render:x', principal: 'browser' })
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(2)
+      // A reconnect's confirmation: the server's last is what the event's read saw.
+      await live.confirm('activity', { last: 'e7' })
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(check).not.toHaveBeenCalled()
+      expect(reads()).toBe(2)
+    })
+
+    it('reads again when the server says activity changed since', async () => {
+      setActivityListCursor('e5')
+      const live = fakeRealtime({ confirmation: { last: 'e9' } })
+      vi.spyOn(getRealtime(), 'check').mockImplementation(async (_since, topics) => topics)
+      const reads = countReads()
+      renderPage(<ActivityBell />)
+      await waitFor(() => expect(live.following()).toContain('activity'))
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(2)
+    })
+  })
+
+  // #3706: a read that settles after the bell is gone, as a test's teardown leaves one, must
+  // set no state. React's dispatchSetState reads `window` first, so with the environment torn
+  // down (no `window`) any update threw "window is not defined" after every test had passed.
+  describe('after it is unmounted (#3706)', () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>((r) => (resolve = r))
+      return { promise, resolve }
+    }
+    /** Settles `settle` with `window` gone, and returns what went unhandled meanwhile. */
+    async function withoutWindow(settle: () => void): Promise<unknown[]> {
+      const unhandled: unknown[] = []
+      const onRejection = (reason: unknown) => void unhandled.push(reason)
+      process.on('unhandledRejection', onRejection)
+      vi.stubGlobal('window', undefined)
+      try {
+        settle()
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+      } finally {
+        vi.unstubAllGlobals()
+      }
+      await new Promise((r) => setTimeout(r, 0))
+      process.off('unhandledRejection', onRejection)
+      return unhandled
+    }
+
+    it('sets nothing when the settings read settles', async () => {
+      const settings = deferred<Awaited<ReturnType<typeof api.getSettings>>>()
+      vi.spyOn(api, 'getSettings').mockReturnValue(settings.promise)
+      const { unmount } = renderPage(<ActivityBell />)
+      unmount()
+      expect(await withoutWindow(() => settings.resolve(mockSettings()))).toEqual([])
+    })
+
+    it('sets nothing, and toasts nothing, when an activity read settles', async () => {
+      const page = deferred<Awaited<ReturnType<typeof api.listActivity>>>()
+      const list = vi.spyOn(api, 'listActivity').mockReturnValue(page.promise)
+      const { unmount } = renderPage(<ActivityBell />)
+      await waitFor(() => expect(list).toHaveBeenCalled())
+      unmount()
+      expect(await withoutWindow(() => page.resolve({ items: [finished('browser')], next: null } as never))).toEqual([])
+    })
   })
 
   it('ignores principals not followed', async () => {
@@ -210,7 +311,7 @@ describe('ActivityBell', () => {
     const { user } = mount()
     const bell = screen.getByRole('button', { name: /Activity, 0 finished/ })
     await user.click(bell)
-    expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('div')!.id)
+    expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('[data-slot="popover-content"]')!.id)
     await user.keyboard('{Escape}')
     expect(screen.queryByText('All activity')).toBeNull()
     expect(bell).toHaveFocus()

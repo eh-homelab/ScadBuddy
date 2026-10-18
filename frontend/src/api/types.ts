@@ -60,13 +60,21 @@ export type VersionDiff = Schemas['VersionDiff']
 export type Job = Schemas['JobStatus']
 /** #1899 — a print's own support structures, over the template's `print_settings`. */
 export type SupportsChoice = Schemas['SupportsChoice']
+/** #3628 — a print's own prime tower, over the template's `print_settings`. */
+export type PrimeTowerChoice = Schemas['PrimeTowerChoice']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
+/** #2340 — a command still accepting, answered 202 for the client to follow (spec 2026-10-13). */
+export type CommandAccepting = Schemas['CommandAccepting']
 
 export type Output = Schemas['OutputDetail']
 export type ArrangeRequest = Schemas['ArrangeRequest']
+/** #3637 — one object of an arrange, maybe in other colours. */
+export type ArrangeObject = Schemas['ArrangeObject']
+/** #2146 — open a library file or an output as an editable mesh model. */
+export type MeshModelCreate = Schemas['MeshModelCreate']
 export type ManifestObject = Schemas['ManifestObject']
 /** #902 — the re-render queued to give an output saved before Arrange its objects. */
 export type BackfillState = Schemas['BackfillState']
@@ -219,6 +227,15 @@ export type PreviewStarted = Schemas['PreviewStarted']
 export type SlicePreview = Schemas['SlicePreview']
 /** #2671 — what a sliced library file was sliced for, read from the file itself. */
 export type SlicedProfile = Schemas['SlicedProfile']
+/** #2672 — a batch print, kept in Postgres so a reload resumes it. */
+export type PrintBatch = Schemas['PrintBatch']
+export type BatchItem = Schemas['BatchItem']
+export type BatchChoice = Schemas['BatchChoice']
+export type BatchSummary = Schemas['BatchSummary']
+export type BatchOutcome = Schemas['BatchOutcome']
+export type NewBatchFile = Schemas['NewBatchFile']
+/** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
+export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
@@ -233,6 +250,8 @@ export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */
 export type LibraryListing = Schemas['LibraryListing']
+/** #2349 — one library file's name by id (`GET /print/library/names`). */
+export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
@@ -242,6 +261,10 @@ export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 export type LibraryMoveResult = Schemas['LibraryMoveResult']
 export type LibraryCopyResult = Schemas['LibraryCopyResult']
 export type LibraryRenameResult = Schemas['LibraryRenameResult']
+export type LibraryFolder = Schemas['LibraryFolder']
+export type LibraryFolderCreate = Schemas['LibraryFolderCreate']
+export type LibraryFolderDeleteResult = Schemas['LibraryFolderDeleteResult']
+export type LibraryFolderUpdate = Schemas['LibraryFolderUpdate']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
@@ -288,10 +311,15 @@ export type PrintStage = PrintProgress['stage']
  */
 export type ProjectView = Schemas['ProjectView']
 export type ProjectChoices = Schemas['ProjectChoices']
+/** #3651 — a library folder of no project, a destination of its own. */
+export type FolderView = Schemas['FolderView']
+/** #3651 — how the destination picker orders projects and folders. */
+export type DestinationSort = Schemas['ProjectChoices']['sort']
+/** #3651 — where some content is filed by default, and why. */
+export type DefaultDestination = Schemas['DefaultDestination']
 export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
 export type ProjectFile = Schemas['ProjectFile']
-export type LastProject = Schemas['LastProject']
 export type ModelProjects = Schemas['ModelProjects']
 export type ModelProjectPut = Schemas['ModelProjectPut']
 export type AttachResult = Schemas['AttachResult']
@@ -359,6 +387,27 @@ export interface Problem {
  */
 export interface HttpRequestSetting {
   enabled: boolean
+}
+
+/** #982 — an origin the user let one chat's headless browser open (`once`: one navigation, `session`: the chat). */
+export interface ApprovedBrowserOrigin {
+  session_id: string
+  title: string
+  origin: string
+  scope: 'once' | 'session'
+  approved_at: string
+}
+
+/**
+ * #982 — the headless browser's lists (`GET/PUT /api/v1/ai/settings/browser-origins`,
+ * agent `src/routes/browserOrigins.ts`): rules are an origin, a host, `*.host` or an
+ * address range; deny wins over allow, and an origin on neither list asks the user.
+ */
+export interface BrowserOriginsSetting {
+  allow: string[]
+  deny: string[]
+  defaults: { allow: string[]; deny: string[] }
+  approved: ApprovedBrowserOrigin[]
 }
 
 /**

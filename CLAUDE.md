@@ -99,6 +99,10 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the bundle
 ```
 
+CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Playwright
+in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
+`frontend-e2e-split` checks that the three selections add up to the whole `--list` and
+that each shard ran what it selected, as `backend-pytest-split` does.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -193,9 +197,23 @@ vendor`, for consumers outside the workspace) and then runs `go work vendor`; it
 runs `go work sync`, which would move a lagging client's `go.mod` past its own
 `vendor/modules.txt` and edit bambuddy-fs's `go.mod` on a client-only change (#2686).
 bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without the
-device). The Go toolchain is pinned in five places, moved together: `go.work`'s
+device). The Go toolchain is pinned in six places, moved together: `go.work`'s
 `toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, and `GOTOOLCHAIN` in
-`go-module-ci.yml` and in `ci.yml`'s two freshness steps.
+`go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
+
+Rust workers (`workers/rust/`, one Cargo workspace; the `rust` CI job):
+
+```bash
+cd workers/rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+`rust-toolchain.toml` pins the toolchain (rustup installs it). The Temporal Core SDK's
+build needs `protoc` on `PATH` (`apt-get install protobuf-compiler`). `Cargo.lock` is
+committed; CI runs clippy and the tests `--locked`, with the same Temporal CLI as the
+`agent` job in `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`.
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
@@ -246,6 +264,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/meshmodel/` — mesh models (#2146, spec 2026-10-11): `scene.py`,
+  `compile.py`, `edits.py`, `shared.py` (what `edits` shares with the render and geometry
+  analysis, which must not import `edits`: `JointSpec`, `WALL`, `MeshOf`, `SceneEditError`,
+  `transform_matrix`), `operations.py` (the `library` kinds), `paint.py` (paint
+  transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
+  render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
+  codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
+  `render/geometry.py` `weak_joints` finds where a print snaps; `render/meshmatch.py`
+  matches points and triangles in numpy (trimesh's proximity needs rtree, not installed).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
@@ -261,7 +288,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   periodic sweeps as Temporal Schedules (every sweep, and `PRUNE_SWEEPS` on its own
   300 s one: the render prune, claims, lost slice starts and activity) on the `library`
   queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
-  process (it holds the data volume). Sweeps off (`asset_sweep_interval` 0) deletes the
+  process (it holds the data volume). That worker is versioned (#4090): deployment
+  `scadbuddy-library` (`client.library_deployment`, no default behavior), each API build
+  made current at start (`main._make_library_current`, which also waits for the queue to
+  route to it before the Schedules are set up), never drained. Every workflow on it is
+  AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
+  worker cannot complete a workflow that declares a behavior), so each stays
+  replay-compatible behind `patched`; a new one needs its own behavior or the worker
+  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -370,7 +404,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
   (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that
-  wires them, reading `store_backend` (a stored setting) at start.
+  wires them, reading `store_backend` (a stored setting) at start, through `backends.py`
+  (`build_backend`, and `UnrecordedSweeper`, the sweep of objects an upload left without a
+  row). `s3.py` is `S3ContentBackend` (`store_backend` `s3`, multipart above 64 MiB).
+  `migrate.py` and `workflows/store_migration.py` copy blobs between backends in two
+  phases (copy and record, then flip `store_backend` and restart; `api/store.py`
+  `/store/migrate`).
 
   `python -m scadbuddy.store.verify_bambuddy` re-measures §6.3; it has not yet been
   run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
@@ -665,8 +704,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `temporalio-claude-agent-sdk` (ai-integrations#33, git-pinned by SHA in `uv.lock`, never
   vendored), shipped as the Dockerfile's `agent-durable` target, trusted like `agent`
   (clusters runs it as a Deployment of its own; its subagents reach the agent's
-  `/internal/durable/subagent-mcp` from the peers `routes/durableSubagents.ts` stores). `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (open
-  only; the agent alone writes it); `check_cli_version.py` is the build's bundled-CLI
+  `/internal/durable/subagent-mcp` from the peers `routes/durableSubagents.ts` stores). `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (only
+  the agent writes a secret; a segment records its key's health, `record_health`,
+  #2320: used, a 60 s cooldown on a 429, or `last_error`, never a disable, which waits
+  on the agent's probe); `check_cli_version.py` is the build's bundled-CLI
   check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
   not the TypeScript SDK's). `python -m scadbuddy_durable` serves `/healthz` on 8082
   and runs the `agent` queue's worker (`worker.py`; without its variables, health only,
@@ -711,6 +752,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`internal/api` the client wrapper, `internal/fsys` the tree, cache, writes and the
   unsent queue, `internal/telemetry` OTel; README there). Its unsent writes are the
   only copy of a save, under the state directory, never the cache.
+- `workers/rust/` — Rust Temporal workers and tools (spec 2026-10-16 §7):
+  `crates/sb-slicer` the `slice_plate` activity, `crates/sb-transfer` GET/PUT of
+  `TransferUrl`s (each body's sha256 reported, never checked: a `TransferUrl` carries
+  none), `crates/sb-temporal` the worker bootstrap (slicer only),
+  `bins/scadbuddy-slicer` the `slicer` queue's worker; `vectors/` pins payloads against
+  the pydantic models (`UPDATE_SLICE_VECTORS=1` in `backend/tests/slicing/test_models.py`).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
@@ -822,17 +869,21 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   note is re-dated only when what backs it was re-checked.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
+- Every `docker/setup-buildx-action` step sets `driver-opts:
+  image=mirror.gcr.io/moby/buildkit:buildx-stable-1` (#3370): Docker Hub refuses some
+  anonymous pulls from hosted runners, which failed jobs before any test ran. A new
+  buildx step needs it too. The tag floats with buildx's own default; nothing would
+  bump a digest pinned there.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
   scope's hit rate drops, move it to `type=registry` on GHCR, which works only on
   pushes and same-repo PRs, not forks (#743).
-- `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
-  PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
-  arm64 under QEMU and runs `openscad-lsp --version`, caching under
-  `scope=openscad-lsp-arm64` with `mode=min`. It is not a required check. Making it one needs its
-  `pull_request.paths` filter dropped first: a required check that never runs on a PR
-  outside those paths leaves that PR waiting for it forever.
+- No CI job builds arm64. `build-image.yml` (all three images) and `build-go-image.yml`
+  publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
+  (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
+  Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
+  `docker/setup-qemu-action`.
 
 - Go (#2686): `ci.yml`'s `go-select` (`.github/scripts/select-go.sh`, tested by
   `select-go.test.sh`) decides whether a change touched Go, and the `go` job always
@@ -844,7 +895,7 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   pushes it to a same-repo PR with the `RUNNER_APP` token.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
-  touching Go, a `v*` tag or a dispatch, for amd64 and arm64: `sha-<7>` always,
+  touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)

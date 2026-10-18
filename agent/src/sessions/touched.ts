@@ -36,7 +36,7 @@ export const RESOURCE_TYPES = [
   'library',
   'font',
   // Stored settings and remembered choices, by what they are for (`print_options:<scope>[:<key>]`,
-  // `print_choices:<slug>`, `last_project`, `bed_type:<printer>`).
+  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`).
   'setting',
   // Bambuddy's own: a project, a library file, a print archive (its id, not a queue item).
   'project',
@@ -385,6 +385,12 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
+  // The blob store's backend migration: one row per pair, whatever the run later copies.
+  store_migrate: (input) => {
+    const source = str(input.source)
+    const target = str(input.target)
+    return source && target ? setting(`store_migration:${source}:${target}`) : []
+  },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>
@@ -410,7 +416,6 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     if (file) return setting(`print_choices:library:${file}`, { model: null })
     return setting(slug ? `print_choices:${slug}` : null, { model: slug })
   },
-  remember_last_project: (input) => setting('last_project', { after: bambuddyId(input.project_id) }),
   remember_printer_bed_type: (input) => {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)

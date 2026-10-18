@@ -1,10 +1,10 @@
 import type { SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { context as otelContext } from '@opentelemetry/api'
-import type { AuditLog } from '../audit/log.js'
+import type { AuditDeps } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import type { Credential } from '../credentials.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { type CredentialSource, type PooledCredential, runWithFallback } from '../harness/fallback.js'
 import type { ApprovalGate, TierResolver } from '../harness/permissions.js'
 import type { QuestionGate } from '../harness/questions.js'
 import { redact } from '../secrets.js'
@@ -39,7 +39,7 @@ export type TurnCoreDeps = {
   credentials: CredentialSource
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   titleOf?: TitleResolver
-  audit?: AuditLog
+  audit?: AuditDeps
   stderr?: (text: string) => void
 }
 
@@ -218,8 +218,10 @@ export class CoreTurn {
     let attempts: WarmTurnRun | undefined
     /** Whether the attempt about to start continues an earlier one with CONTINUE_PROMPT (fallback.ts): no recall again (#1896). */
     let continuing = false
+    // The credential the turn is on, moved by each fallback (#2973), for WebFetch's model call.
+    const onCredential: { current: PooledCredential | undefined } = { current: undefined }
     try {
-      const turn = await deps.runner.assemble(session, principal)
+      const turn = await deps.runner.assemble(session, principal, { parent: traced.context() })
       this.#turn = turn
       secrets = turn.secrets
       const gates = this.#args.gates({
@@ -253,6 +255,7 @@ export class CoreTurn {
           trace: traced,
           http: { turnId, signal },
           nested: this.#nested,
+          credential: onCredential,
           ...(memory ? { memory: continuing ? continuationMemory(memory) : memory } : {}),
           signalInterrupt: () => this.#args.interrupt(),
         })
@@ -262,7 +265,7 @@ export class CoreTurn {
         warm: deps.warm,
         sessionId: id,
         first: turn,
-        assemble: () => deps.runner.assemble(session, principal),
+        assemble: () => deps.runner.assemble(session, principal, { parent: traced.context() }),
         stop: signal,
         acquired: onAcquired,
         trace: traced,
@@ -287,9 +290,14 @@ export class CoreTurn {
           onRefused: (evidence, judged) => {
             refused = { evidence, ...judged }
           },
-          onAttempt: () => {
-            continuing = true
-            unpriced.newAttempt()
+          // Every attempt, the first included: an empty pool starts none, so a
+          // WebFetch there has no credential and fails closed (#3508 review).
+          onAttempt: (credential, index) => {
+            onCredential.current = credential
+            if (index > 0) {
+              continuing = true
+              unpriced.newAttempt()
+            }
           },
         },
       )

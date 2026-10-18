@@ -9,7 +9,7 @@ import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { browser, costStateEntry, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // An AgentSession placement's spend (sessions/turnHost.ts) over a `cost-state` its process
 // carries in. The real SDK loads the transcript a resume restores from through the session
@@ -17,7 +17,7 @@ import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.
 // and the CLI restores that cost-state's total (test/warm.pg.test.ts "counts a resumed process
 // from the total its transcript carried in": 2c after a first c; harness/fallback.ts, measured
 // on 2.1.283 and 2.1.287). The spawn's baseline is that loaded cost-state (warm.ts
-// `MirroredTranscript.loadedCostUsd`). Until 627eb4f05 it was a read of the table at spawn,
+// `restoredCostUsd`, told to `MirroredTranscript.onLoaded`). Until 627eb4f05 it was a read of the table at spawn,
 // before the load: a cost-state that landed in between (a previous process's last append) was
 // restored by the process but not in its baseline, and its turn was over-priced by it. The
 // scripted runner's totals are the script's (support/sessions.ts `costUsd`); it loads as the
@@ -61,7 +61,8 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
   async function place(reported: number, { carried, loads = true }: { carried: 'before' | 'between' | 'none'; loads?: boolean }) {
     let id = ''
     const store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
-    const costState = () => store.append({ projectKey: '', sessionId: id }, [{ type: 'cost-state', totalCostUSD: R }])
+    // One Claude Code restores (warm.ts `restoredCostUsd`): this session's, whole.
+    const costState = () => store.append({ projectKey: '', sessionId: id }, [costStateEntry(id, R)])
     const scripted = scriptedRunner(() => ({ reply: 'carried on', costUsd: reported }), {
       loads,
       ...(carried === 'between' ? { beforeLoad: costState } : {}),

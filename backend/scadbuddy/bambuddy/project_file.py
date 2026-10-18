@@ -17,8 +17,9 @@ import asyncio
 import logging
 import re
 from collections.abc import Mapping
+from typing import Self
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.extruders import (
@@ -28,7 +29,7 @@ from scadbuddy.bambuddy.extruders import (
 )
 from scadbuddy.bambuddy.models import NozzleChoice
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, one_side_map
-from scadbuddy.bambuddy.projects import folder_for
+from scadbuddy.bambuddy.projects import folder_for, require_destination_folder
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
@@ -52,14 +53,28 @@ STEM_MAX_UTF16_UNITS = 120
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+#: Bambuddy's file manager, which a file filed into a folder of no project is shown in.
+LIBRARY_PAGE = "/files"
+
+
 class ProjectFileRequest(BaseModel):
-    project_id: int
+    """A project, or a library folder of no project (#3651): exactly one."""
+
+    project_id: int | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _one_destination(self) -> Self:
+        if (self.project_id is None) == (self.folder_id is None):
+            raise ValueError("name one: project_id or folder_id")
+        return self
 
 
 class ProjectFile(BaseModel):
     """Where the project file is, and whether this call put it there."""
 
-    project_id: int
+    #: ``None`` when it was filed into a library folder of no project (#3651).
+    project_id: int | None
     folder_id: int
     library_file_id: int
     #: The name Bambuddy holds it under.
@@ -127,7 +142,7 @@ async def generate_target(
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
-    project_id: int,
+    project_id: int | None,
 ) -> Target:
     """What the project file is laid out for at Generate time, before any printer is
     chosen: the project's last print, else the model's remembered printer and nozzle,
@@ -141,7 +156,7 @@ async def generate_target(
     since a project remembers only the printer, the size and the nozzle plan its last
     print used. That plan (#2166), when there was one, also gives the sides offered and
     the Manual map, so a print in the same spools reuses this file."""
-    remembered = await uploads.project_target(project_id)
+    remembered = await uploads.project_target(project_id) if project_id is not None else None
     nozzles: list[NozzleChoice] = []
     if remembered is not None:
         printer_id: int | None = remembered.printer_id
@@ -191,16 +206,23 @@ async def file_into_project(
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
-    project_id: int,
+    project_id: int | None,
     *,
     stem: str,
+    folder_id: int | None = None,
 ) -> ProjectFile:
-    """Put this output's 3MF in the project's folder, once per (folder, target).
+    """Put this output's 3MF in the project's folder, or in the library folder chosen
+    instead of a project (#3651), once per (folder, target).
 
     The folder is created and linked if the project has none (:func:`folder_for`). The
     edit link is noted on a new file only: a reused one already carries it.
     """
-    folder_id = await folder_for(client, project_id)
+    if project_id is not None:
+        folder_id = await folder_for(client, project_id)
+    elif folder_id is not None:
+        await require_destination_folder(client, folder_id, settings.library_folder_id)
+    if folder_id is None:
+        raise ApiError(400, "file it into a project or a library folder")
     target = await generate_target(client, uploads, meta, settings, project_id)
     ensured = await ensure_copy(
         client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
@@ -216,7 +238,9 @@ async def file_into_project(
         library_file_id=ensured.library_file_id,
         filename=ensured.filename,
         created=ensured.created,
-        bambuddy_url=client.config.web_url(f"/projects/{project_id}"),
+        bambuddy_url=client.config.web_url(
+            f"/projects/{project_id}" if project_id is not None else LIBRARY_PAGE
+        ),
         edit_url=link,
     )
 

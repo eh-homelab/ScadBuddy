@@ -96,6 +96,54 @@ class RenderTimeoutError(OpenSCADError):
     pass
 
 
+class ExportRefusedError(OpenSCADError):
+    """OpenSCAD logged an ``EXPORT-ERROR`` and exited 0 (#952); ``refusal`` is its text."""
+
+    def __init__(self, refusal: str, *args: Any, **kwargs: Any) -> None:
+        super().__init__(f"openscad could not export: {refusal}", *args, **kwargs)
+        self.refusal = refusal
+
+
+#: A long text value would bury the advice it is quoted in (#4091).
+_QUOTED_VALUE_CHARS = 40
+
+
+def export_refused_message(
+    refusal: str | None, schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> str:
+    """Why a render's 3MF is empty after OpenSCAD exited 0 (#4091).
+
+    The image's lib3mf is 1.x, so OpenSCAD exports through ``export_3mf_v1.cc``, which
+    first merges vertices at identical positions: a mesh of eps-thin shells then has
+    triangles with a repeated index, and lib3mf refuses them (``NMR_ERROR_INVALIDINDEX``).
+    OpenSCAD logs "Can't add triangle to 3MF model.", exits 0 and leaves a 0-byte 3MF
+    (openscad/openscad#6716). Measured on dev.2026-10-05 and dev.2026-10-12 with
+    flame-sculpture's ``blend_start=0.3 tongue_colours=4 core_size=0.5 licks=8``; its
+    defaults render. Whether a model hits it depends on its parameters, so the message
+    names the ones this render changed."""
+    changed: list[str] = []
+    for parameter in schema.parameters:
+        if parameter.name not in params or params[parameter.name] == parameter.initial:
+            continue
+        value = format_scad_value(parameter, params[parameter.name])
+        if len(value) > _QUOTED_VALUE_CHARS:
+            value = value[: _QUOTED_VALUE_CHARS - 1] + "…"
+        changed.append(f"{parameter.name} = {value}")
+    used = (
+        f"this render set {', '.join(changed)}"
+        if changed
+        else "this render used the template's defaults"
+    )
+    said = f" ({refusal})" if refusal else ", leaving it empty"
+    return (
+        f"OpenSCAD could not write the 3MF{said}: the model's geometry has coincident or"
+        " degenerate triangles, typically from many thin, disconnected or self-touching"
+        " shells, which OpenSCAD's 3MF exporter (lib3mf 1.x) cannot write"
+        f" (openscad/openscad#6716). It depends on the parameters: {used}. Change them,"
+        " or thicken the thin features, and render again"
+    )
+
+
 class UnknownParameterError(ValueError):
     pass
 
@@ -455,11 +503,18 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
         raise
     await drain
     duration = time.monotonic() - started
-    if returncode != 0 or export_errors:
+    if returncode == 0 and export_errors:
+        raise ExportRefusedError(
+            export_errors[0],
+            tail,
+            returncode,
+            collector.diagnostics,
+            collector.dropped,
+            missing_files=missing,
+        )
+    if returncode != 0:
         raise OpenSCADError(
-            f"openscad exited with {returncode}"
-            if returncode != 0
-            else f"openscad could not export: {export_errors[0]}",
+            f"openscad exited with {returncode}",
             tail,
             returncode,
             collector.diagnostics,
@@ -590,6 +645,32 @@ async def render_3mf(
         str(out_path.resolve()),
         scad_path.name,
     ]
-    return await run_openscad(
-        args, cwd=scad_path.parent, config=config, failure_is_fallback=failure_is_fallback
-    )
+    try:
+        output = await run_openscad(
+            args, cwd=scad_path.parent, config=config, failure_is_fallback=failure_is_fallback
+        )
+    except ExportRefusedError as error:
+        # A colour's solid render keeps the short message: its fallback is a warning.
+        if failure_is_fallback:
+            raise
+        raise OpenSCADError(
+            export_refused_message(error.refusal, schema, params),
+            error.log_tail,
+            error.returncode,
+            error.diagnostics,
+            error.diagnostics_dropped,
+            missing_files=error.missing_files,
+        ) from error
+    # The same refusal without its EXPORT-ERROR line: exit 0, and a 0-byte 3MF (#4091).
+    if out_path.is_file() and out_path.stat().st_size == 0:
+        raise OpenSCADError(
+            "openscad could not export: it wrote an empty 3MF"
+            if failure_is_fallback
+            else export_refused_message(None, schema, params),
+            output.log_tail,
+            output.returncode,
+            output.diagnostics,
+            output.diagnostics_dropped,
+            missing_files=output.missing_files,
+        )
+    return output

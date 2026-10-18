@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
-import type { ArrangeRequest, LibraryEntry, LibraryFileObjects, ModelSummary, Output } from '../api/types'
+import type {
+  ArrangeObject,
+  ArrangeRequest,
+  LibraryEntry,
+  LibraryFileObjects,
+  ModelSummary,
+  Output,
+} from '../api/types'
 import {
   backfillFailures,
   backfillIds,
@@ -24,9 +31,13 @@ import { shortId } from '../lib/format'
 import { traceAction, type Within } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { CopyColours } from './CopyColours'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Spinner } from './ui/spinner'
 
 type Props = {
   open: boolean
@@ -36,12 +47,56 @@ type Props = {
   onArranged: (arranged: Arranged) => void
 }
 
-/** Each object of each output that has them, as a row with its key. */
+/**
+ * Each object of each output that has them, as a row with its key. #3637 — an arranged
+ * output may hold one part twice, once in other colours: each colouring is a row.
+ */
 function rowsOf(outputs: Output[]) {
   return outputs.flatMap((output) =>
-    (output.manifest ?? []).map((object) => ({ output, object, key: `${output.id}:${object.part}` })),
+    (output.manifest ?? []).map((object) => ({
+      output,
+      object,
+      key: `${output.id}:${object.part}:${JSON.stringify(object.recolour ?? {})}`,
+    })),
   )
 }
+
+/** #3638 — what "File under" offers for a new model made from the arranged library file. */
+const NEW_HOME = ':new-model'
+
+/** A library file's name without its extension: the new model's name (#3638). */
+function stemOf(filename: string): string {
+  return filename.replace(/\.(3mf|stl)$/i, '').trim()
+}
+
+/**
+ * What a model named `name` is filed as: a copy of the backend's
+ * `scadbuddy/library/slugs.py` `slugify` (lower case, each run of other characters one
+ * `-`, none at the ends). Change both together; `ArrangeDialog.test.tsx` pins a case.
+ */
+function slugOf(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+}
+
+/** `base`, or `base 2`, `base 3`… */
+function numbered(base: string, n: number): string {
+  return n === 1 ? base : `${base} ${n}`
+}
+
+/** The name to try (`stem`, else `fallback`) and the first number whose slug no model has. */
+function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): { base: string; n: number } {
+  const base = slugOf(stem) ? stem : fallback
+  const taken = new Set(models.map((model) => model.slug))
+  let n = 1
+  while (taken.has(slugOf(numbered(base, n)))) n += 1
+  return { base, n }
+}
+
+/** #3637 — a copy added to a row, in other colours. */
+type Variant = { key: string; base: string }
 
 /** "A", "A and B", "A, B and C". */
 function listed(names: string[]): string {
@@ -121,6 +176,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * with a library file in it may be filed under (#2284).
    */
   const [models, setModels] = useState<ModelSummary[] | null>(null)
+  /** #3638 — the model list could not be read: whether the file has a model is unknown. */
+  const [modelsFailed, setModelsFailed] = useState(false)
+  /** The same, for the open effect, which runs on `open` alone. */
+  const modelsFailedRef = useRef(false)
+  modelsFailedRef.current = modelsFailed
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
@@ -181,11 +241,27 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   // A library file ScadBuddy did not make belongs to no template: with one in the mix the
   // result may be filed under any template the user picks, its outputs' first (#2284).
   const anyTemplate = fileRows.length > 0
+  // #3638 — library files alone are no model's: filed by default under the first file's
+  // own model, the one made from it before or a new one, never an unrelated template.
+  const homeFile = ownTemplates.length === 0 ? fileRows[0]?.file : undefined
+  const home = homeFile
+    ? models?.find((model) => model.mesh_source?.kind === 'bambuddy_library' && model.mesh_source.file_id === homeFile.id)
+    : undefined
   const templates = anyTemplate
-    ? [...new Set([...ownTemplates, ...(models ?? []).map((model) => model.slug)])]
+    ? [
+        ...new Set([
+          // Never a new model when the list failed: the file may have one already.
+          ...(homeFile && (home || !modelsFailed) ? [home?.slug ?? NEW_HOME] : []),
+          ...ownTemplates,
+          ...(models ?? []).map((model) => model.slug),
+        ]),
+      ]
     : ownTemplates
   /** A template by its name, as "File under" says it (#2284); its slug until the list is read. */
-  const modelName = (slug: string) => models?.find((model) => model.slug === slug)?.name ?? slug
+  const modelName = (slug: string) =>
+    slug === NEW_HOME && homeFile
+      ? `A new model: ${stemOf(homeFile.filename) || homeFile.filename}`
+      : (models?.find((model) => model.slug === slug)?.name ?? slug)
   /** Each output's object names, worked out once per render rather than once per row. */
   const names = new Map<string, Map<string, string>>()
   const namesOf = (output: Output) => {
@@ -217,6 +293,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     ])
   const defaultName = nameOf(outputs.filter((o) => unusable.includes(o) || withRows([o], removed).length > 0))
   const [counts, setCounts] = useState<Record<string, number>>({})
+  /** #3637 — each row's colours swapped, by row key; a row not here prints as its source. */
+  const [swaps, setSwaps] = useState<Record<string, Record<string, string>>>({})
+  /** #3637 — copies added in other colours, each under the row it copies. */
+  const [variants, setVariants] = useState<Variant[]>([])
+  /** #3638 — the model this press made for the file, named when a later step fails. */
+  const madeHome = useRef<string | null>(null)
+  /** The row whose colour editor is open. */
+  const [editing, setEditing] = useState<string | null>(null)
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -250,6 +334,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const [retryable, setRetryable] = useState(false)
 
   const countOf = (key: string, fallback: number) => counts[key] ?? fallback
+  const copiesOf = (base: string) => variants.filter((variant) => variant.base === base)
+  /** #3637 — a copy of `base` in other colours, its editor open to pick them. */
+  function addCopy(base: string) {
+    const key = `${base}#${Date.now().toString(36)}${variants.length}`
+    setVariants((now) => [...now, { key, base }])
+    setEditing(key)
+  }
 
   // Read the output behind each library file once, whoever added it.
   const toRead = [
@@ -288,10 +379,18 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     let live = true
     api
       .listModels()
-      .then((found) => live && setModels(found))
+      .then((found) => {
+        if (!live) return
+        setModels(found)
+        setModelsFailed(false)
+      })
       // #2541 — deliberate: a failed list costs only names. "File under" then offers the
       // outputs' own templates by slug, and the saved line says no name (`savedNote`).
-      .catch(() => live && setModels([]))
+      .catch(() => {
+        if (!live) return
+        setModels([])
+        setModelsFailed(true)
+      })
     return () => {
       live = false
     }
@@ -325,7 +424,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       setAdded([])
       setAdding(null)
       setFiling(null)
+      setSwaps({})
+      setVariants([])
+      setEditing(null)
       setRemoved([])
+      // #3638 — a model list that failed is read again, as a failed file read is.
+      if (modelsFailedRef.current) setModels(null)
       // A read that failed (a network error, say) is tried again.
       readAgain()
       return
@@ -442,22 +546,72 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           // With a library file in the mix, any template picked from every one (#1863, #2284).
           const kept = templatesOf(withRows(usable, removed))
           const choices = anyTemplate ? [...new Set([...kept, ...templates])] : kept
-          const slug = filing && choices.includes(filing) ? filing : choices[0]
+          let slug = filing && choices.includes(filing) ? filing : choices[0]
           if (!slug) throw new Error('Nothing to arrange.')
+          let made: ModelSummary | undefined
+          madeHome.current = null
+          if (slug === NEW_HOME && homeFile) {
+            // #3638 — the file's own model, made once: arranging it again files there too.
+            setProgress(`Making a model for ${homeFile.filename}…`)
+            // The slug is guessed here; a model the list did not show (or a name the
+            // guess gets wrong) is a 409, and the next free name is tried.
+            const first = freeName(stemOf(homeFile.filename), models ?? [], `Library file ${homeFile.id}`)
+            for (let attempt = 0; made === undefined; attempt += 1) {
+              // Refused as taken (a model the list did not show): the server's own check,
+              // so the next try numbers the name on rather than guessing slugs again.
+              const name = numbered(first.base, first.n + attempt)
+              try {
+                made = await within(() =>
+                  api.createMeshModel({
+                    name,
+                    description: `Made from ${homeFile.filename} in the Bambuddy library, to keep its arranged plates.`,
+                    library_file_id: homeFile.id,
+                  }),
+                )
+              } catch (cause) {
+                if (!(cause instanceof ApiError && cause.status === 409) || attempt >= 4) throw cause
+              }
+            }
+            const added = made
+            madeHome.current = added.name
+            setModels((known) => [...(known ?? []), added])
+            setFiling(added.slug)
+            slug = added.slug
+          }
+          const objects = (rowsFor: typeof rows): ArrangeObject[] =>
+            rowsFor.flatMap(({ output, object, key }) => {
+              const own = { output_id: output.id, part: object.part }
+              const recolour = swaps[key] ?? object.recolour ?? {}
+              // A part the output holds twice, in two colourings, is named by its colours.
+              const twice = (output.manifest ?? []).filter((entry) => entry.part === object.part).length > 1
+              return [
+                {
+                  ...own,
+                  count: countOf(key, object.count),
+                  // Sent whenever it was touched, or the entry has one: omitted, the
+                  // API keeps the entry's, so a colour put back would print swapped.
+                  ...(twice || key in swaps || Object.keys(object.recolour ?? {}).length > 0
+                    ? { recolour }
+                    : {}),
+                },
+                ...copiesOf(key).map((copy) => ({ ...own, count: countOf(copy.key, 1), recolour: swaps[copy.key] ?? {} })),
+              ]
+            })
           const body: ArrangeRequest = {
             objects: [
-              ...rowsOf(usable)
-                .filter((row) => !removed.includes(row.key))
-                .map(({ output, object, key }) => ({
-                  output_id: output.id,
-                  part: object.part,
-                  count: countOf(key, object.count),
-                })),
-              ...fileRows.map(({ file, object, key }) => ({
-                library_file_id: file.id,
-                part: object.part,
-                count: countOf(key, object.count),
-              })),
+              ...objects(rowsOf(usable).filter((row) => !removed.includes(row.key))),
+              ...fileRows.flatMap(({ file, object, key }) => {
+                const own = { library_file_id: file.id, part: object.part }
+                const swapped = swaps[key]
+                return [
+                  {
+                    ...own,
+                    count: countOf(key, object.count),
+                    ...(swapped && Object.keys(swapped).length > 0 ? { recolour: swapped } : {}),
+                  },
+                  ...copiesOf(key).map((copy) => ({ ...own, count: countOf(copy.key, 1), recolour: swaps[copy.key] ?? {} })),
+                ]
+              }),
             ],
             goal,
             name: name.trim() || nameOf(withRows(usable, removed)) || null,
@@ -487,8 +641,16 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           // History, but this dialog no longer acts on it.
           if (controller.signal.aborted) return
           // Only a name the model list gave: a slug is not a name (#2541).
-          const filedUnder = models?.find((model) => model.slug === arranged.output.slug)?.name
-          const filed = filedUnder ? { ...arranged, filedUnder } : arranged
+          const filedUnder = [...(models ?? []), ...(made ? [made] : [])].find(
+            (model) => model.slug === arranged.output.slug,
+          )?.name
+          const from = {
+            outputIds: [...new Set(body.objects.flatMap((entry) => (entry.output_id ? [entry.output_id] : [])))],
+            libraryFileIds: [
+              ...new Set(body.objects.flatMap((entry) => (entry.library_file_id != null ? [entry.library_file_id] : []))),
+            ],
+          }
+          const filed = { ...arranged, from, ...(filedUnder ? { filedUnder } : {}) }
           span.setAttribute('scadbuddy.output_id', arranged.output.id)
           onArranged(skipped ? { ...filed, skipped } : filed)
         },
@@ -501,11 +663,17 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         setAsking(true)
         return
       }
-      setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      const why = cause instanceof ApiError ? cause.detail : (cause as Error).message
+      // #3638 — a model made for the file stays: the next Arrange files there.
+      const kept = madeHome.current
+      setError(kept ? `${why} The model ${kept} was made for this file and is kept.` : why)
       // The save's key is kept only when its save may have started (no answer, or a start
       // the server may hold): then the same key follows it. A definite failure is recorded
       // under its key and would be answered again as it is, so the next press gets a new
-      // one; the finished job is kept, since nothing of it was saved.
+      // one; the finished job is kept, since nothing of it was saved. The start's key is
+      // renewed for the same reason: a failed or cancelled arrange job is recorded under
+      // it, so Try again under the old key would be answered with that same failure (#3659).
+      // When the finished job is kept, no start is sent and the new key goes unused.
       if (attempt.current && !mayHaveRun(cause)) {
         attempt.current.key = newRequestId()
         attempt.current.arrangeKey = newRequestId()
@@ -528,34 +696,18 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   return (
     <Dialog
       open={open}
-      title="Arrange"
-      onClose={onClose}
-      footer={
-        <>
-          {/* #2286 — a visible way out besides Escape and the backdrop. */}
-          <Button variant="ghost" onClick={onClose}>
-            Close
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
-            disabled={
-              busy ||
-              asking ||
-              reading.length > 0 ||
-              (anyTemplate && templates.length === 0) ||
-              (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
-            }
-            aria-busy={busy}
-          >
-            Arrange
-          </Button>
-        </>
-      }
+      onOpenChange={(next) => {
+        if (!next) onClose()
+      }}
     >
+      <DialogContent showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
+        <DialogHeader className="shrink-0 border-b px-5 py-4">
+          <DialogTitle>Arrange</DialogTitle>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       <div className="flex flex-col gap-3">
         {unusable.length > 0 && (
-          <p role="status" className="text-[12px] text-muted">
+          <p role="status" className="text-[12px] text-subtle">
             {backfillNote(unusable.map(refOf))}
           </p>
         )}
@@ -570,47 +722,78 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           </p>
         )}
         {(unreadable.length > 0 || unread.length > 0) && (
-          <Button size="sm" className="self-start" onClick={readAgain} disabled={busy}>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={readAgain} disabled={busy}>
             Read them again
           </Button>
         )}
         {reading.length > 0 && (
           <p className="text-[12px] text-faint">{`Reading ${listed(reading.map((f) => f.filename))}…`}</p>
         )}
-        <ul className="flex flex-col gap-1.5">
+        <ul className="flex flex-col gap-2.5">
           {[
             ...rows.map(({ output, object, key }) => ({
               key,
-              label: `${namesOf(output).get(object.part) ?? object.bom_piece ?? object.file} — ${outputName(output)}`,
+              label: `${namesOf(output).get(object.part) ?? object.bom_piece ?? object.file}${
+                Object.keys(object.recolour ?? {}).length > 0 ? ' (other colours)' : ''
+              } — ${outputName(output)}`,
               count: object.count,
+              colours: object.colours,
+              recolour: swaps[key] ?? object.recolour ?? {},
             })),
             ...fileRows.map(({ file, object, key }) => ({
               key,
               label: `${object.name} — ${file.filename}`,
               count: object.count,
+              colours: object.colours,
+              recolour: swaps[key] ?? {},
             })),
-          ].map(({ key, label, count }) => (
-            <li key={key} className="flex items-center justify-between gap-2 text-[13px]">
-              <span className="min-w-0 flex-1">{label}</span>
-              <input
-                type="number"
-                min={0}
-                max={500}
-                aria-label={`Copies of ${label}`}
-                value={countOf(key, count)}
-                onChange={(event) => setCounts({ ...counts, [key]: Math.max(0, Number(event.target.value) || 0) })}
-                className="sb-field sb-num w-20"
+          ].map((row) => (
+            <li key={row.key} className="flex flex-col gap-1.5">
+              <ArrangeRow
+                label={row.label}
+                count={countOf(row.key, row.count)}
+                onCount={(next) => setCounts({ ...counts, [row.key]: next })}
+                colours={row.colours}
+                recolour={row.recolour}
+                editing={editing === row.key}
+                onEdit={() => setEditing(editing === row.key ? null : row.key)}
+                onRecolour={(next) => setSwaps({ ...swaps, [row.key]: next })}
+                // #2286 — out of this arrange, without setting its copies to 0.
+                onRemove={() => setRemoved((now) => [...now, row.key])}
+                locked={busy || asking}
               />
-              {/* #2286 — out of this arrange, without setting its copies to 0. */}
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={`Remove ${label}`}
-                disabled={busy || asking}
-                onClick={() => setRemoved((now) => [...now, key])}
-              >
-                Remove
-              </Button>
+              {copiesOf(row.key).map((copy, index) => {
+                const label = `${row.label}, copy ${index + 1} in other colours`
+                return (
+                  <div key={copy.key} className="ml-4 border-l-2 border-line pl-3">
+                    <ArrangeRow
+                      label={label}
+                      count={countOf(copy.key, 1)}
+                      onCount={(next) => setCounts({ ...counts, [copy.key]: next })}
+                      colours={row.colours}
+                      recolour={swaps[copy.key] ?? {}}
+                      editing={editing === copy.key}
+                      onEdit={() => setEditing(editing === copy.key ? null : copy.key)}
+                      onRecolour={(next) => setSwaps({ ...swaps, [copy.key]: next })}
+                      onRemove={() => setVariants((now) => now.filter((v) => v.key !== copy.key))}
+                      locked={busy || asking}
+                    />
+                  </div>
+                )
+              })}
+              {row.colours.length > 0 && (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="xs"
+                  onClick={() => addCopy(row.key)}
+                  disabled={busy || asking}
+                  aria-label={`Add a copy of ${row.label} in other colours`}
+                  className="self-start px-0"
+                >
+                  + Add a copy in other colours
+                </Button>
+              )}
             </li>
           ))}
           {/* #2285 — an output that needs a re-render is listed too, not only named in the note. */}
@@ -621,10 +804,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 <span className="min-w-0 flex-1">
                   {label} <span className="text-[12px] text-warn">needs a re-render</span>
                 </span>
-                <Button size="sm" aria-label={`Re-render ${label}`} disabled={busy || asking} onClick={() => void rerender(output)}>
+                <Button type="button" variant="outline" size="sm" aria-label={`Re-render ${label}`} disabled={busy || asking} onClick={() => void rerender(output)}>
                   Re-render
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="ghost"
                   aria-label={`Remove ${label}`}
@@ -639,16 +823,16 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         </ul>
         {/* #2286 — a mis-clicked Remove is undone here, not by closing and starting over. */}
         {removed.length > 0 && (
-          <Button size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy || asking}>
+          <Button type="button" size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy || asking}>
             {`Restore ${removed.length} removed ${removed.length === 1 ? 'row' : 'rows'}`}
           </Button>
         )}
         {adding === null && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => setAdding('files')} disabled={busy || asking}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setAdding('files')} disabled={busy || asking}>
               Add files
             </Button>
-            <Button size="sm" onClick={() => setAdding('model')} disabled={busy || asking}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setAdding('model')} disabled={busy || asking}>
               Add from a model
             </Button>
           </div>
@@ -673,53 +857,58 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             onCancel={() => setAdding(null)}
           />
         )}
+        {homeFile && !home && modelsFailed && (
+          <p role="status" className="text-[12px] text-warn">
+            ScadBuddy could not read its models, so it cannot tell where this file's arrangements go. Close
+            Arrange and open it again to retry.
+          </p>
+        )}
         {/* Shown whenever there is a choice, a library file in the mix too (#2284). */}
         {(templates.length > 1 || anyTemplate) && templates.length > 0 && (
           <>
-            <label htmlFor="arrange-filing" className="text-[12px] text-muted">
+            <Label htmlFor="arrange-filing" className="text-[12px] font-normal text-muted-foreground">
               File under
-            </label>
-            <select
-              id="arrange-filing"
-              value={filing && templates.includes(filing) ? filing : templates[0]}
-              onChange={(event) => setFiling(event.target.value)}
-              className="sb-field"
-            >
-              {templates.map((slug) => (
-                <option key={slug} value={slug}>
-                  {modelName(slug)}
-                </option>
-              ))}
-            </select>
+            </Label>
+            <Select value={filing && templates.includes(filing) ? filing : templates[0]} onValueChange={setFiling}>
+              <SelectTrigger id="arrange-filing" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {templates.map((slug) => (
+                  <SelectItem key={slug} value={slug}>
+                    {modelName(slug)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </>
         )}
-        <label htmlFor="arrange-goal" className="text-[12px] text-muted">
+        <Label htmlFor="arrange-goal" className="text-[12px] font-normal text-muted-foreground">
           Goal
-        </label>
-        <select
-          id="arrange-goal"
-          value={goal}
-          onChange={(event) => setGoal(event.target.value as ArrangeGoal)}
-          className="sb-field"
-        >
-          {Object.entries(GOAL_LABELS).map(([value, text]) => (
-            <option key={value} value={value}>
-              {text}
-            </option>
-          ))}
-        </select>
-        <label htmlFor="arrange-name" className="text-[12px] text-muted">
+        </Label>
+        <Select value={goal} onValueChange={(next) => setGoal(next as ArrangeGoal)}>
+          <SelectTrigger id="arrange-goal" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.entries(GOAL_LABELS).map(([value, text]) => (
+              <SelectItem key={value} value={value}>
+                {text}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Label htmlFor="arrange-name" className="text-[12px] font-normal text-muted-foreground">
           Name
-        </label>
+        </Label>
         {/* #2286 — focus starts here, not on Add files; empty, it saves as the placeholder. */}
-        <input
+        <Input
           id="arrange-name"
           value={name}
           placeholder={defaultName || undefined}
           maxLength={MAX_ARRANGE_NAME}
           autoFocus
           onChange={(event) => setName(event.target.value)}
-          className="sb-field"
         />
         <BackfillProgress outputs={outputs.map(refOf)} progress={backfill} />
         <p className="flex items-center gap-2 text-[12px] text-faint">
@@ -738,14 +927,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           </p>
         )}
         {error && retryable && !busy && (
-          <Button size="sm" className="self-start" onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}>
             Try again
           </Button>
         )}
         {/* #2286 — re-renders that failed are tried again from here, not by guessing. Straight
             to submit, with no BackfillPrompt: the user already confirmed these re-renders. */}
         {failures && !error && !busy && !asking && unusable.length > 0 && (
-          <Button size="sm" className="self-start" onClick={() => void submit(unusable)}>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={() => void submit(unusable)}>
             Re-render again
           </Button>
         )}
@@ -753,6 +942,88 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           <BackfillPrompt outputs={unusable.map(refOf)} onConfirm={() => void submit(unusable)} onCancel={() => setAsking(false)} />
         )}
       </div>
+        </div>
+        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">
+              {/* #2286 — a visible way out besides Escape and the backdrop. */}
+              <Button type="button" variant="ghost" onClick={onClose}>
+                Close
+              </Button>
+              <Button
+                type="button"
+                onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
+                disabled={
+                  busy ||
+                  asking ||
+                  reading.length > 0 ||
+                  // #3638 — which model is the file's own is known only once the list is read.
+                  (homeFile !== undefined && models === null) ||
+                  (anyTemplate && templates.length === 0) ||
+                  (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
+                }
+                aria-busy={busy}
+              >
+                Arrange
+              </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
+  )
+}
+
+/** One Arrange row: what it is, how many copies, and the colours they print in (#3637). */
+function ArrangeRow({
+  label,
+  count,
+  onCount,
+  colours,
+  recolour,
+  editing,
+  onEdit,
+  onRecolour,
+  onRemove,
+  locked = false,
+}: {
+  label: string
+  count: number
+  onCount: (next: number) => void
+  colours: string[]
+  recolour: Record<string, string>
+  editing: boolean
+  onEdit: () => void
+  onRecolour: (next: Record<string, string>) => void
+  onRemove?: () => void
+  /** Busy or asking: Remove shows, disabled, so the row does not shift. */
+  locked?: boolean
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2 text-[13px]">
+        <span>{label}</span>
+        <span className="flex items-center gap-2">
+          {onRemove && (
+            <Button type="button" size="sm" variant="ghost" aria-label={`Remove ${label}`} disabled={locked} onClick={onRemove}>
+              Remove
+            </Button>
+          )}
+          <Input
+            type="number"
+            min={0}
+            max={500}
+            aria-label={`Copies of ${label}`}
+            value={count}
+            onChange={(event) => onCount(Math.max(0, Number(event.target.value) || 0))}
+            className="sb-num w-20"
+          />
+        </span>
+      </div>
+      <CopyColours
+        label={label}
+        colours={colours}
+        recolour={recolour}
+        open={editing}
+        onToggle={onEdit}
+        onChange={onRecolour}
+      />
+    </div>
   )
 }

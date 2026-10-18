@@ -10,6 +10,10 @@ import { outputs } from '../mocks/fixtures'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ActionBar } from './ActionBar'
+import { chooseProject, pickerValue } from '../test/projectPicker'
+import { CURSOR_HEADER, trackRequest } from '../lib/readCursor'
+import { getRealtime } from '../lib/realtime'
+import { fakeRealtime } from '../lib/realtime.fake'
 
 const job: Job = {
   id: 'a'.repeat(32),
@@ -122,7 +126,6 @@ describe("Generate's menu", () => {
       await user.keyboard('{Enter}')
       const item = screen.getByRole('menuitem', { name: /Rendered image/ })
       expect(item).toHaveFocus()
-      expect(item).toHaveAttribute('tabindex', '-1')
 
       await user.keyboard('{Escape}')
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()
@@ -398,20 +401,56 @@ describe("the remembered project across a model change (#1660, #2142's review)",
     )
     const { user, rerender } = renderPage(bar('apple'))
     const picker = () => screen.getByTestId('customize-project-select')
-    await waitFor(() => expect(picker()).toHaveValue('1'))
-    await user.selectOptions(picker(), '2')
+    await waitFor(() => expect(pickerValue(picker())).toBe('1'))
+    await chooseProject(user, picker(), 2)
     await user.click(screen.getByRole('button', { name: 'Generate' }))
     await user.click(await screen.findByTestId('generate-file-chosen'))
     await waitFor(() => expect(api.putModelProject).toHaveBeenCalledOnce())
 
     // The page moves to a model filed nowhere, then apple's filing answers.
     rerender(bar('keychain'))
-    await waitFor(() => expect(picker()).toHaveValue(''))
+    await waitFor(() => expect(pickerValue(picker())).toBe(''))
     release()
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(picker()).toHaveValue('')
+    expect(pickerValue(picker())).toBe('')
     // And back on apple, its own projects are read again, not the late answer's.
     rerender(bar('apple'))
-    await waitFor(() => expect(picker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(picker())).toBe('1'))
+  })
+
+  describe("and the settings subscription's confirmation (#1039)", () => {
+    /** `getModelProjects`, answering with cursor `e5` the way the server stamps a read. */
+    function counted() {
+      let reads = 0
+      vi.spyOn(api, 'getModelProjects').mockImplementation(() => {
+        const answered = trackRequest()
+        reads += 1
+        return Promise.resolve().then(() => {
+          answered(new Headers({ [CURSOR_HEADER]: 'e5' }))
+          return { projects: [] }
+        })
+      })
+      return () => reads
+    }
+
+    it("reads the remembered projects once when the read saw the server's last event", async () => {
+      const reads = counted()
+      fakeRealtime({ confirmation: { last: 'e5' } })
+      const check = vi.spyOn(getRealtime(), 'check')
+      renderPage(bar('apple'))
+      await waitFor(() => expect(reads()).toBe(1))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(reads()).toBe(1)
+      expect(check).not.toHaveBeenCalled()
+    })
+
+    it('reads them again when the server says settings changed since', async () => {
+      const reads = counted()
+      fakeRealtime({ confirmation: { last: 'e9' } })
+      const check = vi.spyOn(getRealtime(), 'check').mockResolvedValue(['settings'])
+      renderPage(bar('apple'))
+      await waitFor(() => expect(reads()).toBe(2))
+      expect(check).toHaveBeenCalledWith(['e5'], ['settings'])
+    })
   })
 })

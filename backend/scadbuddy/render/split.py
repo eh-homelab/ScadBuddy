@@ -3,14 +3,14 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import remap, states
+from scadbuddy.render.paint import PaintCodeError, pieces, remap, states
 
 CORE_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 MODEL_ENTRY = "3D/3dmodel.model"
@@ -34,6 +34,12 @@ class Paint:
 
     codes: tuple[str, ...]
     colours: tuple[str, ...]
+    #: Each code places its colours by its face's corners in the reverse of the mesh's
+    #: order (#4015): the part was mirrored, so its faces were turned to keep facing out,
+    #: and a code cannot be turned with them (a two-side split cuts its triangle along a
+    #: median, which a mirror moves to the other one). The 3MF writer stores such a part
+    #: mirrored back with a mirroring component, as Bambu Studio keeps the mirror.
+    reversed: bool = False
 
     def used(self) -> list[str]:
         """The colours the painting prints with, in extruder order."""
@@ -56,6 +62,7 @@ class Paint:
         return Paint(
             tuple(remap(code, mapping) if code else "" for code in self.codes),
             tuple(wanted),
+            self.reversed,
         )
 
 
@@ -76,6 +83,58 @@ class ColourPart:
     @property
     def watertight(self) -> bool:
         return bool(self.mesh.is_watertight)
+
+
+def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
+    """``parts`` as they print (#3956): each painted part split into one part per colour
+    its faces print in, where Bambu Studio's painting puts each (`paint.pieces`), its own
+    colour's first, every colour upper case. What a preview draws, whose colours are per
+    mesh; one unpainted passes as it is (its colour already upper case, as every reader
+    gives it through `normalise_colour`).
+
+    Each distinct code is read once, as its leaves' barycentric corners, and applied to
+    every face that carries it at once: a painting repeats codes across many faces."""
+    out: list[ColourPart] = []
+    for part in parts:
+        if part.paint is None:
+            out.append(part)
+            continue
+        faces = np.asarray(part.mesh.faces)
+        if part.paint.reversed:
+            faces = faces[:, ::-1]  # the corners in the codes' order
+        corners = np.asarray(part.mesh.vertices, dtype=np.float64)[faces]
+        own = part.colour.upper()
+        by_code: dict[str, list[int]] = {}
+        for index, code in enumerate(part.paint.codes):
+            by_code.setdefault(code, []).append(index)
+        by_colour: dict[str, list[np.ndarray]] = {own: []}
+        for code, indices in by_code.items():
+            chosen = corners[indices]
+            for weights, state in pieces(code, np.eye(3)):
+                if state > len(part.paint.colours):
+                    raise PaintCodeError(
+                        f"the painting names extruder {state}, which has no colour"
+                    )
+                colour = own if state == 0 else part.paint.colours[state - 1].upper()
+                by_colour.setdefault(colour, []).append(np.einsum("ij,njk->nik", weights, chosen))
+        for colour, chunks in by_colour.items():
+            if not chunks:
+                continue
+            triangles = np.concatenate(chunks)
+            if part.paint.reversed:
+                triangles = triangles[:, ::-1]  # facing out again, as the part's faces do
+            mesh = trimesh.Trimesh(
+                vertices=triangles.reshape(-1, 3),
+                faces=np.arange(len(triangles) * 3).reshape(-1, 3),
+                process=False,
+            )
+            # Each corner was written once per face: shared again, so a lightly painted
+            # part's preview is not three times its vertices, and is shaded as an
+            # unpainted part's shared-vertex mesh is (smoothed across its edges too).
+            mesh.merge_vertices()
+            name = part.name if colour == own else f"{part.name} ({colour})"
+            out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None))
+    return out
 
 
 def normalise_colour(displaycolor: str | None) -> str:

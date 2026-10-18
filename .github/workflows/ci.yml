@@ -43,8 +43,8 @@ name: CI
 # two independent networks on 2026-09-02, and an 880 ms failure is too fast to
 # be congestion -- but the cause is UNIDENTIFIED; do not merge the two.
 #
-# `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
-# build-image.yml, so no job here needs a bigger or different runner.
+# `ubuntu-latest` provides docker + buildx, so no job here needs a bigger or
+# different runner.
 on:
   pull_request:
   # The merge queue (#508): a queued PR is re-checked on the queue's own commit --
@@ -332,6 +332,13 @@ jobs:
       - name: Test the codec copy check
         run: .github/scripts/lint-codec-copies.test.sh
 
+      # Every buildx step pulls BuildKit from Google's Docker Hub mirror (#3370).
+      - name: Check that buildx pulls BuildKit from the mirror
+        run: .github/scripts/lint-buildx-mirror.sh
+
+      - name: Test the buildx mirror check
+        run: .github/scripts/lint-buildx-mirror.test.sh
+
       # The Claude Code hook (.claude/settings.json) that bumps a plugin's
       # version on its first change in a branch, then lints it (#896).
       - name: Test the plugin edit hook
@@ -357,6 +364,8 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
+    # About 10 minutes now that Playwright is `frontend-e2e`: on the slowest
+    # recent main run the other steps add up to 613 s. 20 is twice that.
     timeout-minutes: 20
     defaults:
       run:
@@ -405,46 +414,163 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # The MSW-BACKED half of the e2e suite lives here and NOT in the image
-      # job, which is where it started. frontend/playwright.config.ts is
-      # self-contained without `E2E_BASE_URL`: it runs its own `webServer`
-      # (`pnpm build && pnpm preview --port 4173`) against the production
-      # bundle with the msw worker mocking the API — by its own comment, "so it
-      # exercises the same build the backend will host". Those specs never talk
-      # to a backend, so pointing them at the running container was simply
-      # wrong, and gating them on the container's entrypoint was wrong for the
-      # same reason. Here they also reuse the node_modules this job already
-      # installed instead of a second `pnpm install`.
-      #
-      # `e2e/real-backend.spec.ts` is the other half and skips itself here, by
-      # design — it needs a real openscad. The image job runs it against the
-      # container it builds; see the e2e steps there.
+  # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
+  #
+  # The MSW-BACKED half of the e2e suite lives here and NOT in the image
+  # job, which is where it started. frontend/playwright.config.ts is
+  # self-contained without `E2E_BASE_URL`: it runs its own `webServer`
+  # (`pnpm build && pnpm preview --port 4173`) against the production
+  # bundle with the msw worker mocking the API — by its own comment, "so it
+  # exercises the same build the backend will host". Those specs never talk
+  # to a backend, so pointing them at the running container was simply
+  # wrong, and gating them on the container's entrypoint was wrong for the
+  # same reason.
+  #
+  # `e2e/real-backend.spec.ts` is the other half and skips itself here, by
+  # design — it needs a real openscad. The image job runs it against the
+  # container it builds; see the e2e steps there.
+  #
+  # A job of its own, in three shards, rather than steps after the unit tests.
+  # In one job the two took about 8 and 9 minutes on main (Unit tests 377-496 s,
+  # Playwright smoke 444-533 s), so the job sat at 15.5-19.5 of its 20 minutes,
+  # and #3762's timed out in Playwright. Each shard keeps the config's one CI
+  # worker (`playwright.config.ts`), so a test sees the machine it always did.
+  # `frontend-e2e-split` checks that the three shards ran the whole suite.
+  frontend-e2e:
+    name: Frontend Playwright (${{ matrix.shard }}/3)
+    needs: layout
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.e2e == 'true' }}
+    runs-on: ubuntu-latest
+    # A shard is a third of the 533 s suite plus the webServer's build (typecheck
+    # and vite, about a minute) and the browser install: about five minutes. 15 is
+    # three times that, room for a slow runner and the retries.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # The webServer's `pnpm build` runs typecheck, which runs `pnpm gen:api`.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Install Playwright browsers
-        if: ${{ needs.layout.outputs.e2e == 'true' }}
         run: pnpm exec playwright install --with-deps chromium
 
+      # `--list` needs no server. Its last line is "Total: N tests in M files".
+      - name: Count this shard's tests
+        run: |
+          set -euo pipefail
+          total=$(pnpm exec playwright test --list | sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')
+          selected=$(pnpm exec playwright test --list --shard=${{ matrix.shard }}/3 | sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')
+          if [ -z "$total" ] || [ -z "$selected" ]; then
+            echo "::error::playwright test --list printed no 'Total: N tests in M files' line"
+            exit 1
+          fi
+          echo "shard ${{ matrix.shard }} selects ${selected} of ${total}"
+          mkdir -p counts
+          echo "${{ matrix.shard }} ${selected} ${total}" > counts/selected.txt
+
       - name: Playwright smoke
-        if: ${{ needs.layout.outputs.e2e == 'true' }}
         # DEBUG=pw:webserver is load-bearing for diagnosis, not noise.
         # Playwright pipes the webServer's STDERR but IGNORES its stdout, so a
         # server that fails to come up produces only
         # "Timed out waiting 180000ms from config.webServer" with no cause —
         # vite's own startup banner and any build output are discarded. This
         # channel prints the lifecycle instead.
+        #
+        # `--reporter` replaces the config's CI reporters, so they are named again
+        # beside the junit file the count reads.
         env:
           DEBUG: pw:webserver
-        run: pnpm exec playwright test
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: results/junit.xml
+        run: pnpm exec playwright test --shard=${{ matrix.shard }}/3 --reporter=github,list,junit
 
-      - name: Upload the Playwright report
-        if: ${{ failure() && needs.layout.outputs.e2e == 'true' }}
+      - name: Count what this shard ran
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # No selection: an earlier step of this shard failed and says why, and the
+          # split job names this shard as the one with no count.
+          [ -f counts/selected.txt ] || exit 0
+          ran=0
+          # `|| true`: grep finds no testcase in an empty suite and exits 1, which
+          # pipefail would turn into no count at all rather than "ran 0".
+          if [ -f results/junit.xml ]; then ran=$( (grep -o '<testcase ' results/junit.xml || true) | wc -l); fi
+          echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.shard }}.txt
+          cat counts/shard-${{ matrix.shard }}.txt
+
+      - name: Upload the count
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report
+          name: frontend-e2e-count-${{ matrix.shard }}
+          path: frontend/counts/shard-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
+
+      - name: Upload the Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-${{ matrix.shard }}
           path: |
             frontend/playwright-report
             frontend/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  frontend-e2e-split:
+    name: Frontend Playwright shards cover the suite
+    needs: frontend-e2e
+    if: ${{ !cancelled() && needs.frontend-e2e.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: frontend-e2e-count-*
+          merge-multiple: true
+          path: counts
+
+      - name: Check the counts
+        run: |
+          set -euo pipefail
+          missing=()
+          for shard in 1 2 3; do
+            [ -f "counts/shard-${shard}.txt" ] || missing+=("${shard}")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::no count from shard ${missing[*]}: see that shard's first failed step"
+            exit 1
+          fi
+          cat counts/shard-*.txt
+          totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
+          [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards listed different suites: $totals"; exit 1; }
+          sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
+          [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
+          short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
+          [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
+          echo "The three shards select and ran all ${totals} tests."
 
   # ── Agent service (#261): the AI sidecar in agent/ ──────────────────────────
   #
@@ -544,6 +670,9 @@ jobs:
         run: pnpm build
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # `type=gha` only because this is a GitHub-hosted runner (see the header
       # of this file). Its own `scope` so this job and `image`, which run in
@@ -689,6 +818,9 @@ jobs:
         run: uv run --frozen pytest -v
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # The stage copies the agent's tool manifest from `agent-build` (5e), so
       # it also reads `scope=agent`, whose mode=max index holds that chain.
@@ -737,8 +869,8 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     # Build, lint, mypy, the container smoke and the real-backend e2e; the backend
-    # suite is `backend-pytest` (#1167).
-    timeout-minutes: 30
+    # suite is `backend-pytest` (#1167), the slicer image `slicer-image` (#3821).
+    timeout-minutes: 40
     # For the backend tests that need Postgres: every one that builds the app
     # (the settings live there, #401), the render queue's store, the `render_jobs`
     # projection the Temporal path writes (#424) and the other `requires_postgres`
@@ -765,6 +897,9 @@ jobs:
           fetch-depth: 1
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # --target test, and --load so it lands in the local docker daemon.
       #
@@ -978,6 +1113,29 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # bambuddy-fs against this image on both library backends (#3827): the desktop
+      # mount works unchanged whichever library ScadBuddy serves. Each run starts its
+      # own ScadBuddy (database and Temporal namespace of its own, on temporal-ci),
+      # mounts it on the runner and walks one file through it; the script prints the
+      # containers' logs when it fails. The toolchain is go.work's, as go-module-ci's.
+      - uses: actions/setup-go@v7
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
+      - name: Install fuse3
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: sudo apt-get update -qq && sudo apt-get install -y fuse3
+
+      - name: bambuddy-fs live mount (native)
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: .github/scripts/bambuddy-fs-live.sh native
+
+      - name: bambuddy-fs live mount (bambuddy)
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: .github/scripts/bambuddy-fs-live.sh bambuddy
+
       - name: Container logs on failure
         if: ${{ failure() && needs.layout.outputs.app == 'true' }}
         run: |
@@ -1018,10 +1176,10 @@ jobs:
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
   # The LFS fixtures, pulled once per change of them into the Actions cache the four
-  # shards restore from: a new fixture costs one ~290 MB pull of the LFS bandwidth
-  # quota, not four. An entry evicted from the full cache since, or a save that never
-  # landed, is the exception: each shard then pulls them itself, four pulls in all
-  # (#2488). A failure here
+  # shards restore from: a miss in `lfs-fixtures` (a new fixture, or an entry evicted
+  # before the run) costs one ~290 MB pull of the LFS bandwidth quota, not one per
+  # shard. A shard that then misses too (a save that never landed, or an eviction
+  # since) pulls them itself, one pull per shard as well (#2488, #3580). A failure here
   # skips the required backend-pytest, which CI Summary reports as a failure.
   lfs-fixtures:
     name: LFS fixtures
@@ -1102,6 +1260,9 @@ jobs:
         run: git lfs checkout
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Build the test image
         uses: docker/build-push-action@v7
@@ -1298,6 +1459,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
         if: ${{ steps.select.outputs.count != '0' }}
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # Read-only cache. The entries it hits were written by an EARLIER run's
       # `image` job (mode=max exports every `base` layer): this job does not
@@ -1418,6 +1582,113 @@ jobs:
     uses: ./.github/workflows/go-module-ci.yml
     with:
       run: ${{ needs.go-select.outputs.run }}
+
+  # ── Rust workers (workers/rust/, spec 2026-10-16 §7) ───────────────────────
+  #
+  # Never path-gated: `CI Summary` requires it, and a skip it counted as a pass
+  # would be the vacuous-green trap `freshness` describes.
+  rust:
+    name: Rust workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: workers/rust
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # One pin, rust-toolchain.toml's; the action takes it as an input.
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" | tee -a "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-17
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: workers/rust
+
+      # The Temporal Core SDK's build runs protoc (its README).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # The worker's tests start their own dev server from this CLI and skip
+      # without one. The same version and amd64 digest as the `agent` job and the
+      # Dockerfile's `test` stage (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64);
+      # bump together.
+      - name: Install the Temporal CLI
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        env:
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+        run: cargo test --workspace --locked
+
+  # ── The slicer worker's image (#3821) ─────────────────────────────────────
+  #
+  # The Dockerfile's `slicer` target: the Rust worker and the pinned Bambu Studio
+  # CLI. A job of its own, so a Rust-only change does not wait on the backend
+  # image; it shares none of that image's stages. A release build and the
+  # AppImage download when its cache misses. Never path-gated, as `rust`.
+  slicer-image:
+    name: Slicer image build and smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      # Its own `scope=slicer`, which build-image.yml's `slicer` job writes. The
+      # build already runs `scadbuddy-slicer --check-cli` as root; the two runs
+      # below repeat it as the image's own user, the way the cluster runs it.
+      - name: Build the slicer image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slicer
+          load: true
+          tags: scadbuddy-slicer:ci
+          # Read-only: the repo's Actions cache is at its ceiling (#743); build-image.yml's
+          # `slicer` job is the scope's only writer.
+          cache-from: type=gha,scope=slicer
+
+      - name: Slicer smoke
+        run: |
+          set -euo pipefail
+          docker run --rm scadbuddy-slicer:ci scadbuddy-slicer --check-cli
+          count="$(docker run --rm scadbuddy-slicer:ci /opt/bambu-studio/AppRun --help 2>&1 | grep -c -- '--slice')"
+          echo "AppRun --help names --slice on ${count} line(s)"
+          test "$count" -ge 1
 
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
@@ -1846,11 +2117,46 @@ jobs:
           exit 1
 
   # ── The required check ──────────────────────────────────────────────────────
+  # The Go client on the commit main actually gets (#3053). `freshness` checks it on a
+  # PR, against the PR merged into its base as that base stood then. Required checks
+  # are not strict, so two PRs that each regenerate cleanly can land a combined client
+  # that matches neither spec, and nothing on the PR side sees it. Every other run (a
+  # push to main, a merge queue's commit if one is enabled again, the weekly schedule)
+  # regenerates it from its own commit's spec and fails on drift; the fix is a PR that
+  # runs the generator. Nothing is pushed here.
+  go-client:
+    name: Go client is fresh
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # As `freshness`: the spec depends on the locked FastAPI/pydantic, not on uv.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+      - name: Regenerate the Go client and compare
+        env:
+          # As go-module-ci.yml: a newer runner Go would write a different vendor/.
+          GOTOOLCHAIN: go1.26.9+auto
+        run: scripts/generate-go-client.sh --check
+
   summary:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness]
+    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1876,6 +2182,8 @@ jobs:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          FRONTEND_E2E_RESULT: ${{ needs.frontend-e2e.result }}
+          FRONTEND_E2E_SPLIT_RESULT: ${{ needs.frontend-e2e-split.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
           AGENT_DURABLE_RESULT: ${{ needs.agent-durable.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
@@ -1884,7 +2192,10 @@ jobs:
           MODELS_RESULT: ${{ needs.models.result }}
           GO_SELECT_RESULT: ${{ needs.go-select.result }}
           GO_RESULT: ${{ needs.go.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
+          GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -uo pipefail
@@ -1914,6 +2225,8 @@ jobs:
           if [ -f backend/pyproject.toml ]; then has_backend=true; fi
           has_frontend=false
           if [ -f frontend/package.json ]; then has_frontend=true; fi
+          has_e2e=false
+          if [ "$has_frontend" = true ] && [ -d frontend/e2e ]; then has_e2e=true; fi
           has_agent=false
           if [ -f agent/package.json ]; then has_agent=true; fi
           has_agent_durable=false
@@ -1936,6 +2249,8 @@ jobs:
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
+          assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
+          assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$has_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
@@ -1946,6 +2261,9 @@ jobs:
           # changes" itself when `go-select` found none, so a skip is a failure.
           assert "Select Go work"                         "$GO_SELECT_RESULT" true
           assert "Go modules"                             "$GO_RESULT"       true
+          # Always required, never path-gated.
+          assert "Rust workers"                           "$RUST_RESULT"     true
+          assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" true
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore
@@ -1956,6 +2274,10 @@ jobs:
           is_pr=false
           if [ "$EVENT_NAME" = "pull_request" ]; then is_pr=true; fi
           assert "API spec determinism and diff"         "$FRESHNESS_RESULT" "$is_pr"
+          # Its mirror: the Go client checked on the commit itself, required off a PR.
+          not_pr=true
+          if [ "$is_pr" = true ]; then not_pr=false; fi
+          assert "Go client is fresh"                     "$GO_CLIENT_RESULT" "$not_pr"
 
           if [ "$failed" -ne 0 ]; then
             echo "::error::CI Summary failed — see the job results above."
@@ -1977,7 +2299,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
+    needs: [lint, frontend, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

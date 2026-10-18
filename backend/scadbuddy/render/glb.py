@@ -7,7 +7,7 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel
 
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, painted_pieces
 
 # OpenSCAD is Z-up, glTF (and three.js) are Y-up.
 Z_UP_TO_Y_UP = np.array(
@@ -74,8 +74,9 @@ def footprint_box(parts: Sequence[ColourPart]) -> BoundingBox:
 
 
 def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
-    # A negative part is cut out by the slicer: the preview shows what prints.
-    parts = [part for part in parts if not part.negative]
+    # A negative part is cut out by the slicer: the preview shows what prints, painting
+    # included: one mesh per colour a painted part prints in (#3956).
+    parts = painted_pieces([part for part in parts if not part.negative])
     if not parts:
         raise ValueError("a GLB needs at least one colour part")
     scene = trimesh.Scene()

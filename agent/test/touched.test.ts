@@ -48,6 +48,12 @@ describe('the extractor registry', () => {
 })
 
 describe('extractors', () => {
+  it('records a store migration as a modified setting of its pair', () => {
+    expect(touches('store_migrate', { source: 'bambuddy', target: 's3' }, { workflow_id: 'w' }, 'outward')).toEqual([
+      { type: 'setting', id: 'store_migration:bambuddy:s3', action: 'modified' },
+    ])
+  })
+
   it('records a revision with its parent and new commit', () => {
     expect(touches('update_source', { slug: 'box', base: C1, source: '' }, { slug: 'box', version: C2 })).toEqual([
       { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 },
@@ -289,9 +295,6 @@ describe('extractors', () => {
     expect(touches('set_print_options', { scope: 'printer', options: {} }, {}, 'outward')).toEqual([])
     expect(touches('remember_model_print_choices', { slug: 'box', tier: 'fast' }, {})).toEqual([
       { type: 'setting', id: 'print_choices:box', action: 'modified', model: 'box' },
-    ])
-    expect(touches('remember_last_project', { project_id: 4 }, { project_id: 4 })).toEqual([
-      { type: 'setting', id: 'last_project', action: 'modified', after: '4' },
     ])
     expect(touches('remember_printer_bed_type', { printer_id: 2, bed_type: 'pei' }, {})).toEqual([
       { type: 'setting', id: 'bed_type:2', action: 'modified' },

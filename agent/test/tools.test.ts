@@ -55,6 +55,22 @@ const SCHEMA = {
   ],
 }
 
+/** A 202 `accepting` answer (spec 2026-10-13): follow it at `followUrl`, by default its own. */
+function acceptingAnswer(workflowId: string, updateId: string, followUrl = `/api/v1/commands/${workflowId}/updates/${updateId}`) {
+  return HttpResponse.json(
+    { status: 'accepting', workflow_id: workflowId, update_id: updateId, follow_url: followUrl, retry_after: 0 },
+    { status: 202 },
+  )
+}
+
+/** A follow's 409 `command-resend`: the Update is not known, so send the request again. */
+function commandResend() {
+  return HttpResponse.json(
+    { type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' },
+    { status: 409 },
+  )
+}
+
 describe('print_output still-accepting budget (#1061)', () => {
   it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
     expect(ACCEPTING_MS).toBe(240_000)
@@ -325,6 +341,40 @@ describe('render_model', () => {
     // One request to the backend, so one claim on the job (review #1066 2.1).
     expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
     expect(keys[1]).toBe(keys[0])
+  })
+
+  it('follows a render the backend answers 202 accepting to its job, posting it once (#2795)', async () => {
+    let posts = 0
+    let prefer: string | null = null
+    let followed: string | undefined
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return HttpResponse.json(
+          {
+            status: 'accepting',
+            workflow_id: 'render-x',
+            update_id: 'k',
+            follow_url: '/api/v1/commands/render-x/updates/k?supersedes=old',
+            retry_after: 0,
+          },
+          { status: 202 },
+        )
+      }),
+      http.post(`${BACKEND}/api/v1/commands/render-x/updates/k`, ({ request }) => {
+        followed = new URL(request.url).searchParams.get('supersedes') ?? undefined
+        return HttpResponse.json({ job_id: 'j', status_url: '', inputs: {} })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ status: 'done' })
+    expect(posts).toBe(1)
+    expect(prefer).toBe('respond-async')
+    expect(followed).toBe('old')
   })
 
   it.each([
@@ -635,6 +685,28 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(t.summarize({ ...args, supports: { enabled: true } })).not.toMatch(/supports (at|on)|tree|normal/)
   })
 
+  it('sends a prime tower when asked for, names it in its approval line, and omits it otherwise (#3628)', async () => {
+    const chosen: { body?: unknown } = {}
+    const off: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, prime_tower: { enabled: true, no_sparse_layers: true } }, ctx())
+    server.use(...capturedRun(off))
+    await t.execute({ ...args, prime_tower: { enabled: false, no_sparse_layers: true } }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect((chosen.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: true, no_sparse_layers: true })
+    expect((off.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: false, no_sparse_layers: true })
+    expect(plain.body).not.toHaveProperty('prime_tower')
+    expect(t.summarize({ ...args, prime_tower: { enabled: true, no_sparse_layers: true } })).toContain(
+      ', with a prime tower (no sparse layers)',
+    )
+    expect(t.summarize({ ...args, prime_tower: { enabled: false } })).toContain(', without a prime tower')
+    expect(t.summarize(args)).not.toContain('prime tower')
+  })
+
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
     const first: { body?: { request_id?: string } } = {}
     const second: { body?: { request_id?: string } } = {}
@@ -761,7 +833,10 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       server.use(handler)
       const result = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
       expect(result.isError).toBe(true)
-      expect(firstText(result)).toContain("may still have started: check Bambuddy's queue")
+      // No run id to follow yet: the request id, and the queue to check (review #2849).
+      expect(firstText(result)).toContain(`may still have started (request ${ids[0]})`)
+      expect(firstText(result)).toContain("check it and Bambuddy's queue before printing again")
+      expect(firstText(result)).toContain('get_print_progress for this output is safe to repeat')
       expect(ids).toHaveLength(RUN_REATTEMPTS + 1)
       expect(new Set(ids).size).toBe(1)
     })
@@ -785,6 +860,44 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(firstText(lost)).toContain('get_print_run')
       expect(ids).toHaveLength(2)
     })
+
+    // #2795 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-send.
+    const followUrl = `${BACKEND}/api/v1/commands/print-x/updates/r1`
+    const runAccepting = () => acceptingAnswer('print-x', 'r1')
+
+    it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2795)', async () => {
+      const prefer: (string | null)[] = []
+      const ids: string[] = []
+      let follows = 0
+      server.use(
+        http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+          prefer.push(request.headers.get('Prefer'))
+          ids.push(((await request.json()) as { request_id: string }).request_id)
+          return runAccepting()
+        }),
+        http.post(followUrl, () => ((follows += 1), follows === 1 ? runAccepting() : HttpResponse.json(running))),
+        done,
+      )
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(firstText(result)).toMatchObject({ id: RUN, status: 'succeeded' })
+      expect(prefer).toEqual(['respond-async'])
+      expect(ids).toHaveLength(1)
+      expect(follows).toBe(2)
+    })
+
+    it('posts the same request again when the follow says command-resend (#2795)', async () => {
+      const { ids, handler } = posts([runAccepting, () => HttpResponse.json(running, { status: 202 })])
+      server.use(
+        handler,
+        http.post(followUrl, () => commandResend()),
+        done,
+      )
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
   })
 
   it('passes a chosen project through', async () => {
@@ -804,7 +917,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   })
 
   it('says what omitting the project and null each mean', () => {
-    expect(tool('print_output').description).toMatch(/project_id.*remembered.*null.*No project/s)
+    expect(tool('print_output').description).toMatch(/project_id.*default project.*null.*No project/s)
   })
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
@@ -1164,6 +1277,14 @@ describe('get_printer_camera (#796)', () => {
 })
 
 describe('analyze_geometry', () => {
+  it('tells the model about weak joints and the split each suggests', () => {
+    const t = tool('analyze_geometry')
+    expect(t.description).toContain('weak_joints')
+    expect(t.description).toContain('split_at_plane')
+    expect(t.description).toContain('un-arranged')
+    expect(t.description).toContain('a quarter of the wider')
+  })
+
   it('is a read tool returning the backend analysis', async () => {
     const id = 'a'.repeat(32)
     server.use(
@@ -2193,21 +2314,11 @@ describe('get_output_preview (#308)', () => {
 describe('project tools (#317)', () => {
   const OUT = 'c'.repeat(32)
 
-  it('remember_last_project sends the chosen project, and null for "No project"', async () => {
-    const bodies: unknown[] = []
-    server.use(
-      http.put(`${BACKEND}/api/v1/print/projects/last`, async ({ request }) => {
-        const body = (await request.json()) as { project_id: number | null }
-        bodies.push(body)
-        return HttpResponse.json(body)
-      }),
-    )
-    const chosen = await tool('remember_last_project').execute({ project_id: 7 }, ctx())
-    const cleared = await tool('remember_last_project').execute({ project_id: null }, ctx())
-    expect(chosen.isError).toBeFalsy()
-    expect(cleared.isError).toBeFalsy()
-    expect(bodies).toEqual([{ project_id: 7 }, { project_id: null }])
-    expect(firstText(chosen)).toEqual({ project_id: 7 })
+  it('no tool changes the default project: only the user does, in Settings (#3188)', () => {
+    const routes = ALL_TOOLS.flatMap((t) => t.routes as readonly string[])
+    expect(routes).not.toContain('PUT /api/v1/settings')
+    expect(routes.filter((r) => r.includes('/print/projects/last'))).toEqual([])
+    expect(ALL_TOOLS.map((t) => t.name)).not.toContain('remember_last_project')
   })
 
   it('file_output_in_project_folder posts the project to the output and answers with the file', async () => {
@@ -2476,5 +2587,199 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
     const other = await runTool(tool('list_outputs'), { slug: 'lid', limit: 20, cursor: first.next_cursor }, ctx())
     expect(other.isError).toBe(true)
     expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
+})
+
+describe('a command the backend answers 202 accepting (#2795)', () => {
+  const OUT = 'e'.repeat(32)
+
+  it('follows it to the route answer, sending the command once', async () => {
+    let deletes = 0
+    let prefer: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, ({ request }) => {
+        deletes += 1
+        prefer = request.headers.get('Prefer')
+        return acceptingAnswer('op-delete_output-x', 'k')
+      }),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => HttpResponse.json({ deleted: OUT })),
+    )
+    const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ deleted: OUT, slug: 'box' })
+    expect(deletes).toBe(1)
+    expect(prefer).toBe('respond-async')
+  })
+
+  it('follows a followed operation that is still running into /operations/{id} (review #2849)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () =>
+        HttpResponse.json({ id: 'op-1', kind: 'delete_output', subject: OUT, status: 'running', created_at: '', repeated: false }, { status: 202 }),
+      ),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () =>
+        HttpResponse.json({ id: 'op-1', kind: 'delete_output', subject: OUT, status: 'succeeded', created_at: '', result: { deleted: OUT } }),
+      ),
+    )
+    const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ deleted: OUT })
+  })
+
+  it('gives up following after its budget, saying it may still start (review #2849)', async () => {
+    let follows = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
+        follows += 1
+        return acceptingAnswer('op-delete_output-x', 'k')
+      }),
+    )
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('ScadBuddy is still starting it')
+    expect(follows).toBeGreaterThan(0)
+  })
+
+  it('takes no pause that would end past its budget (#3039)', async () => {
+    let follows = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
+        follows += 1
+        return acceptingAnswer('op-delete_output-x', 'k')
+      }),
+    )
+    const began = performance.now()
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 1_000, pollIntervalMs: 5_000 }),
+    )
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('ScadBuddy is still starting it')
+    expect(follows).toBe(1)
+    expect(performance.now() - began).toBeLessThan(1_000)
+  })
+
+  it('does not re-send past its budget when a follow says command-resend (#3571)', async () => {
+    let sends = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => {
+        sends += 1
+        return acceptingAnswer('op-delete_output-x', 'k')
+      }),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60))
+        return commandResend()
+      }),
+    )
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('ScadBuddy is still starting it')
+    expect(sends).toBe(1)
+  })
+
+  it('re-sends a render the follow says command-resend with its key and preference (#3087)', async () => {
+    const sent: { key: string | null; prefer: string | null }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        sent.push({ key: request.headers.get('Idempotency-Key'), prefer: request.headers.get('Prefer') })
+        return sent.length === 1
+          ? acceptingAnswer('render-x', 'k')
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.post(`${BACKEND}/api/v1/commands/render-x/updates/k`, commandResend),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(sent).toHaveLength(2)
+    expect(sent[0]?.key).toMatch(/^[0-9a-f]{32}$/)
+    expect(sent[1]).toEqual(sent[0])
+    expect(sent[1]?.prefer).toBe('respond-async')
+  })
+
+  it('re-sends an operation the follow says command-resend with its key and preference (#3087)', async () => {
+    const sent: { key: string | null; prefer: string | null }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, ({ request }) => {
+        sent.push({ key: request.headers.get('Idempotency-Key'), prefer: request.headers.get('Prefer') })
+        return sent.length === 1
+          ? acceptingAnswer('op-delete_output-x', 'k')
+          : HttpResponse.json({ deleted: OUT })
+      }),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, commandResend),
+    )
+    const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ deleted: OUT })
+    expect(sent).toHaveLength(2)
+    expect(sent[0]?.key).toMatch(/^[0-9a-f]{32}$/)
+    expect(sent[1]).toEqual(sent[0])
+    expect(sent[1]?.prefer).toBe('respond-async')
+  })
+
+  it("spends the same acceptingMs budget on 503 re-sends as on follows (#3086)", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/command-still-accepting', title: 'Service Unavailable', status: 503, detail: 'still checking' },
+          { status: 503 },
+        ),
+      ),
+    )
+    const began = performance.now()
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    expect(result.isError).toBe(true)
+    // The budget fired, not RUN_REATTEMPTS: still-accepting answers never count as misses (review #2849).
+    expect(firstText(result)).toContain('ScadBuddy did not answer (HTTP 503)')
+    expect(performance.now() - began).toBeLessThan(2_000)
+  })
+
+  it("never lets a follow's own re-sends run past the budget (review #2849)", async () => {
+    let follows = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
+        follows += 1
+        return new HttpResponse('bad gateway', { status: 502 })
+      }),
+    )
+    const began = performance.now()
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 1_000, pollIntervalMs: 400 }),
+    )
+    expect(result.isError).toBe(true)
+    // RUN_REATTEMPTS pauses of 400 ms would outlast the 1 s budget; the shared one stops them.
+    expect(follows).toBeLessThan(RUN_REATTEMPTS + 1)
+    expect(performance.now() - began).toBeLessThan(1_500)
+  })
+
+  it('refuses a follow URL that names another command than the 202 does (review #2849)', async () => {
+    let followed = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k', '/api/v1/commands/op-other-y/updates/z')),
+      http.post(`${BACKEND}/api/v1/commands/:wf/updates/:id`, () => {
+        followed = true
+        return HttpResponse.json({ deleted: OUT })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('does not name the command it answered')
+    expect(followed).toBe(false)
   })
 })

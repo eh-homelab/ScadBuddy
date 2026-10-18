@@ -245,7 +245,7 @@ describe.skipIf(!TEMPORAL_CLI)(`the session gate as workflow code${TEMPORAL_SKIP
       const state = await s.decided()
       expect(state.decisions).toEqual([{ callId: 'toolu_1', allow: true, approver: 'browser' }])
       expect(state.resolutions[rid]).toEqual({ kind: 'approval', outcome: 'approved' })
-      expect(s.fake.resolved).toEqual([{ requestId: rid, outcome: 'approved', responder: ME, response: { decision: 'approve' }, reason: null }])
+      expect(s.fake.resolved).toEqual([{ requestId: rid, outcome: 'approved', responder: ME, response: { decision: 'approve' }, rawResponse: { kind: 'approval', decision: 'approve' }, reason: null }])
       expect(await s.pending()).toEqual([])
       expect(await failureOf(s.respond(decide(rid, 'approve')))).toBe('GateRefused:stale')
     })
@@ -785,7 +785,7 @@ describe.skipIf(!TEMPORAL_CLI)(`the session gate as workflow code${TEMPORAL_SKIP
       expect(await s.respond(as(rid, 'deny', 'parent', SESSION))).toEqual({ kind: 'approval', outcome: 'denied' })
       const state = await s.decided()
       expect(state.decisions).toEqual([{ callId: 'toolu_1', allow: false, approver: PARENT }])
-      expect(fake.resolved).toEqual([{ requestId: rid, outcome: 'denied', responder: SESSION, response: { decision: 'deny' }, reason: null }])
+      expect(fake.resolved).toEqual([{ requestId: rid, outcome: 'denied', responder: SESSION, response: { decision: 'deny' }, rawResponse: { kind: 'approval', decision: 'deny' }, reason: null }])
     })
   })
 

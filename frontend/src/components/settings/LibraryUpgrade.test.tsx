@@ -17,6 +17,7 @@ import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LibraryUpgrade } from './LibraryUpgrade'
+import { choose, optionsOf } from '../../test/select'
 
 const URL_ = 'https://github.com/BelfrySCAD/BOSL2.git'
 const OLD = { name: 'BOSL2', url: URL_, ref: 'v2.0.700', commit: 'a1b2c3d4'.repeat(5) }
@@ -41,7 +42,7 @@ function recorded() {
 async function open(ref?: string) {
   const view = renderPage(<LibraryUpgrade />)
   const { user } = view
-  await user.selectOptions(await screen.findByLabelText('Library'), 'BOSL2')
+  await choose(user, await screen.findByLabelText('Library'), 'BOSL2')
   const input = screen.getByLabelText('Candidate ref')
   if (ref !== undefined) {
     await user.clear(input)
@@ -82,8 +83,8 @@ describe('LibraryUpgrade', () => {
     setMockLibraryPin('gridfinity-bin', pin)
     const { user } = renderPage(<LibraryUpgrade />)
     const select = await screen.findByLabelText('Library')
-    expect(within(select).getByRole('option', { name: 'threads' })).toBeInTheDocument()
-    await user.selectOptions(select, 'threads')
+    expect(await optionsOf(user, select)).toContain('threads')
+    await choose(user, select, 'threads')
     // Not in the catalogue, so no ref is suggested.
     expect(screen.getByLabelText('Candidate ref')).toHaveValue('')
     const list = await screen.findByRole('list', { name: 'Models that pin threads' })
@@ -93,15 +94,15 @@ describe('LibraryUpgrade', () => {
   })
 
   it('offers a library pinned elsewhere while the panel is open (#766)', async () => {
-    renderPage(<LibraryUpgrade />)
+    const { user } = renderPage(<LibraryUpgrade />)
     const select = await screen.findByLabelText('Library')
-    expect(within(select).queryByRole('option', { name: 'threads' })).toBeNull()
+    expect(await optionsOf(user, select)).not.toContain('threads')
 
     setMockLibraryPin('gridfinity-bin', { name: 'threads', url: 'https://github.com/rcolyer/threads-scad.git', ref: 'v2.1', commit: 'c0ffee00'.repeat(5) })
     // Re-sent until it lands: an event before the subscription is confirmed reaches no one.
-    await waitFor(() => {
+    await waitFor(async () => {
       emitRealtime('library.changed', ['libraries', 'model:gridfinity-bin'], { slug: 'gridfinity-bin', name: 'threads' })
-      expect(within(screen.getByLabelText('Library')).getByRole('option', { name: 'threads' })).toBeInTheDocument()
+      expect(await optionsOf(user, screen.getByLabelText('Library'))).toContain('threads')
     })
   })
 
@@ -115,11 +116,11 @@ describe('LibraryUpgrade', () => {
     // The mount's read, and the live-update resync's: neither depends on the library.
     const mounted = reads
     expect(mounted).toBeGreaterThan(0)
-    await user.selectOptions(screen.getByLabelText('Library'), 'threads')
+    await choose(user, screen.getByLabelText('Library'), 'threads')
     // Named at once from the list already read: no slug while a fetch is in flight.
     const list = await screen.findByRole('list', { name: 'Models that pin threads' })
     expect(within(list).getByRole('listitem', { name: 'Name Keychain' })).toBeInTheDocument()
-    await user.selectOptions(screen.getByLabelText('Library'), 'BOSL2')
+    await choose(user, screen.getByLabelText('Library'), 'BOSL2')
     await screen.findByRole('list', { name: 'Models that pin BOSL2' })
     expect(row('Name Keychain')).toBeInTheDocument()
     expect(reads).toBe(mounted)
@@ -131,13 +132,13 @@ describe('LibraryUpgrade', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Could not read the models, so rows show slugs: the catalogue is offline',
     )
-    await user.selectOptions(screen.getByLabelText('Library'), 'BOSL2')
+    await choose(user, screen.getByLabelText('Library'), 'BOSL2')
     expect(await screen.findByRole('listitem', { name: 'name-keychain' })).toHaveTextContent('Pinned to v2.0.700')
   })
 
   it('says so when no model pins the library', async () => {
     const { user } = renderPage(<LibraryUpgrade />)
-    await user.selectOptions(await screen.findByLabelText('Library'), 'dotSCAD')
+    await choose(user, await screen.findByLabelText('Library'), 'dotSCAD')
     expect(await screen.findByText('No model pins dotSCAD.')).toBeInTheDocument()
   })
 
@@ -470,16 +471,40 @@ describe('LibraryUpgrade', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('keeps the chosen library on screen while a removal re-lists the checkouts', async () => {
+  it('keeps the chosen library, its checks and its ticks on screen while a removal re-lists the checkouts', async () => {
     setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
-    const { user } = renderPage(<LibraryUpgrade />)
-    await user.selectOptions(await screen.findByLabelText('Library'), 'BOSL2')
-    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    const { user } = await open()
+    // A checked, ticked row: the state the old reload threw away.
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    await within(row('Name Keychain')).findByTestId('library-check')
+    await user.click(screen.getByRole('checkbox', { name: 'Move Name Keychain' }))
+    const list = screen.getByRole('list', { name: 'Checkouts no model uses' })
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
     await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
     // No "Loading libraries" in between: the library, its checks and ticks stay.
     expect(screen.queryByText('Loading libraries')).toBeNull()
-    expect(screen.getByLabelText('Library')).toHaveValue('BOSL2')
+    expect(screen.getByLabelText('Library')).toHaveTextContent('BOSL2')
+    expect(within(row('Name Keychain')).getByTestId('library-check')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeChecked()
+  })
+
+  it('says so when a removal could not re-list the checkouts (#3548)', async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    let removed = false
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => {
+        removed = true
+        return undefined
+      }),
+      // Only the re-list after the removal fails.
+      http.get('/api/v1/libraries/installed', () =>
+        removed ? problem(503, 'Unavailable', 'the store is down') : undefined,
+      ),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not re-list the checkouts')
   })
 
   it("says why a removal was refused, and keeps the row", async () => {

@@ -12,6 +12,7 @@ import { setMockRemembered } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
+import { chooseProject, pickerValue } from '../test/projectPicker'
 
 // As in CustomizePage.test.tsx: jsdom has no WebGL.
 vi.mock('../components/Preview', () => ({
@@ -218,7 +219,7 @@ describe('customizer tools', () => {
     // The dialog's project picker is an Advanced step.
     fireEvent.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId('project-select')
-    expect(dialogPicker).toHaveValue('1')
+    expect(pickerValue(dialogPicker)).toBe('1')
     expect(dialogPicker).toBeEnabled()
 
     // The dialog is open when the agent generates again: its picker shares the project.
@@ -241,9 +242,9 @@ describe('customizer tools', () => {
     )
     setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
     const { user } = await open()
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await waitFor(() => expect(picker).toHaveValue('2'))
-    await user.selectOptions(picker, '1')
+    const picker = screen.getByTestId('customize-project-select')
+    await waitFor(() => expect(pickerValue(picker)).toBe('2'))
+    await chooseProject(user, picker, 1)
 
     const refused = await call('generate', { timeout_ms: 5000 })
     expect(!refused.ok && refused.error.message).toMatch(
@@ -254,18 +255,18 @@ describe('customizer tools', () => {
       ok: true,
       result: { filed: { project_id: 2 } },
     })
-    expect(picker).toHaveValue('2')
+    expect(pickerValue(picker)).toBe('2')
   })
 
   it('files nothing with project_id null, past the remembered-project check (#1660)', async () => {
     setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
     await open()
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await waitFor(() => expect(picker).toHaveValue('2'))
+    const picker = screen.getByTestId('customize-project-select')
+    await waitFor(() => expect(pickerValue(picker)).toBe('2'))
 
     const generated = await call('generate', { timeout_ms: 5000, project_id: null })
     expect(generated).toMatchObject({ ok: true, result: { filed: null } })
-    expect(picker).toHaveValue('')
+    expect(pickerValue(picker)).toBe('')
   })
 
   it('refuses a project_id Bambuddy does not list, saving nothing (#1660)', async () => {
@@ -274,21 +275,21 @@ describe('customizer tools', () => {
       if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/outputs')) saved()
     })
     await open()
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await waitFor(() => expect(within(picker).getAllByRole('option').length).toBeGreaterThan(2))
+    // The picker shows once the project list has loaded.
+    const picker = await screen.findByTestId('customize-project-select')
 
     const refused = await call('generate', { timeout_ms: 5000, project_id: 999 })
     expect(refused).toMatchObject({ ok: false, error: { code: 'invalid_args' } })
     expect(!refused.ok && refused.error.message).toMatch(/no project 999/)
     expect(saved).not.toHaveBeenCalled()
-    expect(picker).toHaveValue('')
+    expect(pickerValue(picker)).toBe('')
   })
 
   it('holds Generate while a project is being created (#665)', async () => {
     const { user } = await open()
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await user.selectOptions(picker, 'new')
+    const picker = screen.getByTestId('customize-project-select')
+    await chooseProject(user, picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
     const release = hold('post', '/api/v1/print/projects')
@@ -299,7 +300,7 @@ describe('customizer tools', () => {
     expect(!refused.ok && refused.error.message).toMatch(/still being created/)
 
     release()
-    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(picker).toHaveTextContent(/Workshop Bins/))
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
   })
 
@@ -307,8 +308,8 @@ describe('customizer tools', () => {
     const { user } = await open()
     expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await user.selectOptions(picker, 'new')
+    const picker = screen.getByTestId('customize-project-select')
+    await chooseProject(user, picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
     const release = hold('post', '/api/v1/print/projects')
@@ -319,7 +320,7 @@ describe('customizer tools', () => {
     expect(!refused.ok && refused.error.message).toMatch(/still being created/)
 
     release()
-    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(picker).toHaveTextContent(/Workshop Bins/))
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
   })
 

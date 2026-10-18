@@ -15,7 +15,7 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import AsyncConnection, Connection
 from psycopg.rows import DictRow
@@ -25,6 +25,10 @@ from pydantic import BaseModel, Field
 
 #: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
 COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
+
+#: What a print or a Generate is filed into (#3651): a Bambuddy project (its folder), or
+#: a library folder of its own.
+DestinationKind = Literal["project", "folder"]
 
 
 class SlicedCopy(BaseModel):
@@ -231,6 +235,18 @@ class BambuddyUploadStore:
         (:meth:`record_sliced`), newest first, each with the hash it was recorded with:
         what a print may queue rather than slice the same again (#2671)."""
         return await asyncio.to_thread(self._slices_of, output_id, library_file_id, preset_key)
+
+    async def forget_slice(self, output_id: str, sliced_id: int) -> None:
+        """Forget a recorded slice whose file Bambuddy no longer has, or whose id now
+        holds another file (#2955): neither is ever reused, so its row only costs a
+        later reprint a read."""
+        await asyncio.to_thread(self._forget_slice, output_id, sliced_id)
+
+    async def forget_gone_slice(self, sliced_id: int) -> None:
+        """Forget every recorded slice in library file ``sliced_id``, which Bambuddy no
+        longer has (#3495 review): no subject can reuse a file that is gone, so the
+        next reprint is not left to find that out again."""
+        await asyncio.to_thread(self._forget_gone_slice, sliced_id)
 
     async def record_preview(self, preview: PreviewSlice) -> None:
         """Record one of the print dialog's background slices (#2169)."""
@@ -485,6 +501,15 @@ class BambuddyUploadStore:
         """The project has its folder; forgetting one not recorded is not an error."""
         await asyncio.to_thread(self._forget_folderless, project_id)
 
+    async def touch_destination(self, kind: DestinationKind, target_id: int) -> None:
+        """Note that a project or library folder was just printed into or filed into
+        (#3651): the destination picker's "last touched" order."""
+        await asyncio.to_thread(self._touch_destination, kind, target_id)
+
+    async def destination_touches(self) -> dict[tuple[DestinationKind, int], datetime]:
+        """When each project and folder was last touched from here (#3651)."""
+        return await asyncio.to_thread(self._destination_touches)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
 
     def _project_targets(self) -> dict[int, ProjectTarget]:
@@ -554,6 +579,21 @@ class BambuddyUploadStore:
     def _forget_folderless(self, project_id: int) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM folderless_projects WHERE project_id = %s", (project_id,))
+
+    def _touch_destination(self, kind: DestinationKind, target_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO destination_touches (kind, target_id) VALUES (%s, %s)"
+                " ON CONFLICT (kind, target_id) DO UPDATE SET touched_at = now()",
+                (kind, target_id),
+            )
+
+    def _destination_touches(self) -> dict[tuple[DestinationKind, int], datetime]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT kind, target_id, touched_at FROM destination_touches"
+            ).fetchall()
+        return {(row["kind"], int(row["target_id"])): row["touched_at"] for row in rows}
 
     def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
@@ -730,6 +770,21 @@ class BambuddyUploadStore:
             )
             for row in rows
         ]
+
+    def _forget_slice(self, output_id: str, sliced_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM output_bambuddy_slices"
+                " WHERE output_id = %s AND sliced_library_file_id = %s",
+                (output_id, sliced_id),
+            )
+
+    def _forget_gone_slice(self, sliced_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM output_bambuddy_slices WHERE sliced_library_file_id = %s",
+                (sliced_id,),
+            )
 
     def _record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         with self._pool.connection() as conn:

@@ -49,6 +49,7 @@ from scadbuddy.core.config import (
     READ_MAX_PAINT_DIGITS_CEILING,
     READ_MAX_VISITS_CEILING,
     Config,
+    LibraryBackend,
     StoreBackend,
 )
 from scadbuddy.core.proxies import Network, parse_cidr_list
@@ -145,6 +146,21 @@ class Settings(BaseSettings):
     # Settings wins. Render workers read them from there (spec §9).
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     store_backend: StoreBackend = "local"
+    # SCADBUDDY_LIBRARY_BACKEND: whose library the print routes serve (`native` needs a
+    # content store: `store_backend` s3 or bambuddy).
+    library_backend: LibraryBackend = "bambuddy"
+    # SCADBUDDY_STORE_S3_*: the S3 store (`store_backend` s3), seeded like the render key
+    # and read by render workers from the stored values. The endpoint is Garage, MinIO or
+    # any S3-compatible service; path-style addressing (`store_s3_path_style`) unless the
+    # service wants the bucket in the hostname. Objects go under `store_s3_prefix` in
+    # `store_s3_bucket`. The secret access key is sealed at rest like the Bambuddy keys.
+    store_s3_endpoint: str | None = None
+    store_s3_region: str = "us-east-1"
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str = "scadbuddy"
+    store_s3_access_key_id: str | None = None
+    store_s3_secret_access_key: str | None = Field(default=None, repr=False)
+    store_s3_path_style: bool = True
     # SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT: the store's caps (spec §6.2); a put
     # past either is refused unless the content is already stored. 0 is no limit.
     store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
@@ -175,6 +191,13 @@ class Settings(BaseSettings):
     # runs with --no-proxy-headers in the image, so it believes none either). Not a
     # stored setting: it decides who the server believes about who it is talking to.
     trusted_proxies: str = ""
+
+    @field_validator("store_s3_prefix")
+    @classmethod
+    def _bare_prefix(cls, prefix: str) -> str:
+        # Keys are `<prefix>/<kind>/<sha>`: "p/" would make `p//piece/<sha>`. An empty
+        # prefix stays empty, and a start on S3 refuses it (`store.backends`).
+        return prefix.strip("/")
 
     @field_validator("trusted_proxies")
     @classmethod
@@ -252,6 +275,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS: where the agent service serves its tools
     # as activities (#1055); a flow's `tool(...)` calls them there (#1057).
     temporal_task_queue_agent_tools: str = "agent-tools"
+    # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
+    # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
+    # it off.
+    temporal_sdk_metrics_port: int = 9464
     # SCADBUDDY_AGENT_INTERNAL_URL: the agent sidecar beside this API, on the pod's
     # loopback (#2704). The flow routes read the agent's tools and their tiers from it
     # (agent/src/routes/flowTools.ts), and refuse when it does not answer.
@@ -501,6 +528,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " together; a form only the API reads would split them."
         ),
         "temporal_namespace": "Paired with the Temporal address; set with it by the deployment.",
+        "temporal_sdk_metrics_port": (
+            "A loopback port each worker's Temporal SDK exports on, read by that worker's"
+            " /metrics (#3788). Fixed by the deployment, like the workers' other Temporal"
+            " settings: only a worker process reads it."
+        ),
         "temporal_task_queue_render": (
             "Paired with the Temporal address: the API and the render workers must name the"
             " same queue, and only the deployment sets both."
@@ -561,7 +593,12 @@ ENV_SEEDED: Final = tuple(name for name in Settings.model_fields if name not in 
 
 #: Env-seeded fields that are credentials: written, never read back (only "set").
 SECRET_FIELDS: Final = frozenset(
-    {"bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"}
+    {
+        "bambuddy_api_key",
+        "bambuddy_render_api_key",
+        "google_fonts_api_key",
+        "store_s3_secret_access_key",
+    }
 )
 
 Applies = Literal["live", "restart"]
@@ -623,7 +660,15 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # Read at start, by the API and by every render worker (spec 2026-09-27 §6.2, §9):
         # the store each process opens, its caps, and the key workers fetch with.
         "store_backend": "restart",
+        "library_backend": "restart",
         "bambuddy_render_api_key": "restart",
+        "store_s3_endpoint": "restart",
+        "store_s3_region": "restart",
+        "store_s3_bucket": "restart",
+        "store_s3_prefix": "restart",
+        "store_s3_access_key_id": "restart",
+        "store_s3_secret_access_key": "restart",
+        "store_s3_path_style": "restart",
         "store_max_total_bytes": "restart",
         "store_max_count": "restart",
         "worker_cache_max_bytes": "restart",

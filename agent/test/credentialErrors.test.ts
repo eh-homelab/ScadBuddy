@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   CLEARED_COOLDOWN_MS,
@@ -12,6 +13,7 @@ import {
   type ProbeVerdict,
   probeCredential,
   rateLimitResetFromHeaders,
+  rateLimitResetFromText,
   refusesTheKey,
 } from '../src/harness/credentialErrors.js'
 import { type FakeAnthropic, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -87,6 +89,30 @@ describe('describeApiFailure (#1101)', () => {
     ],
   ])('words a refused credential by what the probe said of it: %s', (probe, said) => {
     expect(describeApiFailure({ status: 403, message: 'blocked' }, probe === undefined ? {} : { probe })).toBe(said)
+  })
+})
+
+// agent-durable's `rate_limit_reset` is held to the same vectors (#4121 review).
+describe('rateLimitResetFromText (#4107)', () => {
+  const vectors = JSON.parse(
+    readFileSync(new URL('./fixtures/rate-limit-reset-vectors.json', import.meta.url), 'utf8'),
+  ) as { cases: { text: string; now: string; at: string | null }[] }
+
+  it.each(vectors.cases)('reads $text at $now as $at', ({ text, now, at }) => {
+    const t = Date.parse(now)
+    const reset = rateLimitResetFromText(text, t)
+    if (at === null) {
+      expect(reset).toBeUndefined()
+      expect(cooldownUntil(reset, t).getTime()).toBe(t + DEFAULT_COOLDOWN_MS)
+    } else {
+      expect(reset).toBe(Date.parse(at))
+    }
+  })
+
+  it('still holds a named reset to a day', () => {
+    const now = Date.parse('2026-10-17T22:16:05Z')
+    const until = rateLimitResetFromText("You've hit your weekly limit · resets Oct 21, 4am (UTC)", now)
+    expect(cooldownUntil(until, now).getTime()).toBe(now + MAX_COOLDOWN_MS)
   })
 })
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costStateUsd, fingerprint } from '../src/sessions/warm.js'
+import { costStateUsd, fingerprint, restoredCostUsd } from '../src/sessions/warm.js'
 import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
 
 const plugin = { id: 'p', url: 'https://x', headerVersion: '1', toolTiers: ['a=read'], disabledTools: ['b'] }
@@ -91,5 +91,41 @@ describe('costStateUsd', () => {
     expect(costStateUsd('{"type":"cost-state", nope', (m) => logged.push(m))).toBe(0)
     expect(costStateUsd(JSON.stringify({ type: 'cost-state', totalCostUSD: 'x' }), (m) => logged.push(m))).toBe(0)
     expect(logged).toHaveLength(2)
+  })
+})
+
+describe('restoredCostUsd', () => {
+  const id = '11111111-1111-4111-8111-111111111111'
+  const state = (totalCostUSD: number, change: Record<string, unknown> = {}) => ({
+    type: 'cost-state',
+    sessionId: id,
+    totalCostUSD,
+    totalAPIDuration: 1,
+    totalAPIDurationWithoutRetries: 1,
+    totalToolDuration: 0,
+    totalLinesAdded: 0,
+    totalLinesRemoved: 0,
+    totalDuration: 1,
+    startTime: 1,
+    modelUsage: {
+      'claude-sonnet-4-5': { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: totalCostUSD },
+    },
+    ...change,
+  })
+  it('reads the last cost-state of the session that Claude Code would restore', () => {
+    expect(restoredCostUsd([{ type: 'user', uuid: 'u' }, state(0.1), state(0.2)], id, () => {})).toBe(0.2)
+    expect(restoredCostUsd([state(0.1, { laterField: 1 })], id, () => {})).toBe(0.1)
+    expect(restoredCostUsd([], id, () => {})).toBe(0)
+  })
+  it('passes over the ones it would refuse, and says so', () => {
+    const logged: string[] = []
+    const log = (m: string) => logged.push(m)
+    const { totalAPIDurationWithoutRetries: _, ...older } = state(0.3)
+    expect(restoredCostUsd([state(0.1), older], id, log)).toBe(0.1)
+    expect(restoredCostUsd([state(0.3, { sessionId: '22222222-2222-4222-8222-222222222222' })], id, log)).toBe(0)
+    expect(restoredCostUsd([state(0.3, { totalToolDuration: -1 })], id, log)).toBe(0)
+    expect(restoredCostUsd([state(0.3, { totalCostUSD: '0.3' })], id, log)).toBe(0)
+    expect(restoredCostUsd([state(0.3, { modelUsage: { 'bad\u0000name': {} } })], id, log)).toBe(0)
+    expect(logged).toHaveLength(5)
   })
 })

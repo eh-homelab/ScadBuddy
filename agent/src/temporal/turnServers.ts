@@ -13,6 +13,7 @@ import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import type { PackageServers } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
+import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
 import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
 import { turnToolName } from './turnTools.js'
@@ -85,6 +86,12 @@ export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
   settings?: { get<T>(key: string): Promise<T | undefined> } | undefined
+  /**
+   * The headless browser's lists and the sessions' approved origins (#982,
+   * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
+   * classic turn's are (browser/guard.ts). Without it they run at their tiers.
+   */
+  browserOrigins?: BrowserOriginsAccess | undefined
   /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   /**
@@ -161,6 +168,17 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       ...(forwarded?.plugins ?? []).map((p) => p.url),
       ...(deps.credentialSecrets ? await deps.credentialSecrets() : []),
     ]
+    // A flow run has no session to remember an approval in.
+    const browserPlugins = (forwarded?.plugins ?? []).map((p) => p.name)
+    const browser = deps.browserOrigins
+      ? browserGuard({ store: deps.browserOrigins, sessionId: context.flow ? undefined : context.session, plugins: browserPlugins })
+      : undefined
+    const browserParts = browser
+      ? {
+          guard: (name: string, input: unknown) => browser.check(name, input),
+          screen: (name: string, input: unknown, text: string) => browser.screen(name, input, text),
+        }
+      : {}
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
       // An unlisted plugin tool is outward (registry.ts), as in a classic turn. One
@@ -173,8 +191,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // Its forwarder URL is new each run; its tools change with what Settings disabled.
         listingKey: JSON.stringify(plugin.disabledTools),
         tierOf,
-        mayPark: (name) => tierOf(name) === 'outward',
-        fixedTier: tierOf,
+        // A browser call's tier depends on the page it opens (#982): any may park.
+        mayPark: (name) => browser?.covers(name) === true || tierOf(name) === 'outward',
+        fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
+        ...browserParts,
         // Its MCP session is kept for the durable session, on its own route (#2581).
         ...(keep
           ? {
@@ -247,9 +267,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // A listing shares each package first: one that fails to share (or to be stripped
       // of its http servers) is not loaded, so its servers are not offered either (#2563).
       let offered = loaded.loaded
+      // Read once: the listing and a call decide on the same root (#3523).
+      const { root, localRoot } = deps.packages!
       if (context.listing) {
         shared = []
-        const root = deps.packages!.root
         const failed = new Set<string>()
         for (const pkg of loaded.loaded) {
           if (root === undefined) {
@@ -260,7 +281,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
+            const turnPackage = await sharePackage(pkg, root, localRoot)
             const dark = unparkableBuiltins(turnPackage, provided)
             if (dark.length) {
               problems.push(
@@ -276,10 +297,14 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           }
         }
         offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
+      } else if (root === undefined) {
+        // With no payload volume a listing shares nothing, so a call builds nothing
+        // either, whatever it names (#3072).
+        offered = []
       }
-      // A call (not a listing) builds every loaded package's servers, a failed share's
-      // included: the listing is the guard, since a call can only name a tool the listing
-      // offered, and it offered none of a package that failed to share (#2620).
+      // Otherwise a call (not a listing) builds every loaded package's servers: a share
+      // that threw is known only by sharing again, so for that one the listing is the
+      // guard, since a call can only name a tool the listing offered (#2620).
       servers.push(...localPackageServers(offered, problems))
       const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
       const builtins = deps.builtins
@@ -313,6 +338,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
           tierOf: () => 'outward',
           mayPark: () => true,
+          callIds: true,
         })
         notes.push(builtinNote(named))
       }
@@ -321,7 +347,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       problems.push(...forwardedPackages.problems)
       secrets.push(...forwardedPackages.secrets)
       for (const plugin of forwardedPackages.plugins) {
-        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
+        browserPlugins.push(plugin.name)
+        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward', ...browserParts })
       }
     }
     return {

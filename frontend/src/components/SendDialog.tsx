@@ -6,9 +6,16 @@ import { openExternal } from '../lib/embed'
 import { traceAction } from '../lib/traceAction'
 import { useAsync } from '../lib/useAsync'
 import { plateLabel } from '../lib/plate'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Spinner } from './ui/spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 
 interface Props {
@@ -67,77 +74,86 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   return (
     <Dialog
       open={open}
-      title="Send to Bambuddy"
-      description={result ? undefined : 'The file is uploaded from ScadBuddy, not your browser.'}
-      onClose={close}
-      footer={
-        result ? (
-          <>
-            <Button onClick={close}>Done</Button>
-            {result.bambuddy_url && (
-              <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
-                Open in library
-              </Button>
-            )}
-          </>
-        ) : (
-          <>
-            <Button onClick={close} disabled={sending}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              onClick={() => void send()}
-              disabled={sending || !output}
-              {...USER_ONLY}
-            >
-              {sending && <Spinner />}
-              {sending ? 'Sending' : 'Send'}
-            </Button>
-          </>
-        )
-      }
+      onOpenChange={(next) => {
+        if (!next) close()
+      }}
     >
-      {result ? (
-        <>
-          <p className="text-[13px] text-ink">
-            Added to the library as <span className="sb-num">{result.filename}</span> (#
-            {result.library_file_id}).
-          </p>
-          {/* The note is best-effort, so say which way it went rather than implying
-              the link is on the file when Bambuddy refused it. Silence when no public
-              URL is set: there was no link to attach, which is not a failure. */}
-          {result.edit_url ? (
-            <p className="mt-1.5 text-[12px] text-muted">
-              Bambuddy has the link back to these parameters.
-            </p>
-          ) : publicUrl ? (
-            <p className="mt-1.5 text-[12px] text-muted">
-              Bambuddy would not take the link back to these parameters.
-            </p>
-          ) : null}
-        </>
-      ) : (
-        <>
-          <p className="text-[13px] text-ink">
-            Adds the 3MF to the Bambuddy library, laid out for the printer set in Settings, or on the default plate without one.
-          </p>
-          {named && (
-            <p className="mt-1.5 text-[13px]" data-testid="send-plates">
-              <span className="text-muted">{plates.length === 1 ? 'Plate:' : 'Plates:'}</span>{' '}
-              {plates.map((plate) => plateLabel(plates, plate.index)).join(' · ')}
-            </p>
+      {/* Bounded by the visible height, the body scrolling, so the buttons stay reachable. */}
+      <DialogContent showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
+        <DialogHeader className="shrink-0 border-b px-5 py-4">
+          <DialogTitle>Send to Bambuddy</DialogTitle>
+          {!result && <DialogDescription>The file is uploaded from ScadBuddy, not your browser.</DialogDescription>}
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {result ? (
+            <>
+              <p className="text-[13px] text-ink">
+                Added to the library as <span className="sb-num">{result.filename}</span> (#
+                {result.library_file_id}).
+              </p>
+              {/* The note is best-effort, so say which way it went rather than implying
+                  the link is on the file when Bambuddy refused it. Silence when no public
+                  URL is set: there was no link to attach, which is not a failure. */}
+              {result.edit_url ? (
+                <p className="mt-1.5 text-[12px] text-subtle">
+                  Bambuddy has the link back to these parameters.
+                </p>
+              ) : publicUrl ? (
+                <p className="mt-1.5 text-[12px] text-subtle">
+                  Bambuddy would not take the link back to these parameters.
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] text-ink">
+                Adds the 3MF to the Bambuddy library, laid out for the printer set in Settings, or on the default plate without one.
+              </p>
+              {named && (
+                <p className="mt-1.5 text-[13px]" data-testid="send-plates">
+                  <span className="text-subtle">{plates.length === 1 ? 'Plate:' : 'Plates:'}</span>{' '}
+                  {plates.map((plate) => plateLabel(plates, plate.index)).join(' · ')}
+                </p>
+              )}
+              <p className="mt-1.5 text-[12px] text-subtle">
+                To slice and queue it, use Print instead.
+              </p>
+              {error && (
+                <p role="alert" className="mt-3 text-[13px] text-warn">
+                  {error}
+                </p>
+              )}
+            </>
           )}
-          <p className="mt-1.5 text-[12px] text-muted">
-            To slice and queue it, use Print instead.
-          </p>
-          {error && (
-            <p role="alert" className="mt-3 text-[13px] text-warn">
-              {error}
-            </p>
+        </div>
+        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">
+          {result ? (
+            <>
+              <Button type="button" variant="outline" onClick={close}>Done</Button>
+              {result.bambuddy_url && (
+                <Button type="button" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+                  Open in library
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <Button type="button" variant="outline" onClick={close} disabled={sending}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void send()}
+                disabled={sending || !output}
+                {...USER_ONLY}
+              >
+                {sending && <Spinner />}
+                {sending ? 'Sending' : 'Send'}
+              </Button>
+            </>
           )}
-        </>
-      )}
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

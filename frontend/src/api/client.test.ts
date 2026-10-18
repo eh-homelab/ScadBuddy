@@ -6,6 +6,7 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
+  COMMAND_RESEND,
   MEDIA_THUMBNAIL_VERSION,
   OPERATION_UNFINISHED,
   SETTINGS_SHARE_MS,
@@ -18,6 +19,7 @@ import {
   printRunPoll,
 } from './client'
 import type { MediaView } from './types'
+import { CURSOR_HEADER, inReadScope, ReadScope } from '../lib/readCursor'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
 const picture = media[GALLERY_SLUG]![0]!
@@ -326,6 +328,27 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(posts).toBe(2)
   })
 
+  // #3035: the one 503 the print route keeps under respond-async is a repeat of an
+  // ended run without a request_id (`ended`), or any start the server would not offer a
+  // 202 for. `reattach` still sends the same request again, still asking to follow.
+  it('re-posts a 503 still-accepting under respond-async, the same request each time (#3035)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: { prefer: string | null; body: unknown }[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push({ prefer: request.headers.get('Prefer'), body: await request.json() })
+        return sent.length < 2 ? stillAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent.map((s) => s.prefer)).toEqual(['respond-async', 'respond-async'])
+    expect(sent[1]!.body).toEqual(sent[0]!.body)
+  })
+
   // Review #1316 (13) 1a: the backend's `may_have_started` says whether the start may
   // have reached Temporal; true, only the same request_id may follow it.
   const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>
@@ -595,6 +618,71 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect((error as ApiError).problem).toMatchObject({ type: UNANSWERED, status: 0 })
     expect(mayHaveRun(error)).toBe(true)
     expect(posts).toBe(3)
+  })
+
+  // #2793 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-POST.
+  const runFollowUrl = '/api/v1/commands/print-x/updates/r1'
+  const runAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'print-x', update_id: 'r1', follow_url: runFollowUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    let prefer: string | null = null
+    let follows = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return runAccepting()
+      }),
+      http.post(runFollowUrl, () => {
+        follows += 1
+        return follows === 1 ? runAccepting() : HttpResponse.json(started)
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('posts the print again, the same request, when the follow says command-resend (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: string[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push(await request.text())
+        return sent.length === 1 ? runAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.post(runFollowUrl, () =>
+        HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+      ),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toBe(sent[0])
+  })
+
+  it('says a print it gave up following may have started (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.acceptingMs = 20
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => runAccepting()),
+      http.post(runFollowUrl, () => runAccepting()),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(mayHaveRun(error)).toBe(true)
   })
 })
 
@@ -988,6 +1076,68 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     )
     await call()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  // #2794 — spec 2026-10-13: a slow start is a 202 `accepting` to follow, not a 503 to re-send.
+  const opFollowUrl = '/api/v1/commands/op-reprint-x/updates/k'
+  const opAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'op-reprint-x', update_id: 'k', follow_url: opFollowUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to the route body without sending again (#2794)', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    let prefer: string | null = null
+    let follows = 0
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return opAccepting()
+      }),
+      http.post(opFollowUrl, () => {
+        follows += 1
+        return follows === 1 ? opAccepting() : HttpResponse.json(again)
+      }),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('follows into the operation when the followed answer is its own 202 (#2794)', async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/prints/35/reprint', () => opAccepting()),
+      http.post(opFollowUrl, () => HttpResponse.json({ ...operation, repeated: false }, { status: 202 })),
+      http.get('/api/v1/operations/op-1', () =>
+        HttpResponse.json({ ...operation, status: 'succeeded', result: again }),
+      ),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+  })
+
+  it('sends again with its key when the follow says command-resend (#2794)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1 ? opAccepting() : HttpResponse.json(again, { status: 201 })
+      }),
+      http.post(opFollowUrl, () =>
+        HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+      ),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
   })
 })
 
@@ -1495,6 +1645,133 @@ describe('render (#1053)', () => {
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(posts).toBe(2)
   })
+
+  // #2340 — spec 2026-10-13: a slow pickup is a 202 to follow, not a 503 to send again.
+  const followUrl = '/api/v1/commands/render-x/updates/k'
+  const stillAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'render-x', update_id: 'k', follow_url: followUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to its job without sending the render again', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    let follows = 0
+    let prefer: string | null = null
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return stillAccepting()
+      }),
+      http.post(followUrl, () => {
+        follows += 1
+        return follows === 1
+          ? stillAccepting()
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('follows a 202 accepting at once, keeping its floor only between follows (review #2805)', async () => {
+    printRunPoll.intervalMs = 60_000
+    server.use(
+      http.post('/api/v1/models/box/render', () => stillAccepting()),
+      http.post(followUrl, () => HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+  })
+
+  it('sends the render again with its key when the follow says command-resend', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? stillAccepting()
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+      http.post(followUrl, () =>
+        HttpResponse.json(
+          { type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' },
+          { status: 409 },
+        ),
+      ),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('after an abort, a last follow still accepting is the abort, not a failure (review #2805)', async () => {
+    printRunPoll.intervalMs = 50
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        setTimeout(() => controller.abort(), 10)
+        return stillAccepting()
+      }),
+      http.post(followUrl, () => stillAccepting()),
+    )
+
+    const failure = await api
+      .render('box', { params: {} }, undefined, undefined, controller.signal)
+      .catch((caught: unknown) => caught)
+    expect(failure).not.toBeInstanceOf(ApiError)
+    expect((failure as Error).name).toBe('AbortError')
+  })
+
+  it('after an abort while following, follows once more to learn the job it claimed', async () => {
+    printRunPoll.intervalMs = 50
+    const controller = new AbortController()
+    let follows = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        setTimeout(() => controller.abort(), 10)
+        return stillAccepting()
+      }),
+      http.post(followUrl, () => {
+        follows += 1
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(follows).toBe(1)
+  })
+
+  it('a follow in flight when the signal aborts, then unanswered, is sent once more to its answer (#3576)', async () => {
+    const controller = new AbortController()
+    let follows = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => stillAccepting()),
+      http.post(followUrl, () => {
+        follows += 1
+        if (follows === 1) {
+          // The abort lands while this follow is in flight, and its answer is lost.
+          controller.abort()
+          return HttpResponse.error()
+        }
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(follows).toBe(2)
+  })
 })
 
 describe('Retry-After on problems (#1000)', () => {
@@ -1538,6 +1815,23 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       expect(reads()).toBe(1)
       expect(a).toEqual(b)
       expect(a).not.toBe(b)
+    })
+
+    it("gives a caller that joins it the shared request's cursor", async () => {
+      server.use(
+        http.get('/api/v1/settings', () =>
+          HttpResponse.json({ display_unit: 'mm' }, { headers: { [CURSOR_HEADER]: 'e3' } }),
+        ),
+        http.get('/api/v1/fonts', () => HttpResponse.json([], { headers: { [CURSOR_HEADER]: 'e9' } })),
+      )
+      const starter = new ReadScope()
+      const joiner = new ReadScope()
+      await Promise.all([
+        inReadScope(starter, () => api.getSettings()),
+        inReadScope(joiner, () => Promise.all([api.getSettings(), api.listFonts()])),
+      ])
+      expect(starter.cursors()).toEqual(['e3'])
+      expect(joiner.cursors()?.sort()).toEqual(['e3', 'e9'])
     })
 
     it('reads afresh once the shared request has answered', async () => {
@@ -1588,7 +1882,7 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
         // Only the settings reads count: another request first would take the hold (#3398).
         const url = input instanceof Request ? input.url : String(input)
-        if (new URL(url, 'http://x').pathname === '/api/v1/settings' && ++settingsSent === 1) {
+        if (new URL(url, location.href).pathname === '/api/v1/settings' && ++settingsSent === 1) {
           await new Promise((resolve) => setTimeout(resolve, 20))
         }
         return realFetch(input, init)
@@ -1625,5 +1919,29 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
         fetched.mockRestore()
       }
     })
+  })
+})
+
+describe('queuePrintBatch (#2951)', () => {
+  it('calls no progress once aborted, though a 202 arrived (#2718 review)', async () => {
+    const run = new AbortController()
+    const batch = { id: 'b-1', status: 'open', items: [] }
+    // The dialog goes while the 202's body is read.
+    const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => {
+        run.abort()
+        return { batch, next_position: 1 }
+      },
+    } as unknown as Response)
+    const onProgress = vi.fn()
+    try {
+      await expect(api.queuePrintBatch('b-1', onProgress, run.signal)).rejects.toThrow()
+      expect(onProgress).not.toHaveBeenCalled()
+      expect(fetched).toHaveBeenCalledTimes(1)
+    } finally {
+      fetched.mockRestore()
+    }
   })
 })

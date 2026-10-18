@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { RealtimeClient, type RealtimeSignal } from './realtime'
+import { CHECK_MS, RealtimeClient, readAgain, type Confirmation, type RealtimeSignal } from './realtime'
+import { ReadScope } from './readCursor'
 
 /** A WebSocket the test drives: it opens, closes and delivers frames on command. */
 class FakeSocket {
@@ -245,5 +246,76 @@ describe('RealtimeClient', () => {
     last().onmessage?.({ data: '{nope' })
     last().deliver(event('model.created', ['models']))
     expect(seen).toHaveLength(1)
+  })
+
+  describe('the cursor (#1039)', () => {
+    it("hands the server's last event to the confirmation's resync", () => {
+      const realtime = client()
+      const seen: [RealtimeSignal, Confirmation | undefined][] = []
+      realtime.subscribe('models', (signal, confirmation) => seen.push([signal, confirmation]))
+      last().open()
+      last().deliver({ type: 'subscribed', topics: ['models'], last: 'e9' })
+      last().deliver({ type: 'resync' })
+      expect(seen).toEqual([
+        ['resync', { last: 'e9' }],
+        ['resync', undefined],
+      ])
+    })
+
+    it('gives a listener joining a live topic a confirmation without `last`, so it asks', async () => {
+      const realtime = client()
+      realtime.subscribe('models', () => {})
+      last().open()
+      last().deliver({ type: 'subscribed', topics: ['models'], last: 'e9' })
+      const seen: [RealtimeSignal, Confirmation | undefined][] = []
+      realtime.subscribe('models', (signal, confirmation) => seen.push([signal, confirmation]))
+      await Promise.resolve()
+      expect(seen).toEqual([['resync', {}]])
+    })
+
+    it('asks the server what changed and resolves with its answer', async () => {
+      const realtime = client()
+      realtime.subscribe('models', () => {})
+      last().open()
+      const answer = realtime.check(['e1', 'e2'], ['models', 'fonts'])
+      expect(last().sent.at(-1)).toEqual({ type: 'check', id: 1, since: ['e1', 'e2'], topics: ['models', 'fonts'] })
+      last().deliver({ type: 'changed', id: 1, topics: ['fonts'] })
+      await expect(answer).resolves.toEqual(['fonts'])
+    })
+
+    it('counts every topic as changed when it cannot ask or hear an answer', async () => {
+      const realtime = client()
+      realtime.subscribe('models', () => {})
+      // Not open yet: nothing is sent.
+      await expect(realtime.check(['e1'], ['models'])).resolves.toEqual(['models'])
+      last().open()
+      const silent = realtime.check(['e1'], ['models'])
+      vi.advanceTimersByTime(CHECK_MS)
+      await expect(silent).resolves.toEqual(['models'])
+      // A server without checks answers with an error frame.
+      const refused = realtime.check(['e1'], ['models'])
+      last().deliver({ type: 'error', message: 'expected subscribe or unsubscribe' })
+      await expect(refused).resolves.toEqual(['models'])
+      // Another error leaves a waiting check be.
+      const kept = realtime.check(['e1'], ['models'])
+      last().deliver({ type: 'error', message: 'at most 64 topics; not following [...]' })
+      last().deliver({ type: 'changed', id: 4, topics: [] })
+      await expect(kept).resolves.toEqual([])
+      const dropped = realtime.check(['e1'], ['models'])
+      last().close()
+      await expect(dropped).resolves.toEqual(['models'])
+    })
+  })
+})
+
+describe('readAgain (#1039)', () => {
+  it('re-reads once a read has hung for CHECK_MS, rather than waiting on it', async () => {
+    const hung = { scope: new ReadScope(), shown: new Promise<boolean>(() => {}) }
+    let answer: boolean | undefined
+    void readAgain(hung, 'models', { last: 'e1' }).then((again) => (answer = again))
+    await vi.advanceTimersByTimeAsync(CHECK_MS - 1)
+    expect(answer).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(answer).toBe(true)
   })
 })

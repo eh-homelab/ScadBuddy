@@ -1,0 +1,132 @@
+{
+  "note": "canonical JSON and its sha256, written by test/responseHash.test.ts (UPDATE_RESPONSE_HASH_VECTORS=1), opened by agent-durable/tests/test_gate_canonical.py",
+  "vectors": [
+    {
+      "name": "an approval",
+      "value": {
+        "kind": "approval",
+        "decision": "approve"
+      },
+      "canonical": "{\"decision\":\"approve\",\"kind\":\"approval\"}",
+      "sha256": "9e837029aee951b4967877d68cf687a78aaa55a120465cea04be3c7d7f2101eb"
+    },
+    {
+      "name": "key order does not matter",
+      "value": {
+        "decision": "approve",
+        "kind": "approval"
+      },
+      "canonical": "{\"decision\":\"approve\",\"kind\":\"approval\"}",
+      "sha256": "9e837029aee951b4967877d68cf687a78aaa55a120465cea04be3c7d7f2101eb"
+    },
+    {
+      "name": "an approval with an input hash",
+      "value": {
+        "kind": "approval",
+        "decision": "deny",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "canonical": "{\"decision\":\"deny\",\"input_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kind\":\"approval\"}",
+      "sha256": "a4f89ebec08e38cd735ae6d4e582cca1677a26a6ce2e499cea5e8520059b1454"
+    },
+    {
+      "name": "an answer keyed by question text",
+      "value": {
+        "kind": "answer",
+        "answers": {
+          "Which colour?": "red",
+          "Sizes?": [
+            "S",
+            "M"
+          ]
+        }
+      },
+      "canonical": "{\"answers\":{\"Sizes?\":[\"S\",\"M\"],\"Which colour?\":\"red\"},\"kind\":\"answer\"}",
+      "sha256": "679ecc2b39037fc18d6333e28516489b1785f8f52284e68c6748843ce40f1c1d"
+    },
+    {
+      "name": "an attention choice",
+      "value": {
+        "kind": "answer",
+        "choice": "proceed"
+      },
+      "canonical": "{\"choice\":\"proceed\",\"kind\":\"answer\"}",
+      "sha256": "aafa54dc051e2a2a0cb803534b252f377c267b4ce8b912767c53b15095b3d32b"
+    },
+    {
+      "name": "escapes and control characters",
+      "value": {
+        "kind": "answer",
+        "text": "a \"quote\" \\ back\nnew\ttab\u0001\u001f end"
+      },
+      "canonical": "{\"kind\":\"answer\",\"text\":\"a \\\"quote\\\" \\\\ back\\nnew\\ttab\\u0001\\u001f end\"}",
+      "sha256": "1cd5811ee6ddc35a70f99cd5c2603f0d01b7ae7c7b04e69df2f6399b584eeabc"
+    },
+    {
+      "name": "non-ASCII text is not escaped",
+      "value": {
+        "kind": "answer",
+        "text": "café   é中"
+      },
+      "canonical": "{\"kind\":\"answer\",\"text\":\"café   é中\"}",
+      "sha256": "0c9aacccd976bd44cec125794919a3adbd8eec99e2d0c89c1816eb6a0cee0af6"
+    },
+    {
+      "name": "astral keys sort by UTF-16 code unit, not code point",
+      "value": {
+        "kind": "answer",
+        "answers": {
+          "😀": "a",
+          "～": "b",
+          "z": "c"
+        }
+      },
+      "canonical": "{\"answers\":{\"z\":\"c\",\"😀\":\"a\",\"～\":\"b\"},\"kind\":\"answer\"}",
+      "sha256": "a106304383d42905817b4b3825f01dc6521640e286b81f71a2ea2563a8b3e2ab"
+    },
+    {
+      "name": "booleans, null and nesting",
+      "value": {
+        "a": [
+          true,
+          false,
+          null,
+          {
+            "b": []
+          }
+        ],
+        "c": {}
+      },
+      "canonical": "{\"a\":[true,false,null,{\"b\":[]}],\"c\":{}}",
+      "sha256": "1ae9f1dd724b2fc4d29b11e49a6b35a3abb9c5cf7e9d2d73bee07b562a4445e1"
+    },
+    {
+      "name": "a bare string",
+      "value": "x",
+      "canonical": "\"x\"",
+      "sha256": "ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b"
+    },
+    {
+      "name": "a lone surrogate is escaped, not encoded",
+      "value": {
+        "kind": "answer",
+        "text": "a\udc00b\ud83d"
+      },
+      "canonical": "{\"kind\":\"answer\",\"text\":\"a\\udc00b\\ud83d\"}",
+      "sha256": "c80099ae7d7e36594901a69d15e867ea25f2ef9f9343732c36a62355642b08bf"
+    },
+    {
+      "name": "a lone surrogate in a key is escaped and sorts by code unit",
+      "value": {
+        "kind": "answer",
+        "answers": {
+          "\udc00": "a",
+          "\ud800x": "b",
+          "z": "c"
+        }
+      },
+      "canonical": "{\"answers\":{\"z\":\"c\",\"\\ud800x\":\"b\",\"\\udc00\":\"a\"},\"kind\":\"answer\"}",
+      "sha256": "0478a2397d73a77cedfb30ade1a7e57f77efb3dcb2836dc2715607925d493bb9"
+    }
+  ]
+}

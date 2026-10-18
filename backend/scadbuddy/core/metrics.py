@@ -39,7 +39,9 @@ RenderOutcome = Literal["done", "failed", "superseded"]
 #: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
 #: §7): spelled out here, not imported, so the metrics never load the render stack.
 RenderKind = Literal["render", "arrange"]
-RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write", "recolour"]
+RenderStage = Literal[
+    "source", "render", "split", "solids", "paint", "thumbnail", "write", "recolour"
+]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
@@ -82,20 +84,25 @@ class Metrics:
         # Render queue: admission, then the job's life.
         self.render_submitted = Counter(
             "scadbuddy_render_jobs_submitted",
-            "Render requests accepted onto the queue as a new job.",
+            "Render requests accepted onto the queue as a new job."
+            " A request answered 202 accepting is counted by the follow that gets its"
+            " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],
             registry=r,
         )
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
-            "Render requests answered with an identical job already waiting.",
+            "Render requests answered with an identical job already waiting."
+            " A request answered 202 accepting is counted by the follow that gets its"
+            " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],
             registry=r,
         )
         self.render_accept_pending = Counter(
             "scadbuddy_render_accept_pending",
-            "Render requests answered 503 command-still-accepting: their job was not"
-            " answered in time, and the client sends the same request again; by kind.",
+            "Render requests whose job was not answered in time: answered 503"
+            " command-still-accepting (the client sends the same request again), or 202"
+            " accepting to a client that follows it (#2340); once per request, by kind.",
             ["kind"],
             registry=r,
         )
@@ -178,7 +185,9 @@ class Metrics:
         )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
-            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
+            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting."
+            " A request answered 202 accepting and then refused is not counted: its follow"
+            " cannot tell a render's queue-full from an Arrange's (#2340, #3575).",
             ["kind"],
             registry=r,
         )
@@ -317,6 +326,32 @@ class Metrics:
         )
         self.worker_cache_bytes = Gauge(
             "scadbuddy_worker_cache_bytes", "Bytes in this process's local piece cache.", registry=r
+        )
+        # The worker's event-loop watch (#3788, `core.loop_watch`).
+        self.event_loop_lag = Histogram(
+            "scadbuddy_event_loop_lag_seconds",
+            "How late a no-op posted to the worker's event loop ran.",
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+            registry=r,
+        )
+        self.event_loop_stalls = Counter(
+            "scadbuddy_event_loop_stalls",
+            "Times the worker's event loop did not run for over a second; each is logged"
+            " with every thread's stack.",
+            registry=r,
+        )
+        self.default_executor_wait = Histogram(
+            "scadbuddy_default_executor_wait_seconds",
+            "How long a no-op handed to the event loop's default executor (asyncio.to_thread)"
+            " waited for a thread.",
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+            registry=r,
+        )
+        self.default_executor_stalls = Counter(
+            "scadbuddy_default_executor_stalls",
+            "Times the default executor had no free thread for over a second; each is logged"
+            " with every thread's stack.",
+            registry=r,
         )
         self.render_data_bytes = Gauge(
             "scadbuddy_render_data_bytes",

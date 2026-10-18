@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,16 +18,28 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.batches.store import Pruned
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.housekeeping import (
     GIT_SWEEP,
+    LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     PRUNE_SWEEPS,
     SWEEPS,
 )
 from tests.test_print_worker_task import StubWorker
+
+
+@pytest.fixture(autouse=True)
+def _routed_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These states have no Temporal: the build counts as routed at once (#4090)."""
+
+    async def routed(client: object, build_id: str, queue: str, done: asyncio.Event) -> None:
+        done.set()
+
+    monkeypatch.setattr(main, "_make_library_current", routed)
 
 
 async def test_a_library_worker_that_fails_while_running_is_started_again(
@@ -55,7 +68,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
@@ -163,7 +176,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
         previews=None,
@@ -219,6 +232,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "client_for", _a_client)
     monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
+    monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -237,6 +251,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 client=object(),
                 store=None,
                 index=SimpleNamespace(repair=_broken_async, prune=_broken_async),
+                serving_native=_broken_async,
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -306,6 +321,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         await asyncio.sleep(0.1)
         return 0
 
+    async def slow_batches(older_than: timedelta, *, pending_older_than: timedelta) -> Pruned:
+        await asyncio.sleep(0.1)
+        return Pruned(count=0, pending=[])
+
     monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
     monkeypatch.setattr(main, "client_for", _a_client)
     monkeypatch.setattr(main, "sweep_lost_slices", slow_previews)
@@ -314,6 +333,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         paths=SimpleNamespace(),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        # #2718: the claims sweep prunes batch prints too.
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_batches)),
     )
     state.paths.claims = None
 
@@ -325,8 +346,21 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         async def prune(self, ttl: float, placeholder_ttl: float) -> int:
             return 0
 
+    async def serving_native() -> object:
+        return object()
+
+    async def slow_library(native: object, *, now: object) -> SimpleNamespace:
+        await asyncio.sleep(0.1)
+        return SimpleNamespace(purged=0, orphans=0)
+
+    monkeypatch.setattr(main, "sweep_library", slow_library)
     state.settings_store = SimpleNamespace(load=StoredSettings)
-    state.components = SimpleNamespace(get=lambda key: SimpleNamespace(index=SlowIndex()))
+    # #2718: the claims sweep's batch-print store, beside the library index.
+    state.components = SimpleNamespace(
+        get=lambda key: SimpleNamespace(
+            index=SlowIndex(), prune=slow_batches, serving_native=serving_native
+        )
+    )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []
     env = ActivityEnvironment()
@@ -577,6 +611,12 @@ def test_the_background_slices_obey_the_sweeps_switch() -> None:
     assert PREVIEWS_SWEEP in SWEEPS
     assert PREVIEWS_SWEEP not in PRUNE_SWEEPS
     assert LOST_SLICES_SWEEP in PRUNE_SWEEPS
+
+
+def test_the_native_library_sweep_runs_with_the_sweeps_off() -> None:
+    """#3827: the 30-day trash purge and the orphan collection are on the prune
+    Schedule, which runs whatever the sweeps' switch is."""
+    assert LIBRARY_SWEEP in PRUNE_SWEEPS
 
 
 @pytest.mark.parametrize(

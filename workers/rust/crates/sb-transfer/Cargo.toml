@@ -1,0 +1,18 @@
+[package]
+name = "sb-transfer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+tokio-util.workspace = true
+sha2.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+axum.workspace = true

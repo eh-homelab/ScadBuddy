@@ -46,9 +46,103 @@ Plugins. A starting point:
 | `outward`, or disabled | `browser_evaluate` and `browser_run_code_unsafe` (they run JavaScript), `browser_file_upload`, anything the server adds later |
 
 Navigation and input stay `outward`: they decide where the browser goes and what it
-does there, and nothing in ScadBuddy tells the browser's requests from a person's.
+does there, and nothing in ScadBuddy tells the browser's requests from a person's. A
+navigation's own tier is then decided by the page it opens (next section), so leave
+`browser_navigate` at `outward`.
 Lower them to `write` only when the server **cannot reach ScadBuddy itself** (next
 section). `browser_tabs` both lists and opens tabs, so it cannot be `read` as a whole.
+
+## Where it may go: the allow and deny lists (#982)
+
+Every navigation a session's browser is asked to make is judged by two lists the user
+keeps in **Settings → Assistant → AI headless browser** (`ai_settings` key
+`browser_origins`, routes `agent/src/routes/browserOrigins.ts`, the rules
+`agent/src/browser/origins.ts`). It applies to any remote plugin's `browser_*` call that
+names a `url` (Playwright MCP's `browser_navigate`), in classic and durable turns alike
+(`agent/src/browser/guard.ts`):
+
+| The page's origin | What happens |
+|---|---|
+| matches a **deny** rule | refused, even if someone would approve it; the refusal names the rule. Deny wins over allow. |
+| matches an **allow** rule, or was approved **for this chat** | opens without asking, whatever the tool's tier. |
+| on neither list | an outward call: it parks for the user. The card shows the full URL and offers **Allow once**, **Allow for this chat** (the origin is recorded for the session, `ai_browser_session_origins`) and **Always allow** (the origin is added to the allow list, a settings write the user makes from the card). **Deny** refuses it. |
+
+Rules are one per line: a host (`makerworld.com`, https on its default port only on the
+allow list), `*.example.com` (its subdomains, never itself), an exact origin
+(`http://printer.lan:8080`), or an address range (`10.0.0.0/8`, for IP-literal URLs). A
+host or wildcard on the deny list matches every scheme and port. Hosts match whole
+labels, so `makerworld.com` never lets `makerworld.com.evil.example` through. A URL is
+parsed once, with the WHATWG parser, and judged only when it is already written as that
+parser (and the browser) writes it: whitespace, control characters, backslashes, user
+names, upper-case or percent-encoded hosts, numeric addresses and other schemes are
+refused, with the form to send instead, so the guard and the browser never read one URL
+two ways. The
+defaults allow a few model sites and references (MakerWorld, Printables, Thingiverse,
+GitHub, OpenSCAD, the OpenSCAD wikibook) and deny loopback, link-local and cloud
+metadata addresses, and the `internal`, `svc` and `cluster.local` names and their subdomains. A LAN address
+is not denied by default: it asks.
+
+**Pages the browser reaches on its own.** A redirect, a link it clicks, or a new tab
+can take the browser somewhere no navigation named. Playwright MCP reports the page it is
+on in each result (`- Page URL: …`); a result whose page is denied, or on neither list
+and not approved in the session, is replaced before the model reads it (and in the
+transcript) by a note saying where the browser is, so the page's content never reaches
+the model. Each result is judged only by what it says itself: nothing about the
+browser's page is remembered between calls, so an error, a timeout, a tab switch, a popup
+or a back or forward navigation never leaves a stale page trusted. Playwright MCP names
+the page only when the tool shows a snapshot or a tab changed since its last result
+(measured in the `playwright-core` that `@playwright/mcp` 0.0.82 ships,
+`Response._build`), so a result that names none is withheld: in practice
+`browser_take_screenshot`, `browser_console_messages` and `browser_network_requests` reach
+the model only when they report the page, and the agent reads a page with
+`browser_snapshot`, which always names it. `browser_close`, `browser_resize` and
+`browser_install` show no page and pass. When more than one tab is open, Playwright MCP
+lists them all with their titles (`### Open tabs`), so every tab in the list must be
+readable, or the result is withheld until the agent closes the others; a tab line that
+cannot be read unambiguously (a `](` or a parenthesis in it) withholds it too. A blank tab
+(`about:blank`) is read only while it is the browser's one tab: a page in another tab can
+write into a tab it opened. A browser tool's error is screened the same way:
+the forwarder passes it to Claude Code as the tool's result, since Claude Code hands an
+MCP error to the model through `PostToolUseFailure`, which no hook can replace (measured,
+`agent/test/browserOrigins.e2e.test.ts`). Both turns screen the same text, the whole
+result (`browser/origins.ts` `screenedText`). A check or screen that fails or takes longer than 20 s refuses the call or
+withholds the result; a deny rule that no longer parses refuses every page; a stored list
+that cannot be read leaves no allow list (everything asks) and the default deny list. The
+allow list lowers only `browser_navigate`'s tier: another browser tool that names a `url`
+can be refused or made to ask by it, never allowed. A classic turn does that with a `PostToolUse` hook's `updatedMCPToolOutput`
+(measured on Claude Code 2.1.296, `agent/test/browserOrigins.e2e.test.ts`), a durable
+turn in its call activity (`agent/src/temporal/turnTools.ts`). To read such a page the
+agent navigates to it, which asks. A navigation approved once is recorded as `once`, so
+the pages of that origin stay readable in the chat while the next navigation there asks
+again. A flow run has no chat to remember it in: only the approved call's own result is
+shown.
+
+Settings lists the origins approved in each chat, with **Revoke**. An approval or a
+revocation is written only to a chat the user controls and that is not archived, as the
+chat's other writes are. Page content still
+arrives as untrusted data: the forwarder wraps every plugin result in the envelope
+(`agent/src/plugins/forwarder.ts`).
+
+**The lists are not the network boundary.** The browser runs in its own pod
+(Microsoft's server, run as shipped), and the agent reaches it only over MCP: it cannot
+route or abort the browser's own requests (`context.route`, CDP `Fetch`), so it never
+sees a redirect hop, a subframe, a popup's `window.open`, or a page's fetches as they
+happen. What the agent enforces is what the model asks for and what the model reads: a
+navigation is refused or parked before it is sent, and every result is withheld unless
+the pages and tabs Playwright MCP reports in it are readable, judged deny-by-default
+(an unknown scheme, a URL not written as the browser writes it, or a result whose
+structure cannot be read unambiguously is withheld). What the browser can reach, and so
+what a page can make it request, is decided by the egress policy of the pod it runs in
+(next section). Playwright MCP's own `--allowed-origins` / `--blocked-origins` run inside
+the browser but do not apply to redirects (measured on `@playwright/mcp` 0.0.82), so they
+are not that boundary either.
+
+The lists judge names, not addresses: a permitted name that resolves to a private
+address is not caught by them. A page that moves itself while Playwright MCP is writing
+one result, after it captured the snapshot and before it read the page's address, is not
+seen: the result names where the page landed. Nor do they judge a page's subresources and frames: an
+allowed page's iframe from elsewhere shows in its snapshot. The boundary for that stays the network the server runs
+in (next section).
 
 ## What the server can reach
 

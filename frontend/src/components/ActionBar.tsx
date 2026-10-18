@@ -1,13 +1,4 @@
-import {
-  useEffect,
-  useId,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type Ref,
-} from 'react'
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -40,9 +31,26 @@ import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Hint } from './Hint'
+import { Spinner } from './ui/spinner'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 
 /** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
@@ -135,8 +143,6 @@ export function ActionBar({
   /** #1741 — at a phone's width the project, Download, Send and Print wait behind More. */
   const phone = useMediaQuery(PHONE_QUERY)
   const [moreOpen, setMoreOpen] = useState(false)
-  const moreId = useId()
-  const footer = useRef<HTMLElement>(null)
   const dialogOpen = sendOpen || printOpen || imageOpen || coloursOpen
   const [error, setError] = useState<string | null>(null)
   /** A job whose first output was saved but not the rest: Generate saves only those. */
@@ -149,11 +155,16 @@ export function ActionBar({
   /**
    * #317 — the project Generate files the editable 3MF into, shared with the print
    * dialog's picker so both show one choice. It opens on the project remembered for this
-   * model (#1660), never on another model's: a change on either picker still becomes the
-   * new `last_project_id`, which a print without a project of its own falls back to.
+   * model (#1660), never on another model's. A change on either picker applies to this
+   * page only: the default project (`last_project_id`) changes only in Settings (#3188).
    */
   const [projectId, setProjectId] = useState<number | null>(null)
   const [project, setProject] = useState<ProjectView | null>(null)
+  /**
+   * #3651 — a library folder of no project chosen instead of a project: Generate files
+   * the 3MF there. Not remembered per model, as a project is: a folder holds no prints.
+   */
+  const [folderId, setFolderId] = useState<number | null>(null)
   /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
   const projects = useProjectList()
   const listed = projects.choices?.projects
@@ -170,7 +181,14 @@ export function ActionBar({
   const loadedProjects = modelProjects.data?.slug === slug ? modelProjects.data : undefined
   // Another tab (or the agent) filing this model, or a Forget in Settings, changes what
   // is remembered: read it again, or this tab confirms against a stale project.
-  useSubscription('settings', (signal) => {
+  useSubscription('settings', (signal, confirmation) => {
+    if (confirmation) {
+      // Only if something passed since the first read (#1039).
+      void modelProjects.staleFor('settings', confirmation).then((stale) => {
+        if (stale) modelProjects.refresh()
+      })
+      return
+    }
     const section = signal === 'resync' ? null : signal.data.section
     if (signal === 'resync' || section === 'model_project' || section === 'remembered') modelProjects.refresh()
   })
@@ -184,21 +202,27 @@ export function ActionBar({
    * not "last filed" anywhere.
    */
   const remembered = rememberedFor(preset?.id ?? null)
-  /** Where the picker opens: the pair's project, else the model's own with no preset. */
-  const opensOn = remembered ?? (preset ? rememberedFor(null) : null)
+  /**
+   * Where the picker opens: the pair's project, else the model's own with no preset (the
+   * project its content is in, #3651), else the project Settings names as the default.
+   */
+  const settingsDefault = stillListed(projects.choices?.last_project_id ?? null)
+  const opensOn = remembered ?? (preset ? rememberedFor(null) : null) ?? settingsDefault
   /** What the model is called in the confirmation: the preset in use, else the model. */
   const subject = preset?.name ?? model?.name ?? slug
   // #1660 — opening a model or loading a preset moves the picker to its project, or with
-  // none remembered to no project: `last_project_id` is another model's (the 2026-10-11
-  // QA report filed an apple into a keychain project). Once per change, so a pick made
-  // since stays.
+  // none remembered to the Settings default, else no project: `last_project_id` is another
+  // model's (the 2026-10-11 QA report filed an apple into a keychain project). Once per
+  // change, so a pick made since stays. After the list, which names the default.
   const preselectKeyFor = (presetId: string | null, target: number | null) =>
     `${slug}\n${presetId ?? ''}\n${target ?? ''}`
-  const preselectKey = loadedProjects ? preselectKeyFor(preset?.id ?? null, opensOn) : null
+  const preselectKey =
+    loadedProjects && !projects.loading ? preselectKeyFor(preset?.id ?? null, opensOn) : null
   const [preselected, setPreselected] = useState<string | null>(null)
   if (preselectKey !== null && preselectKey !== preselected) {
     setPreselected(preselectKey)
     setProjectId(opensOn)
+    setFolderId(null)
   }
   const latestPresetId = useLatest(preset?.id ?? null)
   const latestSlug = useLatest(slug)
@@ -218,9 +242,15 @@ export function ActionBar({
 
   function chooseProject(next: number | null) {
     setProjectId(next)
-    // Only a preference: the picker still shows the choice if it is not remembered.
-    void api.rememberProject(next).catch(() => undefined)
+    setFolderId(null)
   }
+
+  /** #3651 — a folder in place of a project; `null` is a project chosen instead. */
+  function chooseFolder(next: number | null) {
+    setFolderId(next)
+    if (next !== null) setProjectId(null)
+  }
+  const folderChoice = { value: folderId, onChange: chooseFolder }
 
   /** #1660 — the remembered project, when Generate into `target` would file elsewhere. */
   function conflict(target: number | null): { remembered: number; chosen: number } | null {
@@ -232,8 +262,12 @@ export function ActionBar({
    * the output is saved whether or not Bambuddy takes the file. A filed output's project
    * becomes the one remembered for this model and preset (#1660).
    */
-  async function fileIntoProject(created: Output, target: number | null): Promise<ProjectFile | null> {
-    if (target === null) return null
+  async function fileIntoProject(
+    created: Output,
+    target: number | null,
+    folder: number | null,
+  ): Promise<ProjectFile | null> {
+    if (target === null) return folder === null ? null : fileIntoFolder(created, folder)
     const name = target === projectId && project ? project.name : projectName(target)
     try {
       const file = await api.fileIntoProject(created.id, target)
@@ -250,6 +284,21 @@ export function ActionBar({
           modelProjects.setData({ slug, ...next }, { supersede: true })
         })
         .catch(() => undefined)
+      return file
+    } catch (cause) {
+      setFileError(
+        `Saved, but not filed in ${name}: ${cause instanceof ApiError ? cause.detail : 'Bambuddy did not answer.'}`,
+      )
+      return null
+    }
+  }
+
+  /** #3651 — the same into a library folder of no project; nothing is remembered for it. */
+  async function fileIntoFolder(created: Output, folder: number): Promise<ProjectFile | null> {
+    const name = projects.choices?.folders?.find((entry) => entry.id === folder)?.path ?? `folder ${folder}`
+    try {
+      const file = await api.fileIntoFolder(created.id, folder)
+      setFiled({ outputId: created.id, name, file })
       return file
     } catch (cause) {
       setFileError(
@@ -283,6 +332,8 @@ export function ActionBar({
    */
   async function generate(
     target: number | null = projectId,
+    // #3651 — the folder it files into when `target` is no project.
+    folder: number | null = folderId,
   ): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
     if (!job) return null
     const controller = new AbortController()
@@ -319,7 +370,7 @@ export function ActionBar({
           }
           span.setAttribute('scadbuddy.output_id', created.id)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
-          const filed = await within(() => fileIntoProject(created, target))
+          const filed = await within(() => fileIntoProject(created, target, folder))
           setAnnouncement(
             `Generated ${created.name ?? created.id.slice(0, 8)}. Download 3MF, Send to Bambuddy or Print it.`,
           )
@@ -352,6 +403,7 @@ export function ActionBar({
     sendOpen,
     printOpen,
     projectId,
+    folderId,
     conflict,
     subject,
     projectPath,
@@ -395,7 +447,8 @@ export function ActionBar({
       }
       if (project_id !== undefined) chooseProject(project_id)
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
-      const generated = await generate(target)
+      // A project the agent named (or its "no project") is no folder.
+      const generated = await generate(target, project_id === undefined ? live.current.folderId : null)
       if (!generated) return null
       const { output: created, filed, extra: savedExtra } = generated
       // Shown, or already left behind by a UI-state change made while it saved (#848).
@@ -433,7 +486,7 @@ export function ActionBar({
       if (kind === 'send') setSendOpen(true)
       else setPrintOpen(true)
       await committed(() => (kind === 'send' ? live.current.sendOpen : live.current.printOpen), 'the dialog to open')
-      touchAfterRender(() => document.querySelector('[role="dialog"]'))
+      touchAfterRender(() => document.querySelector('[data-modal]'))
       return {
         opened: kind === 'send' ? 'Send to Bambuddy' : 'Print',
         note: 'The dialog is open for the user to review. Only the user can confirm it.',
@@ -441,26 +494,11 @@ export function ActionBar({
     },
   })
 
-  // Escape, or a press outside the bar, closes More; not while one of its dialogs is up,
-  // which takes its own Escape and returns focus to the button that opened it.
-  useEffect(() => {
-    if (!phone || !moreOpen || dialogOpen) return
-    const onDown = (event: MouseEvent) => {
-      if (!footer.current?.contains(event.target as Node)) setMoreOpen(false)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      const inside = !!footer.current?.contains(document.activeElement)
-      setMoreOpen(false)
-      if (inside) footer.current?.querySelector<HTMLButtonElement>('[data-testid="more-actions"]')?.focus()
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [phone, moreOpen, dialogOpen])
+  // More stays open under one of its dialogs, which takes its own Escape and its own
+  // presses: what closes More is Escape, or a press outside it, with no dialog up.
+  const keepMore = (event: Event) => {
+    if (dialogOpen) event.preventDefault()
+  }
 
   async function download() {
     if (!output || downloading) return
@@ -493,6 +531,7 @@ export function ActionBar({
       inline
       value={projectId}
       onChange={chooseProject}
+      folder={folderChoice}
       list={projects}
       onProject={setProject}
       // #666 — locked while Generate files, so the project on screen is where it went.
@@ -503,7 +542,7 @@ export function ActionBar({
   const generateButtons = (
     <div className="flex items-center">
       <Button
-        variant="primary"
+        type="button"
         onClick={() => {
           if (generating) return
           // #1660 — filing somewhere other than the remembered project asks first.
@@ -517,7 +556,7 @@ export function ActionBar({
         aria-disabled={generating || undefined}
         data-testid="generate"
         aria-describedby={blockedReason ? `${slug}-generate-blocked` : undefined}
-        className="rounded-r-none"
+        className="h-9 rounded-r-none px-3"
       >
         {generating && <Spinner />}
         {generating ? 'Generating' : 'Generate'}
@@ -536,7 +575,7 @@ export function ActionBar({
         }
       />
       {blockedReason && (
-        <span id={`${slug}-generate-blocked`} data-testid="generate-blocked" className="ml-2 text-[12px] text-warn">
+        <span id={`${slug}-generate-blocked`} data-testid="generate-blocked" className="ml-2 text-xs text-destructive">
           {blockedReason}
         </span>
       )}
@@ -544,6 +583,9 @@ export function ActionBar({
   )
   const downloadButton = (
     <Button
+      type="button"
+      variant="outline"
+      className="h-9"
       onClick={() => void download()}
       disabled={!output}
       aria-disabled={downloading || undefined}
@@ -553,32 +595,31 @@ export function ActionBar({
     </Button>
   )
   const sendButton = (
-    <Button onClick={() => setSendOpen(true)} disabled={!output}>
+    <Button type="button" variant="outline" className="h-9" onClick={() => setSendOpen(true)} disabled={!output}>
       Send to Bambuddy
     </Button>
   )
+  // #317 — Generate is still filing the project file, which the print reuses.
+  const printDisabled = !output || generating || creatingProject
   const printButton = (
-    <Button
-      variant={misfit ? 'danger' : 'default'}
-      onClick={() => setPrintOpen(true)}
-      // #317 — Generate is still filing the project file, which the print reuses.
-      disabled={!output || generating || creatingProject}
-      data-testid="print"
-      title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
-    >
-      Print
-      {misfit && <span className="text-[12px]">· {misfit}</span>}
-    </Button>
+    <Hint content={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined} wrap={printDisabled}>
+      <Button
+        type="button"
+        variant={misfit ? 'destructive' : 'outline'}
+        className="h-9"
+        onClick={() => setPrintOpen(true)}
+        disabled={printDisabled}
+        data-testid="print"
+      >
+        Print
+        {misfit && <span className="text-xs">· {misfit}</span>}
+      </Button>
+    </Hint>
   )
 
   return (
     <>
-      <footer
-        ref={footer}
-        className={`flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2 ${
-          phone ? 'relative' : ''
-        }`}
-      >
+      <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t bg-background px-3 py-2">
         {/* #967 — always in the page, so a change to it is announced. */}
         <p className="sr-only" role="status" data-testid="action-status">
           {announcement}
@@ -593,35 +634,37 @@ export function ActionBar({
             <>
               <ColorStrip colors={job.colors} />
               {/* #1741 — the swatches alone on a phone, so the bar stays one row. */}
-              <span className={phone ? 'sr-only' : 'whitespace-nowrap text-[12px] text-muted'}>
+              <span className={phone ? 'sr-only' : 'whitespace-nowrap text-xs text-muted-foreground'}>
                 {job.colors.length === 1 ? '1 colour' : `${job.colors.length} colours`}
               </span>
             </>
           )}
           {error && (
-            <span role="alert" className="truncate text-[12px] text-warn">
+            <span role="alert" className="truncate text-xs text-destructive">
               {error}
             </span>
           )}
           {!error && output && !stale && (
-            <span className="truncate text-[12px] text-ok">
+            <span className="truncate text-xs text-ok">
               Saved {output.name ?? output.id.slice(0, 8)}
             </span>
           )}
           {!error && output && !stale && filed?.outputId === output.id && (
-            <span className="flex min-w-0 items-center gap-1.5 text-[12px]" data-testid="project-filed">
+            <span className="flex min-w-0 items-center gap-1.5 text-xs" data-testid="project-filed">
               <span className="truncate text-ok">Saved to {filed.name}</span>
-              <button
+              <Button
                 type="button"
+                variant="link"
+                size="xs"
                 onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url))}
-                className="shrink-0 text-accent underline"
+                className="h-auto shrink-0 px-0"
               >
                 Open in Bambuddy
-              </button>
+              </Button>
             </span>
           )}
           {!error && output && !stale && fileError && (
-            <span role="alert" className="truncate text-[12px] text-warn">
+            <span role="alert" className="truncate text-xs text-destructive">
               {fileError}
             </span>
           )}
@@ -631,23 +674,37 @@ export function ActionBar({
           // #1741 — one row on a phone: Generate, and the rest behind More.
           <div className="flex shrink-0 items-center gap-2">
             {generateButtons}
-            <Button
-              // Print's "does not fit" warning, while Print is out of sight.
-              variant={misfit ? 'danger' : 'default'}
-              onClick={() => setMoreOpen((open) => !open)}
-              aria-expanded={moreOpen}
-              aria-controls={moreOpen ? moreId : undefined}
-              data-testid="more-actions"
-            >
-              More
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 12 12"
-                className={`size-3 fill-current ${moreOpen ? '' : 'rotate-180'}`}
+            <Popover open={moreOpen} onOpenChange={setMoreOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  // Print's "does not fit" warning, while Print is out of sight.
+                  variant={misfit ? 'destructive' : 'outline'}
+                  className="h-9"
+                  data-testid="more-actions"
+                >
+                  More
+                  {moreOpen ? <ChevronDownIcon /> : <ChevronUpIcon />}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                side="top"
+                align="end"
+                aria-label="More actions"
+                data-testid="more-actions-panel"
+                collisionPadding={12}
+                onEscapeKeyDown={keepMore}
+                onInteractOutside={keepMore}
+                className="max-h-[60vh] w-[calc(100vw-1.5rem)] gap-3 overflow-y-auto"
               >
-                <path d="M2 4.5 6 8.5 10 4.5z" />
-              </svg>
-            </Button>
+                {projectPicker}
+                <div className="flex flex-wrap items-center gap-2">
+                  {downloadButton}
+                  {sendButton}
+                  {printButton}
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
@@ -658,35 +715,25 @@ export function ActionBar({
             {printButton}
           </div>
         )}
-        {phone && moreOpen && (
-          <div
-            id={moreId}
-            role="group"
-            aria-label="More actions"
-            data-testid="more-actions-panel"
-            className="absolute inset-x-0 bottom-full max-h-[60vh] space-y-3 overflow-y-auto border-t border-line bg-surface px-3 py-3 shadow-xl"
-          >
-            {projectPicker}
-            <div className="flex flex-wrap items-center gap-2">
-              {downloadButton}
-              {sendButton}
-              {printButton}
-            </div>
-          </div>
-        )}
       </footer>
 
-      <Dialog
-        open={confirming !== null}
-        title="File in another project?"
-        onClose={() => setConfirming(null)}
-        footer={
-          confirming && (
-            <>
-              <Button variant="ghost" onClick={() => setConfirming(null)}>
-                Cancel
-              </Button>
+      <AlertDialog open={confirming !== null} onOpenChange={(open) => !open && setConfirming(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>File in another project?</AlertDialogTitle>
+            {confirming && (
+              <AlertDialogDescription data-testid="generate-project-confirm">
+                {subject} was last filed in <strong>{projectPath(confirming.remembered)}</strong>. File this in{' '}
+                <strong>{projectPath(confirming.chosen)}</strong>?
+              </AlertDialogDescription>
+            )}
+          </AlertDialogHeader>
+          {confirming && (
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
               <Button
+                type="button"
+                variant="outline"
                 onClick={() => {
                   setConfirming(null)
                   chooseProject(confirming.remembered)
@@ -697,7 +744,7 @@ export function ActionBar({
                 Use {projectName(confirming.remembered)}
               </Button>
               <Button
-                variant="primary"
+                type="button"
                 onClick={() => {
                   setConfirming(null)
                   void generate(confirming.chosen).catch(() => undefined)
@@ -706,17 +753,10 @@ export function ActionBar({
               >
                 File in {projectName(confirming.chosen)}
               </Button>
-            </>
-          )
-        }
-      >
-        {confirming && (
-          <p className="text-[13px]" data-testid="generate-project-confirm">
-            {subject} was last filed in <strong>{projectPath(confirming.remembered)}</strong>. File this in{' '}
-            <strong>{projectPath(confirming.chosen)}</strong>?
-          </p>
-        )}
-      </Dialog>
+            </AlertDialogFooter>
+          )}
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ImageDialog
         open={imageOpen}
@@ -753,6 +793,7 @@ export function ActionBar({
         project={{
           value: projectId,
           onChange: chooseProject,
+          folder: folderChoice,
           list: projects,
           disabled: generating || creatingProject,
           onCreating: setDialogCreating,
@@ -764,11 +805,8 @@ export function ActionBar({
 
 /**
  * The other things Generate can make from the preview: an image to share, and (#1289)
- * the render broken down by colour.
- *
- * #968 — the WAI-ARIA menu button pattern. Opening it (click, Enter, Space or the
- * arrows) puts focus on an item; the arrows, Home and End move between items, which are
- * out of the Tab order; Escape closes it back to the button, and Tab out closes it.
+ * the render broken down by colour. #968, #3672 — Radix's menu button: the arrows, Home,
+ * End and Escape, focus back on the button as it closes.
  */
 function GenerateMenu({
   disabled,
@@ -780,133 +818,52 @@ function GenerateMenu({
   /** Offered only when the render has colours to break down. */
   onColours?: (() => void) | undefined
 }) {
-  // Which item takes focus as it opens: the first, or the last for ArrowUp.
-  const [open, setOpen] = useState<'first' | 'last' | null>(null)
-  const root = useRef<HTMLDivElement>(null)
-  const menu = useRef<HTMLDivElement>(null)
-  const menuId = useId()
-
-  const items = () => Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
-  const close = (refocus: boolean) => {
-    setOpen(null)
-    // The shared Button takes no ref, so the trigger is found in the root.
-    if (refocus) root.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus()
-  }
-
-  useEffect(() => {
-    if (!open) return
-    const all = items()
-    const first = open === 'last' ? all.at(-1) : all[0]
-    first?.focus()
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(null)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      // Back to the button only from inside: an Escape elsewhere just closes it.
-      close(!!root.current?.contains(document.activeElement))
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  function onTriggerKey(event: ReactKeyboardEvent) {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-    event.preventDefault()
-    setOpen(event.key === 'ArrowUp' ? 'last' : 'first')
-  }
-
-  function onMenuKey(event: ReactKeyboardEvent) {
-    const all = items()
-    const at = all.indexOf(document.activeElement as HTMLElement)
-    const next =
-      event.key === 'ArrowDown'
-        ? all[(at + 1) % all.length]
-        : event.key === 'ArrowUp'
-          ? all[(at - 1 + all.length) % all.length]
-          : event.key === 'Home'
-            ? all[0]
-            : event.key === 'End'
-              ? all.at(-1)
-              : undefined
-    if (event.key === 'Tab') {
-      // Focus goes on to wherever Tab takes it; the menu does not stay open behind.
-      setOpen(null)
-      return
-    }
-    if (!next) return
-    event.preventDefault()
-    next.focus()
-  }
-
+  // The dialog opens once the menu has closed and put the focus back on its button, so
+  // the dialog returns it there when it closes in turn. A task, not a microtask: Radix
+  // returns the focus after the click's microtasks. Harmless if the bar unmounts first.
+  const after = (open: () => void) => () => setTimeout(open, 0)
+  const [open, setOpen] = useState(false)
   return (
-    <div ref={root} className="relative">
-      <Button
-        variant="primary"
-        onClick={() => setOpen((value) => (value ? null : 'first'))}
-        onKeyDown={onTriggerKey}
-        disabled={disabled}
-        aria-label="More to generate"
-        aria-haspopup="menu"
-        aria-expanded={open !== null}
-        aria-controls={open ? menuId : undefined}
-        data-testid="generate-menu"
-        className="rounded-l-none border-l-accent-ink/25 px-2"
-      >
-        <svg aria-hidden="true" viewBox="0 0 12 12" className="size-3 fill-current">
-          <path d="M2 4.5 6 8.5 10 4.5z" />
-        </svg>
-      </Button>
-      {open && (
-        <div
-          ref={menu}
-          id={menuId}
-          role="menu"
+    <DropdownMenu modal={false} open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          disabled={disabled}
+          // The APG menu button opens on ArrowUp too; Radix's only on Enter, Space and ArrowDown.
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setOpen(true)
+            }
+          }}
           aria-label="More to generate"
-          onKeyDown={onMenuKey}
-          className="absolute right-0 bottom-full z-30 mb-1 min-w-48 rounded-[6px] border border-line bg-surface py-1 shadow-xl"
+          data-testid="generate-menu"
+          className="h-9 rounded-l-none border-l border-l-primary-foreground/25 px-2"
         >
-          <button
-            type="button"
-            role="menuitem"
-            tabIndex={-1}
-            data-testid="generate-image"
-            className="block w-full px-3 py-1.5 text-left text-[13px] outline-none hover:bg-surface-2 focus-visible:bg-surface-2"
-            onClick={() => {
-              // Back to the button first, so the dialog returns focus there when it closes.
-              close(true)
-              onImage()
-            }}
-          >
-            Rendered image…
-            <span className="block text-[11px] text-faint">A high-resolution PNG of the view</span>
-          </button>
-          {onColours && (
-            <button
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              data-testid="generate-colours"
-              className="block w-full px-3 py-1.5 text-left text-[13px] outline-none hover:bg-surface-2 focus-visible:bg-surface-2"
-              onClick={() => {
-                close(true)
-                onColours()
-              }}
-            >
-              Colours…
-              <span className="block text-[11px] text-faint">Where each colour goes, one view per colour</span>
-            </button>
-          )}
-        </div>
-      )}
-    </div>
+          <ChevronDownIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        side="top"
+        align="end"
+        aria-label="More to generate"
+        // Tab leaves the menu closed, rather than kept in it (Radix holds it) or open behind.
+        onKeyDown={(event) => {
+          if (event.key === 'Tab') setOpen(false)
+        }}
+        className="w-auto min-w-56"
+      >
+        <DropdownMenuItem data-testid="generate-image" onSelect={after(onImage)} className="flex-col items-start gap-0">
+          Rendered image…
+          <span className="text-xs text-muted-foreground">A high-resolution PNG of the view</span>
+        </DropdownMenuItem>
+        {onColours && (
+          <DropdownMenuItem data-testid="generate-colours" onSelect={after(onColours)} className="flex-col items-start gap-0">
+            Colours…
+            <span className="text-xs text-muted-foreground">Where each colour goes, one view per colour</span>
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

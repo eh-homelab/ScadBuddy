@@ -141,8 +141,8 @@ async def test_kills_what_the_command_left_running_when_it_exits_normally(
     def running() -> bool:
         try:
             stat = Path(f"/proc/{pid}/stat").read_text()
-        except FileNotFoundError:
-            return False
+        except FileNotFoundError, ProcessLookupError:
+            return False  # gone, even between opening its stat and reading it
         return stat[stat.rindex(")") + 2] != "Z"
 
     try:

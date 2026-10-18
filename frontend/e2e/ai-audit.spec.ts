@@ -15,7 +15,8 @@ test.describe('AI activity in Settings (#258)', () => {
     await expect(entries.first()).toContainText('set_print_options')
     await expect(entries.first()).toContainText('approved by You')
 
-    await section.getByLabel('Outcome').selectOption('denied')
+    await section.getByRole('combobox', { name: 'Outcome' }).click()
+    await page.getByRole('option', { name: 'Denied' }).click()
     await expect(entries).toHaveCount(2)
 
     const retention = section.getByLabel('Keep entries for (days)')

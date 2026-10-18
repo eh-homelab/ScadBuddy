@@ -212,6 +212,17 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await store.load({ projectKey, sessionId })).toBeNull()
       })
 
+      it("refuses an append from a replica that still caches the key, so forget orphans no row (#3316)", async () => {
+        const sessionId = randomUUID()
+        const other = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+        // The other replica's key cache now holds the session's key, for 30 s.
+        await other.append({ projectKey, sessionId }, [entry('user')])
+        await forgetSubject({ sql: db.sql, keys }, `session-${sessionId}`)
+        await expect(other.append({ projectKey, sessionId }, [entry('assistant')])).rejects.toBeInstanceOf(SubjectForgotten)
+        const rows = await db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId}`
+        expect(rows).toHaveLength(0)
+      })
+
       it('keeps a mixed batch in order', async () => {
         const sessionId = randomUUID()
         const batch = [entry('user'), { type: 'last-prompt', text: 'x' }, entry('assistant'), { type: 'cost-state', totalCostUSD: 1 }]

@@ -65,12 +65,14 @@ from scadbuddy_durable.gate.names import (
 from scadbuddy_durable.gate.store import OpenInput, ResolveInput
 from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
-from scadbuddy_durable.session import tools
+from scadbuddy_durable.session import subagents, tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     FORK_POINT_QUERY,
+    MESSAGE_MAX,
     SEGMENT_CONTEXT_QUERY,
+    SEGMENT_TIMEOUT,
     TOOLS_QUEUE,
     TURN_QUERY,
     FinishTurn,
@@ -135,9 +137,13 @@ class Harness:
     gate_activities: GateActivities | None = None
     claude: ScriptedClaude | None = None
 
-    async def session(self, conn: Conn) -> tuple[str, WorkflowHandle[Any, Any]]:
+    async def session(
+        self, conn: Conn, execution_timeout: timedelta = timedelta(minutes=10)
+    ) -> tuple[str, WorkflowHandle[Any, Any]]:
         sid = await insert_session(conn)
-        handle = await start_session(self.client, sid, self.queue)
+        handle = await start_session(
+            self.client, sid, self.queue, execution_timeout=execution_timeout
+        )
         self.handles.append(handle)
         return sid, handle
 
@@ -247,6 +253,28 @@ async def test_history_holds_no_plaintext(
     raw = b"".join(e.SerializeToString() for e in history.events)
     assert b"red bracket" not in raw
     assert b"binary/scadbuddy-subject" in raw
+
+
+async def test_a_segment_may_run_as_long_as_a_subagent_needs(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    # A subagent runs inside its parent's segment: at the plugin's 10 minutes an authoring
+    # subagent never finished, and every retry started it over (#4026).
+    # The server caps an activity's timeout at the run's, so the run outlasts the segment.
+    sid, handle = await harness.session(agent_db, execution_timeout=timedelta(hours=2))
+    await send(handle, "a long one")
+    await settled(connect, sid)
+    history = await handle.fetch_history()
+    segments = [
+        e.activity_task_scheduled_event_attributes
+        for e in history.events
+        if e.activity_task_scheduled_event_attributes.activity_type.name == "run_claude_segment"
+    ]
+    assert segments
+    for s in segments:
+        assert s.start_to_close_timeout.ToTimedelta() == SEGMENT_TIMEOUT
+        assert s.heartbeat_timeout.ToTimedelta() == timedelta(seconds=30)
+    assert SEGMENT_TIMEOUT.total_seconds() < subagents.TOKEN_TTL_S
 
 
 async def test_a_large_turn_crosses_history_as_references(
@@ -572,7 +600,13 @@ async def test_only_the_budgets_own_failure_ends_a_turn_as_the_budgets(
         await send(handle, f"fail: {error}")
         await settled(connect, sid)
     log = await events(agent_db, sid)
-    assert [e["code"] for e in log if e["type"] == "error"] == [code]
+    errors = [e for e in log if e["type"] == "error"]
+    assert [e["code"] for e in errors] == [code]
+    if code == "turn_failed":
+        # The session's own text survives in the failure, quote and all (#3568). Whole,
+        # since finish_turn keeps only the first MESSAGE_MAX characters (#3915).
+        assert len(error) < MESSAGE_MAX
+        assert error in errors[0]["message"]
 
 
 async def test_a_send_while_a_turn_is_finishing_is_refused_busy(

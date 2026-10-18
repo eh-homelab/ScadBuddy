@@ -1,4 +1,4 @@
-import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate, setHandler } from '@temporalio/workflow'
+import { ApplicationFailure, condition, continueAsNew, defineQuery, defineSignal, defineUpdate, setHandler } from '@temporalio/workflow'
 
 // A stand-in for DurableSession's gate handlers (spec 2026-10-01 §6.6; the real one is
 // phase 5c, in agent-durable): one parked entry, the `pending_input` Query, the
@@ -12,10 +12,25 @@ type RespondArgs = { request_id: string; response: { kind: string; decision?: st
 export const pendingInput = defineQuery<unknown[]>('pending_input')
 export const respond = defineUpdate<{ kind: string; outcome: string }, [RespondArgs]>('respond')
 export const cancelInput = defineUpdate<'cancelled' | 'none', [{ reason: string }]>('cancel_input')
+export const release = defineSignal('release')
+export const rollover = defineSignal('rollover')
 export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 
-export async function gateStandIn(entryId: string, kind: 'approval' | 'answer'): Promise<string> {
-  const entry: Entry = { id: entryId, kind, state: 'pending' }
+/**
+ * `failures`: how many responds fail in the handler, after the validator took them, as
+ * one whose `resolve_input` could not be written does: the entry is pending again.
+ */
+export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', hold = false, resolved = false, failures = 0): Promise<string> {
+  let failing = failures
+  let rolled = false
+  setHandler(rollover, () => {
+    rolled = true
+  })
+  let released = false
+  setHandler(release, () => {
+    released = true
+  })
+  const entry: Entry = { id: entryId, kind, state: resolved ? 'resolved' : 'pending' }
   let interrupted: string | undefined
   setHandler(pendingInput, () =>
     entry.state === 'pending'
@@ -24,9 +39,15 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer'):
   )
   setHandler(
     respond,
-    (args) => {
+    async (args) => {
+      if (failing > 0) {
+        failing -= 1
+        throw ApplicationFailure.nonRetryable('resolve_input failed', 'ResolveFailed')
+      }
       entry.state = 'resolved'
-      return { kind: entry.kind, outcome: args.response.decision === 'approve' ? 'approved' : 'denied' }
+      // A held handler has taken effect but not answered: the slow `resolve_input` activity.
+      if (hold) await condition(() => released)
+      return { kind: entry.kind, outcome: kind === 'answer' ? 'answered' : args.response.decision === 'approve' ? 'approved' : 'denied' }
     },
     {
       validator: (args) => {
@@ -36,7 +57,9 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer'):
       },
     },
   )
-  setHandler(cancelInput, () => {
+  setHandler(cancelInput, ({ reason }) => {
+    // A cancel_input that fails in its handler, as one whose resolve_input could not be written.
+    if (reason === 'fail in the handler') throw ApplicationFailure.nonRetryable('resolve_input failed', 'ResolveFailed')
     const was = entry.state
     entry.state = 'resolved'
     return was === 'pending' ? 'cancelled' : 'none'
@@ -45,6 +68,8 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer'):
     interrupted = reason
     entry.state = 'resolved'
   })
-  await condition(() => interrupted !== undefined)
+  await condition(() => interrupted !== undefined || (rolled && entry.state === 'resolved'))
+  // Continue-as-new, as DurableSession does between turns: the entry's state goes with it.
+  if (interrupted === undefined) return continueAsNew<typeof gateStandIn>(entryId, kind, false, true)
   return interrupted ?? ''
 }

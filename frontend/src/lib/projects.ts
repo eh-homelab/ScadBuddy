@@ -30,7 +30,7 @@ export interface ProjectList {
 }
 
 /**
- * Fetches the project list once and reports the last project it went to through
+ * Fetches the project list once and reports the Settings default project through
  * `onLoaded`, so the parent can seed its value. `enabled` false fetches nothing, for a
  * picker handed a list by its parent.
  */

@@ -185,7 +185,9 @@ class PrintLinkStore:
         }
 
     async def delete_outputs(self, output_ids: Iterable[str]) -> None:
-        """Forget deleted outputs' links and sends. Bambuddy's archives are not touched."""
+        """Forget deleted outputs' links and sends, and the attachments of each print no
+        link names any more (#3047): ScadBuddy no longer shows that print. Bambuddy's
+        archives, their photos and the ``Media/`` copies are not touched."""
         keys = [PrintSubject.output(output_id).key for output_id in output_ids]
         await asyncio.to_thread(self._delete_subjects, keys)
 
@@ -279,8 +281,16 @@ class PrintLinkStore:
 
     def _delete_subjects(self, keys: list[str]) -> None:
         with self._pool.connection() as conn, conn.transaction():
-            conn.execute("DELETE FROM print_links WHERE subject = ANY(%s)", (keys,))
+            unlinked = conn.execute(
+                "DELETE FROM print_links WHERE subject = ANY(%s) RETURNING archive_id", (keys,)
+            ).fetchall()
             conn.execute("DELETE FROM print_sends WHERE subject = ANY(%s)", (keys,))
+            if unlinked:
+                conn.execute(
+                    "DELETE FROM print_attachments AS a WHERE a.archive_id = ANY(%s) AND NOT"
+                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
+                    (sorted({row["archive_id"] for row in unlinked}),),
+                )
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:

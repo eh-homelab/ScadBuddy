@@ -11,10 +11,19 @@ import pytest
 from scadbuddy import main
 from scadbuddy.activity.index import ACTIVITY_PRUNE_MARGIN, ActivityIndex
 from scadbuddy.activity.models import ActivityRow
-from scadbuddy.library.settings_store import SettingsPatch, StoredSettings
+from scadbuddy.library.settings_store import (
+    RETENTION_MAX_SECONDS,
+    SettingsPatch,
+    StoredSettings,
+)
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.workflows.housekeeping import ACTIVITY_PATCH, ACTIVITY_SWEEP, SWEEPS
+from scadbuddy.workflows.housekeeping import (
+    ACTIVITY_PATCH,
+    ACTIVITY_SWEEP,
+    GIT_SWEEP,
+    SWEEPS,
+)
 from tests.conftest import PgPool
 from tests.test_activity_agent_ingest import AgentTables, agent_tables  # noqa: F401
 from tests.test_activity_render import make_job
@@ -64,8 +73,11 @@ def age(pg_pool: PgPool, id: str, interval: str) -> None:
         )
 
 
-def test_sweep_is_last_and_patched() -> None:
-    assert SWEEPS[-1] == ACTIVITY_SWEEP == "housekeeping_activity"
+def test_sweep_keeps_its_place_and_is_patched() -> None:
+    """Added after the git sweep, behind its patch: a later sweep goes after it, never
+    before, or a replay of a run that had it would schedule another activity there."""
+    assert ACTIVITY_SWEEP == "housekeeping_activity"
+    assert SWEEPS.index(ACTIVITY_SWEEP) == SWEEPS.index(GIT_SWEEP) + 1
     assert ACTIVITY_PATCH == "housekeeping-activity"
 
 
@@ -81,6 +93,26 @@ def test_settings_fields() -> None:
     with pytest.raises(ValueError):
         SettingsPatch(activity_repair_window_seconds=8 * DAY)
     assert SettingsPatch(activity_follow=["browser"]).activity_follow == ["browser"]
+
+
+def test_a_retention_stored_past_the_maximum_is_read_as_it() -> None:
+    """A row saved before the bound (656868686867 s) cannot put the prune out of range."""
+    stored = StoredSettings.model_validate(
+        {
+            "activity_ttl_seconds": 656868686867.0,
+            "print_run_retention_seconds": 656868686867.0,
+            "operation_retention_seconds": 7 * DAY,
+        }
+    )
+    assert stored.activity_ttl_seconds == RETENTION_MAX_SECONDS
+    assert stored.print_run_retention_seconds == RETENTION_MAX_SECONDS
+    assert stored.operation_retention_seconds == 7 * DAY
+    with pytest.raises(ValueError):
+        SettingsPatch(activity_ttl_seconds=RETENTION_MAX_SECONDS + 1)
+
+
+async def test_prune_with_the_maximum_ttl_is_in_range(index: ActivityIndex) -> None:
+    assert await index.prune(RETENTION_MAX_SECONDS, DAY) == 0
 
 
 async def test_prune_deletes_old_finished_only(pg_pool: PgPool, index: ActivityIndex) -> None:

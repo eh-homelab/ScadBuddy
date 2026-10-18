@@ -16,7 +16,6 @@ from functools import partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import trimesh
 from fastapi import status
 from pydantic import TypeAdapter, ValidationError
 
@@ -28,8 +27,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModelPathError
 from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
 from scadbuddy.meshmodel.compile import compile_scene
-from scadbuddy.meshmodel.edits import Edit, MeshOf, SceneEditError, apply_edits, removed_parameters
+from scadbuddy.meshmodel.edits import Edit, apply_edits, removed_parameters
 from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.scene import (
     MESHES_DIR,
     SCENE_NAME,
@@ -42,6 +42,7 @@ from scadbuddy.meshmodel.scene import (
     source_name,
     text_sha256,
 )
+from scadbuddy.meshmodel.shared import SceneEditError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import (
     KindsBuild,
@@ -49,6 +50,8 @@ from scadbuddy.operations.kinds import (
     to_thread_to_end,
     waiting_on_bambuddy,
 )
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.reads import NativeReads, no_native, reads_for
 from scadbuddy.render.bambu3mf import stl_3mf
 from scadbuddy.render.objects3mf import UnreadableObjectsError, check_stl, read_objects
 from scadbuddy.render.read_budget import ReadBudget, budget_of
@@ -150,22 +153,6 @@ def unused_meshes(directory: Path, scene: Scene) -> list[str]:
     )
 
 
-def mesh_loader(directory: Path) -> MeshOf:
-    """Each part mesh read once per run."""
-    cache: dict[str, trimesh.Trimesh] = {}
-
-    def mesh_of(path: str) -> trimesh.Trimesh:
-        if path not in cache:
-            data = (directory / path).read_bytes()
-            mesh = trimesh.load(io.BytesIO(data), file_type="3mf", force="mesh")
-            if not isinstance(mesh, trimesh.Trimesh):
-                raise SceneEditError(f"{path} holds no mesh")
-            cache[path] = mesh
-        return cache[path]
-
-    return mesh_of
-
-
 def stl_as_3mf(data: bytes, name: str, budget: ReadBudget) -> bytes:
     """An untrusted STL as a 3MF: refused past the triangle budget before trimesh loads
     it whole (`check_stl`), and as unreadable when it holds no mesh."""
@@ -202,7 +189,11 @@ def _answered(fn: Step) -> Step:
     return answered
 
 
-def mesh_kinds(state: AppState) -> list[OperationKind]:
+def mesh_kinds(state: AppState, library: NativeReads = no_native) -> list[OperationKind]:
+    """The mesh model kinds; a library source is read from ``library`` when it serves
+    (#3827), with no Bambuddy, asked when the kind runs, since the kinds are built before
+    the settings say which library serves."""
+
     def _record(record: Any) -> dict[str, Any]:
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped
@@ -236,12 +227,21 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             # The check read the file's record; only its bytes are fetched here, as they
             # are, so an STL is budgeted below before anything loads it.
             filename, kind = checked["filename"], checked["file_type"]
-            library = LibrarySource(
-                file_id=source["file_id"], colours=[], plates=[], filename=filename, file_type=kind
+            native = await library()
+            file = LibrarySource(
+                file_id=source["file_id"],
+                colours=[],
+                plates=[],
+                filename=filename,
+                file_type=kind,
+                files=native,
             )
-            settings = await asyncio.to_thread(state.settings_store.load)
-            async with client_for(settings) as client:
-                payload = await library.download(client)
+            if native is not None:
+                payload = await file.download(None)
+            else:
+                settings = await asyncio.to_thread(state.settings_store.load)
+                async with client_for(settings) as client:
+                    payload = await file.download(client)
             if payload is None:
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, f"{filename} is too large to read"
@@ -264,8 +264,14 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         if source["kind"] != "bambuddy_library":
             return {}
         settings = await asyncio.to_thread(state.settings_store.load)
-        async with waiting_on_bambuddy(), client_for(settings) as client:
-            file = await client.library_file(source["file_id"])
+        native = await library()
+        if native is not None:
+            file = await native.library_file(source["file_id"])
+        else:
+            async with waiting_on_bambuddy(), client_for(settings) as client:
+                file = await reads_for(source["file_id"], client, None).library_file(
+                    source["file_id"]
+                )
         kind = (file.file_type or "").lower()
         if kind == SLICED_TYPE or not printable(kind):
             what = "sliced" if kind == SLICED_TYPE else f"a {kind or 'file of unknown type'}"
@@ -409,7 +415,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         raise TypeError(
             f"the mesh model kinds need the API's AppState, not a {type(core).__name__}"
         )
-    return mesh_kinds(core)
+    return mesh_kinds(core, components.get(PRINT_LIBRARY).serving_native)
 
 
 OPERATION_KINDS: KindsBuild = _kinds

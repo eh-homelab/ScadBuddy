@@ -531,7 +531,7 @@ export class SessionGate {
     }
   }
 
-  async #resolve(parked: Parked, outcome: InputOutcome, responder: Responder, response: unknown, reason: string | null | undefined, timer: boolean): Promise<boolean> {
+  async #resolve(parked: Parked, outcome: InputOutcome, responder: Responder, response: unknown, reason: string | null | undefined, timer: boolean, rawResponse?: unknown): Promise<boolean> {
     // A response is written only after its entry's row: a call is parked (and so
     // answerable) before open_input has written it. One whose open failed was never
     // asked; its call is refused by parkOrRefuse.
@@ -548,6 +548,7 @@ export class SessionGate {
         outcome,
         responder,
         response,
+        ...(rawResponse === undefined ? {} : { rawResponse }),
         reason,
       } satisfies ResolveInput)) as boolean
     } catch (err) {
@@ -601,10 +602,10 @@ export class SessionGate {
     const who: Responder = { kind: String(responder.kind ?? ''), id: String(responder.id ?? ''), label: String(responder.label ?? '') }
     if ('decision' in valid) {
       const outcome = valid.decision === 'approve' ? 'approved' : 'denied'
-      await this.#resolve(parked, outcome, who, { decision: valid.decision }, null, false)
+      await this.#resolve(parked, outcome, who, { decision: valid.decision }, null, false, args.response)
       return { kind: parked.entry.kind, outcome }
     }
-    await this.#resolve(parked, 'answered', who, { answers: [...valid.answers] }, null, false)
+    await this.#resolve(parked, 'answered', who, { answers: [...valid.answers] }, null, false, args.response)
     return { kind: parked.entry.kind, outcome: 'answered' }
   }
 

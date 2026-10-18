@@ -74,6 +74,8 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.download_cache import DownloadCache
@@ -303,6 +305,7 @@ async def _context(
     paths: DataPaths,
     budget: ReadBudget,
     downloads: DownloadCache | None = None,
+    native: LibraryReads | None = None,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     settings = store.load()
@@ -326,6 +329,7 @@ async def _context(
         cache=paths.cache,
         budget=budget,
         downloads=downloads,
+        native=native,
     )
 
 
@@ -424,6 +428,7 @@ async def post_run(
     check: ParamsCheckDep,
     paths: PathsDep,
     state: StateDep,
+    library: PrintLibraryDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -452,6 +457,7 @@ async def post_run(
         paths,
         budget,
         downloads_of(state),
+        await library.serving_native(),
     )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -479,6 +485,7 @@ async def post_preview(
     check: ParamsCheckDep,
     paths: PathsDep,
     state: StateDep,
+    library: PrintLibraryDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
@@ -495,6 +502,7 @@ async def post_preview(
         paths,
         budget,
         downloads_of(state),
+        await library.serving_native(),
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -524,6 +532,7 @@ async def post_apply(
     check: ParamsCheckDep,
     paths: PathsDep,
     state: StateDep,
+    library: PrintLibraryDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -551,6 +560,7 @@ async def post_apply(
         paths,
         budget,
         downloads_of(state),
+        await library.serving_native(),
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

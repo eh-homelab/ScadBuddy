@@ -13,11 +13,12 @@ import hashlib
 import io
 import json
 import logging
+import tempfile
 import weakref
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, NamedTuple
+from typing import BinaryIO, Literal, NamedTuple, Protocol
 
 from fastapi import status
 from pydantic import BaseModel
@@ -39,11 +40,22 @@ from scadbuddy.render.bambu3mf import (
     ArchiveTooLargeError,
     FilamentMap,
     layout_of,
+    plate_origin,
     replate_3mf,
+    rezipped,
     state_nozzles,
 )
+from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
-from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
+from scadbuddy.render.plate import (
+    PRIME_TOWER_SIDE,
+    PlateFitError,
+    PlateGeometry,
+    Rect,
+    plate_for,
+    tower_beside,
+    tower_reaches,
+)
 from scadbuddy.render.provenance import content_key
 from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import normalise_colour
@@ -279,12 +291,15 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return state_nozzles(
-                payload,
-                nozzle_stats=target.nozzle_stats,
-                nozzle_volume_type=target.nozzle_volume_type,
-                filament_colour=colours,
-                filament_map=target.filament_map,
+            return towers_within_reach(
+                state_nozzles(
+                    payload,
+                    nozzle_stats=target.nozzle_stats,
+                    nozzle_volume_type=target.nozzle_volume_type,
+                    filament_colour=colours,
+                    filament_map=target.filament_map,
+                ),
+                target.plate,
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -304,6 +319,95 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
     return recolour_3mf(payload, colours) if colours is not None else payload
+
+
+def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
+    """The bed the file was laid out on, from its ``printable_area`` (``["0x0",
+    "180x0", ...]``): what its plates' origins are spaced by."""
+    area = settings.get("printable_area")
+    if not isinstance(area, list) or not area:
+        return None
+    try:
+        points = [tuple(float(v) for v in str(point).split("x")) for point in area]
+    except ValueError:
+        return None
+    if any(len(point) != 2 for point in points):
+        return None
+    return (max(x for x, _ in points), max(y for _, y in points))
+
+
+def _tower_value(value: float) -> str:
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
+    """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
+    reach moved beside that plate's objects, by #105's rule (:func:`tower_beside`),
+    else unchanged (#4014).
+
+    An author's file keeps the tower where its printer put it: library file 2440, laid
+    out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
+    below x 25, so every slice failed with "Found G-code in unprintable area". Only an
+    unreachable tower moves; a plate whose objects cannot be read, or that leaves no
+    room, keeps its own, and the slicer says why. The objects are read where the file
+    places them, less their plate's origin on the file's own bed."""
+    if plate.model is None:
+        return payload  # no printer chosen: nothing to judge a tower against
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    xs, ys = settings.get("wipe_tower_x"), settings.get("wipe_tower_y")
+    bed = _source_bed(settings)
+    if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) != len(ys) or bed is None:
+        return payload
+    try:
+        towers = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
+    except ValueError:
+        return payload
+    try:
+        side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
+    except (TypeError, ValueError):
+        side = PRIME_TOWER_SIDE
+    unreachable = [
+        index
+        for index, tower in enumerate(towers, start=1)
+        if not tower_reaches(tower, plate, side)
+    ]
+    if not unreachable:
+        return payload
+    try:
+        # Read within the read budget, model settings included: a library file is
+        # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
+        read = plate_boxes(payload)
+    except UnreadableObjectsError:
+        return payload
+    boxes, count = read.boxes, read.count
+    source = PlateGeometry(
+        model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
+    )
+    moved = list(towers)
+    for index in unreachable:
+        if index > count or index not in boxes:
+            continue
+        low, high = boxes[index]
+        ox, oy = plate_origin(index, count, source)
+        corner = tower_beside(
+            Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)),
+            plate,
+        )
+        if corner is not None:
+            moved[index - 1] = corner
+    if moved == towers:
+        return payload
+    settings["wipe_tower_x"] = [_tower_value(x) for x, _ in moved]
+    settings["wipe_tower_y"] = [_tower_value(y) for _, y in moved]
+    logger.info(
+        "moved the file's prime tower where every extruder reaches",
+        extra={"printer_model": plate.model, "towers": len(moved)},
+    )
+    return rezipped(
+        payload, {PROJECT_SETTINGS_NAME: (json.dumps(settings, indent=4) + "\n").encode()}
+    )
 
 
 def nozzles_stated(payload: bytes) -> bool:
@@ -633,7 +737,8 @@ async def _left_unrecorded(
     if not rows:
         return None
     recorded = await uploads.recorded([row.id for row in rows])
-    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], digest)
     if found is not None:
         logger.info(
             "an earlier attempt's upload was never recorded; taking it",
@@ -643,11 +748,10 @@ async def _left_unrecorded(
 
 
 async def _same_bytes(
-    client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], payload: bytes
+    client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], digest: str
 ) -> LibraryFile | None:
-    """The newest of ``rows`` whose ``file_hash`` is the sha256 of ``payload``, or
-    ``None``. A row whose read fails is passed over."""
-    digest = hashlib.sha256(payload).hexdigest()
+    """The newest of ``rows`` whose ``file_hash`` is ``digest``, a sha256, or ``None``. A
+    row whose read fails is passed over."""
     # Newest first: a retry's own upload is the latest of its name.
     for row in sorted(rows, key=lambda row: row.id, reverse=True):
         try:
@@ -870,6 +974,101 @@ async def _still_there(
         await uploads.forget(key, copy.id)
         return None
     return CopyFound(filename=found.filename)
+
+
+class Sink(Protocol):
+    """Where :func:`ensure_raw_copy`'s ``write`` puts the bytes."""
+
+    def write(self, data: bytes, /) -> int: ...
+
+
+class _Hashing:
+    """A spool file that counts and hashes what is written to it."""
+
+    def __init__(self, out: BinaryIO) -> None:
+        self.out = out
+        self.size = 0
+        self.digest = hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        self.size += len(data)
+        self.digest.update(data)
+        return self.out.write(data)
+
+
+async def _raw_left_unrecorded(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    folder: int | None,
+    filename: str,
+    size: int,
+    digest: str,
+) -> LibraryFile | None:
+    """The raw copy an earlier attempt uploaded into ``folder`` and died before
+    recording, or ``None``: one named ``filename``, of ``size`` bytes hashing to
+    ``digest``, that nothing records (:func:`_left_unrecorded`'s check, #1145)."""
+    listed = await _listing(client, folder)
+    if listed is None:
+        return None
+    name = filename.casefold()
+    rows = [row for row in listed if row.filename.casefold() == name and row.file_size == size]
+    if not rows:
+        return None
+    recorded = await uploads.recorded([row.id for row in rows])
+    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], digest)
+    if found is not None:
+        logger.info(
+            "an earlier attempt's raw copy was never recorded; taking it",
+            extra={"library_file_id": found.id, "folder_id": found.folder_id},
+        )
+    return found
+
+
+#: The ``target_key`` of a copy uploaded as the file is, with nothing laid out (#3827).
+RAW_TARGET = "raw"
+
+
+async def ensure_raw_copy(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    settings: StoredSettings,
+    *,
+    folder_id: int | None,
+    filename: str,
+    media_type: str,
+    write: Callable[[Sink], Awaitable[None]],
+) -> int:
+    """A copy of a file Bambuddy does not hold, uploaded as it is into ``folder_id`` (the
+    inbox when ``None``) and recorded under ``key`` as :data:`RAW_TARGET` (#3827): a
+    native library file with no 3MF to lay out. One recorded there is reused while
+    Bambuddy still has it; else ``write`` spools the bytes and they are uploaded. In the
+    inbox the new copy supersedes the key's others there, as :func:`upload_copy`'s does.
+    Held under the copy's folder lock, as :func:`ensure_uploaded` is. An upload an
+    earlier attempt left unrecorded is taken rather than uploaded again, as
+    :func:`_left_unrecorded` takes one (#1145): the bytes are hashed as they spool."""
+    folder = folder_id if folder_id is not None else settings.library_folder_id
+    lock = _copy_lock_key(key, folder, settings)
+    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0] or ''}:{lock[1]}"):
+        for copy in await uploads.for_output(key):
+            if copy.folder_id != folder or copy.target_key != RAW_TARGET:
+                continue
+            if await _still_there(client, uploads, key, copy, tolerate_errors=True) is not None:
+                return copy.id
+        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+            hashed = _Hashing(spool)
+            await write(hashed)
+            uploaded = await _raw_left_unrecorded(
+                client, uploads, folder, filename, hashed.size, hashed.digest.hexdigest()
+            ) or await upload_into(client, filename, spool, folder_id=folder, media_type=media_type)
+        await uploads.record(
+            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET)
+        )
+        if is_inbox(folder, settings):
+            for copy in await uploads.for_output(key):
+                if copy.id != uploaded.id and copy.folder_id == folder:
+                    await _delete_copy(client, uploads, key, copy.id, strict=False)
+    return uploaded.id
 
 
 @dataclass(frozen=True)

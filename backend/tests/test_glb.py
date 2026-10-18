@@ -8,7 +8,8 @@ import pytest
 import trimesh
 
 from scadbuddy.render.glb import bounding_box, read_glb, write_glb
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.paint import PaintCodeError
+from scadbuddy.render.split import ColourPart, Paint, painted_pieces
 
 
 def _parts() -> list[ColourPart]:
@@ -129,3 +130,33 @@ def test_a_preview_reads_back_as_the_parts_it_was_written_from(tmp_path: Path) -
         ("Color 2", "#1F6FEB"),
     ]
     assert bounding_box(parts) == bounding_box(_parts())
+
+
+def test_a_painted_part_is_one_mesh_per_colour_it_prints(tmp_path: Path) -> None:
+    """#3956: the painting shows. A box with one face painted whole in extruder 2 and one
+    split between extruders 1 and 2 ("481") reads back as its own colour and both paints."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ["" for _ in box.faces]
+    codes[0], codes[1] = "8", "481"  # extruder 2 whole; split 1 / 2
+    part = ColourPart(1, "Color 1", "#FFFFFF", box, Paint(tuple(codes), ("#FF0000", "#00FF00")))
+    write_glb([part], tmp_path / "p.glb")
+    faces = {p.colour: len(p.mesh.faces) for p in read_glb(tmp_path / "p.glb")}
+    assert faces == {"#FFFFFF": 10, "#00FF00": 2, "#FF0000": 1}
+
+
+def test_a_painting_that_names_an_extruder_with_no_colour_is_refused() -> None:
+    """A mesh model's `.paint.json` reaches here without the 3MF reader's check."""
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    codes = ("8",) + ("",) * (len(box.faces) - 1)  # extruder 2, of one colour
+    with pytest.raises(PaintCodeError, match="extruder 2"):
+        painted_pieces([ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",)))])
+
+
+def test_each_colours_mesh_shares_its_corners() -> None:
+    """A painted part's colour meshes are not triangle soup: a box with one painted face
+    keeps its eight corners in its own colour's mesh, not three per face."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ("4",) + ("",) * (len(box.faces) - 1)
+    pieces = painted_pieces([ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",)))])
+    own = next(p for p in pieces if p.colour == "#FFFFFF")
+    assert len(own.mesh.vertices) == 8

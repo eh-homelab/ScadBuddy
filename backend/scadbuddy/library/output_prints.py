@@ -20,6 +20,12 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.library.outputs import PlateSend, PrintRoute
 
+#: The fields a row lays over the file's even when ``None``: the last print's project
+#: is its own, ``None`` for a folder or no project (#3790 review). Every other null
+#: id leaves the file's. A row written before then with a null project lays it over an
+#: older ``meta.json``'s project too, as intended: the row is always the newer print.
+ALWAYS_OVERLAID = frozenset({"project_id"})
+
 
 class LastPrint(BaseModel):
     queue_item_id: int | None = None
@@ -29,8 +35,13 @@ class LastPrint(BaseModel):
     plates: list[PlateSend] = Field(default_factory=list)
 
     def fields(self) -> dict[str, Any]:
-        """What the row overrides on an ``OutputMeta``: a null id leaves the file's."""
-        return {key: value for key, value in self.__dict__.items() if value is not None}
+        """What the row overrides on an ``OutputMeta``: a null id leaves the file's,
+        except the fields in :data:`ALWAYS_OVERLAID`."""
+        return {
+            key: value
+            for key, value in self.__dict__.items()
+            if value is not None or key in ALWAYS_OVERLAID
+        }
 
 
 class OutputPrintStore:
@@ -47,7 +58,10 @@ class OutputPrintStore:
         plates: list[PlateSend],
     ) -> None:
         """A slice-and-queue print's ids; a null id leaves the one already recorded, as
-        ``record_send`` left an omitted field alone. ``plates`` is every plate so far."""
+        ``record_send`` left an omitted field alone. The project is the run's, every plate
+        alike, so ``None`` (a print into a library folder or no project) clears an
+        earlier one rather than leaving it the output's default (#3790 review).
+        ``plates`` is every plate so far."""
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_last_prints AS t"
@@ -57,7 +71,7 @@ class OutputPrintStore:
                 " queue_item_id = COALESCE(EXCLUDED.queue_item_id, t.queue_item_id),"
                 " print_route = EXCLUDED.print_route,"
                 " slice_job_id = COALESCE(EXCLUDED.slice_job_id, t.slice_job_id),"
-                " project_id = COALESCE(EXCLUDED.project_id, t.project_id),"
+                " project_id = EXCLUDED.project_id,"
                 " plates = EXCLUDED.plates, recorded_at = now()",
                 (
                     output_id,

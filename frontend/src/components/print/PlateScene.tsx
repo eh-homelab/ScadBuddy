@@ -6,7 +6,7 @@ import * as THREE from 'three'
 import { designColorOf } from '../../lib/glbColor'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
-import { Button } from '../ui/Button'
+import { Button } from '@/components/ui/button'
 
 type Props = {
   url: string
@@ -91,7 +91,7 @@ export function PreviewFailure({ url, error, retry }: { url: string; error: Erro
           : "The plate's preview cannot be shown for this file."
         : "The plate's preview could not be loaded."}
       {!refused && (
-        <Button size="sm" onClick={retry}>
+        <Button type="button" size="sm" variant="outline" onClick={retry}>
           Try again
         </Button>
       )}

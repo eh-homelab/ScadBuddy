@@ -1,8 +1,11 @@
 # bambuddy-fs
 
-Mounts Bambuddy's print library, through ScadBuddy's API, as a FUSE filesystem, so
+Mounts ScadBuddy's print library, through ScadBuddy's API, as a FUSE filesystem, so
 folders and files can be browsed, copied in and out, renamed and deleted with ordinary
 tools (#2686). Design: `docs/superpowers/specs/2026-10-13-bambuddy-fs-design.md`.
+Which library that is depends on ScadBuddy's `library_backend` (#3827): Bambuddy's
+trash and external-file notes below apply to `bambuddy`, while on `native` every
+delete goes to ScadBuddy's trash for 30 days.
 
 It needs `fuse3` (`fusermount3`) and `/dev/fuse`. By default it sends traces and
 metrics, with the host's name, to eh-homelab's collector; `--no-telemetry` turns that
@@ -14,38 +17,38 @@ The module's `go.mod` has a `replace` for the generated client (`../scadbuddy-cl
 so build it from the workspace at the repo root:
 
 ```bash
-go build -o bambuddy-fs ./tools/go/bambuddy-fs
-mkdir -p ~/bambuddy
-./bambuddy-fs mount --api http://scadbuddy.lan/api/v1 --all ~/bambuddy
+go install ./tools/go/bambuddy-fs     # into $(go env GOPATH)/bin; again after a pull
+bambuddy-fs mount --all --background  # the deployed ScadBuddy, at ~/bambuddy
+bambuddy-fs status
+bambuddy-fs umount
 ```
 
-The process stays in the foreground and unmounts cleanly on SIGINT or SIGTERM. If the
-mount is busy it logs that and exits non-zero; close what uses it and run
-`fusermount3 -u <mountpoint>`.
+`mount` defaults `--api` to `$BAMBUDDY_FS_API`, else the deployed ScadBuddy, and the
+mountpoint to `$BAMBUDDY_FS_DIR`, else `~/bambuddy` (made if missing). Without
+`--background` it stays in the foreground and unmounts cleanly on SIGINT or SIGTERM;
+if the mount is busy it logs that and exits non-zero.
 
-A helper that builds from the checkout it lives in and mounts at `~/bambuddy` is
-`scripts/bambuddy-mount.sh`. Run it directly, or put it on PATH with
-`ln -s "$PWD/scripts/bambuddy-mount.sh" ~/bin/bambuddy-mount`:
+`--background` starts it again detached, its output appended to
+`<state-dir>/mount.log` after a `===` banner (so the lines naming unsent writes outlive
+the next mount), and returns once the mount is up, or prints what the log gained and
+fails. Every mount records its pid in `<state-dir>/mount.pid`.
 
-```bash
-scripts/bambuddy-mount.sh [mount] [--ro] [--api URL] [--dir DIR] [-- extra flags]
-scripts/bambuddy-mount.sh umount
-scripts/bambuddy-mount.sh status
-```
-
-`SCADBUDDY_REPO`, `BAMBUDDY_FS_API` and `BAMBUDDY_FS_DIR` override its defaults. It
-passes `--allow-other` only when given `--allow-other` (or `BAMBUDDY_FS_ALLOW_OTHER=1`),
-for the reason below. It appends to `$XDG_STATE_HOME/bambuddy-fs/mount.log`, each mount
-after a `===` banner, so the lines naming unsent writes outlive the next mount; `status`
-checks both the mount and its process.
+`umount` runs `fusermount3 -u`, then waits for the process, then sends it SIGTERM,
+then SIGKILL: on WSL, Windows reaches the mount through `\\wsl$` from another mount
+namespace, whose copy keeps the FUSE connection open after the unmount, so the process
+may not exit on its own. Its unsent writes are on disk either way. `status` exits 0
+only when the mountpoint is mounted and its process is running. Both take the
+mountpoint and `--state-dir` of the mount they act on.
 
 ### WSL and Windows
 
-Windows Explorer reaches a WSL mount only when other users may see it. Uncomment
-`user_allow_other` in `/etc/fuse.conf`, mount with `--allow-other`, then open
-`\\wsl$\<distro>\home\<you>\bambuddy`.
+Windows Explorer reaches a WSL mount only when other users may see it. Run
+`bambuddy-fs allow-other` once: it turns on `user_allow_other` in `/etc/fuse.conf`
+(uncommenting it, or adding the line), through `sudo` unless run as root, and does
+nothing if it is already on. Mounts then pass FUSE `allow_other` by default (remount
+a running one). Then open `\\wsl$\<distro>\home\<you>\bambuddy`.
 
-`--allow-other` has a cost: the mount does not check permissions (no
+`allow_other` has a cost: the mount does not check permissions (no
 `default_permissions`), so with it every local user, and every container that shares
 the mount, can rename, overwrite and delete library files through it, with the
 mounting user's access to ScadBuddy. Use it only on a machine whose users you trust.
@@ -53,7 +56,7 @@ mounting user's access to ScadBuddy. Use it only on a machine whose users you tr
 ## Container image
 
 Published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs` (`sha-<7-char commit>`, `latest`
-for main's head, and the version on a `v*` tag; amd64 and arm64) by
+for main's head, and the version on a `v*` tag; amd64 only) by
 `.github/workflows/build-go-image.yml` on every push to main that touches Go. Build it from the repo root, since it needs the
 workspace and the root `vendor/`:
 
@@ -98,16 +101,21 @@ paths above. With no arguments the image prints `mount --help`.
 ## Flags
 
 ```
-bambuddy-fs mount --api <url> [--ro] [--all] [--allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] <mountpoint>
+bambuddy-fs mount [--api <url>] [--background] [--ro] [--all] [--allow-other | --no-allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] [<mountpoint>]
+bambuddy-fs umount [--state-dir <dir>] [<mountpoint>]
+bambuddy-fs status [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs unsent [--state-dir <dir>]
+bambuddy-fs allow-other
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--api` | ScadBuddy's API root, like `http://host/api/v1`. Required. |
+| `--api` | ScadBuddy's API root, like `http://host/api/v1`. Default `$BAMBUDDY_FS_API`, else the deployed ScadBuddy. |
+| `--background` | Run detached and return once mounted (see "Build and run"). |
 | `--ro` | Every write fails with `EROFS`. |
 | `--all` | List every file. Without it the mount lists what the library dialog lists by default (unsliced 3MFs). |
-| `--allow-other` | FUSE `allow_other`: other users and processes see the mount. |
+| `--allow-other` | Fail unless FUSE `allow_other` is allowed (other users and processes see the mount). It is on by default whenever `/etc/fuse.conf` has `user_allow_other`, or for root. |
+| `--no-allow-other` | Only the mounting user sees the mount. |
 | `--attr-ttl` | How long listings are cached, and the kernel's entry and attribute timeout. Default `5s`. |
 | `--cache-dir` | Downloaded contents and files being written, under `<cache-dir>/<API host>[_<port>]/`, so two ScadBuddy instances never share contents (file IDs are each one's own). Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. One mount at a time uses an API's cache (it holds a `lock` there). |
 | `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
@@ -213,6 +221,10 @@ copy of what was written: cache cleaners may empty `~/.cache`. One mount at a ti
 a state directory (it holds `<state-dir>/lock`); a second fails to start. Records do not
 say which ScadBuddy they are for: a mount of another `--api` over the same state
 directory would send them there, so give each API its own `--state-dir`.
+After a `library_backend` flip, a queued write aimed at a folder of the other library
+lands at the top level of the new one: its folder ID is a 404 there, and a 404 whose
+folder the library no longer has sends the entry to the top level
+(`internal/fsys/unsent.go` `sendFailed`).
 
 `close()`, `fsync()` and `release` then succeed: the bytes are as safe on local disk as
 they would be in the library, and an app told its save failed would report it, or

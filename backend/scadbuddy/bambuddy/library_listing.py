@@ -1,4 +1,5 @@
-"""The Library page's listing (#313): Bambuddy's folder tree and one folder's files."""
+"""The Library page's listing (#313): the folder tree and one folder's files, Bambuddy's
+or ScadBuddy's own (`print_library`)."""
 
 from __future__ import annotations
 
@@ -9,9 +10,9 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import Folder, LibraryListRow
 from scadbuddy.bambuddy.print_source import is_sliced, printable
+from scadbuddy.print_library.reads import LibraryListingSource
 
 #: What the page lists without Advanced: unsliced 3MFs (spec 2026-09-28 §2).
 DEFAULT_TYPES: frozenset[str] = frozenset({"3mf"})
@@ -25,7 +26,8 @@ class LibraryFolderView(BaseModel):
     depth: int = 0
     file_count: int | None = None
     #: The Bambuddy project this folder is linked to: the project lists the files directly
-    #: in it, so a move out of it takes a file out of the project (#2670).
+    #: in it, so a move out of it takes a file out of the project (#2670), and a batch
+    #: print can take that file list (#2724).
     project_id: int | None = None
     project_name: str | None = None
 
@@ -100,7 +102,7 @@ def folder_views(folders: Iterable[Folder]) -> list[LibraryFolderView]:
 
 
 async def list_library(
-    client: BambuddyClient, *, folder_id: int | None, show_all: bool
+    client: LibraryListingSource, *, folder_id: int | None, show_all: bool
 ) -> LibraryListing:
     """One read of the tree and one of the folder, however many files it holds. The two
     are read at once (#3633): each is most of a second on a library of hundreds of

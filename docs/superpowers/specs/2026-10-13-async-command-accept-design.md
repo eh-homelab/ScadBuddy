@@ -114,7 +114,21 @@ and answers it exactly as the POST would have.
 - If Temporal does not answer the describe, the route answers 503
   `temporal-unavailable` as today.
 - The Update always has an id. When the request carries no `Idempotency-Key`, the route
-  makes one, so there is always something to follow.
+  makes one, so there is always something to follow. A render that supersedes another
+  still needs the client's own key (422 without), checked before a key is made: a made
+  key is new on every send, so a re-send would release the superseded job again. A made
+  key therefore names only a keyless render's own Update, and no supersede release is
+  keyed by it.
+- **The render route's whole wait shrinks too.** Its outer bound is `SUBMIT_DEADLINE`
+  around `_started` (the accept, a closing run's `CLOSING_WAIT` retry, and the
+  supersede). Opted in, that bound is `FAST_ACCEPT` plus the connect margin, not
+  `SUBMIT_DEADLINE`, so a closing run never holds the POST past it: it answers the 202,
+  and the follow waits the closing run out instead.
+- **The 202 names the workflow, not the run.** The follow's `get_update_handle` targets
+  the latest run. If the run that accepted the Update has closed and another request
+  started the next one, the follow gets `NOT_FOUND` and the client re-sends (§5.2): one
+  extra claim on the new run, released as any other. Following by run id would avoid it,
+  at the cost of the run id in every 202; it is rare, so the 202 stays as it is.
 - **Opt-in by the client:** only a request with `Prefer: respond-async` (RFC 7240) gets
   the 202. Every other request keeps today's 503 `command-still-accepting`, so a cached
   SPA bundle during a rollout, the agent, and any script keep working unchanged. The

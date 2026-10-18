@@ -1,4 +1,7 @@
 import base64
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -6,9 +9,11 @@ import pytest
 
 from scadbuddy_durable.credentials import (
     LEGACY_FORMAT_MESSAGE,
+    cooldown_until,
     credential_aad,
     credential_env,
     open_credential,
+    rate_limit_reset,
     usable_credentials,
 )
 from scadbuddy_durable.secrets import Envelope, SealError, kek_from_base64
@@ -170,3 +175,36 @@ def test_an_unknown_kind_is_refused_not_treated_as_a_gateway(vectors: dict[str, 
             base_url=v["base_url"],
             envelope=_envelope(v),
         )
+
+
+NOW = datetime(2026, 10, 17, 22, 16, 5, tzinfo=UTC)
+
+
+RESET_VECTORS = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "agent"
+        / "test"
+        / "fixtures"
+        / "rate-limit-reset-vectors.json"
+    ).read_text()
+)["cases"]
+
+
+@pytest.mark.parametrize("case", RESET_VECTORS, ids=lambda c: f"{c['text']!r}@{c['now']}")
+def test_a_rate_limit_reset_is_read_from_the_result_text(case: dict[str, Any]) -> None:
+    """#4088: the reset Claude Code's result names, the next such time in UTC; `at`
+    null keeps the default cooldown. credentialErrors.ts `rateLimitResetFromText` is
+    held to the same vectors (#4121 review)."""
+    now = datetime.fromisoformat(case["now"])
+    reset = rate_limit_reset(case["text"], now)
+    if case["at"] is None:
+        assert reset is None
+        assert cooldown_until(now, reset) == now + timedelta(seconds=60)
+    else:
+        assert reset == datetime.fromisoformat(case["at"])
+
+
+def test_a_named_reset_is_still_held_to_a_day() -> None:
+    until = rate_limit_reset("resets Oct 21, 4am (UTC)", NOW)
+    assert cooldown_until(NOW, until) == NOW + timedelta(hours=24)

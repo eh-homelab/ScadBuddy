@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../sessions/protocol.js'
 import { busKindOf } from '../sessions/busEvents.js'
+import { responseHash } from './canonical.js'
 import { parseRequestId } from './ids.js'
 import { cut } from './limits.js'
 
@@ -77,6 +78,8 @@ export type ResolveInput = {
   outcome: InputOutcome
   responder: Responder
   response?: unknown
+  /** The response as the person sent it, whose hash is kept for a retry's comparison (#3724). */
+  rawResponse?: unknown
   reason?: string | null
 }
 
@@ -218,6 +221,7 @@ async function resolved(
   responder: Responder,
   response: unknown,
   reason: string | null,
+  hash: string | null = null,
 ): Promise<void> {
   const sid = String(row.session_id)
   const rid = row.request_id
@@ -228,10 +232,10 @@ async function resolved(
   }
   await tx`
     INSERT INTO ai_input_responses
-      (request_id, session_id, kind, outcome, response, responder, reason, hops)
+      (request_id, session_id, kind, outcome, response, responder, reason, hops, response_hash)
     VALUES (${rid}, ${sid}, ${row.kind}, ${outcome},
             ${response === undefined || response === null ? null : tx.json(response as never)}::jsonb,
-            ${tx.json(responder)}, ${reason}, ${tx.json(hops)})`
+            ${tx.json(responder)}, ${reason}, ${tx.json(hops)}, ${hash})`
   const person = responder.kind !== 'system'
   const events: ServerEvent[] = []
   if (row.kind === 'approval') {
@@ -456,7 +460,7 @@ export async function resolveInput(sql: Sql, args: ResolveInput): Promise<boolea
     const deleted = await tx<PendingRow[]>`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId} RETURNING *, created_at::text AS created_at_text`
     const row = deleted[0]
     if (row === undefined) return false
-    await resolved(tx, row, args.outcome, args.responder, args.response, args.reason ?? null)
+    await resolved(tx, row, args.outcome, args.responder, args.response, args.reason ?? null, args.rawResponse === undefined ? null : responseHash(args.rawResponse))
     return true
   })
 }

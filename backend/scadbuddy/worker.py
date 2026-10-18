@@ -6,17 +6,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import faulthandler
 import logging
 import os
 import signal
+import socket
 import time
-from collections.abc import Awaitable, Callable, Generator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.applications import Starlette
@@ -24,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from temporalio.client import Client
+from temporalio.runtime import Runtime
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
@@ -32,7 +37,7 @@ from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
-from scadbuddy.bambuddy.output_reader import RemoteOutputs
+from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     PrintProgress,
@@ -45,6 +50,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
+from scadbuddy.core.loop_watch import LoopWatch
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -69,6 +75,8 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsStore, load_render_store_settings
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.rack.usage import RackUsageStore, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
@@ -102,6 +110,7 @@ from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.projects_worker import projects_worker
+from scadbuddy.workflows.sdk_metrics import SDK_READ_TIMEOUT, sdk_exposition, sdk_runtime
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -535,6 +544,13 @@ async def _serve_versioned(
 
 
 class _HealthServer(uvicorn.Server):
+    def __init__(self, config: uvicorn.Config, sock: socket.socket | None = None) -> None:
+        super().__init__(config)
+        self._sock = sock
+
+    async def serve(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().serve(sockets if sockets is not None or self._sock is None else [self._sock])
+
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
         # `main` owns SIGTERM/SIGINT: they set `stop`, which stops this server too.
@@ -601,9 +617,14 @@ async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _Da
 
 
 def _health_app(
-    settings: Settings, metrics: Metrics, store: StoreBundle | None, task_queue: str
+    settings: Settings,
+    metrics: Metrics,
+    store: StoreBundle | None,
+    task_queue: str,
+    sdk_port: int | None = None,
 ) -> Starlette:
-    """``store`` is the render worker's; the print worker holds none (#1060)."""
+    """``store`` is the render worker's; the print worker holds none (#1060). With
+    ``sdk_port``, ``/metrics`` carries the Temporal SDK's own series too (#3788)."""
     data = _DataUsage(settings.data_dir)
 
     async def healthz(_: Request) -> JSONResponse:
@@ -619,17 +640,77 @@ def _health_app(
             except Exception:
                 # Like the API's: keep the last values, never fail the scrape.
                 logger.exception("could not read the store's gauges")
-        return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
+        body = generate_latest(metrics.registry)
+        if sdk_port is not None and sdk_reader is not None:
+            body += await sdk_exposition(sdk_port, sdk_reader)
+        return Response(body, media_type=CONTENT_TYPE_LATEST)
 
-    return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
+    @contextlib.asynccontextmanager
+    async def lifespan(_: Starlette) -> AsyncIterator[None]:
+        if sdk_reader is None:
+            yield
+            return
+        async with sdk_reader:
+            yield
+
+    # One connection to the SDK's exporter for every scrape, closed with the server;
+    # none when the worker serves no SDK series.
+    sdk_reader = httpx.AsyncClient(timeout=SDK_READ_TIMEOUT) if sdk_port is not None else None
+    return Starlette(
+        routes=[Route("/healthz", healthz), Route("/metrics", exposition)], lifespan=lifespan
+    )
+
+
+#: Where a worker serves /healthz and /metrics: a port to bind, or a socket already
+#: bound (#3807: a test holds its port from picking it to serving, so nothing else on
+#: the runner can take it in between).
+HealthListen = int | socket.socket
+
+
+def _sdk_runtime(settings: Settings) -> tuple[Runtime | None, int | None]:
+    """The Runtime a worker connects with when it connects for itself, and the port
+    its /metrics reads the SDK's series from (#3788); neither when the port is 0, or
+    when the exporter cannot bind it: the series are optional, the worker is not."""
+    port = settings.temporal_sdk_metrics_port
+    if not port:
+        return None, None
+    try:
+        return sdk_runtime(port), port
+    except ValueError as err:
+        # The SDK raises ValueError when its exporter's port is taken (two workers in
+        # one network namespace, as in a compose or dev run), and nothing narrower:
+        # temporalio 1.34 maps the core's bind error to a plain ValueError.
+        logger.warning("serving no Temporal SDK metrics on port %d: %s", port, err)
+        return None, None
+
+
+async def _own_client(settings: Settings, client: Client | None) -> tuple[Client, int | None]:
+    """``client``, or one this worker connects for itself on the SDK metrics Runtime,
+    and the port its /metrics reads them from: none for a client it was handed, whose
+    Runtime it did not choose."""
+    if client is not None:
+        return client, None
+    runtime, sdk_port = _sdk_runtime(settings)
+    return (
+        await connect(settings.temporal_address, settings.temporal_namespace, runtime=runtime),
+        sdk_port,
+    )
 
 
 def _health_server(
-    settings: Settings, metrics: Metrics, store: StoreBundle | None, port: int, task_queue: str
+    settings: Settings,
+    metrics: Metrics,
+    store: StoreBundle | None,
+    listen: HealthListen,
+    task_queue: str,
+    sdk_port: int | None = None,
 ) -> _HealthServer:
-    app = _health_app(settings, metrics, store, task_queue)
+    app = _health_app(settings, metrics, store, task_queue, sdk_port)
+    if isinstance(listen, socket.socket):
+        config = uvicorn.Config(app, log_config=None, access_log=False)
+        return _HealthServer(config, listen)
     return _HealthServer(
-        uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, access_log=False)
+        uvicorn.Config(app, host="0.0.0.0", port=listen, log_config=None, access_log=False)
     )
 
 
@@ -714,7 +795,7 @@ async def run_worker(
     *,
     stop: asyncio.Event | None = None,
     stop_now: asyncio.Event | None = None,
-    health_port: int | None = HEALTH_PORT,
+    health_port: HealthListen | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
@@ -729,18 +810,23 @@ async def run_worker(
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
-        if client is None:
-            client = await connect(settings.temporal_address, settings.temporal_namespace)
+        client, sdk_port = await _own_client(settings, client)
         server = (
             _health_server(
-                settings, deps.metrics, store, health_port, settings.temporal_task_queue_render
+                settings,
+                deps.metrics,
+                store,
+                health_port,
+                settings.temporal_task_queue_render,
+                sdk_port,
             )
             if health_port is not None
             else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
+            async with LoopWatch(deps.metrics):
+                await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -779,9 +865,13 @@ class PrintWorkerDeps:
     operations: OperationStore
     activities: list[Callable[..., Any]]
     follow_print: Callable[..., Any]
+    #: Native library files, read through the API's internal routes (#3827).
+    library: LibraryReads | None = None
 
     async def aclose(self) -> None:
         await self.outputs.aclose()
+        if isinstance(self.library, RemoteLibrary):
+            await self.library.aclose()
         await self.events.aclose()
         await asyncio.to_thread(self.rack.close)
         await asyncio.to_thread(self.settings_store.close)
@@ -789,6 +879,10 @@ class PrintWorkerDeps:
 
 class ApiUrlMissingError(ValueError):
     pass
+
+
+async def _given(library: LibraryReads) -> LibraryReads | None:
+    return library
 
 
 def build_print_deps(settings: Settings) -> PrintWorkerDeps:
@@ -811,6 +905,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
     outputs = RemoteOutputs(settings.api_internal_url)
+    # Asked of the API whichever library serves: on ``bambuddy`` it answers every native
+    # id with the 404 of a file not found.
+    library = RemoteLibrary(settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT))
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
 
@@ -842,6 +939,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         uploads=uploads,
         links=links,
         archive_cache=ArchiveCache(),
+        library=partial(_given, library),
     )
     printing = PrintActivities(
         PrintDeps(
@@ -853,6 +951,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             observer=observer,
             rack=rack,
             links=links,
+            library=library,
         )
     )
     return PrintWorkerDeps(
@@ -872,6 +971,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             ),
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
+        library=library,
     )
 
 
@@ -880,7 +980,7 @@ async def run_print_worker(
     *,
     stop: asyncio.Event | None = None,
     stop_now: asyncio.Event | None = None,
-    health_port: int | None = HEALTH_PORT,
+    health_port: HealthListen | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
     """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
@@ -890,8 +990,7 @@ async def run_print_worker(
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
         await deps.events.start()
-        if client is None:
-            client = await connect(settings.temporal_address, settings.temporal_namespace)
+        client, sdk_port = await _own_client(settings, client)
         queue = settings.temporal_task_queue_bambuddy
         build_id = settings.revision
         workers = [
@@ -899,21 +998,22 @@ async def run_print_worker(
             follow_worker(client, queue, deps.follow_print, build_id=build_id),
         ]
         server = (
-            _health_server(settings, deps.metrics, None, health_port, queue)
+            _health_server(settings, deps.metrics, None, health_port, queue, sdk_port)
             if health_port is not None
             else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _serve_versioned(
-                client,
-                workers,
-                stop,
-                build_id=build_id,
-                deployment_name=PRINT_DEPLOYMENT_NAME,
-                drain_timeout=None,
-                stop_now=stop_now,
-            )
+            async with LoopWatch(deps.metrics):
+                await _serve_versioned(
+                    client,
+                    workers,
+                    stop,
+                    build_id=build_id,
+                    deployment_name=PRINT_DEPLOYMENT_NAME,
+                    drain_timeout=None,
+                    stop_now=stop_now,
+                )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -930,7 +1030,7 @@ async def run_projects_worker(
     settings: Settings,
     *,
     stop: asyncio.Event | None = None,
-    health_port: int | None = HEALTH_PORT,
+    health_port: HealthListen | None = HEALTH_PORT,
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
     §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
@@ -958,8 +1058,9 @@ async def run_projects_worker(
     await asyncio.to_thread(settings_store.open)
     try:
         await events.start()
+        runtime, sdk_port = _sdk_runtime(settings)
         client = await connect_flows(
-            settings.temporal_address, settings.temporal_namespace, keys[0]
+            settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
         )
         store = FlowStore(settings_store.pool, events=events)
         queue = settings.temporal_task_queue_projects
@@ -985,13 +1086,13 @@ async def run_projects_worker(
             [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
         )
         server = (
-            _health_server(settings, metrics, None, health_port, queue)
+            _health_server(settings, metrics, None, health_port, queue, sdk_port)
             if health_port is not None
             else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            async with worker:
+            async with LoopWatch(metrics), worker:
                 await stop.wait()
         finally:
             if server is not None and serving is not None:
@@ -1061,6 +1162,9 @@ def main() -> None:
         # Not an assert, which python -O strips (#3020 review).
         raise SystemExit(f"queue {queue!r} has no service name")
     configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
+    # `kill -USR1 1` in the pod writes every thread's stack to stderr (#3788): the
+    # loop watch logs a stall by itself, this is for a hang it does not see.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     asyncio.run(_main(settings, queue))
 
 

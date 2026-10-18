@@ -71,6 +71,12 @@ class LibraryIndex:
         #: The one read waiting for the read in flight to end, per source: every request
         #: too new for the read in flight joins it, so a burst is one more read, not many.
         self._queued: dict[str, asyncio.Task[LibrarySnapshot]] = {}
+        #: The source of the read started last: a read of another, landing late, is not
+        #: kept. Set when a read starts, not on every request, so a request holding the
+        #: settings from before a change does not turn it back without reading. A request
+        #: that finds the old source stale still starts its refresh, and so turns it back:
+        #: the new source's read in flight is then not kept, costing one more read later.
+        self._latest: str | None = None
 
     async def snapshot(
         self, source: str, connect: Connect, *, fresh: bool = False
@@ -109,25 +115,40 @@ class LibraryIndex:
         if reading is not None:
             queued = self._queued.get(source)
             if queued is None:
-                queued = asyncio.ensure_future(self._after(source, connect, reading[1]))
+                queued = asyncio.ensure_future(
+                    self._after(source, connect, reading[1], queued_at=self._clock())
+                )
                 queued.add_done_callback(_log_failure)
                 self._queued[source] = queued
             return queued
         return self._start(source, connect)
 
     async def _after(
-        self, source: str, connect: Connect, before: asyncio.Task[LibrarySnapshot]
+        self,
+        source: str,
+        connect: Connect,
+        before: asyncio.Task[LibrarySnapshot],
+        *,
+        queued_at: float,
     ) -> LibrarySnapshot:
-        """A read that starts once ``before`` ends: after every request that joined it."""
+        """A read that starts once ``before`` ends: after every request that joined it.
+        A read another request started meanwhile, after this one was queued, answers
+        them all instead of a second read at once."""
         try:
             await asyncio.wait([before])
         finally:
             if self._queued.get(source) is asyncio.current_task():
                 del self._queued[source]
+        reading = self._reading.get(source)
+        if reading is not None and reading[0] >= queued_at:
+            # Shielded, defensively: nothing cancels this task but close(), which cancels
+            # the joined read too; a future cancel must not reach a read others wait on.
+            return await asyncio.shield(reading[1])
         return await self._start(source, connect)
 
     def _start(self, source: str, connect: Connect) -> asyncio.Task[LibrarySnapshot]:
         started = self._clock()
+        self._latest = source
         task = asyncio.ensure_future(self._load(source, connect, started))
         task.add_done_callback(_log_failure)
         self._reading[source] = (started, task)
@@ -148,8 +169,9 @@ class LibraryIndex:
                 del self._reading[source]
         snapshot = LibrarySnapshot(folders=folder_views(tree), files=files, read_at=started)
         kept = self._kept.get(source)
-        # A read that began before the one kept is older than it, and is not kept.
-        if kept is None or kept.read_at <= started:
+        # A read that began before the one kept is older than it, and is not kept; nor is
+        # one of a source no longer asked for (a URL or key changed while it ran).
+        if source == self._latest and (kept is None or kept.read_at <= started):
             # One Bambuddy at a time: a changed URL or key drops what the old one had.
             self._kept = {source: snapshot}
         self._failed.pop(source, None)

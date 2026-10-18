@@ -26,6 +26,18 @@ export type LoggedEvent = { seq: number; event: ServerEvent }
 export const DEFAULT_POLL_MS = 1000
 const PAGE = 500
 
+/**
+ * The `WHERE` of a session's `user.turn` rows with `turnId`, in `ai_session_events`: the
+ * one copy of how a turn's start is found, for every reader of it (#3361). A `turnId`
+ * logged twice matches both rows; every reader takes the latest (`ORDER BY seq DESC`),
+ * so they agree on which start they use (#3750). Its columns are unqualified, so it
+ * assumes `ai_session_events` is the only table in scope with a `session_id` or an
+ * `event` column; a join that adds one must qualify them instead.
+ */
+export function userTurnRows(sql: Sql, sessionId: string, turnId: string) {
+  return sql`session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}`
+}
+
 export class EventLog {
   private readonly sql: Sql
   private readonly pollMs: number
@@ -112,8 +124,7 @@ export class EventLog {
    */
   async userTurnText(sessionId: string, turnId: string): Promise<string | undefined> {
     const [row] = await this.sql<{ event: string }[]>`
-      SELECT event FROM ai_session_events
-      WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}
+      SELECT event FROM ai_session_events WHERE ${userTurnRows(this.sql, sessionId, turnId)}
       ORDER BY seq DESC LIMIT 1`
     const turn = row ? (JSON.parse(row.event) as ServerEvent) : undefined
     return turn?.type === 'user.turn' ? turn.text : undefined

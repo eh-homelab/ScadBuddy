@@ -11,14 +11,17 @@ sweep is best effort, as the loop's were: one that fails is logged, fails its ac
 (the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
 tries again.
 
-The ``library`` worker is unversioned (unlike the render worker), so a run left open
-across a deploy replays on the new code: ``Housekeeping.run`` must stay
-replay-compatible. A change to its command sequence (a step added, the loop reordered)
-goes behind ``workflow.patched``. A run that fails on replay anyway ends at its
-`housekeeping_timeout`. Activities are not covered by that: a replica still on the old
-build takes a sweep the new one added to `SWEEPS` and fails it as unregistered, and a
-sweep is not retried, so it waits for the next tick. A release that adds a sweep is
-rolled out with ``Recreate`` (README, "Uploaded files").
+The ``library`` worker is versioned (#4090): the ``scadbuddy-library`` Worker
+Deployment, each API build one version of it, made current at start
+(`main._run_library_worker`). ``Housekeeping`` is AUTO_UPGRADE
+(`VersionedHousekeeping`): a run outlives a rollout (up to its `housekeeping_timeout`),
+so it moves to the current build on its next workflow task and replays there.
+``Housekeeping.run`` must stay replay-compatible: a change to its command sequence (a
+step added, the loop reordered) goes behind ``workflow.patched``. A run that fails on
+replay anyway ends at its `housekeeping_timeout`. The activity tasks of an
+AUTO_UPGRADE run start on the run's target version, the current build, so a sweep a
+new build adds to `SWEEPS` is never handed to an old replica that would fail it as
+unregistered; an old replica only finishes the attempts it had already started.
 """
 
 from __future__ import annotations
@@ -42,10 +45,10 @@ from temporalio.client import (
     ScheduleUpdate,
     ScheduleUpdateInput,
 )
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, VersioningBehavior
 from temporalio.exceptions import ActivityError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.worker import Worker, WorkflowRunner
+from temporalio.worker import Worker, WorkerDeploymentConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 with workflow.unsafe.imports_passed_through():
@@ -93,7 +96,11 @@ PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
 PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
 #: #2715: remove what a print run's lost slice start sliced (`bambuddy.lost_slices`).
 #: Its own sweep, out of `PREVIEWS_SWEEP`, so it stays on the prune Schedule: Bambuddy
-#: keeps a finished job only 30 minutes. Behind its own patch.
+#: keeps a finished job only 30 minutes. Behind its own patch. With the sweeps on it
+#: runs from both Schedules, whose overlap SKIP is each its own, so two may overlap:
+#: harmless, since a file is deleted only while it still has its job's name (a second
+#: delete finds it gone, warns and settles on the next tick) and finishing a lost start
+#: is an idempotent update.
 LOST_SLICES_SWEEP = "housekeeping_sweep_lost_slices"
 LOST_SLICES_PATCH = "housekeeping-sweep-lost-slices"
 #: #2289: pack the models repository (`ModelHistory.maintain`) once loose objects pile
@@ -105,6 +112,13 @@ GIT_PATCH = "housekeeping-maintain-models-git"
 ACTIVITY_SWEEP = "housekeeping_activity"
 #: The `workflow.patched` id that adds `ACTIVITY_SWEEP` to a run.
 ACTIVITY_PATCH = "housekeeping-activity"
+#: #3047: forget the attachments of archives deleted in Bambuddy. Behind its own patch,
+#: and after `ACTIVITY_SWEEP`, so a run without the patch is today's run exactly.
+ATTACHMENTS_SWEEP = "housekeeping_sweep_print_attachments"
+ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
+#: The native print library's trash purge and orphan blobs (#3827); after the attachments.
+LIBRARY_SWEEP = "housekeeping_sweep_library"
+LIBRARY_PATCH = "housekeeping-sweep-library"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -119,14 +133,19 @@ SWEEPS = (
     LOST_SLICES_SWEEP,
     GIT_SWEEP,
     ACTIVITY_SWEEP,
+    ATTACHMENTS_SWEEP,
+    LIBRARY_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
 #: of lost slice starts, findable only while Bambuddy keeps the job (#2715); and the
-#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6).
+#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6);
+#: and the native print library's trash purge and orphan blobs (#3827), which the generic
+#: blob sweep skips, so with the sweeps off nothing else would collect them. Behind
+#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
 #: Not the dialog's background slices (`PREVIEWS_SWEEP`): they obey the sweeps' switch,
 #: so with the sweeps off they stay in Bambuddy's library.
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP)
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP, LIBRARY_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -150,6 +169,10 @@ PREVIEWS_TIMEOUT = timedelta(minutes=5)
 GIT_TIMEOUT = timedelta(minutes=12)
 #: The activity sweep is a repair pass over four tables and one delete.
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
+#: One Bambuddy archive read per print with attachments, and a delete per gone one.
+ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
+#: The library sweep purges trash past 30 days and deletes the blobs no row names.
+LIBRARY_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -166,6 +189,10 @@ def sweep_timeout(sweep: str) -> timedelta:
         return GIT_TIMEOUT
     if sweep == ACTIVITY_SWEEP:
         return ACTIVITY_TIMEOUT
+    if sweep == ATTACHMENTS_SWEEP:
+        return ATTACHMENTS_TIMEOUT
+    if sweep == LIBRARY_SWEEP:
+        return LIBRARY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -195,6 +222,10 @@ class Housekeeping:
                 continue
             if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
                 continue
+            if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
+                continue
+            if sweep == LIBRARY_SWEEP and not workflow.patched(LIBRARY_PATCH):
+                continue
             try:
                 await workflow.execute_activity(
                     sweep,
@@ -209,6 +240,20 @@ class Housekeeping:
         return failed
 
 
+@workflow.defn(name=HOUSEKEEPING_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedHousekeeping(Housekeeping):
+    """``Housekeeping`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE: a
+    Schedule's run lasts up to its `housekeeping_timeout`, longer than a rollout, and
+    Pinned it would hold the old build's last replica until it ended or be stranded
+    when that replica stopped. Its own class because an unversioned worker cannot
+    complete a workflow that declares a behavior (the tests' workers). Changes still
+    go behind ``workflow.patched``, in ``Housekeeping``."""
+
+    @workflow.run
+    async def run(self, sweeps: list[str] | None = None) -> list[str]:
+        return await super().run(sweeps)
+
+
 def library_worker(
     client: Client,
     task_queue: str,
@@ -217,6 +262,7 @@ def library_worker(
     workflows: Sequence[type] = (),
     workflow_runner: WorkflowRunner | None = None,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+    deployment_config: WorkerDeploymentConfig | None = None,
 ) -> Worker:
     """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
     library commands' ``Operation``, the preview backfill). A stop gives a running
@@ -225,14 +271,20 @@ def library_worker(
     `main.SWEEP_SHUTDOWN_JOIN` more for its thread to return (#1708), so the lifespan
     does not close the stores under it. ``workflow_runner`` is the app's
     `client.sandboxed_runner` (#2014), passed in: this module runs in the sandbox, so
-    it does not import the client's."""
+    it does not import the client's. With ``deployment_config`` (the API's,
+    `client.library_deployment`, #4090) it is versioned and serves
+    `VersionedHousekeeping`, and every one of ``workflows`` must name its own
+    versioning behavior: the deployment has no default, so the SDK refuses one that
+    does not."""
+    housekeeping = Housekeeping if deployment_config is None else VersionedHousekeeping
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[Housekeeping, *workflows],
+        workflows=[housekeeping, *workflows],
         activities=activities,
         workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
+        deployment_config=deployment_config,
     )
 
 

@@ -3,8 +3,9 @@ name: Build Image
 
 # Publishes ghcr.io/eh-homelab/scadbuddy for the cluster to pull, the AI
 # agent sidecar as ghcr.io/eh-homelab/scadbuddy-agent (the `agent` job below),
-# and the durable sessions sidecar as ghcr.io/eh-homelab/scadbuddy-agent-durable
-# (the `agent-durable` job, #1056).
+# the durable sessions sidecar as ghcr.io/eh-homelab/scadbuddy-agent-durable
+# (the `agent-durable` job, #1056), and the slicer worker as
+# ghcr.io/eh-homelab/scadbuddy-slicer (the `slicer` job, #3821).
 #
 # THE PACKAGE MUST BE PUBLIC. Nodes on the target cluster pull ghcr.io through
 # an ANONYMOUS Nexus proxy (`ghcr-proxy`), so a per-pod imagePullSecret
@@ -14,13 +15,15 @@ name: Build Image
 # Change visibility); it cannot be set from a workflow. If a node ever reports
 # `denied` / `unauthorized` pulling this image, check visibility FIRST.
 #
-# The publish jobs do not run on pull_request: a PR has no GHCR write token,
-# and ci.yml already builds the same Dockerfile (both targets) on every PR. But
-# ci.yml builds amd64 only, so the one PR-time job here, `openscad-lsp-arm64`,
-# builds the arm64 leg of the `openscad-lsp` stage under QEMU and runs the
-# binary (#199). It is not a required check (the required one is ci.yml's
-# "CI Summary", which cannot `needs:` a job in another workflow), so a red run
-# is visible on the PR but does not block the merge by itself.
+# Nothing here runs on pull_request: a PR has no GHCR write token, and ci.yml
+# already builds the same Dockerfile (both targets) on every PR.
+#
+# amd64 only. arm64 was built under QEMU, which made every publish several
+# times slower and doubled the cache footprint, for an architecture no node
+# runs (the spec pins the workload to amd64). The Dockerfile still handles
+# `TARGETARCH=arm64` (the openscad-lsp and temporal CLI checksums), so adding
+# `linux/arm64` back to `platforms` (plus docker/setup-qemu-action) is all a
+# multi-arch build needs.
 #
 # This workflow only PUBLISHES. Deploying is a separate step so it can be
 # switched off without touching the build: deploy-main.yml (workflow_run on
@@ -32,29 +35,21 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  # Only the `openscad-lsp-arm64` job runs for a PR. The stage copies nothing
-  # from the build context, so the Dockerfile and this file are all it reads.
-  pull_request:
-    paths:
-      - Dockerfile
-      - .github/workflows/build-image.yml
   workflow_dispatch:
 
 # Never cancel a publish. Two concurrent pushes to main would otherwise race on
 # the `main` tag and the shared buildcache, and a cancelled push leaves a
-# half-written manifest list behind. A PR run publishes nothing, so a newer
-# push to the PR cancels it.
+# half-written manifest behind.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build and push (amd64 + arm64)
-    if: github.event_name != 'pull_request'
+    name: Build and push (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -69,15 +64,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      # arm64 is emulated: ubuntu-latest is amd64, so binfmt handlers are what
-      # make the second architecture possible at all. The spec pins the workload
-      # to amd64 nodes today, but the base image is multi-arch and the estate
-      # has arm64 hardware (wingnut), so building both keeps that door open at
-      # the cost of build minutes, not of correctness.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -152,7 +142,7 @@ jobs:
           # this is belt and braces — but a future stage appended below it would
           # otherwise silently become the published image.
           target: runtime
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -172,10 +162,9 @@ jobs:
           # default branch's entries.
           #
           # mode=max caches intermediate stages, which is what makes the
-          # frontend and dependency layers survive between runs. Two
-          # architectures at mode=max is the biggest consumer of the repo's
-          # 10 GB Actions cache ceiling — if entries start evicting before they
-          # are reused, move this one leg to
+          # frontend and dependency layers survive between runs. It is the
+          # biggest consumer of the repo's 10 GB Actions cache ceiling — if
+          # entries start evicting before they are reused, move this one leg to
           # `type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache`, which
           # has no ceiling and sits next to the image being pushed anyway.
           cache-from: type=gha
@@ -220,8 +209,7 @@ jobs:
   # backend deploy that does not use it yet. Drop `continue-on-error` in the
   # change that pins this image in eh-homelab/clusters.
   agent:
-    name: Build and push agent (amd64 + arm64)
-    if: github.event_name != 'pull_request'
+    name: Build and push agent (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -233,10 +221,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -279,8 +267,7 @@ jobs:
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
       # The build runs the Dockerfile's Claude Code check (check-cli-version.js)
-      # once per platform, against that platform's bundled binary (arm64 under
-      # QEMU).
+      # against the bundled binary.
       #
       # `type=gha` on a hosted runner only, as above; `scope=agent` is the
       # scope ci.yml's `agent` job reads, so PRs start from main's layers.
@@ -290,7 +277,7 @@ jobs:
         with:
           context: .
           target: agent
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -331,8 +318,7 @@ jobs:
   # failed build here still stops the deploy: deploy.reusable.yml then finds no
   # image to pin for a manifest that names one.
   agent-durable:
-    name: Build and push agent-durable (amd64 + arm64)
-    if: github.event_name != 'pull_request'
+    name: Build and push agent-durable (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     continue-on-error: true
@@ -344,10 +330,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -390,7 +376,7 @@ jobs:
 
       # The build runs the stage's bundled Claude Code check
       # (scadbuddy_durable.check_cli_version) and parses the agent's tool
-      # manifest, once per platform (arm64 under QEMU).
+      # manifest.
       #
       # `type=gha` on a hosted runner only, as above. Its own scope, which
       # ci.yml's `agent-durable` job reads and writes too, at mode=min (the
@@ -403,7 +389,7 @@ jobs:
         with:
           context: .
           target: agent-durable
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -433,65 +419,108 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The arm64 leg of the Dockerfile's `openscad-lsp` stage (#199): its
-  # `TARGETARCH` case picks the aarch64 release and checksum, which the amd64
-  # PR build in ci.yml never exercises. Only that stage (and `base` under it)
-  # is built, not the image. `base` is OpenSCAD's arm64 image plus an apt
-  # install, which QEMU manages in minutes; the stage itself already runs
-  # `openscad-lsp --version` at build time, and the step below runs it again
-  # from the loaded image so the check does not depend on that RUN line.
+  # The slicer worker (#3821, spec 2026-10-16 §7): the Dockerfile's `slicer`
+  # target, the Rust `slicer` queue worker with the pinned Bambu Studio CLI,
+  # published as ghcr.io/eh-homelab/scadbuddy-slicer and run as a Deployment of
+  # its own (README.md, "Slicer worker"). Same tag scheme as the other images, so
+  # one `sha-<short>` names every image of a commit.
   #
-  # PRs only, and only those the trigger's paths filter lets in (a Dockerfile or
-  # workflow change): main's `build` job already writes this stage's arm64 layers
-  # to the default cache scope, which the cache below reads.
-  openscad-lsp-arm64:
-    name: Build and run openscad-lsp (arm64)
-    if: github.event_name == 'pull_request'
+  # `continue-on-error` for the reason the agent jobs have it: a first publish of
+  # a new package (private until its visibility is changed, see the header) must
+  # not hold back a backend deploy. Drop it in the change that pins this image in
+  # eh-homelab/clusters.
+  slicer:
+    name: Build and push slicer (amd64)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    continue-on-error: true
     permissions:
       contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
-
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
-      # `type=gha` on a hosted runner only, as above. Its own scope, so it
-      # never overwrites the backend's (default) or the agent's index. It also
-      # reads the default scope, where the `build` job's mode=max cache holds
-      # main's arm64 `base` layers.
-      - name: Build the openscad-lsp stage for arm64
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+        with:
+          images: ghcr.io/eh-homelab/scadbuddy-slicer
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=ScadBuddy slicer
+            org.opencontainers.image.description=Bambu Studio slicer worker for ScadBuddy
+
+      # The same label as the other jobs: `X.Y.Z` for a `vX.Y.Z` tag,
+      # `sha-<short>` otherwise.
+      - name: Pick the version label
+        id: label
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            version="sha-${SHA:0:7}"
+          fi
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
+      # The build runs `scadbuddy-slicer --check-cli` against the pinned CLI.
+      #
+      # `type=gha` on a hosted runner only, as above. Its own scope, which
+      # ci.yml's `image` job only reads, written here at mode=min (the repo's
+      # Actions cache is at its ceiling, #743).
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: openscad-lsp
-          platforms: linux/arm64
-          load: true
-          tags: scadbuddy-openscad-lsp:arm64
+          target: slicer
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SCADBUDDY_REVISION=${{ github.sha }}
+            SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
-          cache-from: |
-            type=gha,scope=openscad-lsp-arm64
-            type=gha
-          # mode=min: only the final stage's layers. The repo's Actions cache sits at its
-          # ~10 GB ceiling, and every intermediate arm64 layer this PR-only job wrote
-          # pushed the backend image's cache out sooner (#743).
-          cache-to: type=gha,scope=openscad-lsp-arm64,mode=min
+          cache-from: type=gha,scope=slicer
+          cache-to: type=gha,scope=slicer,mode=min
 
-      # `uname -m` proves the container really is arm64 (binfmt runs it under
-      # QEMU); a silently amd64 image would print x86_64 and fail here.
-      - name: Run openscad-lsp --version on arm64
+      - name: Report the published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          arch=$(docker run --rm --platform linux/arm64 --entrypoint uname scadbuddy-openscad-lsp:arm64 -m)
-          echo "container arch: $arch"
-          [[ "$arch" == aarch64 ]] || { echo "::error::expected aarch64, got $arch"; exit 1; }
-          version=$(docker run --rm --platform linux/arm64 --entrypoint /usr/local/bin/openscad-lsp scadbuddy-openscad-lsp:arm64 --version)
-          echo "$version"
-          echo "### openscad-lsp (arm64): \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Published \`ghcr.io/eh-homelab/scadbuddy-slicer\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

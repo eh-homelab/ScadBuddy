@@ -97,6 +97,16 @@ func (b base) is(f api.File) bool {
 	return b.ID == f.ID && (b.Created.IsZero() || b.Created.Equal(f.Created))
 }
 
+// movedTo is the base once its file is renamed to f: the same file under a new name
+// and folder, or, when a retype sent it again, f itself with its created_at unknown.
+func (b base) movedTo(f api.File) base {
+	if f.ID != b.ID {
+		return base{ID: f.ID, FolderID: f.FolderID, Name: f.Name}
+	}
+	b.Name, b.FolderID = f.Name, f.FolderID
+	return b
+}
+
 // baseOf is the base for a stored file, with its created_at if known.
 func baseOf(f api.File, created time.Time) base {
 	return base{ID: f.ID, Created: created, FolderID: f.FolderID, Name: f.Name}
@@ -616,7 +626,7 @@ func (q *queue) drop(e *entry) {
 
 // rebase follows a stored file renamed through the mount in every record that
 // replaces it: a base is the file wherever it now lives.
-func (q *queue) rebase(id int, name string, folderID int) {
+func (q *queue) rebase(id int, to api.File) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, e := range q.entries {
@@ -626,7 +636,7 @@ func (q *queue) rebase(id int, name string, folderID int) {
 		}
 		rec := e.rec
 		rec.Bases = slices.Clone(rec.Bases)
-		rec.Bases[i].Name, rec.Bases[i].FolderID = name, folderID
+		rec.Bases[i] = rec.Bases[i].movedTo(to)
 		if err := writeRecord(e.dir, rec); err != nil {
 			slog.Error("updating an unsent write's record failed", "path", e.dir, "err", err)
 			continue
@@ -793,6 +803,10 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		sentAs.Name, sentAs.FolderID = u.Name, u.FolderID
 	} else {
 		got, conflict, err = t.sendOnce(ctx, e, rec)
+		// A conflict copy is sent under its own name. A lost answer's file renamed in
+		// the library since (#3318) keeps the record's name here on purpose: sent()
+		// renames the file to whatever the record says once the entry has been renamed
+		// locally, and a library rename the user made must not be undone by that.
 		if conflict {
 			sentAs.Name = got.Name
 		}
@@ -828,8 +842,8 @@ func (t *tree) send(ctx context.Context, e *entry) {
 // file may be the last attempt's, whose answer was lost: the same request is sent
 // again, and the route answers it with that file. If it answers with a new file
 // instead, the name is someone else's, and the new file is renamed to the conflict
-// copy. A repeated request whose answer is no longer in the folder under the name
-// (deleted or renamed since) goes again under a new key. It returns the file and
+// copy. A repeated request whose answer is no longer in the folder (deleted since)
+// goes again under a new key; one renamed since is the write, stored. It returns the file and
 // whether it is a conflict copy.
 func (t *tree) sendOnce(ctx context.Context, e *entry, rec record) (api.File, bool, error) {
 	a := *rec.Attempt
@@ -851,14 +865,20 @@ func (t *tree) sendOnce(ctx context.Context, e *entry, rec record) (api.File, bo
 	}
 	if repeat {
 		// The route answers a repeated key with the file it made then, even if that
-		// file has since been deleted or renamed: then the write was never stored, and
-		// it goes again under a new key.
-		live, err := t.holds(ctx, rec.FolderID, name, got.ID)
+		// file has since been deleted: then the write was never stored, and it goes
+		// again under a new key. One renamed since is still the write, stored under the
+		// name it was given (#3318): sending it again would leave a duplicate.
+		live, ok, err := t.held(ctx, rec.FolderID, got.ID)
 		if err != nil {
 			return api.File{}, false, err
 		}
-		if !live {
-			slog.Warn("the file a lost answer made is gone or renamed; the write is sent again",
+		if ok && live.Name != name {
+			slog.Info("the file a lost answer made was renamed since; the write is stored under that name",
+				"folder", rec.FolderID, "file", got.ID, "name", live.Name)
+			got.Name, again = live.Name, false
+		}
+		if !ok {
+			slog.Warn("the file a lost answer made is gone; the write is sent again",
 				"folder", rec.FolderID, "file", got.ID)
 			// The name is chosen again: the files that held it may be the ones gone.
 			if name, conflict, others, err = t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt); err != nil {
@@ -895,15 +915,17 @@ func (t *tree) persistAttempt(e *entry, a attempt) {
 	}
 }
 
-// holds reports whether a fresh listing of the folder has the file under the name.
-func (t *tree) holds(ctx context.Context, folderID int, name string, fileID int) (bool, error) {
+// held reports the file as a fresh listing of the folder has it, under any name.
+func (t *tree) held(ctx context.Context, folderID, fileID int) (api.File, bool, error) {
 	l, err := t.lib.List(ctx, folderID, true)
 	if err != nil {
-		return false, err
+		return api.File{}, false, err
 	}
-	return slices.ContainsFunc(l.Files, func(f api.File) bool {
-		return f.ID == fileID && f.Name == name && f.FolderID == folderID
-	}), nil
+	i := slices.IndexFunc(l.Files, func(f api.File) bool { return f.ID == fileID && f.FolderID == folderID })
+	if i < 0 {
+		return api.File{}, false, nil
+	}
+	return l.Files[i], true, nil
 }
 
 func (t *tree) uploadFile(ctx context.Context, folderID int, name, key, path string) (api.File, error) {

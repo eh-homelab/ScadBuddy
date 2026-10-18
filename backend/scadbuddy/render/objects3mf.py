@@ -579,12 +579,6 @@ class _Reader:
                 f"object {name} is painted, but the file names no Bambu Studio filaments"
                 " for its paint"
             )
-        if mirrored:
-            # Reversing each face to keep it facing out would move its painting: the
-            # code places colour by the face's own corners, in their order.
-            raise UnreadableObjectsError(
-                f"object {name} is painted and mirrored, which Arrange cannot carry over"
-            )
         _check_faces(faces, points)
         # Charged on every placement, as its faces are: each copy carries its codes on.
         self._spend(paint_digits=sum(map(len, codes)))
@@ -602,7 +596,14 @@ class _Reader:
                 f"object {name} is painted with extruder {max(used)}, and the file has"
                 f" {len(self.filaments)} filaments"
             )
-        return self.colour_of(extruder), points, faces, Paint(codes, tuple(self.filaments))
+        # A mirror turns the faces inside out, so they are turned back to face out; the
+        # codes keep the source's corner order, which `Paint.reversed` records (#4015).
+        return (
+            self.colour_of(extruder),
+            points,
+            faces[:, ::-1] if mirrored else faces,
+            Paint(codes, tuple(self.filaments), reversed=bool(mirrored)),
+        )
 
     def item(
         self, model: str, object_id: str, matrix: np.ndarray
@@ -743,7 +744,7 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     if (plates and plate not in plates) or (not plates and plate != 1):
         raise NoSuchPlateError(plate, count)
     instances: dict[str, int] = {}
-    by_colour: dict[str, list[trimesh.Trimesh]] = {}
+    by_colour: dict[tuple[str, bool], list[ColourPart]] = {}
     for item in items:
         object_id = item.get("objectid", "")
         instance = instances.get(object_id, 0)
@@ -755,15 +756,135 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         for part in parts:
             if part.negative:
                 continue  # cut out by the slicer: neither shown nor checked
-            by_colour.setdefault(part.colour, []).append(part.mesh)
+            # A mirrored painting joins only its like: one `Paint.reversed` per part.
+            reversed_ = part.paint is not None and part.paint.reversed
+            by_colour.setdefault((part.colour, reversed_), []).append(part)
     found: list[ColourPart] = []
-    for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
+    for index, ((colour, _), parts) in enumerate(by_colour.items(), start=1):
+        meshes = [part.mesh for part in parts]
         joined = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         if isinstance(joined, trimesh.Trimesh):
-            found.append(ColourPart(index, f"Color {index}", colour, joined))
+            found.append(ColourPart(index, f"Color {index}", colour, joined, _joined_paint(parts)))
     if not found:
         raise UnreadableObjectsError(f"plate {plate} of the 3MF places no object with any geometry")
     return PlateRead(found, count)
+
+
+@dataclass(frozen=True)
+class PlateBoxes:
+    """:func:`plate_boxes`' answer: each plate's box, and how many plates the file lays
+    out (what spaces their origins), both read within the budget."""
+
+    boxes: dict[int, np.ndarray]
+    count: int
+
+
+def plate_boxes(payload: bytes | BinaryIO, budget: ReadBudget | None = None) -> PlateBoxes:
+    """Each plate's ``(2, 3)`` box where the file places its objects, by plate index
+    (one plate, 1, for a file that lists none), and the file's plate count: the
+    corners of each mesh's own box
+    carried through its transforms, so it may be larger than the objects' tight box,
+    never smaller. A box needs no faces, so a painted or mirrored object, which
+    :func:`read_objects` refuses, is boxed like any other (#4014). Refused as
+    :func:`read_objects` refuses, within ``budget``."""
+    spend = budget or ReadBudget()
+    return _opened(payload, spend, _plate_boxes)
+
+
+def _plate_boxes(archive: _Archive) -> PlateBoxes:
+    model = _root_model_name(archive)
+    plates = _plates(_model_settings(archive))
+    instances: dict[str, int] = {}
+    corners: dict[int, list[np.ndarray]] = {}
+    visits = [0]
+    for item in _build_items(archive, model):
+        object_id = item.get("objectid", "")
+        instance = instances.get(object_id, 0)
+        instances[object_id] = instance + 1
+        on = [index for index, pairs in plates.items() if (object_id, instance) in pairs]
+        if not plates:
+            on = [1]
+        if not on:
+            continue
+        path = (item.get(_PATH) or "").lstrip("/") or model
+        found = _object_corners(archive, path, object_id, _matrix(item.get("transform")), 0, visits)
+        for index in on:
+            corners.setdefault(index, []).extend(found)
+    boxes = {
+        index: np.array([stacked.min(axis=0), stacked.max(axis=0)])
+        for index, points in corners.items()
+        if points
+        for stacked in (np.vstack(points),)
+    }
+    return PlateBoxes(boxes, len(plates) or 1)
+
+
+def _object_corners(
+    archive: _Archive,
+    path: str,
+    object_id: str,
+    matrix: np.ndarray,
+    depth: int,
+    visits: list[int],
+) -> list[np.ndarray]:
+    """The corners of each mesh box of ``object_id`` in ``path``, placed by ``matrix``.
+    Each object visited is counted in ``visits`` against the budget's ``max_visits``,
+    as :func:`read_objects` counts them, so components fanning out cost a refusal."""
+    if depth > _MAX_DEPTH:
+        raise UnreadableObjectsError("the 3MF's components nest too deep")
+    visits[0] += 1
+    if visits[0] > archive.budget.max_visits:
+        raise OverBudgetError(archive.budget.refusal("max_visits"))
+    _, objects, scale = archive.model(path)
+    obj = objects.get(object_id)
+    if obj is None:
+        raise UnreadableObjectsError(f"the 3MF places an object it lacks ({object_id})")
+    found: list[np.ndarray] = []
+    mesh = obj.find(f"{_CORE}mesh")
+    arrays = archive.meshes.get(mesh) if mesh is not None else None
+    if arrays is not None and len(arrays.vertices):
+        low, high = arrays.vertices.min(axis=0) * scale, arrays.vertices.max(axis=0) * scale
+        box = np.array(
+            [
+                [x, y, z, 1.0]
+                for x in (low[0], high[0])
+                for y in (low[1], high[1])
+                for z in (low[2], high[2])
+            ]
+        )
+        found.append((_combine(matrix, box.T).T)[:, :3])
+    components = obj.find(f"{_CORE}components")
+    for component in components if components is not None else []:
+        inner = (component.get(_PATH) or "").lstrip("/") or path
+        found.extend(
+            _object_corners(
+                archive,
+                inner,
+                component.get("objectid", ""),
+                _combine(matrix, _matrix(component.get("transform"))),
+                depth + 1,
+                visits,
+            )
+        )
+    return [corners for corners in found if np.isfinite(corners).all()]
+
+
+def _joined_paint(parts: list[ColourPart]) -> Paint | None:
+    """The painting of ``parts`` joined in order (an unpainted part's faces unpainted),
+    or None when none is painted: a preview draws each colour where its painting puts
+    it, and the checks see the joined mesh whole (#3956). Every painted part of one file
+    names the file's filaments, so their colours are one tuple."""
+    painted = [part.paint for part in parts if part.paint is not None]
+    if not painted:
+        return None
+    # A guard for a future caller: every painting this reader builds names its own
+    # `self.filaments` (`_painted`), so no file reaches this today.
+    if any(paint.colours != painted[0].colours for paint in painted):
+        raise UnreadableObjectsError("painted parts of one colour name different filaments")
+    codes: list[str] = []
+    for part in parts:
+        codes += part.paint.codes if part.paint is not None else [""] * len(part.mesh.faces)
+    return Paint(tuple(codes), painted[0].colours, painted[0].reversed)
 
 
 def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_Archive], T]) -> T:

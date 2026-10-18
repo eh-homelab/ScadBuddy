@@ -7,7 +7,7 @@ import type { SlotChoice } from '../api/types'
 import { installTestTracing } from '../test/tracing'
 import { DEFAULT_NOZZLES } from './printChoices'
 import type { PrintSelection } from './usePrintChoices'
-import { useRunPrint } from './useRunPrint'
+import { printRunBody, useRunPrint } from './useRunPrint'
 
 const OUTPUT = 'a'.repeat(32)
 /** Hoisted: a fresh `[]` per render would itself count as a change of plan. */
@@ -104,6 +104,18 @@ describe('useRunPrint', () => {
     rerender(input({ tier: 'fine' }))
     await waitFor(() => expect(result.current.refused).toBe(false))
     expect(result.current.runError).toBeNull()
+  })
+
+  it('another destination after a 422 is worth another try (#3651)', async () => {
+    runPrint.mockRejectedValueOnce(new ApiError(422, 'folder 9 is not a library folder a print can be filed in'))
+    const { result, rerender } = renderHook((props) => useRunPrint(props), {
+      initialProps: { ...input(), folderId: 9 },
+    })
+    await act(() => result.current.run())
+    expect(result.current.refused).toBe(true)
+
+    rerender({ ...input(), folderId: 10 })
+    await waitFor(() => expect(result.current.refused).toBe(false))
   })
 
   it('anything but a 422 is worth retrying as it stands', async () => {
@@ -207,5 +219,25 @@ describe('useRunPrint, traced', () => {
     } finally {
       tracing.uninstall()
     }
+  })
+})
+
+describe('printRunBody', () => {
+  it("carries the supports and filament profiles Print sends, so a batch step keeps them (#2672)", () => {
+    const body = printRunBody({
+      printerId: 1,
+      plan: PLAN,
+      printChoices: { nozzles: [...DEFAULT_NOZZLES], tier: 'standard' } as unknown as Parameters<typeof printRunBody>[0]['printChoices'],
+      copies: null,
+      plate: [1],
+      projectId: undefined,
+      options: {} as Parameters<typeof printRunBody>[0]['options'],
+      printSequence: null,
+      supports: { enabled: true } as unknown as Parameters<typeof printRunBody>[0]['supports'],
+      filamentProfiles: ['p1'],
+      rackPosition: null,
+      rackAlgorithm: null,
+    })
+    expect(body).toMatchObject({ supports: { enabled: true }, filament_profiles: ['p1'] })
   })
 })

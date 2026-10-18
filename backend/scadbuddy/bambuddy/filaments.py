@@ -42,7 +42,7 @@ import logging
 import math
 import re
 from collections.abc import Callable, Sequence
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -59,6 +59,7 @@ from scadbuddy.bambuddy.models import (
     SpoolAssignment,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +97,22 @@ WarningKind = Literal[
     # #1899: a support setting left out because the preset's shape for it is unknown:
     # its values could not be read, or it has no value (or an empty one) for that key.
     "supports-not-applied",
+    # #3628: a prime tower setting the process preset has no value for, sent anyway.
+    "prime-tower-unconfirmed",
+    # #3628: a prime tower chosen for an already-sliced file, which queues as it is.
+    "prime-tower-not-applied",
     # A sliced file queued as it is (#2671), never refused: what to set right first.
     "sliced-other-model",
     "sliced-nozzle-missing",
     "sliced-plate-missing",
+    # A sliced file whose settings could not be read, so nothing was checked (#3436).
+    "sliced-unchecked",
+    # Sliced for another model of the same G-code family, which prints it (#2956).
+    "sliced-same-family",
     # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
     "slice-reused",
+    # #2722 — the chosen spools mix material families.
+    "mixed-materials",
 ]
 
 
@@ -506,7 +517,8 @@ def suggest(
 
     A slot that declares no material (every generated template's) stays in the plate's
     material family (#2461): the declared ones, else the family that matches the most
-    slots with a loaded spool, then the most slots at all, then the best match (#2850).
+    slots with a loaded spool, then the most slots at all, then the best match (#2850);
+    :func:`_anchor_family` has the full rule, including that it counts slots, not spools.
     One PETG loaded beside the PLA does not make a mostly-PLA plate a PETG one because
     it is the closest colour for a single slot. Opening a PLA print with an unloaded
     TPU in one slot looks deliberate, for the reason :func:`_match_score` gives for PETG
@@ -554,7 +566,12 @@ def _anchor_family(
 ) -> set[str]:
     """The family an all-undeclared plate is suggested in (#2850): the one whose
     spools match the most slots with a loaded spool, then the most slots at all, then
-    the best single match."""
+    the best single match.
+
+    It counts slots, not spools: one loaded spool whose colour fits three slots beats
+    two loaded spools that fit two, since an undeclared slot can share a loaded spool.
+    A spool with no material is the family ``""``; if that wins, only material-less
+    spools are suggested for the undeclared slots."""
     loaded: dict[str, set[int]] = {}
     matched: dict[str, set[int]] = {}
     best: dict[str, tuple[float, int]] = {}
@@ -832,6 +849,69 @@ async def read_inventory(client: BambuddyClient) -> Inventory:
     return settled(spools), settled(assignments)
 
 
+#: The most plates one request may name (#3652); a 3MF lays out far fewer.
+MAX_PLATES = 256
+
+
+def asked_plates(
+    plate_id: int, all_plates: bool, plate_ids: Sequence[int] | None
+) -> list[int] | None:
+    """The plates a request asks for, each once and in plate order; ``None`` for every
+    plate (#3652). ``all_plates`` wins over ``plate_ids``, which wins over ``plate_id``."""
+    if all_plates:
+        return None
+    if plate_ids:
+        return sorted(set(plate_ids))
+    return [plate_id]
+
+
+def one_plate_folded(
+    plate_id: int, all_plates: bool, plate_ids: Sequence[int] | None
+) -> tuple[int, list[int] | None]:
+    """``(plate_id, plate_ids)`` with ``plate_ids`` each once in plate order, for a run
+    and an analysis alike (#3762 review). One chosen plate is ``plate_id``'s print
+    (``plate_ids=[2]`` is ``plate_id=2``), and several make ``plate_id`` the first of
+    them, so the mesh checks read a plate that prints. ``all_plates`` keeps ``plate_id``."""
+    if plate_ids is None:
+        return plate_id, None
+    chosen = sorted(set(plate_ids))
+    if all_plates:
+        return plate_id, chosen
+    return (chosen[0], None) if len(chosen) == 1 else (chosen[0], chosen)
+
+
+class _Plated(Protocol):
+    plate_id: int
+    all_plates: bool
+    plate_ids: list[int] | None
+    __pydantic_fields_set__: set[str]
+
+
+def fold_plates(request: _Plated) -> None:
+    """Apply :func:`one_plate_folded` to a request model in place, keeping the fields it
+    was sent as its set fields (#3768 review): ``exclude_unset`` dumps (a batch's
+    stored request and its ``batch_request_id``) read the same before and after the
+    fold. Only a one-plate list, which leaves ``plate_ids`` empty, marks ``plate_id``
+    set, so a dump re-read names the plate that prints."""
+    # Called from an `after` validator: safe only while neither model sets
+    # `validate_assignment`, which would run the validator again on each assignment.
+    folded = one_plate_folded(request.plate_id, request.all_plates, request.plate_ids)
+    if folded == (request.plate_id, request.plate_ids):
+        return
+    sent = set(request.__pydantic_fields_set__)
+    request.plate_id, request.plate_ids = folded
+    if folded[1] is None and "plate_ids" in sent:
+        sent.add("plate_id")
+    request.__pydantic_fields_set__ = sent
+
+
+def plates_named(plates: Sequence[int]) -> str:
+    """``plate 4``, or ``plates 4 and 5``, or ``plates 4, 5 and 6``."""
+    if len(plates) == 1:
+        return f"plate {plates[0]}"
+    return f"plates {', '.join(map(str, plates[:-1]))} and {plates[-1]}"
+
+
 async def gather_plate_options(
     client: BambuddyClient,
     *,
@@ -842,6 +922,7 @@ async def gather_plate_options(
     own_colours: list[str] | None = None,
     inventory: Inventory | None = None,
     known: Callable[[int | None], FilamentRequirements] | None = None,
+    native: LibraryReads | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -852,12 +933,15 @@ async def gather_plate_options(
     the printer's, and among plates the first failing one in ``plate_ids`` order wins.
     ``inventory`` is the spools and assignments when the caller has read them already.
     ``known`` answers each plate's slots in place of Bambuddy's ``filament-requirements``
-    when they were read from the file itself (#2550)."""
+    when they were read from the file itself (#2550). A native file's (#3827) are read
+    from ``native``: the empty requirement, so its slots read as unknown."""
     spools, assignments = inventory if inventory is not None else await read_inventory(client)
 
     answers = await asyncio.gather(
         *(
-            _requirements(client, library_file_id, plate, fallback_colours, own_colours, known)
+            _requirements(
+                client, library_file_id, plate, fallback_colours, own_colours, known, native
+            )
             for plate in plate_ids
         ),
         *(
@@ -896,6 +980,7 @@ async def _requirements(
     fallback_colours: list[str] | None,
     own_colours: list[str] | None = None,
     known: Callable[[int | None], FilamentRequirements] | None = None,
+    native: LibraryReads | None = None,
 ) -> list[SlotNeed]:
     """The plate's slots, from Bambuddy, falling back to the output's own colours.
 
@@ -914,7 +999,9 @@ async def _requirements(
                 f"plate {plate_id}'s slots were neither read from the file nor named by a"
                 " library file",
             )
-        answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
+        answer = await reads_for(library_file_id, client, native).filament_requirements(
+            library_file_id, plate_id=plate_id
+        )
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,

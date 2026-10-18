@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BellIcon } from 'lucide-react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { Activity } from '../../api/types'
 import { DEFAULT_ACTIVITY_QUERY } from '../../lib/activityQuery'
-import { focusInto } from '../../lib/modal'
-import { getRealtime, useSubscription } from '../../lib/realtime'
+import { getRealtime, readAgain, recordRead, useSubscription, type ReadRecord } from '../../lib/realtime'
 import { toast } from '../../lib/toast'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { principalLabel } from './labels'
+import { StatusBadge } from './StatusBadge'
 
 const SEEN_KEY = 'scadbuddy.activity.seen'
 const DEBOUNCE_MS = 500
@@ -62,23 +66,43 @@ export function ActivityBell() {
   const [mounted] = useState(() => Date.now())
   const toasted = useRef(new Set<string>())
   const generation = useRef(0)
-  const button = useRef<HTMLButtonElement>(null)
-  const popover = useRef<HTMLDivElement>(null)
-  const popoverId = useId()
+  // A read that settles once the bell is gone sets nothing (#3706): React reads `window` on
+  // every update, and a test's teardown removes it, as useAsync guards (#2908).
+  const live = useRef(true)
+  useEffect(() => {
+    live.current = true
+    return () => {
+      live.current = false
+    }
+  }, [])
 
+  /** What the last follow and activity reads saw, for a confirmation to judge (#1039). */
+  const followRead = useRef<ReadRecord | undefined>(undefined)
+  const activityRead = useRef<ReadRecord | undefined>(undefined)
   const loadFollow = useCallback(() => {
-    api
-      .getSettings()
-      .then((settings) => setFollow(settings.activity_follow ?? DEFAULT_FOLLOW))
-      .catch(() => setFollow((current) => current ?? DEFAULT_FOLLOW))
+    const { record, result } = recordRead(() => api.getSettings())
+    followRead.current = record
+    result
+      .then((settings) => {
+        if (live.current) setFollow(settings.activity_follow ?? DEFAULT_FOLLOW)
+      })
+      .catch(() => {
+        if (live.current) setFollow((current) => current ?? DEFAULT_FOLLOW)
+      })
   }, [])
   useEffect(loadFollow, [loadFollow])
   // Saved in Settings (here or elsewhere): follow the new list without a reload.
-  useSubscription('settings', loadFollow)
+  useSubscription('settings', (_signal, confirmation) => {
+    if (!confirmation) return loadFollow()
+    void readAgain(followRead.current, 'settings', confirmation).then((stale) => {
+      if (stale) loadFollow()
+    })
+  })
 
   const followKey = follow === null ? null : JSON.stringify(follow)
-  const refresh = useCallback(async () => {
-    if (followKey === null) return
+  /** True when its answer is what the bell now shows. */
+  const refresh = useCallback(async (): Promise<boolean> => {
+    if (followKey === null) return false
     const principals = JSON.parse(followKey) as string[]
     const mine = ++generation.current
     const since = new Date(seen.current - LOOKBACK_MS).toISOString()
@@ -90,8 +114,8 @@ export function ActivityBell() {
           .catch(() => [] as Activity[]),
       ),
     )
-    // A newer read started meanwhile: its answer is the fresher one.
-    if (mine !== generation.current) return
+    // A newer read started meanwhile: its answer is the fresher one. Gone: nothing to show.
+    if (mine !== generation.current || !live.current) return false
     const fresh = pages
       .flat()
       .filter((row) => finishedAt(row) > seen.current)
@@ -107,6 +131,7 @@ export function ActivityBell() {
       })
     }
     setRows(fresh)
+    return true
   }, [followKey, mounted])
 
   useEffect(() => {
@@ -121,19 +146,29 @@ export function ActivityBell() {
       timer = setTimeout(
         () => {
           first = 0
-          void refresh()
+          // Once shown, a later confirmation (a reconnect's) asks from what it saw.
+          const { record } = recordRead(refresh, (applied) => applied)
+          void record.shown.then((shown) => {
+            if (shown) activityRead.current = record
+          })
         },
         Math.max(0, Math.min(DEBOUNCE_MS, first + MAX_WAIT_MS - now)),
       )
     }
-    const stop = getRealtime().subscribe('activity', (signal) => {
+    const stop = getRealtime().subscribe('activity', (signal, confirmation) => {
+      if (confirmation) {
+        void readAgain(activityRead.current, 'activity', confirmation).then((stale) => {
+          if (stale) schedule()
+        })
+        return
+      }
       if (signal !== 'resync') {
         const principal = signal.data.principal
         if (typeof principal === 'string' && !principals.has(principal)) return
       }
       schedule()
     })
-    void refresh()
+    activityRead.current = recordRead(refresh, (applied) => applied).record
     return () => {
       stop()
       clearTimeout(timer)
@@ -143,28 +178,6 @@ export function ActivityBell() {
   // One read per followed principal per burst (the API's `principal` takes one value), and
   // any signal from a followed principal triggers it, since the event carries no status.
   const count = rows.length
-  const close = useCallback((refocus: boolean) => {
-    setListed(null)
-    if (refocus) button.current?.focus()
-  }, [])
-  const isOpen = listed !== null
-  useEffect(() => {
-    if (!isOpen) return
-    if (popover.current) focusInto(popover.current)
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) close(true)
-    }
-    const onPointer = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (!popover.current?.contains(target) && !button.current?.contains(target)) close(false)
-    }
-    document.addEventListener('keydown', onKey)
-    document.addEventListener('mousedown', onPointer)
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      document.removeEventListener('mousedown', onPointer)
-    }
-  }, [isOpen, close])
   const markSeen = () => {
     const now = Date.now()
     seen.current = now
@@ -173,55 +186,54 @@ export function ActivityBell() {
   }
 
   return (
-    <div className="relative">
-      <button
-        ref={button}
-        type="button"
-        aria-controls={listed !== null ? popoverId : undefined}
-        aria-label={`Activity, ${count} finished`}
-        aria-expanded={listed !== null}
-        onClick={() => {
-          if (listed !== null) {
-            setListed(null)
-            return
-          }
-          setListed(rows)
-          markSeen()
-        }}
-        className="relative inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-[13px] text-muted hover:bg-surface-2 hover:text-ink"
-      >
-        <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M6 9a6 6 0 1 1 12 0c0 6 2 7 2 7H4s2-1 2-7M10 20h4" />
-        </svg>
-        <span
-          data-testid="activity-bell-count"
-          hidden={count === 0}
-          className="rounded-full bg-accent px-1.5 text-[11px] leading-4 text-white"
-        >
-          {count}
-        </span>
-      </button>
-      {listed !== null && (
-        <div ref={popover} id={popoverId} className="absolute right-0 top-9 z-40 w-72 rounded-[6px] border border-line bg-surface p-2 text-[13px] shadow-lg">
-          {listed.length === 0 ? (
-            <p className="px-1 py-1 text-muted">Nothing new has finished.</p>
-          ) : (
-            <ul className="space-y-1">
-              {listed.map((row) => (
-                <li key={row.id} className="flex justify-between gap-2 px-1">
-                  <span className="truncate">{row.title}</span>
-                  <span className="shrink-0 text-muted">
-                    {row.status} · {principalLabel(row.principal)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <Link to="/activity" onClick={() => setListed(null)} className="mt-2 block px-1 text-accent hover:underline">
-            All activity
-          </Link>
+    <Popover
+      open={listed !== null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setListed(null)
+          return
+        }
+        setListed(rows)
+        markSeen()
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label={`Activity, ${count} finished`} className="relative">
+          <BellIcon aria-hidden="true" />
+          <Badge
+            data-testid="activity-bell-count"
+            hidden={count === 0}
+            className="pointer-events-none absolute -top-0.5 -right-0.5 h-4 min-w-4 px-1 text-[10px] leading-none tabular-nums"
+          >
+            {count}
+          </Badge>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 max-w-[calc(100vw-2rem)] gap-1 p-1.5">
+        <p className="px-2 pt-1 pb-0.5 text-xs font-medium text-muted-foreground">Finished since you last looked</p>
+        {listed === null || listed.length === 0 ? (
+          <p className="px-2 py-2 text-[13px] text-muted-foreground">Nothing new has finished.</p>
+        ) : (
+          <ul className="flex max-h-80 flex-col overflow-y-auto">
+            {listed.map((row) => (
+              <li key={row.id} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted">
+                <span className="min-w-0 truncate">{row.title}</span>
+                <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <StatusBadge status={row.status} />
+                  {principalLabel(row.principal)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="border-t pt-1">
+          <Button asChild variant="ghost" size="sm" className="w-full justify-start text-primary">
+            <Link to="/activity" onClick={() => setListed(null)}>
+              All activity
+            </Link>
+          </Button>
         </div>
-      )}
-    </div>
+      </PopoverContent>
+    </Popover>
   )
 }

@@ -59,6 +59,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any, Protocol, TypeGuard
 
 import psycopg
@@ -79,10 +80,19 @@ from temporalio.claude_agent_sdk import (
 from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
+from scadbuddy_durable.credentials import (
+    Credential,
+    Health,
+    audit_health,
+    cooldown_until,
+    credential_env,
+    rate_limit_reset,
+    record_health,
+    usable_credentials,
+)
 from scadbuddy_durable.secrets import Kek
 from scadbuddy_durable.session import subagents
-from scadbuddy_durable.session.fallback import credentials_fault
+from scadbuddy_durable.session.fallback import classify, credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     SEGMENT_CONTEXT_QUERY,
@@ -111,7 +121,9 @@ NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", 
 
 
 def _url_problem(value: str) -> str:
-    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme.
+    Only for a value it refused: an accepted URL would read as "no host". Not asserted:
+    a misuse should not fail a worker's segment (#3765); tests/test_subagents.py pins it."""
     try:
         parts = urllib.parse.urlsplit(value)
     except ValueError:
@@ -527,6 +539,12 @@ class HeldText:
     def drop(self) -> None:
         self._held = []
 
+    def mark_notice(self) -> None:
+        """Marks what is held as a refused credential's notice (#3703): still published,
+        as the panel's reason the turn failed, but ``notice``, so a retain never keeps it
+        as the assistant's (memoryActivities.ts ``transcriptOf``)."""
+        self._held = [{**event, "notice": True} for event in self._held]
+
 
 class ScadBuddyRunner:
     def __init__(
@@ -698,11 +716,15 @@ class ScadBuddyRunner:
             # session limit") before its ResultError, and the plugin publishes that text
             # (#2945): held until the attempt is known not to be refused, while another
             # credential could still take the segment over.
+            # The last credential's is held too: refused, its notice is published marked
+            # (#3703) rather than dropped, since nothing takes the segment over.
             publish = _EMIT.get()
-            held = HeldText(publish) if publish is not None and i + 1 < len(credentials) else None
+            held = HeldText(publish) if publish is not None else None
             token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
+                # The endpoint answered: the key works, whatever became of the segment.
+                await self._report(session, credential, "used")
                 if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
                     # The plugin answers a segment that reached its cap with the error's
                     # text only: no subtype, and no cost. Claude Code stops only once the
@@ -722,7 +744,10 @@ class ScadBuddyRunner:
                     type(err).__name__,
                     len(error_text(err).encode()),
                 )
+                await self._report_failure(session, credential, err)
                 if _BUDGET_REACHED.match(str(err)):
+                    # Ahead of credentials_fault on purpose (#3569): a cap is never the
+                    # credential's fault, so a capped segment must not go on to the next.
                     # The cap raised rather than returned: today the plugin returns it,
                     # but a raised one is the same cap, charged and ended the same way
                     # as the returned one above, never a failure (#3356).
@@ -756,7 +781,12 @@ class ScadBuddyRunner:
                         "segment of %s continues on %s", workflow_id, credentials[i + 1].label
                     )
                     continue
-                if not final_failure(err):
+                if credentials_fault(err) and held is not None:
+                    held.mark_notice()
+                # Every credential refused it (#3705): no retry could change that, and each
+                # one ran the refused keys again and published the notice again. Final, as a
+                # request too large is; a transient failure (5xx, network) is still retried.
+                if not final_failure(err) and not credentials_fault(err):
                     raise bounded_failure(err) from None
                 # Ends the turn with the reason, as the plugin's own final errors do.
                 return SegmentOutput(
@@ -770,9 +800,52 @@ class ScadBuddyRunner:
                     _EMIT.reset(token)
                 if held is not None:
                     # Not a leak: a failure that is not the credential's ends the turn on
-                    # this credential, so what it said is the turn's and is published.
+                    # this credential, so what it said is the turn's and is published; the
+                    # last credential's refusal notice goes out marked (mark_notice).
                     held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
+
+    async def _report_failure(self, session: str, credential: Credential, err: Exception) -> None:
+        """What a failed attempt says of its key, as a classic turn reports it
+        (fallback.ts): a rate limit cools the key down, a refusal or an endpoint failure
+        is its last error, and any other answer from the endpoint (a capped or refused
+        request) means the key works. A failure that never reached the endpoint (no
+        ``ResultError``) says nothing of the key."""
+        if not isinstance(err, ResultError):
+            return
+        reason = err.result or str(err)
+        verdict = classify(err)
+        if verdict == "rate_limited":
+            await self._report(session, credential, "cooling_down", reason)
+        elif verdict in ("permanent", "transient"):
+            # A refusal is not disabled here: a classic turn disables a key only once its
+            # probe confirms the refusal, and a durable segment runs no probe.
+            await self._report(session, credential, "error", reason)
+        else:
+            await self._report(session, credential, "used")
+
+    async def _report(
+        self, session: str, credential: Credential, health: Health, reason: str = ""
+    ) -> None:
+        """Records the key's health (#2320), so Settings and the next turn see what this
+        segment met; never fails the segment, as CredentialPool.report never fails a turn."""
+        now = datetime.now(UTC)
+        until = (
+            cooldown_until(now, rate_limit_reset(reason, now)) if health == "cooling_down" else None
+        )
+        try:
+            async with self._connect() as conn:
+                change = await record_health(conn, credential, health, reason=reason, until=until)
+                await audit_health(
+                    conn, credential, change, reason=reason, until=until, session_id=session
+                )
+        except Exception as err:
+            logger.warning(
+                "credentials: could not record %s for %s: %s",
+                health,
+                credential.label,
+                type(err).__name__,
+            )
 
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
         workflow_id = activity.info().workflow_id

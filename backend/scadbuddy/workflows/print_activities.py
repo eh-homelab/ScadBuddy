@@ -33,8 +33,8 @@ from scadbuddy.bambuddy.dispatch import (
     start_slice,
     wait_slice,
 )
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
-from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
+from scadbuddy.bambuddy.output_reader import OutputNaming, OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
@@ -42,11 +42,12 @@ from scadbuddy.bambuddy.print_run import (
     PreparedPlates,
     PrintRunResult,
     QueuedPlate,
-    chosen_project,
+    ResolvedProject,
     finish_run,
     plan_run,
     prepare_run,
     queue_plate,
+    resolve_project,
 )
 from scadbuddy.bambuddy.print_source import (
     LibrarySource,
@@ -57,15 +58,17 @@ from scadbuddy.bambuddy.print_source import (
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
+    SLICE_GONE,
     SLICE_LOST,
     Checked,
     CheckInput,
@@ -90,6 +93,23 @@ HEARTBEAT_EVERY = 10.0
 REMEMBER_BUDGET = 20.0
 
 
+async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error: ApiError) -> bool:
+    """Whether a refused ``POST /queue/`` was for a reused slice Bambuddy no longer has
+    (#2955). Only a plate that has a slice plan and queued a recorded slice is asked,
+    and only after Bambuddy itself answered with a 4xx: a 5xx or no answer may have
+    queued, and is never sliced again."""
+    reused = input.plate.plan is not None and input.plate.sliced_file_id == input.sliced
+    answer = error.upstream
+    code = answer.status if isinstance(answer, UpstreamAnswer) else None
+    if not reused or code is None or not 400 <= code < 500:
+        return False
+    try:
+        await client.library_file(input.sliced)
+    except ApiError as gone:
+        return gone.status == 404
+    return False
+
+
 @dataclass
 class PrintDeps:
     settings_store: SettingsStore
@@ -104,6 +124,9 @@ class PrintDeps:
     rack: RackUsage | None = None
     #: Where every run's queue items are recorded by subject (#976, #1750).
     links: PrintLinkStore | None = None
+    #: The native library a native file is read from (#3827): the API's own in-process,
+    #: the API's internal routes on the print worker; ``None`` on ``bambuddy``.
+    library: LibraryReads | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -155,6 +178,7 @@ class PrintActivities:
                 settings=settings,
                 sends=self.d.links,
                 filaments=given_filaments(spec.filaments) if spec.filaments else None,
+                files=reads_for(spec.file_id, client, self.d.library),
             )
         return await self._output_source(spec, settings)
 
@@ -193,29 +217,33 @@ class PrintActivities:
         settings = self._settings()
         spec = input.source
         try:
-            if spec.kind == "output":
-                assert spec.output_id is not None
-                meta = await require(self.d.outputs, spec.output_id)
-                # A copy uploaded into a project's folder is named like the one Generate
-                # files (#317); a model.json that refuses its print settings refuses the
-                # run here, before the record (#770).
-                naming = await self.d.outputs.naming(meta)
-                if naming.invalid_meta is not None:
-                    raise invalid_meta(naming.invalid_meta)
-                spec = spec.model_copy(
-                    update={
-                        "stem": (
-                            naming.stem
-                            if chosen_project(input.request, settings) is not None
-                            else None
-                        ),
-                        "print_settings": naming.print_settings,
-                    }
-                )
             async with client_for(settings) as client:
+                # An output's naming, which names its copy below; none for a library file.
+                naming: OutputNaming | None = None
+                if spec.kind == "output":
+                    assert spec.output_id is not None
+                    meta = await require(self.d.outputs, spec.output_id)
+                    # A copy uploaded into a project's folder is named like the one
+                    # Generate files (#317); a model.json that refuses its print settings
+                    # refuses the run here, before the record (#770).
+                    naming = await self.d.outputs.naming(meta)
+                    if naming.invalid_meta is not None:
+                        raise invalid_meta(naming.invalid_meta)
+                # Resolved once, after the refusals that need no Bambuddy, and carried
+                # to the plan (#3790 review).
+                project = ResolvedProject(
+                    project_id=await resolve_project(client, input.request, settings)
+                )
+                if naming is not None:
+                    spec = spec.model_copy(
+                        update={
+                            "stem": naming.stem if project.project_id is not None else None,
+                            "print_settings": naming.print_settings,
+                        }
+                    )
                 source = await self._source(client, spec, settings)
                 prepared = await prepare_run(
-                    client, source, settings, input.request, rack=self.d.rack
+                    client, source, settings, input.request, rack=self.d.rack, project=project
                 )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
@@ -307,16 +335,41 @@ class PrintActivities:
 
     @activity.defn(name="print_enqueue")
     async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
-        """The rack pick, ``POST /queue/`` once, then the picks saved (#836)."""
+        """The rack pick, ``POST /queue/`` once, then the picks saved (#836). A reused
+        slice Bambuddy refuses to queue is read back, and one it no longer has is
+        ``SLICE_GONE``, which the workflow slices again (#2955). Bambuddy answers a
+        deleted library file with 400 "Library file not found" (``print_queue.py`` at
+        maziggy/bambuddy@943f3587), or 404 where the caller may not read it; the read
+        back, not that text, is what decides."""
         try:
             async with client_for(self._settings()) as client:
-                return await queue_plate(
-                    client,
-                    planned=input.planned,
-                    plate=input.plate,
-                    sliced=input.sliced,
-                    rack=self.d.rack,
-                )
+                try:
+                    return await queue_plate(
+                        client,
+                        planned=input.planned,
+                        plate=input.plate,
+                        sliced=input.sliced,
+                        rack=self.d.rack,
+                    )
+                except ApiError as error:
+                    if await _reused_slice_gone(client, input, error):
+                        try:
+                            await self.d.uploads.forget_gone_slice(input.sliced)
+                        except Exception:
+                            # Only a later reprint's read saved: never in place of the
+                            # reslice SLICE_GONE asks for (#3495 review).
+                            logger.warning(
+                                "could not forget a gone slice",
+                                extra={"sliced_library_file_id": input.sliced},
+                                exc_info=True,
+                            )
+                        raise ApplicationError(
+                            f"The earlier slice of plate {input.plate.plate_id} (library file"
+                            f" {input.sliced}) is gone from Bambuddy.",
+                            type=SLICE_GONE,
+                            non_retryable=True,
+                        ) from None
+                    raise
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 
@@ -363,6 +416,24 @@ class PrintActivities:
         if file_hash is not None:
             await self.d.uploads.record_slice_hash(subject.run_subject, sliced_id, file_hash)
 
+    async def _touch(self, planned: PlannedRun, inbox_id: int | None) -> None:
+        """The project or library folder printed into, touched for the destination
+        picker's order (#3651). Best effort and bounded, like remembering the project:
+        every plate is queued by now. The inbox ("No project") is never offered, so it
+        is never touched."""
+        if planned.project_id is not None:
+            kind: DestinationKind = "project"
+            target = planned.project_id
+        elif planned.folder_id is not None and planned.folder_id != inbox_id:
+            kind, target = "folder", planned.folder_id
+        else:
+            return
+        try:
+            async with asyncio.timeout(REMEMBER_BUDGET):
+                await self.d.uploads.touch_destination(kind, target)
+        except Exception:
+            logger.exception("could not touch %s %s", kind, target)
+
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
         """What the run queued, for ``print_succeed`` to record, and the project's
@@ -387,6 +458,7 @@ class PrintActivities:
                     )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)
+        await self._touch(planned, settings.library_folder_id)
         try:
             config: BambuddyConfig | None = BambuddyConfig.from_settings(settings)
         except ApiError as error:

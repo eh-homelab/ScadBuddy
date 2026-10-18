@@ -24,10 +24,14 @@ from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ACTIVITY_TIMEOUT,
+    ATTACHMENTS_SWEEP,
+    ATTACHMENTS_TIMEOUT,
     CLAIMS_TIMEOUT,
     GIT_SWEEP,
     GIT_TIMEOUT,
     HEARTBEAT_TIMEOUT,
+    LIBRARY_SWEEP,
+    LIBRARY_TIMEOUT,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     PREVIEWS_TIMEOUT,
@@ -113,6 +117,8 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         LOST_SLICES_SWEEP: PREVIEWS_TIMEOUT,
         GIT_SWEEP: GIT_TIMEOUT,
         ACTIVITY_SWEEP: ACTIVITY_TIMEOUT,
+        ATTACHMENTS_SWEEP: ATTACHMENTS_TIMEOUT,
+        LIBRARY_SWEEP: LIBRARY_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -241,7 +247,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
     # Review 3c M1: claims are swept even with the sweeps off, or they pile up for good;
     # so is the activity record (spec 2026-10-09 §6), and the files of lost slice starts,
     # which only the next 30 minutes can find (#2715). The dialog's background slices
-    # obey the switch: with the sweeps off they are not swept.
+    # obey the switch: with the sweeps off they are not swept. The native library's trash
+    # purge and orphan blobs run on it too (#3827).
     action = described.schedule.action
     assert isinstance(action, ScheduleActionStartWorkflow)
     (sweeps,) = await client.data_converter.decode(action.args)
@@ -250,6 +257,7 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_sweep_claims",
         "housekeeping_sweep_lost_slices",
         "housekeeping_activity",
+        "housekeeping_sweep_library",
     ]
     assert PREVIEWS_SWEEP not in sweeps
 
@@ -345,7 +353,7 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=30)
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=45)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

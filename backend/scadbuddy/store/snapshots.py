@@ -160,10 +160,17 @@ class SnapshotStore:
             if not background:
                 self._promoted.setdefault(key, asyncio.Event()).set()
             return running
+        # A fresh store starts unpromoted. The last store's `ended` runs a loop step after
+        # it finished, so its event, already set, can still be here; a background store
+        # would then take an interactive slot that no interactive pin asked for (#2553).
+        self._promoted.pop(key, None)
         storing = asyncio.create_task(self.ensure(slug, revision, background=background))
         self._pins[key] = (storing, self._clock())
 
         def ended(task: asyncio.Task[str]) -> None:
+            # Only while the pin is still this store's: a late `ended` runs after the
+            # next store of the key started, and must not drop that store's pin or the
+            # promotion an interactive pin gave it. Keep this guard on both pops.
             if self._pins.get(key, (None,))[0] is task:
                 del self._pins[key]
                 self._promoted.pop(key, None)

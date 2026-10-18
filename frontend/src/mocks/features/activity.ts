@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { Activity, ActivityFacets } from '../../api/types'
+import { CURSOR_HEADER } from '../../lib/readCursor'
 
 /**
  * The activity list, its facets and one row (backend/scadbuddy/api/activity.py), over an
@@ -13,6 +14,16 @@ const LIST_PARAMS = new Set([
 ])
 const ADVANCED_FIELDS = ['workflow_id', 'run_id', 'traceparent', 'source', 'source_id', 'facets'] as const
 const ADVANCED_DETAIL = new Set(['request', 'result', 'error'])
+
+/**
+ * backend/scadbuddy/activity/index.py's ``subject_key`` (and its SQL twin ``_SUBJECT_KEY``):
+ * one subject's key under either spelling. Change it with those two.
+ */
+function subjectKey(subject: string): string {
+  const library = /^library-(\d+)$/.exec(subject)
+  if (library) return `library:${library[1]}`
+  return /^[0-9a-f]{32}$/.test(subject) ? `output:${subject}` : subject
+}
 
 function row(id: string, fields: Partial<Activity> & Pick<Activity, 'kind' | 'status' | 'title'>): Activity {
   return {
@@ -80,12 +91,14 @@ function defaultFacets(): ActivityFacets {
       { value: 'token:t1', count: 1 },
     ],
     tools: [{ value: 'import_model', count: 1 }],
-    subjects: [{ value: 'box', count: 1 }],
+    subjects: [{ value: 'box', count: 1, label: 'Box' }],
   }
 }
 
 let rows = defaultRows()
 let facets = defaultFacets()
+/** #1039 — the event the list's answers say the server had heard; none by default. */
+let listCursor: string | undefined
 
 export function seedActivity(next: Activity[]): void {
   rows = next
@@ -95,9 +108,14 @@ export function setActivityFacets(next: ActivityFacets): void {
   facets = next
 }
 
+export function setActivityListCursor(next: string | undefined): void {
+  listCursor = next
+}
+
 export function reset(): void {
   rows = defaultRows()
   facets = defaultFacets()
+  listCursor = undefined
 }
 
 const PROBLEM = 'https://scadbuddy.dev/problems/'
@@ -207,7 +225,7 @@ export const handlers = [
       .filter((r) => !sp.has('principal') || r.principal === sp.get('principal'))
       .filter((r) => !sp.has('session') || r.session === sp.get('session'))
       .filter((r) => !sp.has('via_tool') || r.via_tool === sp.get('via_tool'))
-      .filter((r) => !sp.has('subject') || r.subject === sp.get('subject'))
+      .filter((r) => !sp.has('subject') || subjectKey(r.subject) === subjectKey(sp.get('subject')!))
       .filter((r) => !sp.has('parent') || r.parent_id === sp.get('parent'))
       .filter((r) => !since || at(r) >= Date.parse(since))
       .filter((r) => !until || at(r) <= Date.parse(until))
@@ -220,9 +238,12 @@ export const handlers = [
       : filtered
     const page = after.slice(0, limit)
     const advanced = ['1', 'true'].includes(sp.get('advanced') ?? '')
-    return HttpResponse.json({
-      items: page.map((r) => shape(r, advanced)),
-      next_cursor: after.length > limit ? encodeCursor(page[page.length - 1]!) : null,
-    })
+    return HttpResponse.json(
+      {
+        items: page.map((r) => shape(r, advanced)),
+        next_cursor: after.length > limit ? encodeCursor(page[page.length - 1]!) : null,
+      },
+      listCursor === undefined ? undefined : { headers: { [CURSOR_HEADER]: listCursor } },
+    )
   }),
 ]

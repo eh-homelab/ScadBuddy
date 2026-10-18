@@ -112,7 +112,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     await expect
       .poll(async () => (await t.db.sql`
         SELECT 1 FROM pg_stat_activity
-         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'`).length)
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'
+           AND query LIKE '%workflow_runs%'`).length)
       .toBe(1)
     expect(answered).toBe(false)
     release()

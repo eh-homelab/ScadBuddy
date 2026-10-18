@@ -1,0 +1,29 @@
+[package]
+name = "scadbuddy-slicer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "scadbuddy-slicer"
+path = "src/main.rs"
+
+[dependencies]
+sb-slicer = { path = "../../crates/sb-slicer" }
+sb-temporal = { path = "../../crates/sb-temporal" }
+sb-transfer = { path = "../../crates/sb-transfer" }
+temporalio-sdk.workspace = true
+temporalio-client.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+prometheus.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+temporalio-common.workspace = true
+temporalio-workflow.workspace = true

@@ -2,12 +2,17 @@
 2026-10-11 §4.1): the same call, made smaller, never another one.
 
 The vocabulary is closed, as the grant's bounds are (Ruling 3). A print may drop copies
-(when it named them) or all plates; an arrange may drop objects, or copies of one (when
+(when it named them), all plates, or some of the plates its `plate_ids` chose (keeping
+at least one); an arrange may drop objects, or copies of one (when
 it named them). Every other field must stay as the call had it: a different printer,
 source, plate, model or option is a substitution, not a narrowing, and an agent tool's
 arguments carry no meaning ScadBuddy could judge smaller, so a tool call is never
 narrowed (its parent denies it or passes it up). A field left out is the same as one
 sent as null.
+
+The grant reads a print's `plate_ids` more strictly than the print route does
+(`flow_grants._chosen_plates`): anything but a non-empty list of whole plate numbers,
+`["3"]` or `[2.0]` included, is outside the grant and goes to a person.
 """
 
 from __future__ import annotations
@@ -57,6 +62,19 @@ def _all_plates(original: Any, proposed: Any, what: str) -> str | None:
     return None
 
 
+def _plate_ids(original: Any, proposed: Any, what: str) -> str | None:
+    """Fewer of the call's chosen plates (#3652), never others or none."""
+    if proposed == original:
+        return None
+    if not isinstance(original, list):
+        return f"{what} must stay as the call had it"
+    if not isinstance(proposed, list) or not proposed:
+        return f"{what} must keep at least one of the call's plates"
+    if any(plate not in original for plate in proposed):
+        return f"{what} may only leave out plates the call chose"
+    return None
+
+
 def _print_copies(original: Any, proposed: Any, what: str) -> str | None:
     problem = _fewer(original, proposed, what)
     if problem is None and proposed < 1:
@@ -94,7 +112,7 @@ def narrowing_problem(fn: str, original: dict[str, Any], proposed: dict[str, Any
         return _fields(
             original.get("request") or {},
             proposed.get("request") or {},
-            {"copies": _print_copies, "all_plates": _all_plates},
+            {"copies": _print_copies, "all_plates": _all_plates, "plate_ids": _plate_ids},
             "",
         )
     if fn == "arrange":

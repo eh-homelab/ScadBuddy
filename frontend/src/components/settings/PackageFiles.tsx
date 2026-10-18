@@ -4,8 +4,14 @@ import { aiPlugins, type PackageFilesOf, type PackageReview } from '../../api/ai
 import { formatBytes } from '../../lib/format'
 import { highlight, languageOf, TOKEN_CLASS } from '../../lib/highlight'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { CheckIcon, ChevronRightIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { cn } from '@/lib/utils'
+import { LoadingLines } from './form'
 
 /**
  * A plugin package's files as the admin reads them before approving it (#1029): the
@@ -20,20 +26,15 @@ import { Spinner } from '../ui/Spinner'
 export function PackageFiles({ review, of }: { review: PackageReview; of: PackageFilesOf }) {
   const [open, setOpen] = useState(false)
   return (
-    <div>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-        className="inline-flex min-h-6 cursor-pointer items-center text-muted hover:text-ink"
-      >
-        <span aria-hidden className="mr-1 inline-block w-2">
-          {open ? '▾' : '▸'}
-        </span>
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="inline-flex min-h-6 cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground">
+        <ChevronRightIcon aria-hidden="true" className={cn('size-3.5 transition-transform', open && 'rotate-90')} />
         Files to read ({review.files.length})
-      </button>
-      {open && <FileBrowser review={review} of={of} />}
-    </div>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <FileBrowser review={review} of={of} />
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -55,19 +56,22 @@ function FileBrowser({ review, of }: { review: PackageReview; of: PackageFilesOf
   const files = (label: string, paths: string[]) => (
     <ul className="mt-1 space-y-0.5" aria-label={label}>
       {paths.map((path) => (
-        <li key={path} aria-label={path} className="flex items-baseline gap-2">
-          <button
-            type="button"
+        <li key={path} aria-label={path} className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="xs"
             onClick={() => select(path)}
             aria-current={path === selected ? 'true' : undefined}
-            className={`sb-num min-h-6 break-all text-left hover:underline ${path === selected ? 'text-accent' : ''}`}
+            className="sb-num h-auto min-h-6 justify-start text-left font-normal break-all whitespace-normal aria-[current=true]:bg-muted aria-[current=true]:text-primary"
           >
             {path}
-          </button>
-          {sizes.has(path) && <span className="sb-num shrink-0 text-muted">{formatBytes(sizes.get(path)!)}</span>}
+          </Button>
+          {sizes.has(path) && (
+            <span className="sb-num shrink-0 text-muted-foreground">{formatBytes(sizes.get(path)!)}</span>
+          )}
           {seen.has(path) && (
-            <span className="shrink-0 text-ok" aria-label="opened">
-              ✓
+            <span className="shrink-0 text-ok" role="img" aria-label="opened">
+              <CheckIcon aria-hidden="true" className="size-3.5" />
             </span>
           )}
         </li>
@@ -77,22 +81,26 @@ function FileBrowser({ review, of }: { review: PackageReview; of: PackageFilesOf
 
   return (
     <div className="mt-1 space-y-2">
-      <p className="text-muted">
+      <p className="text-muted-foreground">
         Read {[...seen].filter((p) => order.includes(p)).length} of {order.length} files
       </p>
-      {files(`Files to read in ${of.name}`, toRead)}
-      {list.loading && <Spinner />}
+      <ScrollArea className="max-h-64 rounded-lg ring-1 ring-foreground/10 [&>[data-slot=scroll-area-viewport]]:max-h-64">
+        <div className="p-1.5">
+          {files(`Files to read in ${of.name}`, toRead)}
+          {list.loading && <LoadingLines label="Listing the files" lines={['w-1/2', 'w-1/3']} className="mt-1 px-1" />}
       {list.error && (
         <p role="alert" className="text-warn">
           The file list is unavailable: {list.error.message}
         </p>
       )}
-      {others.length > 0 && (
-        <div>
-          <p className="text-muted">Other files</p>
-          {files(`Other files in ${of.name}`, others)}
+          {others.length > 0 && (
+            <div className="mt-1.5">
+              <p className="px-1 text-muted-foreground">Other files</p>
+              {files(`Other files in ${of.name}`, others)}
+            </div>
+          )}
         </div>
-      )}
+      </ScrollArea>
       {selected !== null && (
         <FileViewer
           key={`${of.name}:${of.pending}:${selected}`}
@@ -130,24 +138,29 @@ function FileViewer({
   const content = data?.content ?? null
 
   return (
-    <section aria-label={`${of.name}: ${path}`} className="rounded-[6px] border border-line">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-2 py-1.5">
+    <Card size="sm" className="gap-0 py-0">
+    <section aria-label={`${of.name}: ${path}`}>
+      <header className="flex flex-wrap items-center gap-2 border-b px-2.5 py-1.5">
         <span className="sb-num grow break-all font-medium">{path}</span>
         {data && (
-          <span className="sb-num text-muted">
+          <span className="sb-num text-muted-foreground">
             {formatBytes(data.size)} · {data.media_type}
           </span>
         )}
-        {!data && size !== undefined && <span className="sb-num text-muted">{formatBytes(size)}</span>}
+        {!data && size !== undefined && <span className="sb-num text-muted-foreground">{formatBytes(size)}</span>}
         {language === 'markdown' && content !== null && (
-          <span className="flex gap-1">
-            <Button size="sm" variant="ghost" aria-pressed={!rendered} onClick={() => setRendered(false)}>
-              Raw
-            </Button>
-            <Button size="sm" variant="ghost" aria-pressed={rendered} onClick={() => setRendered(true)}>
-              Rendered
-            </Button>
-          </span>
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={0}
+            value={rendered ? 'rendered' : 'raw'}
+            onValueChange={(next) => next && setRendered(next === 'rendered')}
+            aria-label="Show the file"
+          >
+            <ToggleGroupItem value="raw">Raw</ToggleGroupItem>
+            <ToggleGroupItem value="rendered">Rendered</ToggleGroupItem>
+          </ToggleGroup>
         )}
         <span className="flex gap-1">
           <Button size="sm" variant="ghost" onClick={onPrevious} disabled={!onPrevious}>
@@ -158,15 +171,15 @@ function FileViewer({
           </Button>
         </span>
       </header>
-      <div className="p-2">
-        {file.loading && <Spinner />}
+      <div className="p-2.5">
+        {file.loading && <LoadingLines label="Reading the file" lines={['w-full', 'w-5/6', 'w-2/3']} />}
         {file.error && (
           <p role="alert" className="text-warn">
             {file.error.message}
           </p>
         )}
         {data?.binary && (
-          <p className="text-muted">
+          <p className="text-muted-foreground">
             Binary file, not shown: {formatBytes(data.size)} · {data.media_type}
           </p>
         )}
@@ -186,13 +199,13 @@ function FileViewer({
             </pre>
           ))}
         {data?.truncated && content !== null && (
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-muted">
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-muted-foreground">
             <p>
               Showing the first {formatBytes(new TextEncoder().encode(content).length)} of {formatBytes(data.size)}.
               {data.too_large && ' Too large to show whole.'}
             </p>
             {!data.too_large && (
-              <Button size="sm" onClick={() => setFull(true)}>
+              <Button size="sm" variant="outline" onClick={() => setFull(true)}>
                 Show all
               </Button>
             )}
@@ -200,6 +213,7 @@ function FileViewer({
         )}
       </div>
     </section>
+    </Card>
   )
 }
 
@@ -209,7 +223,7 @@ function RenderedMarkdown({ text }: { text: string }) {
   return (
     <div className="max-h-96 space-y-2 overflow-auto text-[13px]">
       {front && (
-        <pre className="rounded-[6px] border border-line bg-bg px-2 py-1 font-mono text-[12px] text-muted whitespace-pre-wrap">
+        <pre className="rounded-md bg-muted px-2 py-1 font-mono text-[12px] whitespace-pre-wrap text-muted-foreground">
           {front}
         </pre>
       )}

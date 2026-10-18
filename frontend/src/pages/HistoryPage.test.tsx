@@ -1,4 +1,5 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import type userEvent from '@testing-library/user-event'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -8,6 +9,7 @@ import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { setDisplayUnit } from '../lib/units'
+import { choose } from '../test/select'
 import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -69,6 +71,12 @@ function EditRoute() {
  * Rows are labelled by the output's name — its id is 32 hex characters. The name is
  * also one of the parameters, so it appears twice in its own row; the heading is first.
  */
+/** Opens `item`'s "More for …" menu and returns its entry named `name` (#3672). */
+async function menuItem(user: ReturnType<typeof userEvent.setup>, item: HTMLElement, name: string | RegExp): Promise<HTMLElement> {
+  await user.click(within(item).getByRole('button', { name: /^More for / }))
+  return screen.findByRole('menuitem', { name })
+}
+
 async function row(name: string): Promise<HTMLElement> {
   const headings = await screen.findAllByText(name)
   return (headings[0] as HTMLElement).closest('li') as HTMLElement
@@ -345,19 +353,19 @@ describe('HistoryPage', () => {
       if (request.method === 'DELETE') deleted.push(new URL(request.url).pathname)
     })
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Workshop'), /^Delete /))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Workshop?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Workshop?' })
     expect(dialog).toHaveTextContent('This cannot be undone.')
     expect(within(dialog).queryByRole('list', { name: 'Library copies' })).not.toBeInTheDocument()
     expect(deleted).toEqual([])
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(within(await row('Workshop')).getByRole('button', { name: /^Delete / })).toBeInTheDocument()
+    expect(within(await row('Workshop')).getByRole('button', { name: 'More for Workshop' })).toBeInTheDocument()
     expect(deleted).toEqual([])
 
-    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Workshop'), /^Delete /))
     await user.click(
-      within(await screen.findByRole('dialog', { name: 'Delete Workshop?' })).getByRole('button', {
+      within(await screen.findByRole('alertdialog', { name: 'Delete Workshop?' })).getByRole('button', {
         name: 'Delete output',
       }),
     )
@@ -375,9 +383,9 @@ describe('HistoryPage', () => {
       }),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     const copies = within(dialog).getByRole('list', { name: 'Library copies' })
     expect(copies).toHaveTextContent('#8790 in the inbox folder')
     expect(copies).toHaveTextContent('#8789 in a project folder, kept')
@@ -393,9 +401,9 @@ describe('HistoryPage', () => {
   it('does not label a copy inbox or project before the settings have loaded', async () => {
     server.use(http.get('/api/v1/settings', () => delay('infinite')))
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     const copies = within(dialog).getByRole('list', { name: 'Library copies' })
     expect(copies).not.toHaveTextContent('in the inbox folder')
     expect(copies).not.toHaveTextContent('in a project folder')
@@ -411,8 +419,8 @@ describe('HistoryPage', () => {
       }),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
 
     await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
@@ -429,8 +437,8 @@ describe('HistoryPage', () => {
       ),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
 
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Bambuddy said no')
@@ -554,14 +562,16 @@ describe('HistoryPage', () => {
     await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
     await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
     await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
-    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
+    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name!
+    const model = await screen.findByLabelText('Model')
+    await waitFor(() => expect(model).toBeEnabled())
+    await choose(user, model, binName)
     await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
-    await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
+    await choose(user, screen.getByLabelText('File under'), binName)
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     const note = await screen.findByRole('status', { name: 'Arranged' })
-    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name
     expect(note).toHaveTextContent(`in ${binName}'s history.`)
     expect(within(note).getByRole('link', { name: 'Open in History' })).toHaveAttribute(
       'href',
@@ -661,18 +671,19 @@ describe('HistoryPage', () => {
     const { user } = render()
     for (const name of ['Reagan', 'Nova', 'Workshop']) {
       const item = await row(name)
-      expect(within(item).getByRole('button', { name: `Queue ${name}` })).toBeInTheDocument()
       expect(within(item).getByRole('button', { name: 'Download 3MF' })).toBeInTheDocument()
-      expect(within(item).getByRole('button', { name: `Rename ${name}` })).toBeInTheDocument()
+      expect(await menuItem(user, item, `Queue ${name}`)).toBeInTheDocument()
+      expect(screen.getByRole('menuitem', { name: `Rename ${name}` })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
     }
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Queue Workshop' }))
+    await user.click(await menuItem(user, await row('Workshop'), 'Queue Workshop'))
     const dialog = await screen.findByRole('dialog', { name: 'Queue' })
     expect(within(dialog).getByTestId('run-print')).toHaveTextContent('Queue')
   })
 
   it('opens Print as Print after a Queue was closed (#2288)', async () => {
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Queue Workshop' }))
+    await user.click(await menuItem(user, await row('Workshop'), 'Queue Workshop'))
     await user.click(within(await screen.findByRole('dialog', { name: 'Queue' })).getByRole('button', { name: 'Cancel' }))
     await user.click(within(await row('Workshop')).getByRole('button', { name: 'Print Workshop' }))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
@@ -680,7 +691,7 @@ describe('HistoryPage', () => {
 
   it('renames an output, and a blank name gives it back its short id (#2288)', async () => {
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Rename Workshop' }))
+    await user.click(await menuItem(user, await row('Workshop'), 'Rename Workshop'))
     const field = screen.getByRole('textbox', { name: 'Name for Workshop' })
     expect(field).toHaveValue('Workshop')
     await user.clear(field)
@@ -691,7 +702,7 @@ describe('HistoryPage', () => {
     const id = outputs.find((o) => o.name === 'Workshop')!.id
     expect(((await (await fetch(`/api/v1/outputs/${id}`)).json()) as Output).name).toBe('Shed sign')
 
-    await user.click(within(renamed).getByRole('button', { name: 'Rename Shed sign' }))
+    await user.click(await menuItem(user, renamed, 'Rename Shed sign'))
     await user.clear(screen.getByRole('textbox', { name: 'Name for Shed sign' }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText(id.slice(0, 8))).toBeInTheDocument()
@@ -711,13 +722,13 @@ describe('HistoryPage', () => {
       http.delete('/api/v1/outputs/:id', () => new HttpResponse(null, { status: 204 })),
     )
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Rename Workshop' }))
+    await user.click(await menuItem(user, await row('Workshop'), 'Rename Workshop'))
     const field = screen.getByRole('textbox', { name: 'Name for Workshop' })
     await user.clear(field)
     await user.type(field, 'Shed sign{Enter}')
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
     await user.click(
-      within(await screen.findByRole('dialog', { name: 'Delete Nova?' })).getByRole('button', {
+      within(await screen.findByRole('alertdialog', { name: 'Delete Nova?' })).getByRole('button', {
         name: 'Delete output',
       }),
     )
@@ -730,7 +741,7 @@ describe('HistoryPage', () => {
   it('keeps the name being typed and says why when a rename fails (#2288)', async () => {
     server.use(http.patch('/api/v1/outputs/:id', () => problem(503, 'the volume is not writable')))
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Rename Workshop' }))
+    await user.click(await menuItem(user, await row('Workshop'), 'Rename Workshop'))
     await user.type(screen.getByRole('textbox', { name: 'Name for Workshop' }), ' 2')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('the volume is not writable')
@@ -772,8 +783,8 @@ describe('HistoryPage', () => {
     const workshop = await row('Workshop')
     await user.click(within(workshop).getByRole('checkbox', { name: 'Select Workshop' }))
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
-    await user.click(within(workshop).getByRole('button', { name: 'Delete Workshop' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Workshop?' })
+    await user.click(await menuItem(user, workshop, 'Delete Workshop'))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Workshop?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
@@ -888,11 +899,11 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
 
 describe('HistoryPage, item context (#975)', () => {
   it("names each row's actions after its output", async () => {
-    render()
+    const { user } = render()
     const nova = await row('Nova')
     expect(within(nova).getByRole('button', { name: 'Edit Nova' })).toBeInTheDocument()
     expect(within(nova).getByRole('button', { name: 'Send again Nova' })).toBeInTheDocument()
-    expect(within(nova).getByRole('button', { name: 'Delete Nova' })).toBeInTheDocument()
+    expect(await menuItem(user, nova, 'Delete Nova')).toBeInTheDocument()
   })
 
   it('reads a changed value as the value and its default, not the two run together', async () => {

@@ -7,6 +7,7 @@ service sends the same shapes as JSON (agent/src/sessions/durable.ts).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Literal
 
 from temporalio.claude_agent_sdk import AgentState
@@ -34,6 +35,11 @@ MAX_SEGMENTS = 50
 # A segment that keeps failing ends its turn after this many attempts, about 25 minutes
 # of the server's backoff (1 s doubling to 100 s), instead of retrying without end (#2243).
 SEGMENT_ATTEMPTS = 20
+# One segment attempt's cap (the plugin's segment_timeout, 10 minutes by default). A
+# subagent runs inside its parent's segment, so this bounds the whole subagent: at 10
+# minutes an authoring subagent never finished and each retry started it over (#4026).
+# A dead worker is still caught by the segment's 30 s heartbeat timeout.
+SEGMENT_TIMEOUT = timedelta(hours=1)
 # The most characters of a failed turn's message that reach FinishTurn and its event.
 MESSAGE_MAX = 500
 

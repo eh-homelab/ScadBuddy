@@ -53,12 +53,12 @@ from scadbuddy.meshmodel.scene import (
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.jobs import UNCOLOURED_MATERIAL_INDEX
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.render.split import ColourPart, split_by_material
+from scadbuddy.render.split import ColourPart, Paint, split_by_material
 
 #: Part of every key: bump it when what a geometry key promises changes, or when what a
 #: row holds does (`RenderMainResult`, a piece's files), so no older row is read under
 #: the new meaning.
-GEOMETRY_VERSION = 3
+GEOMETRY_VERSION = 4
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
 
 
@@ -176,8 +176,18 @@ def _layout_colours(layout: Mapping[str, Any]) -> set[str]:
     return found
 
 
+def painted(layout: Mapping[str, Any]) -> bool:
+    """Whether any part of the layout carries a painting (`PartSource.paint`)."""
+    return any("paint" in part for plate in layout["plates"] for part in plate["parts"])
+
+
 def reusable(layout: Mapping[str, Any], classes: Sequence[str]) -> bool:
-    """Whether every colour the layout holds is one of its colour classes."""
+    """Whether every colour the layout holds is one of its colour classes, and no part
+    carries a painting: its ``paint-*.json`` keeps the palette it was painted in, which
+    `recolour_layout` does not swap, so a painted colour that is also a class would no
+    longer be a filament."""
+    if painted(layout):
+        return False
     return _layout_colours(layout) <= {colour.upper() for colour in classes}
 
 
@@ -251,7 +261,15 @@ def recolour_piece(
                 part.name,
                 _swap(part.colour, mapping),
                 part.mesh,
-                part.paint,
+                # Its painting's colours swapped too, now that a preview draws them
+                # (#3956), as an arranged copy's are (`workflows/outputs.py`).
+                None
+                if part.paint is None
+                else Paint(
+                    part.paint.codes,
+                    tuple(_swap(c, mapping) for c in part.paint.colours),
+                    part.paint.reversed,
+                ),
                 negative=part.negative,
             )
             for part in parts

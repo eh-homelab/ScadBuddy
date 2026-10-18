@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -18,7 +19,7 @@ from typing import Annotated, Any
 
 import httpx
 import psycopg
-from fastapi import APIRouter, Path, Query, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.accepting import accepting, prefers_async
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     AppState,
@@ -57,10 +59,12 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
+from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
+from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
-from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
@@ -111,6 +115,7 @@ from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
     DESCRIBE_SECONDS,
+    FAST_ACCEPT,
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
     CommandClosedError,
@@ -119,6 +124,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
+    follow_update,
     start_command,
 )
 from scadbuddy.workflows.component import FollowsDep
@@ -131,6 +137,11 @@ from scadbuddy.workflows.print_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The `request_id`s a follow URL can carry as its Update id: the web client's hex and the
+#: agent's UUIDs both match. Not `.` or `..`, which a client or proxy collapses out of a
+#: path as a dot segment (review #2834).
+_FOLLOWABLE_ID = re.compile(r"(?!\.{1,2}$)[A-Za-z0-9_.-]+")
 
 #: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
 #: was persisted, and the same request sent again follows it (review #1316 4).
@@ -694,10 +705,11 @@ async def post_run(
     output_id: OutputIdPath,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     outputs: OutputsDep,
     runs: PrintRunsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
-) -> PrintRun:
+) -> PrintRun | JSONResponse:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
 
@@ -723,11 +735,16 @@ async def post_run(
     one per deliberate Print gets a new print each time, and a retry of one press
     (same id) its run, for as long as the run's row is kept
     (``print_run_retention_seconds``).
+
+    With ``Prefer: respond-async``, a run no worker has picked up within a few seconds
+    answers **202** ``accepting`` instead of 503 ``command-still-accepting``: follow its
+    ``follow_url`` to this answer (spec 2026-10-13, #2793).
     """
     meta = require_output(outputs, output_id)
     return await accept_run(
         runs,
         response,
+        http=http,
         subject=PrintSubject.output(meta.id),
         slug=meta.slug,
         request=body,
@@ -756,7 +773,8 @@ async def accept_run(
     source: SourceSpec,
     activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
-) -> PrintRun:
+    http: Request | None = None,
+) -> PrintRun | JSONResponse:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
 
@@ -767,6 +785,11 @@ async def accept_run(
     (or attached to) with update-with-start, and its ``accepted`` Update answers with
     the new row (202), the run it repeats (200) or the refusal, raised as the problem it
     carries. ``prepare`` completes ``source`` for a run that is not a repeat (#2550).
+    ``http`` asking for ``Prefer: respond-async`` makes a start no worker has accepted
+    within `FAST_ACCEPT` a 202 to follow (spec 2026-10-13 §5.1, #2793); its Update id is
+    the request's ``request_id``. A request without one, or with one a URL path cannot
+    carry, keeps the 503 re-send: a repeat
+    of an ended run must start anew (``ended``), which a follow cannot tell apart.
     """
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
@@ -787,6 +810,18 @@ async def accept_run(
         search_attributes=runs.search_attributes,
     )
     workflow_id = f"print-{key}"
+    # Only for a press with a `request_id` (review #2834): without one, a repeat of an
+    # ended run outside its window must start anew (`ended` below), which a follow of the
+    # Update cannot tell from the run this request made. Those keep the 503 re-send.
+    # A `request_id` is the follow URL's last path segment, so one Starlette cannot put
+    # in a path (a `/`, say) keeps the 503 re-send too, rather than a 500 (#3078).
+    respond_async = (
+        http is not None
+        and prefers_async(http)
+        and request.request_id is not None
+        and _FOLLOWABLE_ID.fullmatch(request.request_id) is not None
+    )
+    update_id = request.request_id if respond_async else None
 
     began = time.monotonic()
 
@@ -805,6 +840,7 @@ async def accept_run(
                 else WorkflowIDReusePolicy.ALLOW_DUPLICATE
             ),
             deadline=deadline,
+            update_id=update_id,
         )
 
     async def ended(answer: AcceptAnswer) -> bool:
@@ -817,7 +853,14 @@ async def accept_run(
         return stored is not None and stored.status != "running"
 
     try:
-        answer = await start()
+        try:
+            answer = await start(FAST_ACCEPT if respond_async else COMMAND_ANSWER_DEADLINE)
+        except CommandStillAcceptingError:
+            if http is None or update_id is None:
+                raise
+            # Followed by its Update rather than sent again (#2793). Only this first
+            # start: one that must start a new run past an ended one is sent again.
+            return accepting(http, workflow_id, update_id)
         if await ended(answer):
             # Our record no longer repeats this ended run: its window is over and the
             # execution is closing. Let it close, then this request starts its own.
@@ -859,23 +902,36 @@ async def accept_run(
             type_=STILL_ACCEPTING_PROBLEM,
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
-    except TemporalRefusedError:
+    except (TemporalRefusedError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
+    run = _answered(answer)
+    await attribute_request(activity.index, f"print_run:{run.id}")
+    if answer.repeated:
+        response.status_code = status.HTTP_200_OK
+    return run
+
+
+def _temporal_problem(error: TemporalRefusedError | TemporalUnavailableError) -> ApiError:
+    if isinstance(error, TemporalRefusedError):
         # A misconfiguration, not a blip (review #1061 (3) 3).
-        raise temporal_refused(
+        return temporal_refused(
             "to start a print run", TEMPORAL_REFUSED_DETAIL, may_have_started=True
-        ) from None
-    except TemporalUnavailableError as error:
-        if isinstance(error, TemporalUnreachableError):
-            detail = TEMPORAL_UNREACHABLE_DETAIL
-        elif isinstance(error, TemporalBusyError):
-            detail = TEMPORAL_BUSY_DETAIL
-        else:
-            detail = TEMPORAL_DOWN_DETAIL
-        raise temporal_unavailable(
-            "a print run",
-            detail,
-            may_have_started=not isinstance(error, TemporalUnreachableError),
-        ) from None
+        )
+    if isinstance(error, TemporalUnreachableError):
+        detail = TEMPORAL_UNREACHABLE_DETAIL
+    elif isinstance(error, TemporalBusyError):
+        detail = TEMPORAL_BUSY_DETAIL
+    else:
+        detail = TEMPORAL_DOWN_DETAIL
+    return temporal_unavailable(
+        "a print run",
+        detail,
+        may_have_started=not isinstance(error, TemporalUnreachableError),
+    )
+
+
+def _answered(answer: AcceptAnswer) -> PrintRun:
+    """The run the `accepted` Update answered, or its refusal raised as its problem."""
     if answer.refusal is not None:
         refusal = answer.refusal
         raise ApiError(
@@ -886,10 +942,18 @@ async def accept_run(
             **refusal.extensions,
         )
     assert answer.run is not None  # the Update answers one or the other
-    await attribute_request(activity.index, f"print_run:{answer.run.id}")
-    if answer.repeated:
-        response.status_code = status.HTTP_200_OK
     return answer.run.model_copy(update={"repeated": answer.repeated})
+
+
+async def follow_run(runs: PrintCommands, workflow_id: str, update_id: str) -> PrintRun:
+    """The run a print-run route answered 202 for (spec 2026-10-13 §5.3, #2793): its
+    `accepted` Update's outcome, answered as `accept_run` answers it. Still not answered,
+    `CommandStillAcceptingError`; not known, `CommandResendError`."""
+    try:
+        answer = await follow_update(runs.client, workflow_id, update_id, result_type=AcceptAnswer)
+    except (TemporalRefusedError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
+    return _answered(answer)
 
 
 @router.get(
@@ -1039,6 +1103,9 @@ async def get_filaments(
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
+    plate_ids: Annotated[
+        list[Annotated[int, Field(ge=1)]] | None, Query(max_length=MAX_PLATES)
+    ] = None,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
 
@@ -1054,6 +1121,7 @@ async def get_filaments(
 
     ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
     place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
+    ``plate_ids`` answers the same way for just those plates (#3652).
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -1067,6 +1135,7 @@ async def get_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
+            plate_ids=plate_ids,
         )
 
 
@@ -1097,6 +1166,7 @@ async def get_choices(
             settings,
             printer_id=printer_id,
             cache=paths.cache,
+            catalogue_key=catalogue_name_key(store.kek),
             rack=rack,
         )
 
@@ -1150,32 +1220,81 @@ async def get_progress(
     return progress
 
 
-@router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")
-async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
-    """Every Bambuddy project, with the library folder that belongs to it (#79).
+@router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects and folders")
+async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectChoices:
+    """Every Bambuddy project, with the library folder that belongs to it (#79), and
+    every library folder of no project, a destination of its own (#3651).
 
-    Also the project the last send went to, so the picker opens where it was left.
-    ScadBuddy models no relationship between a model and a project: which prints
-    belong to a project is on the project's own page, and keeping a second answer
-    here would be a copy that goes stale.
+    Also the default project (``last_project_id``), which only Settings changes (#3188),
+    the picker's sort, and when each destination was last touched. ScadBuddy models no
+    relationship between a model and a project: which prints belong to a project is on
+    the project's own page, and keeping a second answer here would be a copy that goes
+    stale.
     """
     settings = store.load()
+    touches = await uploads.destination_touches()
     async with client_for(settings) as client:
-        return await describe_projects(client, last_project_id=settings.last_project_id)
+        return await describe_projects(
+            client,
+            last_project_id=settings.last_project_id,
+            sort=settings.destination_sort,
+            touches=touches,
+            inbox_id=settings.library_folder_id,
+        )
 
 
-class LastProject(BaseModel):
-    """The project the pickers open on (#317); ``null`` is "No project"."""
-
-    project_id: int | None = None
+#: The most content one default asks about: a batch of library files, or an arrange's.
+MAX_DEFAULT_CONTENT = 100
 
 
-@router.put("/projects/last", response_model=LastProject, summary="Remember the chosen project")
-def put_last_project(body: LastProject, store: SettingsStoreDep) -> LastProject:
-    """The project chosen on the Customize page or in the print dialog, which both open
-    on next (``last_project_id``). ScadBuddy's own preference: it needs no Bambuddy."""
-    settings = store.remember_project(body.project_id)
-    return LastProject(project_id=settings.last_project_id)
+@router.get(
+    "/projects/default",
+    response_model=DefaultDestination,
+    summary="Where some content is filed by default",
+)
+async def get_default_project(
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    output_id: Annotated[list[str] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
+    library_file_id: Annotated[list[int] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
+) -> DefaultDestination:
+    """The project a print or Generate of these outputs and library files opens on
+    (#3651): the one project they are all in already, else the Settings default
+    (``last_project_id``, #3188), else none. ``reason`` says which."""
+    metas = [require_output(outputs, one) for one in dict.fromkeys(output_id or [])]
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await default_destination(
+            client,
+            uploads,
+            settings,
+            outputs=metas,
+            library_file_ids=list(dict.fromkeys(library_file_id or [])),
+        )
+
+
+#: A new project's subject keeps this much of its name (#3856): enough to tell it apart.
+PROJECT_NAME_SUBJECT_CHARS = 200
+
+
+def project_subject(body: ProjectRequest) -> str:
+    """The project linked, or the name of the one created: one chip per project on the
+    Activity page, not one for them all (#3856). The name is prefixed, so one that reads
+    like a model's slug or ``library:89`` never shares that subject's chip.
+
+    The name is what a person typed, and it is shown to everyone who reads the
+    operations record or the Activity facets, as the project itself is in Bambuddy.
+
+    The create keeps this subject once the project has an id, so its chip is apart
+    from the ``project:<id>`` one its later links share: the record says what was
+    asked for, and the id is not known until Bambuddy answers. Two creates of one name
+    share a chip, as two asks for the same thing would."""
+    if body.project_id is not None:
+        return f"project:{body.project_id}"
+    if body.name:
+        return f"project-name:{body.name[:PROJECT_NAME_SUBJECT_CHARS]}"
+    return "project"
 
 
 @router.post(
@@ -1201,7 +1320,7 @@ async def post_project(
         ops,
         response,
         kind=ops.kinds["create_project"],
-        subject="project",
+        subject=project_subject(body),
         request=body,
         idempotency_key=idempotency_key,
     )

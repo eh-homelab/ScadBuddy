@@ -8,6 +8,7 @@ import re
 import tracemalloc
 import zipfile
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, BinaryIO
 from xml.etree import ElementTree as ET
@@ -162,6 +163,61 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert settings["wipe_tower_x"] == ["98"]
     assert settings["wipe_tower_y"] == ["5"]
+
+
+def test_project_settings_size_every_filament_for_a_slice_with_no_profiles(
+    tmp_path: Path,
+) -> None:
+    """Bambu Studio's CLI with no profiles takes this file as its whole config, and
+    segfaults without ``filament_diameter``; a multi-colour one then needs
+    ``filament_is_support`` the length of ``filament_colour`` (#4089)."""
+    parts = [
+        ColourPart(index, f"Color {index}", colour, trimesh.creation.box(extents=(4, 4, 4)))
+        for index, colour in enumerate(["#FF0000", "#00FF00", "#0000FF"], start=1)
+    ]
+    out = tmp_path / "three.3mf"
+    write_plates_3mf([single_plate(parts)], [p.colour for p in parts], out, thumbnails=None)
+    settings = _settings_of(out)
+    assert settings["filament_diameter"] == ["1.75", "1.75", "1.75"]
+    assert settings["filament_is_support"] == ["0", "0", "0"]
+    # Beside the five keys spec §3 requires.
+    for key in (
+        "printer_settings_id",
+        "print_settings_id",
+        "filament_settings_id",
+        "nozzle_diameter",
+        "printable_height",
+    ):
+        assert key in settings
+
+
+def _restated(payload: bytes, **changes: list[str] | None) -> bytes:
+    """``payload`` with ``project_settings.config`` keys set, or removed for ``None``."""
+    settings = _settings_of_bytes(payload)
+    for key, value in changes.items():
+        if value is None:
+            settings.pop(key)
+        else:
+            settings[key] = value
+    restated = (json.dumps(settings, indent=4) + "\n").encode()
+    return _with_entries(payload, {"Metadata/project_settings.config": restated})
+
+
+def test_re_placing_a_file_written_before_4089_adds_the_filament_vectors(
+    written: Path,
+) -> None:
+    old = _restated(written.read_bytes(), filament_diameter=None, filament_is_support=None)
+    assert "filament_diameter" not in _settings_of_bytes(old)
+    settings = _settings_of_bytes(replate_3mf(old, plate_for("H2C")))
+    assert settings["filament_diameter"] == ["1.75", "1.75"]
+    assert settings["filament_is_support"] == ["0", "0"]
+
+
+def test_re_placing_keeps_the_filament_vectors_a_file_states(written: Path) -> None:
+    thick = _restated(written.read_bytes(), filament_diameter=["2.85", "2.85"])
+    settings = _settings_of_bytes(replate_3mf(thick, plate_for("A1")))
+    assert settings["filament_diameter"] == ["2.85", "2.85"]
+    assert settings["filament_is_support"] == ["0", "0"]
 
 
 def _settings_of(out: Path) -> dict[str, object]:
@@ -779,6 +835,8 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         "filament_settings_id": ["ScadBuddy", "ScadBuddy"],
         "nozzle_diameter": ["0.4"],
         "printable_height": "250",
+        "filament_diameter": ["1.75", "1.75"],
+        "filament_is_support": ["0", "0"],
         "wipe_tower_x": ["98"],
         "wipe_tower_y": ["5"],
     }
@@ -838,6 +896,9 @@ class TestBambuProjectIdentity:
             settings = json.loads(archive.read("Metadata/project_settings.config"))
         assert all(key in settings for key in self.REQUIRED)
         assert "wipe_tower_x" not in settings
+        # A slice with no profiles segfaults without it (#4089).
+        assert settings["filament_diameter"] == ["1.75"]
+        assert settings["filament_is_support"] == ["0"]
 
     def test_filament_settings_id_has_one_entry_per_colour(self, written: Path) -> None:
         with zipfile.ZipFile(written) as archive:
@@ -1854,15 +1915,156 @@ def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> Non
     )
 
 
-def test_written_extents_are_read_a_batch_at_a_time() -> None:
-    vertices = b"".join(
-        b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(bambu3mf._VERTEX_BATCH + 5)
-    )
+def test_written_extents_are_read_a_window_at_a_time() -> None:
+    """#3678: vertices are matched a window of the file at a time; a box over several
+    windows is the box over every vertex, and none is counted twice or missed."""
+    count = 3 * bambu3mf._WINDOW // len(b'<vertex x="0" y="0" z="1"/>')
+    vertices = b"".join(b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(count))
     data = _object_bytes(vertices)
+    assert len(list(bambu3mf._windows(data, 0))) > 2
     box, painted = bambu3mf._written_extents(data) or (None, None)
     assert box is not None
-    assert box.tolist() == [
-        [0, -(bambu3mf._VERTEX_BATCH + 4), 1],
-        [bambu3mf._VERTEX_BATCH + 4, 0, 1],
-    ]
+    assert box.tolist() == [[0, -(count - 1), 1], [count - 1, 0, 1]]
     assert painted == frozenset()
+
+
+def test_a_run_of_paint_attributes_is_counted_without_being_held() -> None:
+    """Security review of #3711: the bare attribute needs no ``<``, so a window can hold
+    any number of them; collecting them cost four times the file, which at the archive's
+    cap is gigabytes."""
+    junk = b' paint_color="' * 400_000
+    data = _object_bytes(_THREE, tail=b'<metadata name="' + junk + b'"/>')
+    tracemalloc.start()
+    try:
+        bambu3mf._written_extents(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+def test_windows_cover_the_file_and_end_before_a_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3678: the windows run end to end from where they start, and each but the last
+    ends just before a ``<``, so no tag starts in one window and ends in the next."""
+    data = _object_bytes(b'<vertex x="1" y="2" z="3"/>' * 50)
+    monkeypatch.setattr(bambu3mf, "_WINDOW", 100)
+    windows = list(bambu3mf._windows(data, 7))
+    assert len(windows) > 5
+    assert windows[0][0] == 7 and windows[-1][1] == len(data)
+    assert all(end == start for (_, end), (start, _) in pairwise(windows))
+    assert all(data[end : end + 1] == b"<" for _, end in windows[:-1])
+
+
+def _object_files(payload: bytes) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return [
+            (name, archive.read(name))
+            for name in archive.namelist()
+            if name.startswith("3D/Objects/")
+        ]
+
+
+def _parsed(name: str, data: bytes, **limits: int) -> bambu3mf.ParsedModel:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, data)
+    return parse_model(zipfile.ZipFile(io.BytesIO(out.getvalue())), name, **limits)
+
+
+def _assert_read_alike(fast: bambu3mf.ParsedModel, slow: bambu3mf.ParsedModel) -> None:
+    """The same arrays and the same tree, but for the space between the vertices and
+    triangles the parse keeps as their parent's text (#3679)."""
+    (got,), (want,) = fast.meshes.values(), slow.meshes.values()
+    for field in ("vertices", "faces", "pid", "p1"):
+        a, b = getattr(got, field), getattr(want, field)
+        assert a.dtype == b.dtype and a.shape == b.shape and np.array_equal(a, b), field
+    assert (got.pids, got.paint, got.prusa_painted) == (want.pids, want.paint, want.prusa_painted)
+    blocks = {f"{{{CORE_NS}}}vertices", f"{{{CORE_NS}}}triangles"}
+    for x, y in zip(fast.root.iter(), slow.root.iter(), strict=True):
+        assert (x.tag, x.attrib, x.tail) == (y.tag, y.attrib, y.tail)
+        assert x.text == y.text or (x.tag in blocks and not x.text and not (y.text or "").strip())
+
+
+def _parsed_by_xml(monkeypatch: pytest.MonkeyPatch, name: str, data: bytes) -> bambu3mf.ParsedModel:
+    with monkeypatch.context() as patch:
+        patch.setattr(bambu3mf, "_written_mesh", lambda *_: None)
+        return _parsed(name, data)
+
+
+@pytest.mark.parametrize("window", [None, 64], ids=["one window", "many windows"])
+def test_a_written_object_file_is_read_by_pattern_as_the_parse_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, window: int | None
+) -> None:
+    """#3679: an object file in the writer's own shape has its vertices and triangles
+    read by pattern, painted ones included, and comes out as the parse reads it."""
+    if window is not None:
+        monkeypatch.setattr(bambu3mf, "_WINDOW", window)
+    files = _object_files(_painted_two_objects(tmp_path))
+    assert any(b"paint_color" in data for _, data in files)
+    for name, data in files:
+        assert bambu3mf._written_mesh(data, None, None) is not None
+        _assert_read_alike(_parsed(name, data), _parsed_by_xml(monkeypatch, name, data))
+
+
+def test_the_rest_of_a_written_object_file_is_still_parsed_as_xml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3679: only the two blocks are read by pattern; an entity outside them is the
+    XML parser's to expand, and a file that is not XML is refused as it always was."""
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    named = data.replace(b'name="', b'name="&#60;', 1)
+    fast = bambu3mf._written_mesh(named, None, None)
+    assert fast is not None
+    _assert_read_alike(fast, _parsed_by_xml(monkeypatch, name, named))
+    with pytest.raises(ET.ParseError):
+        _parsed(name, data.replace(b"</object>", b"</objekt>"))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda data: data.replace(b"<mesh>", b"<!-- a note --><mesh>"),
+        lambda data: data.replace(b"<mesh>", b"<?note hi?><mesh>"),
+        lambda data: data.replace(b'<vertex x="', b'<vertex id="1" x="', 1),
+        lambda data: re.sub(rb'x="[^"]*"', b'x="1e2"', data, count=1),
+        lambda data: data.replace(b'"/>\n    </triangles>', b'" pid="1"/>\n    </triangles>'),
+    ],
+    ids=["comment", "instruction", "attribute", "exponent", "pid"],
+)
+def test_an_object_file_written_otherwise_is_left_to_the_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Callable[[bytes], bytes]
+) -> None:
+    """#3679: anything the pattern does not read exactly as the parse would, or that
+    could hide a block's tags, is parsed as it always was."""
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    other = change(data)
+    assert other != data
+    assert bambu3mf._written_mesh(other, None, None) is None
+    _assert_read_alike(_parsed(name, other), _parsed_by_xml(monkeypatch, name, other))
+
+
+def test_a_written_object_file_past_its_limits_is_refused_as_the_parse_refuses_it(
+    tmp_path: Path,
+) -> None:
+    from scadbuddy.render.bambu3mf import TooManyTrianglesError
+
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    with pytest.raises(TooManyTrianglesError) as triangles:
+        _parsed(name, data, max_triangles=1)
+    with pytest.raises(TooManyTrianglesError) as vertices:
+        _parsed(name, data, max_vertices=1)
+    assert (triangles.value.kind, vertices.value.kind) == ("triangles", "vertices")
+
+
+def test_an_entry_too_large_to_hold_is_parsed_as_it_inflates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    expected = _parsed_by_xml(monkeypatch, name, data)
+    monkeypatch.setattr(bambu3mf, "_HELD_ENTRY", len(data) // 3)
+
+    def unused(*_: object) -> None:
+        raise AssertionError("an entry past what is held was held")
+
+    monkeypatch.setattr(bambu3mf, "_written_mesh", unused)
+    _assert_read_alike(_parsed(name, data), expected)

@@ -125,6 +125,55 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
   // transaction could land after the turn had finished and set `idle`: `running` was then
   // never logged, and the panel went straight from waiting to idle. Read off the commits
   // themselves, so the order of the turn and the answer call does not matter.
+  // Review of #3685, for questions: two answers in one session that overlap each see the
+  // other's question as pending under READ COMMITTED, so without a lock on the session row
+  // neither moves it back, and it stays `waiting_input` with nothing pending. Both answers
+  // are held inside the refresh, written and not committed, before either runs it.
+  it('two overlapping answers in one session move it back from waiting_input (review of #3685)', async () => {
+    let hold!: () => void
+    const held = new Promise<void>((r) => (hold = r))
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const ask = (toolUseId: string) => run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId, signal: new AbortController().signal })
+        await Promise.all([ask('toolu_q1'), ask('toolu_q2')])
+        await held
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me twice' })
+    let ids: string[] = []
+    await expect
+      .poll(async () => (ids = (await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`).map((r) => r.id)).length, { timeout: 10_000 })
+      .toBe(2)
+    await expect.poll(async () => (await m.get(session.id, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
+
+    // A spy, not a trigger: the two answers must meet between their own commits, and only
+    // a hook inside the transaction can hold the first there for the second.
+    const service = m.questions as unknown as { statusRefresh: (tx: unknown, sessionId: string) => Promise<ServerEvent[]> }
+    const refresh = service.statusRefresh.bind(service)
+    let arrived = 0
+    let both!: () => void
+    const together = new Promise<void>((r) => (both = r))
+    /** What the two answering commits moved the session to: the second must move it, seeing both answers. */
+    const moved: string[] = []
+    vi.spyOn(service, 'statusRefresh').mockImplementation(async (tx, sessionId) => {
+      // Both meet here when nothing orders them; with the session locked the second answer
+      // cannot arrive until the first commits, so the first goes on alone after a wait.
+      if (++arrived === 2) both()
+      await Promise.race([together, new Promise((r) => setTimeout(r, 1_000))])
+      const out = await refresh(tx, sessionId)
+      moved.push(...out.flatMap((e) => (e.type === 'session.status' ? [e.status] : [])))
+      return out
+    })
+
+    await Promise.all(ids.map((id) => m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))))
+    expect(arrived).toBe(2)
+    expect(moved).toEqual(['running'])
+    hold()
+    await turn!.done
+  })
+
   it('logs the move back to running in the same commit as the answer (#3255)', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
@@ -528,10 +577,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
-    const service = m.questions as unknown as { statusRefresh: () => Promise<ServerEvent[]> }
-    vi.spyOn(service, 'statusRefresh').mockRejectedValueOnce(new Error('status write failed'))
-
-    await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    // The session's own status write fails, in Postgres (#3256 review): what users see,
+    // not a private method's name.
+    await db.sql.unsafe(
+      `CREATE FUNCTION fail_status_write() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN RAISE EXCEPTION 'status write failed'; END $$`,
+    )
+    await db.sql.unsafe(
+      `CREATE TRIGGER fail_status_write BEFORE UPDATE OF status ON ai_sessions FOR EACH ROW
+       WHEN (OLD.status = 'waiting_input' AND NEW.status <> 'waiting_input') EXECUTE FUNCTION fail_status_write()`,
+    )
+    try {
+      await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    } finally {
+      await db.sql.unsafe('DROP TRIGGER fail_status_write ON ai_sessions')
+      await db.sql.unsafe('DROP FUNCTION fail_status_write()')
+    }
     expect(await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`).toEqual([{ outcome: null }])
     expect((await m.get(session.id, browser)).status).toBe('waiting_input')
     expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'question'`).toEqual([])

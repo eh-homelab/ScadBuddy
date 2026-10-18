@@ -7,10 +7,16 @@ import type {
   SessionStore,
   SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
+import { CONTINUE_PROMPT } from '../harness/continuePrompt.js'
 import { pinnedFetch } from '../http/pinned.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
 import { redact } from '../secrets.js'
+import { SpanStatusCode } from '@opentelemetry/api'
+import { withSpan } from '../telemetry/trace.js'
+
+/** A recall's span, as the bank was asked (#2981 review). */
+export const RECALL_SPAN = 'agent.memory.recall'
 
 // Automatic Hindsight memory for assistant sessions: recall at each user
 // prompt, retain at each turn's end, without the model having to call the
@@ -311,11 +317,12 @@ export class HindsightClient {
 type TranscriptLine = {
   type?: unknown
   isMeta?: unknown
+  isApiErrorMessage?: unknown
   isSidechain?: unknown
   isCompactSummary?: unknown
   timestamp?: unknown
   result?: unknown
-  message?: { content?: unknown }
+  message?: { content?: unknown; model?: unknown }
 }
 
 export type Turn = { role: string; content: string; timestamp?: string }
@@ -399,6 +406,22 @@ function entriesOf(jsonl: string): TranscriptLine[] {
   return out
 }
 
+/**
+ * A credential failover's plumbing, never conversation (#3701): the refused attempt's
+ * synthetic error message ("You've hit your weekly limit…", model `<synthetic>`), and the
+ * continuation prompt the next credential resumed with (harness/fallback.ts).
+ */
+function failover(line: TranscriptLine): boolean {
+  if (line.type === 'assistant') return line.isApiErrorMessage === true || line.message?.model === '<synthetic>'
+  const content = line.message?.content
+  if (typeof content === 'string') return content.trim() === CONTINUE_PROMPT
+  return (
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every((b: { type?: unknown; text?: unknown }) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim() === CONTINUE_PROMPT)
+  )
+}
+
 /** coding-agents `readClaudeTranscript`, over parsed entries. */
 export function transcriptTurns(entries: readonly TranscriptLine[]): Turn[] {
   const turns: Turn[] = []
@@ -406,6 +429,7 @@ export function transcriptTurns(entries: readonly TranscriptLine[]): Turn[] {
     if (line.type !== 'user' && line.type !== 'assistant') continue
     if (line.isMeta === true || line.isSidechain === true || line.isCompactSummary === true) continue
     if (typeof line.message !== 'object' || line.message === null) continue
+    if (failover(line)) continue
     for (const turn of renderLine(line.message.content, line.type)) {
       turns.push(typeof line.timestamp === 'string' ? { ...turn, timestamp: line.timestamp } : turn)
     }
@@ -677,7 +701,12 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       if (recalled && !recalled.failed) return recalled.output
       const mine: { prompt: string; output: Promise<HookJSONOutput>; failed?: true } = {
         prompt: input.prompt,
-        output: recall(input, signal).then(({ output, failed }) => {
+        // Its own span, under the run: the turn's `memory` step only sets the hooks up (#2981 review).
+        output: withSpan(RECALL_SPAN, {}, async (span) => {
+          const answered = await recall(input, signal)
+          if (answered.failed) span.setStatus({ code: SpanStatusCode.ERROR })
+          return answered
+        }).then(({ output, failed }) => {
           if (failed) mine.failed = true
           return output
         }),

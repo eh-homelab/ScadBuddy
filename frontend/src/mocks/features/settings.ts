@@ -33,6 +33,7 @@ const SECRETS = {
   bambuddy_api_key: 'has_api_key',
   bambuddy_render_api_key: 'has_render_api_key',
   google_fonts_api_key: 'has_google_fonts_api_key',
+  store_s3_secret_access_key: 'has_store_s3_secret_access_key',
 } as const
 /** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
 const NULLABLE = new Set([
@@ -43,9 +44,25 @@ const NULLABLE = new Set([
   'default_plate',
   'google_fonts_api_key',
   'temporal_ui_url',
+  'store_s3_endpoint',
+  'store_s3_bucket',
+  'store_s3_access_key_id',
+  'store_s3_secret_access_key',
 ])
 /** The settings the backend's `StoreNotReadyError` is decided from. */
-const STORE_READINESS = ['store_backend', 'bambuddy_url', 'library_folder_id']
+const STORE_READINESS = [
+  'store_backend',
+  'library_backend',
+  'bambuddy_url',
+  'library_folder_id',
+  'store_s3_endpoint',
+  'store_s3_region',
+  'store_s3_bucket',
+  'store_s3_prefix',
+  'store_s3_access_key_id',
+  'store_s3_secret_access_key',
+  'store_s3_path_style',
+]
 const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'library_max_bytes'])
 const MORE_THAN_ZERO = new Set([
   'render_timeout',
@@ -130,6 +147,30 @@ function putSettings(body: Record<string, unknown>) {
       422,
       'Unprocessable Content',
       'the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first',
+    )
+  }
+  // The S3 store's: its endpoint, bucket and both keys.
+  if (
+    STORE_READINESS.some((name) => name in body || reset.includes(name)) &&
+    next.store_backend === 's3' &&
+    (!next.store_s3_endpoint || !next.store_s3_bucket || !next.store_s3_access_key_id || !next.has_store_s3_secret_access_key)
+  ) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      'the S3 store needs its endpoint, bucket, access key id and secret access key saved first',
+    )
+  }
+  // #3827 — `SettingsStore.save`: ScadBuddy's own library needs a content store.
+  if (
+    STORE_READINESS.some((name) => name in body || reset.includes(name)) &&
+    next.library_backend === 'native' &&
+    (next.store_backend ?? 'local') === 'local'
+  ) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 or bambuddy first",
     )
   }
   // #426 — without their own key, render workers are handed the full one.

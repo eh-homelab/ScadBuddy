@@ -16,7 +16,9 @@ import {
   type ProbeVerdict,
   cooldownUntil,
   probeCredential,
+  rateLimitResetFromText,
 } from './credentialErrors.js'
+import { CONTINUE_PROMPT } from './continuePrompt.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
 
 // Several Claude credentials, in priority order, with fallback (#1093).
@@ -124,9 +126,7 @@ export class NoUsableCredentialError extends Error {
   }
 }
 
-/** Sent as the next credential's prompt when it resumes a turn another one started. */
-export const CONTINUE_PROMPT =
-  'The request to the model failed and was sent again with another Claude credential. Continue where you left off.'
+export { CONTINUE_PROMPT }
 
 /** Claude Code's retries of a transient failure on one credential, when there is another to fall back to. */
 export const DEFAULT_TRANSIENT_RETRIES = 2
@@ -160,12 +160,15 @@ export type FallbackOptions = {
    */
   onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
   /**
-   * Called as each attempt after the first starts, once the caller has seen
-   * every message of the attempts before it. The caller cannot tell otherwise:
-   * only the first attempt's init message is passed on. The session manager
-   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
+   * Called as each attempt starts, the first included (`index` 0), once the
+   * caller has seen every message of the attempts before it. The caller cannot
+   * tell otherwise: only the first attempt's init message is passed on. The
+   * session manager forgets the earlier attempts' unfinished requests on each
+   * attempt after the first (unpricedSpend.ts, #1666), and points the turn's own
+   * model calls (WebFetch's nested query) at the credential the attempt is on
+   * (#2973), so it need not know which candidate comes first (#3508 review).
    */
-  onAttempt?: () => void
+  onAttempt?: (credential: PooledCredential, index: number) => void
   /**
    * The SDK session every attempt runs in, when the caller fixes it: a warm
    * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
@@ -308,8 +311,8 @@ export async function* runWithFallback(
   let continuing = false
 
   for (let i = 0; i < candidates.length; i++) {
-    if (i > 0) options.onAttempt?.()
     const current = candidates[i] as PooledCredential
+    options.onAttempt?.(current, i)
     const next = candidates[i + 1]
     const controller = linked(base.signal)
     const { resume: _resume, sessionId: _sessionId, ...rest } = continuing ? continuationRun(base) : base
@@ -440,6 +443,8 @@ export async function* runWithFallback(
     const secret = current.credential.secret
     const reason = redact(failure.message || verdict, [secret])
     let outcome: AttemptOutcome
+    /** The reset a rate limit's own text named, when it named one. */
+    let named: number | undefined
     if (verdict === 'permanent') {
       // Confirmed before it disables (see the top of this file), on the
       // probe's own model, so a refusal of this turn's model or features
@@ -463,8 +468,12 @@ export async function* runWithFallback(
             ? { class: 'rate_limited', reason, until: check.until }
             : { class: 'transient', reason }
     } else if (verdict === 'rate_limited') {
-      // Recorded now with the default; the probe's answer replaces it below.
-      outcome = { class: 'rate_limited', reason, until: cooldownUntil(undefined, Date.now()) }
+      // Recorded now with the reset the text names (#4107: a subscription limit's
+      // "resets Oct 21, 4am (UTC)"), else the default; the probe's answer replaces it
+      // below, unless the probe could not tell.
+      const now = Date.now()
+      named = rateLimitResetFromText(failure.message ?? '', now)
+      outcome = { class: 'rate_limited', reason, until: cooldownUntil(named, now) }
     } else {
       outcome = { class: 'transient', reason }
     }
@@ -482,7 +491,12 @@ export async function* runWithFallback(
       pending.push(
         probe(current.credential, model, base.signal)
           .then((answer) =>
-            base.signal?.aborted
+            // An `unknown` answer (always, for an OAuth key) knows less than the
+            // reset the text named: that one stands. Any other answer replaces it, even
+            // an earlier one (a minute-level header reset under a weekly limit's text):
+            // the endpoint's own answer is the newer evidence, and a key let back too
+            // soon is only limited again.
+            base.signal?.aborted || (answer.verdict === 'unknown' && named !== undefined)
               ? undefined
               : options.report(
                   current,

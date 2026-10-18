@@ -1,13 +1,12 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError } from '../../api/client'
+import { api, ApiError, BAMBUDDY_NOT_CONFIGURED } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { ClearSwatch, Swatch, UnknownSwatch } from '../../components/print/Swatch'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { spoolChip, spoolName } from '../../lib/filamentColour'
 import { trayPlace } from '../../lib/filaments'
-
-/** Bambuddy's not-configured refusal: a setup step still to take, not a failure. */
-const NOT_CONFIGURED = 'https://scadbuddy.dev/problems/bambuddy-not-configured'
+import { Card } from '@/components/ui/card'
+import { LoadingLines, SwitchField } from '../../components/settings/form'
 
 /** Loaded spools first, then by material, brand and colour. */
 function order(a: InventorySpool, b: InventorySpool): number {
@@ -65,7 +64,7 @@ export function SpoolInventoryPanel() {
         if (!live) return
         setSpools(null)
         setReading(false)
-        const notConfigured = cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED
+        const notConfigured = cause instanceof ApiError && cause.problem.type === BAMBUDDY_NOT_CONFIGURED
         setUnconfigured(notConfigured)
         setError(
           notConfigured ? null : cause instanceof ApiError ? cause.detail : "Bambuddy's inventory could not be read.",
@@ -91,66 +90,70 @@ export function SpoolInventoryPanel() {
   const total = (spools ?? []).filter((spool) => !spool.archived).reduce((sum, spool) => sum + spool.remaining_g, 0)
   return (
     <div data-testid="spool-inventory">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
-        <label className="flex items-center gap-2 text-muted">
-          <input
-            type="checkbox"
-            checked={archived}
-            onChange={(event) => showArchived(event.target.checked)}
-          />
-          Include archived spools
-        </label>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+        <SwitchField
+          id="spool-inventory-archived"
+          label="Include archived spools"
+          checked={archived}
+          onCheckedChange={showArchived}
+          userOnly={false}
+          className="items-center"
+        />
         {base && (
-          <a href={`${base}/inventory`} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+          <a href={`${base}/inventory`} target="_blank" rel="noreferrer" className="text-primary hover:underline">
             Manage in Bambuddy
           </a>
         )}
       </div>
       {unconfigured && (
-        <p className="text-[12px] text-muted" data-testid="spool-inventory-unconfigured">
+        <p className="text-xs text-muted-foreground" data-testid="spool-inventory-unconfigured">
           Bambuddy isn't connected yet, so there are no spools to show.
         </p>
       )}
       {error && (
-        <p className="text-[12px] text-warn" data-testid="spool-inventory-error">
+        <p className="text-xs text-warn" data-testid="spool-inventory-error">
           {error}
         </p>
       )}
       {spools === null && !error && !unconfigured && (
-        <p className="text-[12px] text-muted">Reading Bambuddy's inventory…</p>
+        <LoadingLines label="Reading Bambuddy's inventory…" lines={['w-1/3', 'w-full', 'w-full', 'w-full']} />
       )}
       {spools !== null && (
         // #3486 review: the total and the empty note are the last selection's too, so the
         // whole result is marked as being read again, not the table alone.
         <div data-testid="spool-inventory-result" aria-busy={reading} className={reading ? 'opacity-60' : undefined}>
-          {spools.length === 0 && <p className="text-[12px] text-muted">Bambuddy has no spools.</p>}
+          {spools.length === 0 && <p className="text-xs text-muted-foreground">Bambuddy has no spools.</p>}
           {spools.length > 0 && (
             <>
-          <p className="sb-num mb-2 text-[12px] text-muted" data-testid="spool-inventory-total">
+          <p className="sb-num mb-2 text-xs text-muted-foreground" data-testid="spool-inventory-total">
             {spools.filter((spool) => !spool.archived).length} spools, {(total / 1000).toFixed(2)} kg left
           </p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-[12.5px]">
-              <thead className="text-[11.5px] text-muted">
+          <Card size="sm" className="overflow-x-auto py-0">
+            <table className="w-full text-left text-[13px]">
+              <thead className="border-b text-xs text-muted-foreground">
                 <tr>
-                  <th scope="col" className="py-1 pr-3 font-normal">
+                  <th scope="col" className="px-3 py-2 font-medium">
                     Filament
                   </th>
-                  <th scope="col" className="py-1 pr-3 text-right font-normal">
+                  <th scope="col" className="px-3 py-2 text-right font-medium">
                     Left
                   </th>
-                  <th scope="col" className="py-1 pr-3 text-right font-normal">
+                  <th scope="col" className="px-3 py-2 text-right font-medium">
                     Per kg
                   </th>
-                  <th scope="col" className="py-1 font-normal">
+                  <th scope="col" className="px-3 py-2 font-medium">
                     Where
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-line">
+              <tbody className="divide-y">
                 {spools.map((spool) => (
-                  <tr key={spool.id} data-testid={`spool-${spool.id}`} className={spool.archived ? 'text-faint' : ''}>
-                    <td className="py-1.5 pr-3">
+                  <tr
+                    key={spool.id}
+                    data-testid={`spool-${spool.id}`}
+                    className={`transition-colors hover:bg-muted/50 ${spool.archived ? 'text-faint' : ''}`}
+                  >
+                    <td className="px-3 py-2">
                       <span className="flex min-w-0 items-center gap-2">
                         {colourOf(spool)}
                         <span className="truncate">
@@ -159,18 +162,18 @@ export function SpoolInventoryPanel() {
                         </span>
                       </span>
                     </td>
-                    <td className="sb-num py-1.5 pr-3 text-right whitespace-nowrap">
+                    <td className="sb-num px-3 py-2 text-right whitespace-nowrap">
                       {Math.round(spool.remaining_g)} / {spool.label_weight} g
                     </td>
-                    <td className="sb-num py-1.5 pr-3 text-right whitespace-nowrap">
+                    <td className="sb-num px-3 py-2 text-right whitespace-nowrap">
                       {spool.cost_per_kg != null ? spool.cost_per_kg.toFixed(2) : '—'}
                     </td>
-                    <td className="py-1.5 whitespace-nowrap text-muted">{where(spool)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">{where(spool)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </Card>
             </>
           )}
         </div>

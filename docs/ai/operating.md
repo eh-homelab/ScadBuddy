@@ -303,18 +303,22 @@ is `classifyFailure()` in
 | Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. Through a gateway, Claude Code first sends a refused 400 or 422 once more on the same credential without its `thinking.display` field (and that field's `anthropic-beta` value), so a gateway that refuses only that field still answers the turn, at the cost of one refused request a turn. |
 
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
-fails mid-way (after tool calls ran) resumes the session on the next
-credential with a short "continue" prompt, so no tool runs twice and the prompt is not
-sent twice. Each credential is tried at most once per turn. In a durable session,
-while another credential could still take the segment over, the assistant's text
-reaches the transcript only at the next tool call or at the end of the segment, not
-block by block, so a refused credential's notice never shows (#2945). Every disable,
-cooldown,
+fails mid-way (after tool calls ran) resumes the session on the next credential with a
+short "continue" prompt, so no tool runs twice and the prompt is not sent twice. Each
+credential is tried at most once per turn. In a durable session, while another
+credential could still take the segment over, the assistant's text reaches the
+transcript only at the next tool call or at the end of the segment, not block by
+block, so a refused credential's notice never shows (#2945). A durable segment records
+what its credential met as a classic turn does, so Settings shows the same "used" time
+and state in both modes (#2320): an answer stamps it used, a 429 cools it down for the
+default 60 s, and a refusal or a 5xx is its `last_error`. It runs no probe, so it never
+disables a key and never learns a rate limit's real reset time; a classic turn's probe
+does both. Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
-is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with
-`ai` set to one of:
+is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with `ai`
+set to one of:
 
 - `unavailable (every Claude credential is rate limited)`, with `recovers_at`: every
   credential is cooling down and will be usable again on its own;
@@ -484,6 +488,13 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
   recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it. So
   does a ledger still keyed by position (before #491) that holds a row main never had
   (`MigrationLedgerError`): that database ran an unmerged branch's migration.
+- **The agent migrates before agent-durable writes.** agent-durable runs no migrations
+  of its own but writes columns the agent's create, such as
+  `ai_input_responses.response_hash` (`20261015T1500Z_input_response_hash.sql`, #3724),
+  which `resolve_input` sets on every respond. So roll the agent out first. If
+  agent-durable runs ahead of that migration, every respond fails in its handler: the
+  route answers 503, the entry stays pending, and it goes through once the agent has
+  migrated.
 
 ## 6. Origin allowlist and trusted proxies
 
@@ -633,7 +644,11 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); `printer_camera_enabled`, on unless stored
+  ([§12](#12-the-http-request-tool-827)); `browser_origins`, the headless browser's allow and deny
+  lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
+  through `PUT /api/v1/ai/settings/browser-origins`
+  ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
+  `printer_camera_enabled`, on unless stored
   `false`: while it is off a `get_printer_camera` call (from a turn, `/mcp` or a durable
   session) is refused before the backend is asked, which Settings → Printer camera writes
   through `PUT /api/v1/ai/settings/printer-camera`
@@ -718,6 +733,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
+
+The agent also reads the backend's flow tables, which the backend migrates. Its
+database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
+reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
+Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
+tool call, as a lookup error the activity retries until it gives up.
 
 ## 8. Per-query limits
 

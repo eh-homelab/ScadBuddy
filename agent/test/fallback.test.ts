@@ -114,7 +114,9 @@ function harness(script: Script) {
               refusals.push({ failure, ...judged })
               order.push('onRefused')
             },
-            onAttempt: () => attempts.push(messages.length),
+            onAttempt: (_credential, index) => {
+              if (index > 0) attempts.push(messages.length)
+            },
           },
         )) {
           messages.push(m)
@@ -214,6 +216,45 @@ describe('runWithFallback (#1093)', () => {
       next: undefined,
     })
     expect(provisional.getTime()).toBeGreaterThan(Date.now() + DEFAULT_COOLDOWN_MS - 5000)
+  })
+
+  // #4107: an OAuth key's probe always answers `unknown`, and a subscription limit
+  // names a reset hours or days away. The text's reset stands.
+  const resetIn = (ms: number) => {
+    const at = new Date(Math.ceil((Date.now() + ms) / 60_000) * 60_000)
+    const hour = at.getUTCHours()
+    const clock = `${hour % 12 || 12}:${String(at.getUTCMinutes()).padStart(2, '0')}${hour < 12 ? 'am' : 'pm'}`
+    return { at, text: `You've hit your weekly limit · resets ${clock} (UTC)` }
+  }
+
+  it('cools a rate-limited credential down until the reset its text names, which an unknown probe leaves (#4107)', async () => {
+    const { at, text: t } = resetIn(2 * 60 * 60_000)
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), apiError(t, 'rate_limit'), errorResult(429, t)], throws: new Error('error result') }
+        : [init(), success('ok')],
+    )
+    await h.collect([A, B], {}, { verdict: 'unknown', until: new Date(Date.now() + DEFAULT_COOLDOWN_MS) })
+    expect(h.reports[0]).toEqual({ id: 'a', outcome: { class: 'rate_limited', reason: t, until: at }, next: 'b' })
+    // Only B's success follows: the unknown answer replaces nothing.
+    expect(h.reports.slice(1)).toEqual([{ id: 'b', outcome: { class: 'ok' }, next: undefined }])
+  })
+
+  it('lets a probe that does answer replace the reset the text named', async () => {
+    const { text: t } = resetIn(2 * 60 * 60_000)
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), apiError(t, 'rate_limit'), errorResult(429, t)], throws: new Error('error result') }
+        : [init(), success('ok')],
+    )
+    const until = new Date(Date.now() + 5 * 60_000)
+    await h.collect([A, B], {}, { verdict: 'rate_limited', until })
+    const provisional = (h.reports[0]?.outcome as { until: Date }).until
+    expect(h.reports.slice(1)).toContainEqual({
+      id: 'a',
+      outcome: { class: 'rate_limited', reason: t, until, replacing: provisional },
+      next: undefined,
+    })
   })
 
   it('starts the next credential without waiting for a slow rate-limit probe, and writes its answer before returning', async () => {

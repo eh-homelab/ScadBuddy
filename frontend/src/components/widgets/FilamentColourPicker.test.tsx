@@ -30,27 +30,27 @@ describe('a colour from a filament (#1026)', () => {
     // Not read until asked for.
     expect(reads).toBe(0)
 
-    await user.click(screen.getByRole('button', { name: 'Choose from a filament' }))
-    const list = await screen.findByRole('list', { name: 'Filaments for Plate' })
-    const options = within(list).getAllByRole('button')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const list = await screen.findByRole('listbox', { name: 'Filaments for Plate' })
+    const options = within(list).getAllByRole('option')
     expect(options.map((option) => option.textContent)).toEqual([
       'Insignia PETG — Clearclear, no tint recorded',
       'Bambu Lab PLA Basic — Mistletoe Green1000 g',
       'Bambu Lab PLA Basic — Hot Pink930 g',
     ])
     // A clear spool with no tint has no colour to give.
-    expect(options[0]).toBeDisabled()
+    expect(options[0]).toHaveAttribute('aria-disabled', 'true')
 
-    await user.click(within(list).getByRole('button', { name: /Hot Pink/ }))
+    await user.click(within(list).getByRole('option', { name: /Hot Pink/ }))
     expect(onChange).toHaveBeenCalledWith('#F5547C')
-    expect(screen.queryByRole('list', { name: 'Filaments for Plate' })).toBeNull()
+    expect(screen.queryByRole('listbox', { name: 'Filaments for Plate' })).toBeNull()
   })
 
   it('marks the spool whose colour the parameter already has', async () => {
     const { user } = setup('#3F8E43')
-    await user.click(screen.getByRole('button', { name: 'Choose from a filament' }))
-    expect(await screen.findByRole('button', { name: /Mistletoe Green/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('button', { name: /Hot Pink/ })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    expect(await screen.findByRole('option', { name: /Mistletoe Green/ })).toHaveTextContent('(the colour now)')
+    expect(screen.getByRole('option', { name: /Hot Pink/ })).not.toHaveTextContent('(the colour now)')
   })
 
   it("names a loaded spool's printer, AMS and slot, and lists it ahead of a fuller one on the shelf (#2779 review)", async () => {
@@ -73,9 +73,9 @@ describe('a colour from a filament (#1026)', () => {
       ),
     )
     const { user } = setup()
-    await user.click(screen.getByRole('button', { name: 'Choose from a filament' }))
-    const list = await screen.findByRole('list', { name: 'Filaments for Plate' })
-    expect(within(list).getAllByRole('button').map((option) => option.textContent)).toEqual([
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const list = await screen.findByRole('listbox', { name: 'Filaments for Plate' })
+    expect(within(list).getAllByRole('option').map((option) => option.textContent)).toEqual([
       'Bambu Lab PLA Basic — Loaded OrangeH2C-East · AMS-B · slot 1 · 120 g',
       'Bambu Lab PLA Basic — Shelf Blue1000 g',
     ])
@@ -83,10 +83,10 @@ describe('a colour from a filament (#1026)', () => {
 
   it('draws a clear spool as clear, never black (#2779 review)', async () => {
     const { user } = setup()
-    await user.click(screen.getByRole('button', { name: 'Choose from a filament' }))
-    const clear = await screen.findByRole('button', { name: /Clear/ })
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const clear = await screen.findByRole('option', { name: /Clear/ })
     expect(within(clear).getByTestId('clear-swatch')).toBeInTheDocument()
-    expect(clear.querySelector('[title="#000000"]')).toBeNull()
+    expect(clear.querySelector('[data-colour="#000000"]')).toBeNull()
   })
 
   it('drops a read that answers after the list was closed (#2779 review)', async () => {
@@ -100,13 +100,13 @@ describe('a colour from a filament (#1026)', () => {
       }),
     )
     const { user } = setup()
-    await user.click(screen.getByRole('button', { name: 'Choose from a filament' }))
-    await user.click(screen.getByRole('button', { name: 'Hide filaments' }))
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    await user.keyboard('{Escape}')
 
     answer()
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(screen.queryByRole('list', { name: 'Filaments for Plate' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Choose from a filament' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('listbox', { name: 'Filaments for Plate' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Choose Plate' })).toHaveAttribute('aria-expanded', 'false')
   })
 
   it('says why when Bambuddy cannot be read', async () => {
@@ -116,7 +116,7 @@ describe('a colour from a filament (#1026)', () => {
       ),
     )
     const { user } = setup()
-    await user.click(screen.getByRole('button', { name: 'Choose from a filament' }))
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy is not configured')
   })
 })
@@ -131,5 +131,17 @@ describe('spoolColour', () => {
     [null, null],
   ])('%s', (rgba, colour) => {
     expect(spoolColour({ rgba })).toEqual(colour)
+  })
+})
+
+// #3656: picking the swatch of the colour already set, however it was spelt, sends
+// nothing, as the hex box does not.
+describe('a filament of the colour already set', () => {
+  it('is not sent again', async () => {
+    const { onChange, user } = setup('#f5547c')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const list = await screen.findByRole('listbox', { name: 'Filaments for Plate' })
+    await user.click(within(list).getByRole('option', { name: /Hot Pink/ }))
+    expect(onChange).not.toHaveBeenCalled()
   })
 })

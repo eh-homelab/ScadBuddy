@@ -6,6 +6,7 @@ import { setMcpAuthMode } from '../mocks/features/mcpTokens'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { McpTokensSection } from './McpTokensSection'
+import { choose } from '../test/select'
 
 async function listed() {
   return await screen.findByRole('list', { name: 'Tokens' })
@@ -42,8 +43,8 @@ describe('McpTokensSection', () => {
     const button = screen.getByRole('button', { name: 'Create token' })
     expect(button).toBeDisabled()
     await user.type(screen.getByLabelText('Token name'), '  Claude Code  ')
-    await user.selectOptions(screen.getByLabelText('Access'), 'write')
-    await user.selectOptions(screen.getByLabelText('Expires after'), '30')
+    await choose(user, screen.getByLabelText('Access'), 'Write')
+    await choose(user, screen.getByLabelText('Expires after'), '30 days')
     await user.click(button)
 
     expect(create).toHaveBeenCalledWith({ name: 'Claude Code', tier: 'write', expires_in: 30 * 86400 })
@@ -99,10 +100,10 @@ describe('McpTokensSection', () => {
 
     // Read and Write tokens cannot hold it (the route answers 400), so it is not offered.
     expect(grant()).toBeNull()
-    await user.selectOptions(screen.getByLabelText('Access'), 'write')
+    await choose(user, screen.getByLabelText('Access'), 'Write')
     expect(grant()).toBeNull()
 
-    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
     const box = grant() as HTMLInputElement
     expect(box).not.toBeChecked()
     // The label itself states the scope: every agent, every session, not only this token's own.
@@ -120,7 +121,7 @@ describe('McpTokensSection', () => {
     const { user } = renderPage(<McpTokensSection />)
     await listed()
     await user.type(screen.getByLabelText('Token name'), 'Reviewer agent')
-    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
     await user.click(screen.getByRole('checkbox', { name: /approve or deny any agent/i }))
     await user.click(screen.getByRole('button', { name: 'Create token' }))
 
@@ -134,7 +135,10 @@ describe('McpTokensSection', () => {
     const [row, plain] = within(screen.getByRole('list')).getAllByTestId('mcp-token')
     const badge = within(row!).getByTestId('mcp-token-grant')
     expect(badge).toHaveTextContent('Approves for any session')
-    expect(badge).toHaveAttribute('title', expect.stringMatching(/any agent's outward action, in any session/))
+    // Said in a tooltip, on hover and on focus.
+    await user.hover(badge)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/any agent's outward action, in any session/)
+    await user.unhover(badge)
     expect(within(plain!).queryByTestId('mcp-token-grant')).toBeNull()
 
     // The form forgets the grant with the name, so the next token does not inherit it.
@@ -146,13 +150,13 @@ describe('McpTokensSection', () => {
     const { user } = renderPage(<McpTokensSection />)
     await listed()
     await user.type(screen.getByLabelText('Token name'), 'ci')
-    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
     await user.click(screen.getByRole('checkbox', { name: /approve or deny any agent/i }))
-    await user.selectOptions(screen.getByLabelText('Access'), 'write')
+    await choose(user, screen.getByLabelText('Access'), 'Write')
     await user.click(screen.getByRole('button', { name: 'Create token' }))
     expect(create).toHaveBeenCalledWith({ name: 'ci', tier: 'write', expires_in: 90 * 86400 })
 
-    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
     expect(screen.getByRole('checkbox', { name: /approve or deny any agent/i })).not.toBeChecked()
   })
 
@@ -211,16 +215,16 @@ describe('McpTokensSection', () => {
     await listed()
 
     await user.click(screen.getByRole('button', { name: 'Revoke Claude Desktop' }))
-    let dialog = screen.getByRole('dialog', { name: 'Revoke Claude Desktop?' })
+    let dialog = screen.getByRole('alertdialog', { name: 'Revoke Claude Desktop?' })
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(revoke).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: 'Revoke Claude Desktop' }))
-    dialog = screen.getByRole('dialog', { name: 'Revoke Claude Desktop?' })
+    dialog = screen.getByRole('alertdialog', { name: 'Revoke Claude Desktop?' })
     await user.click(within(dialog).getByRole('button', { name: 'Revoke token' }))
     expect(revoke).toHaveBeenCalledWith('6f1c2b1e-0d5c-4c7e-9a51-3b2f0b6f1a01')
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Revoke Claude Desktop' })).toBeNull())
     expect((await screen.findAllByTestId('mcp-token'))[0]).toHaveTextContent(/Revoked \d{4}-\d{2}-\d{2}/)
   })
@@ -234,7 +238,7 @@ describe('McpTokensSection', () => {
     const { user } = renderPage(<McpTokensSection />)
     await listed()
     await user.click(screen.getByRole('button', { name: 'Revoke Claude Desktop' }))
-    const dialog = screen.getByRole('dialog')
+    const dialog = screen.getByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Revoke token' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
   })

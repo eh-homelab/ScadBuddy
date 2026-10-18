@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
+import { selectOption } from '../test/select'
 import { ColoursDialog } from './ColoursDialog'
 
 const JOB = 'c'.repeat(32)
@@ -50,7 +51,7 @@ describe('ColoursDialog', () => {
     render(<ColoursDialog open jobId={JOB} colors={['#FF0000', '#00FF00']} onClose={() => undefined} />)
     await screen.findByRole('list', { name: 'Tiles, row by row' })
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'View' }), 'top')
+    await selectOption(user, screen.getByRole('combobox', { name: 'View' }), 'Top')
     await vi.waitFor(() => expect(seen).toEqual(['iso', 'top']))
     expect(await screen.findByRole('list', { name: 'Tiles, row by row' })).toBeInTheDocument()
   })

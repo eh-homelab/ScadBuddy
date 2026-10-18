@@ -57,7 +57,7 @@ describe('PluginPackagesPanel', () => {
     expect(within(stored).queryByLabelText('Re-pin to branch, tag or commit')).not.toBeInTheDocument()
 
     await user.click(within(stored).getByRole('button', { name: 'Remove' }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove package' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove package' }))
     await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Plugin package scadbuddy' })).not.toBeInTheDocument())
     expect(screen.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeInTheDocument()
   })
@@ -131,7 +131,7 @@ describe('PluginPackagesPanel', () => {
     await user.click(within(dialog).getByRole('checkbox', { name: /I reviewed commit/ }))
     expect(approve).toBeDisabled()
     const allow = within(dialog).getByRole('checkbox', { name: /Load it as it is, despite the 2 refusals/ })
-    expect(isUserOnly(allow.closest('label')!)).toBe(true)
+    expect(isUserOnly(allow)).toBe(true)
     await user.click(allow)
     await user.click(approve)
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
@@ -264,7 +264,7 @@ describe('PluginPackagesPanel', () => {
     await install(user, 'https://git.example/greeter.git')
     const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
     await user.click(within(card).getByRole('button', { name: 'Remove' }))
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove package' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove package' }))
     expect(await screen.findByText('No plugin packages installed.')).toBeInTheDocument()
   })
 
@@ -336,9 +336,9 @@ describe('PluginPackagesPanel', () => {
     const raw = await within(viewer).findByTestId('file-content')
     expect(raw.textContent).toBe(GREETER_SKILL)
     expect(within(raw).getByText('# Hello')).toHaveAttribute('data-token', 'heading')
-    expect(within(viewer).getByRole('button', { name: 'Raw' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(viewer).getByRole('radio', { name: 'Raw' })).toHaveAttribute('aria-checked', 'true')
 
-    await user.click(within(viewer).getByRole('button', { name: 'Rendered' }))
+    await user.click(within(viewer).getByRole('radio', { name: 'Rendered' }))
     expect(within(viewer).getByRole('heading', { name: 'Hello' })).toBeInTheDocument()
     expect(within(viewer).getByText('hello').tagName).toBe('STRONG')
   })

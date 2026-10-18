@@ -28,19 +28,23 @@ from scadbuddy.meshmodel.scene import (
     dump_scene,
     text_sha256,
 )
+from scadbuddy.render import geometry_cache
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.render.geometry_cache import (
     geometry_key,
     mesh_scene,
     recolour_layout,
+    recolour_piece,
     reusable,
     scene_classes,
 )
-from scadbuddy.render.glb import COLOUR_EXTRA
-from scadbuddy.render.jobs import LAYOUT_NAME
+from scadbuddy.render.glb import COLOUR_EXTRA, read_glb
+from scadbuddy.render.jobs import LAYOUT_NAME, finish_piece_stage
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import PgPool
@@ -225,6 +229,14 @@ def test_only_a_layout_every_colour_of_which_is_a_class_is_reusable() -> None:
     assert not reusable(_layout("#FF0000", "#123456"), ["#FF0000", "#00FF00"])
     # Uncoloured geometry is drawn in no class's colour, and keeps its own.
     assert reusable(_layout("#FF0000", uncoloured=True), ["#FF0000"])
+
+
+def test_a_painted_layout_is_never_reusable() -> None:
+    """A carried painting's file keeps the palette it was painted in, which a recolour
+    would not swap: its colour, also a class, would no longer be a filament."""
+    layout = _layout("#FF0000", "#00FF00")
+    layout["plates"][0]["parts"][0]["paint"] = "paint-1-1.json"
+    assert not reusable(layout, ["#FF0000", "#00FF00"])
 
 
 # ── the activities ─────────────────────────────────────────────────────────────
@@ -412,6 +424,48 @@ async def test_a_scene_in_other_colours_is_recoloured_without_rendering(
 
 
 @pytest.mark.requires_postgres
+async def test_a_painted_piece_is_rendered_again_not_recoloured(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+) -> None:
+    acts, _, _ = geometry_acts
+    env = ActivityEnvironment()
+    first = _piece(acts, 1, _scene(), width=12)
+    await _render(acts, first)
+    # As `paint_layout` leaves a piece whose painting it carried.
+    path = acts.deps.blobs.dir_for(first.piece_key) / LAYOUT_NAME
+    layout = json.loads(path.read_text())
+    layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
+    path.write_text(json.dumps(layout))
+
+    second = _piece(acts, 2, _scene("#0000FF"), width=12)
+    prepared = await env.run(acts.prepare, second)
+    assert await env.run(acts.reuse_geometry, second, prepared) is None
+
+
+@pytest.mark.requires_postgres
+async def test_a_painted_piece_is_never_recorded_as_a_geometry_source(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`reusable` would refuse it, but only after a recolour fetched it: no row, no fetch."""
+    acts, _, index = geometry_acts
+
+    async def painted(*args: Any, **kwargs: Any) -> Any:
+        result = await finish_piece_stage(*args, **kwargs)
+        # As `paint_layout` leaves a piece whose painting it carried.
+        path = args[2] / LAYOUT_NAME
+        layout = json.loads(path.read_text())
+        layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
+        path.write_text(json.dumps(layout))
+        return result
+
+    monkeypatch.setattr(activities_module, "finish_piece_stage", painted)
+    prepared, _, _ = await _render(acts, _piece(acts, 1, _scene(), width=12))
+    assert prepared.geometry_key is not None
+    assert index.get(prepared.geometry_key) is None
+
+
+@pytest.mark.requires_postgres
 async def test_a_scene_with_other_geometry_is_not_recoloured(
     geometry_acts: tuple[RenderActivities, str, GeometryIndex],
 ) -> None:
@@ -461,3 +515,29 @@ def test_a_swept_pieces_rows_are_forgotten(pg_pool: PgPool) -> None:
     geometry.forget_pieces(["piece-a", "piece-c"])
     assert geometry.get("g1") is None
     assert geometry.get("g2") is not None
+
+
+def test_a_recolour_swaps_a_painted_parts_painting_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3956 review: a preview draws painting, so a recolour swaps its colours as well."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ("4",) + ("",) * (len(box.faces) - 1)  # one face in extruder 1
+    painted = ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",)))
+    monkeypatch.setattr(geometry_cache, "split_by_material", lambda path: [painted])
+    source, work = tmp_path / "source", tmp_path / "work"
+    source.mkdir()
+    work.mkdir()
+    recolour_piece(
+        source,
+        work,
+        {"colours": [], "warnings": [], "plates": []},
+        "raw.3mf",
+        classes=["#FFFFFF", "#FF0000"],
+        colours=["#0000FF", "#00FF00"],
+        skip=frozenset(),
+        layout_name="layout.json",
+        preview_name="preview.glb",
+    )
+    drawn = {part.colour for part in read_glb(work / "preview.glb")}
+    assert drawn == {"#0000FF", "#00FF00"}

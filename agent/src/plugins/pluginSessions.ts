@@ -114,9 +114,13 @@ export async function sweepDeadReplicas(sql: Sql, liveReplicas: Set<string>, dep
   return rows.length
 }
 
-/** The database's clock, read once at start before anything can record a session: the line between this incarnation's rows and the last one's. */
-export async function startMark(sql: Sql): Promise<Date> {
-  const [row] = await sql<{ t: Date }[]>`SELECT now() AS t`
+/**
+ * The database's clock, read once at start before anything can record a session: the line between this incarnation's rows and the last one's.
+ * Kept as Postgres's text, to the microsecond: a JS Date keeps milliseconds, and a row from earlier in the mark's millisecond fell after it
+ * (#3691). It goes back as `::text::timestamptz`: a parameter postgres.js sees as a timestamptz it sends through a Date, which cuts it again.
+ */
+export async function startMark(sql: Sql): Promise<string> {
+  const [row] = await sql<{ t: string }[]>`SELECT now()::text AS t`
   return row!.t
 }
 
@@ -126,10 +130,10 @@ export async function startMark(sql: Sql): Promise<Date> {
  * recorded before `mark` (`startMark`), never this incarnation's. Failed DELETEs are forgotten
  * too: nothing would retry them.
  */
-export async function endOwnSessions(sql: Sql, self: string, deps: SweepDeps, mark: Date): Promise<number> {
+export async function endOwnSessions(sql: Sql, self: string, deps: SweepDeps, mark: string): Promise<number> {
   const rows = await sql<Row[]>`
     SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions
-    WHERE replica = ${self} AND created_at < ${mark}`
+    WHERE replica = ${self} AND created_at < ${mark}::text::timestamptz`
   await endSessions(sql, rows, deps, true)
   return rows.length
 }

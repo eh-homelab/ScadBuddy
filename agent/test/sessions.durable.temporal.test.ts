@@ -387,6 +387,55 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(await m.interrupt(session.id, browser)).toBe(false)
   }, 60_000)
 
+  it('leaves a fresh first claim whose workflow is not started yet to the sweep, on Stop (#4131 review)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    // A first send's claim, its update-with-start possibly still in flight.
+    await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() WHERE id = ${session.id}`
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+    expect(await status(session.id)).toBe('running')
+    expect((await m.events.read(session.id)).some((e) => e.event.type === 'error')).toBe(false)
+  }, 60_000)
+
+  it('ends at once, when Stop finds no workflow past the grace, a running session the sweep would end later (#4018)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    // A kept claim whose workflow never started, past RUNNING_GRACE_MS.
+    await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/could not be found/) },
+      { type: 'session.status', status: 'idle' },
+    ])
+    // Once ended, Stop has nothing left to stop.
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+  }, 60_000)
+
+  it('ends, as ended, a running session whose workflow was terminated, on Stop (#4018)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
+    expect(await status(session.id)).toBe('running')
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).at(-2)?.event).toMatchObject({
+      type: 'error',
+      code: 'turn_failed',
+      message: expect.stringMatching(/workflow has ended/),
+    })
+  }, 60_000)
+
+  it('writes nothing on Stop when the gone workflow is open again by the time it is described (#4131 review)', async () => {
+    const m = await durableManager()
+    m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, describe: async () => 'open' })
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
+    expect(await m.interrupt(session.id, browser)).toBe(false)
+    expect(await status(session.id)).toBe('running')
+    expect((await m.events.read(session.id)).some((e) => e.event.type === 'error')).toBe(false)
+  }, 60_000)
+
   it("hands off, then ends the old owner's parked calls with cancel_input, or the interrupt Signal when it goes unanswered", async () => {
     const m = await durableManager({ cancelTimeoutMs: 1_000 })
     const { session } = await m.start(agentA, { origin: 'mcp', prompt: 'hello' })
@@ -739,6 +788,42 @@ describe("a durable handoff whose workflow cannot be reached", () => {
       const [line] = warn.mock.calls[0] as [string]
       expect(line).toContain('f0e1d2c3-0000-4000-8000-000000000000')
       expect(line).not.toContain('handed off')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+describe('a durable fork whose workflow cannot be read (#3739)', () => {
+  const id = 'a1b2c3d4-0000-4000-8000-000000000000'
+  function turnsFailing(err: Error): DurableTurns {
+    const client = {
+      withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
+      workflow: { getHandle: () => ({ query: () => Promise.reject(err) }) },
+    } as unknown as Client
+    // forkSource reads the row's runtime first: no row, so a classic durable session.
+    const sql = (() => Promise.resolve([])) as unknown as Sql
+    return new DurableTurns({ client, sql, events: {} as EventLog })
+  }
+
+  it('logs why, and says when no worker answered in time', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // A gRPC DEADLINE_EXCEEDED (code 4), as the client raises it.
+      const deadline = Object.assign(new Error('4 DEADLINE_EXCEEDED: query timed out'), { code: 4, details: 'query timed out', metadata: {} })
+      await expect(turnsFailing(deadline).forkSource(id)).rejects.toMatchObject({
+        code: 'unavailable',
+        message: expect.stringContaining('no durable session worker answered'),
+      })
+      await expect(turnsFailing(new Error('nondeterminism in replay')).forkSource(id)).rejects.toMatchObject({
+        code: 'unavailable',
+        message: expect.stringContaining('could not be read to fork it'),
+      })
+      const lines = warn.mock.calls.map(([line]) => String(line))
+      expect(lines).toHaveLength(2)
+      expect(lines[0]).toContain(id)
+      expect(lines[0]).toContain('DEADLINE_EXCEEDED')
+      expect(lines[1]).toContain('nondeterminism in replay')
     } finally {
       warn.mockRestore()
     }

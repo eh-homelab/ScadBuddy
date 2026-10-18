@@ -12,12 +12,13 @@ import pytest
 import trimesh
 
 from scadbuddy.render.bambu3mf import (
+    IDENTITY,
     PlateParts,
     stl_3mf,
     write_bambu_3mf,
     write_plates_3mf,
 )
-from scadbuddy.render.geometry import NoSuchPlateError
+from scadbuddy.render.geometry import NoSuchPlateError, parts_from_3mf
 from scadbuddy.render.glb import bounding_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
@@ -29,7 +30,7 @@ from scadbuddy.render.objects3mf import (
     write_piece,
 )
 from scadbuddy.render.read_budget import ReadBudget
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, painted_pieces
 
 CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
@@ -313,7 +314,6 @@ def _painted_project(objects: str) -> bytes:
     [
         ([at(0, 0)], ' paint_color="1C"', ("#FF0000", "#00FF00"), "extruder 4"),
         ([at(0, 0)], ' paint_color="1"', ("#FF0000", "#00FF00"), "cannot be read"),
-        (["-1 0 0 0 1 0 0 0 1 0 0 0"], ' paint_color="8"', ("#FF0000", "#00FF00"), "mirrored"),
         ([at(0, 0)], ' paint_color="8"', (), "no Bambu Studio filaments"),
     ],
 )
@@ -654,13 +654,6 @@ def test_each_plate_of_a_multi_plate_file_is_read_on_its_own(tmp_path: Path) -> 
 
 
 def test_a_plate_is_refused_as_the_objects_are() -> None:
-    mirrored = bambu_project(
-        items=["-1 0 0 0 1 0 0 0 1 0 0 0"],
-        parts={1: (_box(20, 10, 5), "normal_part", None)},
-        triangle_extra=' paint_color="8"',
-    )
-    with pytest.raises(UnreadableObjectsError, match="painted and mirrored"):
-        read_plate_parts(mirrored, 1)
     with pytest.raises(UnreadableObjectsError, match="max_visits read budget"):
         read_plate_parts(_fan_out(7, 10), 1, budget=ReadBudget(max_visits=1_000))
     with pytest.raises(UnreadableObjectsError, match="max_visits read budget"):
@@ -790,3 +783,126 @@ def _one_triangle_model(vertices: str) -> bytes:
             )
         }
     )
+
+
+# --- #4015: a painted object that is also mirrored is carried over -------------------
+
+
+def _code(bits: list[int]) -> str:
+    """Bits, least significant first, as a ``paint_color``: hex digits last first."""
+    digits = [
+        "0123456789ABCDEF"[sum(bit << at for at, bit in enumerate(bits[start : start + 4]))]
+        for start in range(0, len(bits), 4)
+    ]
+    return "".join(reversed(digits))
+
+
+#: A triangle split on two sides into three pieces, painted 1, 2 and the part's own. Its
+#: two pieces off the special corner are cut along a median, which a mirror moves to the
+#: other median: no code says the mirrored triangle with its faces turned.
+SPLIT = _code([0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+MIRROR = "-1 0 0 0 1 0 0 0 1 0 0 0"
+
+
+def _triangles(parts: list[ColourPart]) -> dict[str, set[tuple[tuple[float, ...], ...]]]:
+    """Each colour's printed triangles, each as its corners (rounded), in winding order
+    from its lowest corner: equal for the same triangles facing the same way."""
+    found: dict[str, set[tuple[tuple[float, ...], ...]]] = {}
+    for part in painted_pieces([p for p in parts if not p.negative]):
+        for face in np.asarray(part.mesh.vertices)[np.asarray(part.mesh.faces)]:
+            corners = [tuple(round(float(v), 4) + 0.0 for v in corner) for corner in face]
+            start = corners.index(min(corners))
+            found.setdefault(part.colour, set()).add(tuple(corners[start:] + corners[:start]))
+    return found
+
+
+def _mirrored(
+    found: dict[str, set[tuple[tuple[float, ...], ...]]],
+) -> dict[str, set[tuple[tuple[float, ...], ...]]]:
+    """``found`` mirrored in x, each triangle turned to face out again."""
+    out: dict[str, set[tuple[tuple[float, ...], ...]]] = {}
+    for colour, triangles in found.items():
+        for triangle in triangles:
+            corners = [(-x + 0.0, y, z) for x, y, z in reversed(triangle)]
+            start = corners.index(min(corners))
+            out.setdefault(colour, set()).add(tuple(corners[start:] + corners[:start]))
+    return out
+
+
+def _split_box(item: str) -> bytes:
+    return bambu_project(
+        items=[item],
+        parts={1: (_box(20, 10, 5), "normal_part", None)},
+        triangle_extra=f' paint_color="{SPLIT}"',
+    )
+
+
+def test_a_painted_mirrored_object_reads_facing_out_its_painting_where_it_prints() -> None:
+    """Library file 2440's objects are mirrored (``-1 -0 -0 0 1 0 ...``) with painted
+    eyes, and Arrange left them out. Its pieces now print the mirror image of the
+    unmirrored object's, each facing out."""
+    (plain,) = read_objects(_split_box(IDENTITY))
+    (mirrored,) = read_objects(_split_box(MIRROR))
+
+    (painted,) = [part for part in mirrored.parts if part.paint is not None]
+    assert painted.paint is not None and painted.paint.reversed
+    assert painted.mesh.volume > 0  # faces out, as every arranged part's do
+    assert _triangles(mirrored.parts) == _mirrored(_triangles(plain.parts))
+    # Filament 1 is the part's own colour: the split's pieces print in two.
+    assert set(_triangles(plain.parts)) == {"#FF0000", "#00FF00"}
+
+
+def test_a_mirrored_painting_is_written_mirrored_back_as_bambu_studio_keeps_it(
+    tmp_path: Path,
+) -> None:
+    """The object file holds the source's triangles in their own corner order with their
+    own codes, and the component mirrors them to where they print: what Bambu Studio
+    reads, as it read the source's mirror in its item."""
+    (mirrored,) = read_objects(_split_box(MIRROR))
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [PlateParts(tuple(mirrored.parts), tuple(range(1, len(mirrored.parts) + 1)))],
+        ["#FF0000", "#00FF00"],
+        out,
+        thumbnails=None,
+    )
+    payload = out.read_bytes()
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = archive.read("3D/3dmodel.model").decode()
+    assert 'transform="-1 0 0 0 1 0 0 0 1 ' in root
+    (again,) = read_objects(payload)
+    # Read back through the component, as read from the source through its item.
+    assert _at_origin(_triangles(again.parts)) == _at_origin(_triangles(mirrored.parts))
+    # ScadBuddy's own reader puts it where it prints too, facing out.
+    painted = next(p for p in parts_from_3mf(out) if p.colour == "#FF0000")
+    assert painted.mesh.volume > 0
+
+
+def _at_origin(
+    found: dict[str, set[tuple[tuple[float, ...], ...]]],
+) -> dict[str, set[tuple[tuple[float, ...], ...]]]:
+    """``found`` moved so its lowest corner is at the origin: the plate placement aside."""
+    low = np.min([c for triangles in found.values() for t in triangles for c in t], axis=0)
+    return {
+        colour: {
+            tuple(
+                tuple(round(float(v - o), 4) + 0.0 for v, o in zip(c, low, strict=True)) for c in t
+            )
+            for t in triangles
+        }
+        for colour, triangles in found.items()
+    }
+
+
+def test_a_mirrored_painting_survives_a_pieces_layout(tmp_path: Path) -> None:
+    """Arrange keeps each object as a piece, its mesh file and ``layout.json``, until it
+    packs them: the corner order is in the layout, which the mesh file cannot hold."""
+    (mirrored,) = read_objects(_split_box(MIRROR))
+    write_piece(tmp_path, mirrored)
+
+    layout = PlateLayout.load(tmp_path / LAYOUT_NAME)
+
+    (painted,) = [part for part in layout.plates[0].parts if part.paint is not None]
+    assert painted.paint is not None and painted.paint.reversed
+    assert _triangles(list(layout.plates[0].parts)) == _triangles(mirrored.parts)

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from scadbuddy.api.outputs import detail
+from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.outputs import OutputNotFoundError, OutputStore
 from tests.support.arrange import copied_output, saved_output
 
@@ -84,3 +86,35 @@ async def test_a_deleted_output_leaves_no_cached_directory(tmp_path: Path) -> No
         store.directory(meta.id)
     # A lookup searches again either way; only the map shows the entry was forgotten.
     assert len(store._dirs) == 0
+
+
+async def test_name_and_slug_reads_meta_and_a_corrupt_one_is_a_value_error(
+    tmp_path: Path,
+) -> None:
+    """#3856: activity labels catch ValueError for a meta.json that does not parse."""
+    paths, meta, _ = await saved_output(tmp_path)
+    store = OutputStore(paths)
+    assert store.name_and_slug(meta.id) == (meta.name, meta.slug)
+    (store.directory(meta.id) / "meta.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError):
+        store.name_and_slug(meta.id)
+
+
+async def test_name_and_slug_does_not_look_again_at_once_for_a_gone_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3856: the Activity facets refetch often; a deleted output costs one glob a minute."""
+    paths, _, _ = await saved_output(tmp_path)
+    store = OutputStore(paths)
+    patterns = _count_globs(monkeypatch)
+    gone = "f" * 32
+    for _ in range(2):
+        with pytest.raises(OutputNotFoundError):
+            store.name_and_slug(gone)
+    looked = len(patterns)
+    assert looked > 0
+    later = time.monotonic() + outputs_module.GONE_OUTPUT_SECONDS + 1
+    monkeypatch.setattr(time, "monotonic", lambda: later)
+    with pytest.raises(OutputNotFoundError):
+        store.name_and_slug(gone)
+    assert len(patterns) == 2 * looked

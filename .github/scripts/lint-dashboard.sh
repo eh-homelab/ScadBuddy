@@ -25,6 +25,8 @@
 #     `<name>_total`, a Histogram as `<name>_bucket`/`_sum`/`_count`, an Info as
 #     `<name>_info` (prometheus_client's exposition names), so a `_total` on a
 #     gauge or a bare counter is an error, not an empty panel
+#   - every `temporal_*` series is one of the Temporal SDK's that this lint lists
+#     with its labels (#3788): the SDK declares them in its Rust core
 #   - every label a PromQL target's `by (...)`/`without (...)` or `{{label}}` legend
 #     names is one a series in that query declares in its constructor's label list
 #     (`le` comes with a `_bucket`), or one the scrape adds (namespace, pod,
@@ -136,6 +138,21 @@ PY
 ) || exposed=""
 [ -n "$exposed" ] \
   || problem "backend/scadbuddy/core/metrics.py" "no scadbuddy_* metric declarations found"
+
+# The Temporal SDK's own series, which each worker's /metrics appends (#3788,
+# workflows/sdk_metrics.py). The SDK declares them in its Rust core, out of this
+# lint's reach, so the ones a dashboard may read are listed here with the labels
+# the exporter gives them (seen on temporalio 1.34). Its `namespace` is the
+# Temporal namespace, which Prometheus keeps as `exported_namespace`.
+sdk_histogram() { # name labels... -> its exposition lines
+  local name=$1; shift
+  printf '%s\n' "${name}_bucket $* le" "${name}_sum $*" "${name}_count $*"
+}
+exposed+=$'\n'$(
+  sdk_histogram temporal_workflow_task_execution_latency exported_namespace service_name task_queue workflow_type
+  sdk_histogram temporal_workflow_task_schedule_to_start_latency exported_namespace service_name task_queue workflow_type
+  sdk_histogram temporal_activity_schedule_to_start_latency exported_namespace service_name task_queue activity_type
+)
 series_labels() { # series -> its declared labels on one line; fails when undeclared
   awk -v s="$1" '$1 == s { $1 = ""; print; found = 1 } END { exit !found }' <<< "$exposed"
 }
@@ -158,7 +175,9 @@ mapfile -t api_files < <(
 )
 worker_names=$(
   {
-    grep -E '^RenderStage = Literal\[' "$metrics_py" | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./' || true
+    # The whole Literal[...], which ruff format may wrap over several lines.
+    awk '/^RenderStage = Literal\[/ { on = 1 } on { print } on && /\]/ { exit }' "$metrics_py" \
+      | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./' || true
     span_literals "${worker_files[@]}"
   } | sort -u
 )
@@ -260,9 +279,9 @@ lint_dashboard() { # repo-relative path of one dashboard
   while read -r series; do
     [ -n "$series" ] || continue
     series_labels "$series" > /dev/null \
-      || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py declares"
+      || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists"
   done < <(jq -r "$panels"' [panels | .targets[]? | .expr // empty] + [.templating.list[]? | .query | objects | .query // empty] | .[]' "$dash" \
-    | grep -oE 'scadbuddy_[a-z0-9_]+' | sort -u)
+    | grep -oE '(scadbuddy|temporal)_[a-z0-9_]+' | sort -u)
 
   # The labels a target's by()/without() grouping and {{label}} legend name must
   # be ones a series in its query declares (`le` comes with a _bucket), or ones
@@ -273,7 +292,7 @@ lint_dashboard() { # repo-relative path of one dashboard
     while read -r series; do
       [ -n "$series" ] || continue
       allowed+="$(series_labels "$series" || true) "
-    done < <(grep -oE 'scadbuddy_[a-z0-9_]+' <<< "$expr" | sort -u)
+    done < <(grep -oE '(scadbuddy|temporal)_[a-z0-9_]+' <<< "$expr" | sort -u)
     while read -r group; do
       [ -n "$group" ] || continue
       read -ra group_labels <<< "$(sed -E 's/^[a-z]+\s*\(//; s/\)$//; s/,/ /g' <<< "$group")"

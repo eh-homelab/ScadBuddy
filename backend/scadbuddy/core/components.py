@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from scadbuddy.library.settings_store import SettingsStore
     from scadbuddy.render.projection import JobProjection
     from scadbuddy.render.submit import RenderService
+    from scadbuddy.store.factory import StoreBundle
 
 #: The module a feature package names its component in, and what it exports.
 COMPONENT_MODULE = "component"
@@ -70,6 +71,9 @@ class Core(Protocol):
     uploads: BambuddyUploadStore
     projection: JobProjection
     print_runs: PrintCommands
+    #: Set in the lifespan once the settings pool is open, after every component is
+    #: built: a component reads it on first use, never in its ``build``.
+    store: StoreBundle
 
 
 @dataclass(frozen=True)

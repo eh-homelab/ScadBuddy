@@ -22,12 +22,14 @@ from psycopg_pool import PoolTimeout
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import APPLIES, Settings
 from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
+    S3_PREFIX_NOT_READY,
     STORE_READINESS_LOCK,
     ModelPrintChoices,
     RenderStoreSettings,
+    S3Settings,
     SettingsPatch,
     SettingsStore,
     StoredSettings,
@@ -469,6 +471,161 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "bambuddy"
     store.save(SettingsPatch(reset=["store_backend"]))
     assert store.load().store_backend == "local"
+
+
+S3_PATCH = SettingsPatch(
+    store_s3_endpoint="http://garage:3900",
+    store_s3_bucket="sb",
+    store_s3_prefix="prod",
+    store_s3_access_key_id="GK1",
+    store_s3_secret_access_key="s3cr3t",
+)
+
+
+def test_s3_backend_needs_endpoint_bucket_and_keys(store: SettingsStore) -> None:
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_backend="s3"))
+    store.save(SettingsPatch(store_s3_endpoint="http://garage:3900", store_s3_bucket="sb"))
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_backend="s3", store_s3_access_key_id="GK1"))
+    assert store.load().store_backend == "local"
+
+
+def test_s3_backend_saves_once_its_fields_are_set(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    saved = store.save(SettingsPatch(store_backend="s3"))
+    assert saved.store_backend == "s3"
+    assert saved.s3_settings() == S3Settings(
+        endpoint="http://garage:3900",
+        bucket="sb",
+        prefix="prod",
+        access_key_id="GK1",
+        secret_access_key="s3cr3t",
+    )
+    assert "s3cr3t" not in repr(saved.s3_settings())
+
+
+def test_s3_settings_are_none_until_endpoint_bucket_and_keys_are_set(
+    store: SettingsStore,
+) -> None:
+    assert store.load().s3_settings() is None
+    store.save(S3_PATCH.model_copy(update={"store_s3_secret_access_key": None}))
+    assert store.load().s3_settings() is None
+
+
+def test_clearing_an_s3_field_while_on_the_s3_store_is_refused(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3"))
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_s3_bucket=None))
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_s3_secret_access_key=""))
+    assert store.load().store_s3_bucket == "sb"
+
+
+def test_a_blank_s3_prefix_while_on_the_s3_store_is_refused(store: SettingsStore) -> None:
+    """`build_backend` refuses a blank prefix at start, so Settings must not save one:
+    "/" is blank once its outer slashes are stripped."""
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3"))
+    with pytest.raises(StoreNotReadyError, match=S3_PREFIX_NOT_READY):
+        store.save(SettingsPatch(store_s3_prefix="/"))
+    assert store.load().store_s3_prefix == "prod"
+    store.save(SettingsPatch(store_backend="local"))
+    store.save(SettingsPatch(store_s3_prefix=""))
+    with pytest.raises(StoreNotReadyError, match=S3_PREFIX_NOT_READY):
+        store.save(SettingsPatch(store_backend="s3"))
+    assert store.load().store_backend == "local"
+
+
+def test_native_library_is_refused_on_the_local_store(store: SettingsStore) -> None:
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+        store.save(SettingsPatch(library_backend="native"))
+    assert store.load().library_backend == "bambuddy"
+
+
+def test_native_library_saves_on_s3(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3"))
+    assert store.save(SettingsPatch(library_backend="native")).library_backend == "native"
+
+
+def test_back_to_local_is_refused_while_the_library_is_native(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3", library_backend="native"))
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+        store.save(SettingsPatch(store_backend="local"))
+    assert store.load().store_backend == "s3"
+
+
+def test_resetting_the_store_to_a_local_default_is_refused_while_native(
+    store: SettingsStore,
+) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3", library_backend="native"))
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+        store.save(SettingsPatch(reset=["store_backend"]))
+    assert store.load().store_backend == "s3"
+
+
+def test_resetting_the_store_to_an_s3_default_keeps_native(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_backend="s3",
+        store_s3_endpoint="http://garage:3900",
+        store_s3_bucket="sb",
+        store_s3_access_key_id="GK1",
+        store_s3_secret_access_key="s3cr3t",
+    )
+    opened = SettingsStore(seeded)
+    opened.open()
+    try:
+        opened.save(SettingsPatch(store_backend="local"))
+        with pytest.raises(StoreNotReadyError):
+            opened.save(SettingsPatch(library_backend="native"))
+        saved = opened.save(SettingsPatch(library_backend="native", reset=["store_backend"]))
+        assert (saved.store_backend, saved.library_backend) == ("s3", "native")
+    finally:
+        opened.close()
+
+
+def test_native_library_saves_over_the_bambuddy_store(store: SettingsStore) -> None:
+    store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+    store.save(SettingsPatch(store_backend="bambuddy"))
+    assert store.save(SettingsPatch(library_backend="native")).library_backend == "native"
+
+
+def test_library_backend_applies_on_restart() -> None:
+    assert APPLIES["library_backend"] == "restart"
+
+
+@pytest.mark.parametrize(("saved", "read"), [("p/", "p"), ("/a/b/", "a/b"), ("/", "")])
+def test_the_s3_prefix_is_saved_without_its_outer_slashes(
+    store: SettingsStore, saved: str, read: str
+) -> None:
+    """Keys are `<prefix>/<kind>/<sha>`: a trailing slash made `p//piece/<sha>`. An
+    empty one is the blank prefix a start refuses (`build_backend`)."""
+    store.save(SettingsPatch(store_s3_prefix=saved))
+    assert store.load().store_s3_prefix == read
+
+
+def test_render_store_settings_carry_s3(store: SettingsStore, settings: Settings) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3", store_s3_path_style=False))
+    current = load_render_store_settings(store.pool, settings)
+    assert current.store_backend == "s3"
+    assert current.s3 == S3Settings(
+        endpoint="http://garage:3900",
+        bucket="sb",
+        prefix="prod",
+        access_key_id="GK1",
+        secret_access_key="s3cr3t",
+        path_style=False,
+    )
 
 
 def test_the_readiness_check_reads_an_unstored_inbox_as_unset(

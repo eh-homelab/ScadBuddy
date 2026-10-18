@@ -78,6 +78,7 @@ with workflow.unsafe.imports_passed_through():
         PROJECTS_QUEUE,
         SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
+        SEGMENT_TIMEOUT,
         SEND_MESSAGE_UPDATE,
         TOOLS_QUEUE,
         TURN_QUERY,
@@ -242,10 +243,12 @@ def _joined(append: str | None, note: str | None) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-# What the plugin raises when a segment answered BUDGET_EXHAUSTED (``_fail`` with
-# ``f"Claude run failed: {seg.error}"``): that message exactly, with no cause. A failure
-# that only quotes the constant, amid other text or in a cause, is the session's content
-# and ends the turn failed (#3353).
+# What the plugin raises when a segment answered BUDGET_EXHAUSTED: that message exactly,
+# with no cause. A failure that only quotes the constant, amid other text or in a cause,
+# is the session's content and ends the turn failed (#3353). On every pin bump of
+# temporalio-claude-agent-sdk (pyproject.toml), grep its temporalio/claude_agent_sdk/
+# _workflow.py for ``_fail(f"Claude run failed: {seg.error}")`` and check the words still
+# match; that is the anchor, and line 845 is only where it sat at b1cf3848 (#3915).
 _BUDGET_FAILURE = f"Claude run failed: {BUDGET_EXHAUSTED}"
 
 
@@ -298,6 +301,7 @@ class DurableSession:
             auto_continue_as_new=True,
             continue_as_new_args=self._next_run,
             live_output=True,
+            segment_timeout=SEGMENT_TIMEOUT,
             segment_retry_policy=RetryPolicy(
                 maximum_interval=timedelta(seconds=100), maximum_attempts=SEGMENT_ATTEMPTS
             ),
@@ -824,6 +828,7 @@ class DurableSession:
         reason: str | None,
         *,
         timer: bool = False,
+        raw_response: Any | None = None,
     ) -> bool:
         # A response is written only after its entry's row: a call is parked (and so
         # answerable) before open_input has written it. One whose open failed was never
@@ -843,6 +848,7 @@ class DurableSession:
                     responder=responder,
                     response=response,
                     reason=reason,
+                    raw_response=raw_response,
                 ),
                 **(RESOLVE_ON_TIMER if timer else RESOLVE_ON_RESPOND),
             )
@@ -935,10 +941,24 @@ class DurableSession:
         }
         if parked.kind == "approval":
             outcome: Outcome = "approved" if valid.decision == "approve" else "denied"
-            await self._resolve(parked, outcome, who, {"decision": valid.decision}, None)
+            await self._resolve(
+                parked,
+                outcome,
+                who,
+                {"decision": valid.decision},
+                None,
+                raw_response=args.get("response"),
+            )
         else:
             outcome = "answered"
-            await self._resolve(parked, outcome, who, {"answers": list(valid.answers)}, None)
+            await self._resolve(
+                parked,
+                outcome,
+                who,
+                {"answers": list(valid.answers)},
+                None,
+                raw_response=args.get("response"),
+            )
         return {"kind": parked.kind, "outcome": outcome}
 
     @respond.validator

@@ -16,12 +16,17 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.analyzers.model import ScopeRef
-from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan
+from scadbuddy.bambuddy.filaments import (
+    MAX_PLATES,
+    FilamentOptions,
+    FilamentPlan,
+    fold_plates,
+)
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.resolver import TIERS, PrintChoices, printer_preset_name
@@ -65,11 +70,24 @@ class AnalysisRequest(BaseModel):
     #: per slot as the print dialog's filament step does. The mesh checks still read
     #: ``plate_id``.
     all_plates: bool = False
+    #: Several plates' print (#3652): the filament checks read those plates' usage, as
+    #: ``all_plates`` reads every plate's. The mesh checks still read ``plate_id``. One
+    #: plate here becomes ``plate_id`` (``one_plate_folded``), as on a print run.
+    plate_ids: list[Annotated[int, Field(ge=1)]] | None = Field(
+        default=None, min_length=1, max_length=MAX_PLATES
+    )
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
     #: What reading a library file's 3MF for the mesh checks may spend (#2087), each
     #: omitted budget the setting's; none past its ceiling.
     read_budget: ReadBudgetOverride | None = None
+
+    @model_validator(mode="after")
+    def _one_plate_is_plate_id(self) -> AnalysisRequest:
+        # As `PrintRunRequest` folds it (#3768 review), so the mesh checks read the plate
+        # that prints.
+        fold_plates(self)
+        return self
 
 
 class FilamentSlot(BaseModel):
@@ -110,13 +128,18 @@ class BaseProfile(BaseModel):
     process_preset_name: str | None = None
     bed_type: str | None = None
     plate_id: int = 1
+    #: The print's plates when it is not ``plate_id`` alone (#3652): ``None`` for that
+    #: plate, the chosen plates in plate order, or ``"all"`` for every plate.
+    plates: list[int] | Literal["all"] | None = None
     plate_model: str | None = None
     slots: list[BaseSlot] = Field(default_factory=list)
     copies: int = 1
 
     def identity(self) -> dict[str, Any]:
-        """What a diff is judged against: moving any of it makes a preview stale."""
-        return {
+        """What a diff is judged against: moving any of it makes a preview stale. The
+        plate set is in it only when the print is more than ``plate_id``, so a one-plate
+        print's identity is what it was before plate sets existed."""
+        identity: dict[str, Any] = {
             "printer": self.printer_id,
             "printer_preset": self.printer_preset_name,
             "process_preset": self.process_preset_name,
@@ -124,6 +147,16 @@ class BaseProfile(BaseModel):
             "plate": self.plate_id,
             "slots": [(slot.slot_id, slot.spool_id, slot.preset) for slot in self.slots],
         }
+        if self.plates is not None:
+            identity["plates"] = self.plates
+        return identity
+
+
+def _plates(request: AnalysisRequest) -> list[int] | Literal["all"] | None:
+    if request.all_plates:
+        return "all"
+    chosen = sorted(set(request.plate_ids or [request.plate_id]))
+    return None if chosen == [request.plate_id] else chosen
 
 
 def base_profile(
@@ -159,6 +192,7 @@ def base_profile(
         process_preset_name=process,
         bed_type=choices.bed_type if choices else None,
         plate_id=request.plate_id,
+        plates=_plates(request),
         plate_model=plate.model if plate else None,
         slots=slots,
         copies=request.copies or request.options.quantity or 1,

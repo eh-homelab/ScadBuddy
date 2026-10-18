@@ -263,7 +263,6 @@ def test_every_settings_write_is_announced_with_its_section(
     try:
         store.save(SettingsPatch(public_url="https://scad.example"))
         store.set_printer_bed_type(1, "Cool Plate")
-        store.remember_project(7)
         store.set_model_project("demo", None, ModelProject(project_id=7))
     finally:
         store.close()
@@ -271,7 +270,6 @@ def test_every_settings_write_is_announced_with_its_section(
     assert [e.section for e in seen if isinstance(e, SettingsChanged)] == [
         "connection",
         "printer_bed_type",
-        "last_project",
         "model_project",
     ]
 

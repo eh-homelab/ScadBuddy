@@ -3,9 +3,16 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, mayHaveRun } from '../api/client'
 import type { PrintAgain, PrintDetail } from '../api/types'
 import { openExternal } from '../lib/embed'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Spinner } from './ui/spinner'
 
 interface Props {
   open: boolean
@@ -61,50 +68,59 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
   return (
     <Dialog
       open={open}
-      title="Print again"
-      description={result ? undefined : 'Bambuddy queues the same sliced file again.'}
-      onClose={close}
-      footer={
-        result ? (
-          <>
-            <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
-              Open in queue
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button onClick={close} disabled={sending}>
-              {unsure ? 'Close' : 'Cancel'}
-            </Button>
-            {!unsure && (
-              <Button variant="primary" onClick={() => void queue()} disabled={sending} {...USER_ONLY}>
-                {sending && <Spinner />}
-                {sending ? 'Queueing' : 'Queue'}
-              </Button>
-            )}
-          </>
-        )
-      }
+      onOpenChange={(next) => {
+        if (!next) close()
+      }}
     >
-      {result ? (
-        <p className="text-[13px] text-ink">
-          Queued as <span className="sb-num">#{result.queue_item_id}</span>.
-        </p>
-      ) : (
-        <>
-          <p className="text-[13px] text-ink">
-            Queue <span className="font-medium">{print.output_name ?? print.slug ?? `print #${print.archive_id}`}</span> again on{' '}
-            <span className="font-medium">{printer}</span>, with the print options remembered for this
-            printer and model, as a print from the print dialog uses.
-          </p>
-          {error && (
-            <p role="alert" className="mt-3 text-[13px] text-warn">
-              {error}
+      {/* Bounded by the visible height, the body scrolling, so the buttons stay reachable. */}
+      <DialogContent showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
+        <DialogHeader className="shrink-0 border-b px-5 py-4">
+          <DialogTitle>Print again</DialogTitle>
+          {!result && <DialogDescription>Bambuddy queues the same sliced file again.</DialogDescription>}
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {result ? (
+            <p className="text-[13px] text-ink">
+              Queued as <span className="sb-num">#{result.queue_item_id}</span>.
             </p>
+          ) : (
+            <>
+              <p className="text-[13px] text-ink">
+                Queue <span className="font-medium">{print.output_name ?? print.slug ?? `print #${print.archive_id}`}</span> again on{' '}
+                <span className="font-medium">{printer}</span>, with the print options remembered for this
+                printer and model, as a print from the print dialog uses.
+              </p>
+              {error && (
+                <p role="alert" className="mt-3 text-[13px] text-warn">
+                  {error}
+                </p>
+              )}
+            </>
           )}
-        </>
-      )}
+        </div>
+        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">
+          {result ? (
+            <>
+              <Button type="button" variant="outline" onClick={close}>Done</Button>
+              <Button type="button" onClick={() => openExternal(result.bambuddy_url)}>
+                Open in queue
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button type="button" variant="outline" onClick={close} disabled={sending}>
+                {unsure ? 'Close' : 'Cancel'}
+              </Button>
+              {!unsure && (
+                <Button type="button" onClick={() => void queue()} disabled={sending} {...USER_ONLY}>
+                  {sending && <Spinner />}
+                  {sending ? 'Queueing' : 'Queue'}
+                </Button>
+              )}
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
