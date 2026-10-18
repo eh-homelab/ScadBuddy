@@ -303,7 +303,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   default-render previews, on its own hourly Schedule on the same queue; the per-change
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
-  finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+  finish; a kind its worker does not register fails the workflow task until a build that
+  has it is current, #4139, told by `registered.py` `RegisteredActivities`), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
   Flows (#1057, plan `docs/superpowers/plans/2026-10-09-durable-phase-6-flows.md`):
   `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
   the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no

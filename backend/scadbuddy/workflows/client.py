@@ -46,6 +46,7 @@ from scadbuddy.workflows.pipelines import (
 )
 from scadbuddy.workflows.printing import PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
+from scadbuddy.workflows.registered import RegisteredActivities
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -154,13 +155,18 @@ def bambuddy_worker(
     the same way.
 
     Versioned, a run moves to the new build on its next workflow task, so the new build
-    replays every open run: a change to a workflow's commands goes behind ``patched``,
-    and a new workflow type or activity name is only safe once no old build polls. The
-    ``Recreate`` rollout is the usual one and gives that: the old pod stops before the
-    new one starts, and the runs wait for it rather than land on a build without them.
-    Rolled instead, an old replica fails an activity it does not register, and that
-    failure counts against its retry policy: an effect that runs once is recorded
-    ``failed`` ("may have been done") without reaching Bambuddy."""
+    replays every open run: a change to a workflow's commands goes behind ``patched``.
+    An auto-upgrade run's activities start on the current build, so the old build is
+    handed only what its own code scheduled, except an ``Operation``'s kind, which the
+    API names: a new API pod starts a kind only the new build has while the old build
+    is still current (the API rolls with ``RollingUpdate``). Failed there as
+    unregistered, each failure would spend an attempt, and a run-once effect would be
+    recorded ``failed`` ("may have been done") without reaching Bambuddy. So
+    ``Operation`` defers a kind its worker does not register (#4139): it fails its
+    workflow task, which Temporal retries on the current build, and that is told it by
+    `RegisteredActivities`. The Deployment may then roll with ``RollingUpdate``. A new
+    workflow type is still only safe once no old build is current (README, "Rolling
+    it")."""
     return Worker(
         client,
         task_queue=task_queue,
@@ -173,6 +179,7 @@ def bambuddy_worker(
         workflow_runner=sandboxed_runner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),
+        interceptors=[RegisteredActivities(activities)],
     )
 
 
