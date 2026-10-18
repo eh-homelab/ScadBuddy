@@ -73,20 +73,24 @@ def read_sliced(payload: bytes, plate_id: int) -> NativeSliceRead:
         read = read_filaments(io.BytesIO(payload), sliced=True)
     except UnreadableFilamentsError:
         return NativeSliceRead(plate_id=plate_id)
-    plates = read.profile.plates if read.profile else []
-    if len(plates) == 1:
-        index = plates[0].index
-    elif any(plate.index == plate_id for plate in plates):
-        index = plate_id
+    profile = read.profile
+    if profile is None or not profile.plates:
+        return NativeSliceRead(plate_id=plate_id)
+    if len(profile.plates) == 1:
+        plate = profile.plates[0]
+        if plate_id not in (0, plate.index):
+            logger.info("the sliced file's only plate is not the one asked for")
     else:
-        raise ApiError(404, f"the sliced file has no plate {plate_id}")
-    plate = read.profile.plate(index) if read.profile else None
-    grams = {slot.slot_id: slot.used_grams for slot in read.sliced.get(index, [])}
-    grams_by_slot = {slot: value for slot, value in grams.items() if value is not None}
+        found = profile.plate(plate_id)
+        if found is None:
+            raise ApiError(404, f"the sliced file has no plate {plate_id}")
+        plate = found
+    index = plate.index
+    grams_by_slot = {slot.slot_id: slot.used_grams for slot in read.sliced.get(index, [])}
     gcode = plate_gcode(payload, index)
     return NativeSliceRead(
         plate_id=plate_id,
-        print_time_seconds=plate.print_seconds if plate else None,
+        print_time_seconds=plate.print_seconds,
         grams_by_slot=grams_by_slot,
         filament_used_g=round(sum(grams_by_slot.values()), 2) if grams_by_slot else None,
         filament_changes=None if gcode is None else filament_changes(gcode),

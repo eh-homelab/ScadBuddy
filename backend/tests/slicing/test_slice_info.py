@@ -29,6 +29,16 @@ def test_a_plate_a_file_of_several_lacks_is_404() -> None:
     assert missing.value.status == 404
 
 
+def test_a_plate_of_several_is_read_by_its_number() -> None:
+    two = sliced_3mf(plates={1: (60, [1.0]), 2: (120, [2.0, 0.5])}, gcode={1: b"", 2: b""})
+    read = read_sliced(two, 2)
+    assert (read.print_time_seconds, read.grams_by_slot, read.filament_used_g) == (
+        120,
+        {1: 2.0, 2: 0.5},
+        2.5,
+    )
+
+
 def test_unloads_are_not_changes() -> None:
     assert filament_changes(b"M620 S255A\nM620 S0A\nM620 S1A\n") == 1
 
