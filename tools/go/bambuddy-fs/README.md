@@ -1,8 +1,11 @@
 # bambuddy-fs
 
-Mounts Bambuddy's print library, through ScadBuddy's API, as a FUSE filesystem, so
+Mounts ScadBuddy's print library, through ScadBuddy's API, as a FUSE filesystem, so
 folders and files can be browsed, copied in and out, renamed and deleted with ordinary
 tools (#2686). Design: `docs/superpowers/specs/2026-10-13-bambuddy-fs-design.md`.
+Which library that is depends on ScadBuddy's `library_backend` (#3827): Bambuddy's
+trash and external-file notes below apply to `bambuddy`, while on `native` every
+delete goes to ScadBuddy's trash for 30 days.
 
 It needs `fuse3` (`fusermount3`) and `/dev/fuse`. By default it sends traces and
 metrics, with the host's name, to eh-homelab's collector; `--no-telemetry` turns that

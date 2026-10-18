@@ -1113,6 +1113,29 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # bambuddy-fs against this image on both library backends (#3827): the desktop
+      # mount works unchanged whichever library ScadBuddy serves. Each run starts its
+      # own ScadBuddy (database and Temporal namespace of its own, on temporal-ci),
+      # mounts it on the runner and walks one file through it; the script prints the
+      # containers' logs when it fails. The toolchain is go.work's, as go-module-ci's.
+      - uses: actions/setup-go@v7
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
+      - name: Install fuse3
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: sudo apt-get update -qq && sudo apt-get install -y fuse3
+
+      - name: bambuddy-fs live mount (native)
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: .github/scripts/bambuddy-fs-live.sh native
+
+      - name: bambuddy-fs live mount (bambuddy)
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: .github/scripts/bambuddy-fs-live.sh bambuddy
+
       - name: Container logs on failure
         if: ${{ failure() && needs.layout.outputs.app == 'true' }}
         run: |
