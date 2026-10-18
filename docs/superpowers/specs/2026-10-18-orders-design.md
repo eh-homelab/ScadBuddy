@@ -218,14 +218,15 @@ agent's follow a 202.
 |---|---|
 | `GET/POST /customers`, `GET/PATCH /customers/{id}`, `POST /customers/{id}/archive` | customers; contacts and addresses as nested lists in the body, replaced whole |
 | `GET /orders` (`status`, `customer_id`, `q`, `from`, `to`, cursor), `POST /orders`, `GET/PATCH /orders/{id}` | orders; `PATCH` edits notes, due date, addresses, charges while `draft` or `quoted` |
-| `POST /orders/{id}/items`, `PATCH/DELETE /orders/{id}/items/{item}` | line items; the reference is set on create and replaced whole on `PATCH` while `draft` or `quoted` (a new reference drops the accepted quote) |
+| `POST /orders/{id}/items`, `PATCH/DELETE /orders/{id}/items/{item}` | line items; the reference is set on create and replaced whole on `PATCH` while `draft` or `quoted` (a new reference drops the accepted quote); `DELETE` only while the item is `draft` (never quoted), else it is a cancel (§3.5) |
 | `POST /orders/{id}/items/{item}/quote` (operation `order_item_quote`) | render if needed, slice, price (§5); 202 then the quote |
 | `POST /orders/{id}/items/{item}/quotes/{quote}/accept` | pins the quote; the item becomes `approved` |
 | `POST /orders/{id}/items/{item}/quotes` with a `manual` body | a typed price |
 | `POST /orders/{id}/accept`, `/cancel`, `/hold`, `/release`, `/close` | lifecycle (§3.5); `accept` publishes the event |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
-| `POST /orders/{id}/items/{item}/fulfilments/{f}/attachments` (multipart), `DELETE …/{attachment}` | §6.2 |
+| `POST /orders/{id}/items/{item}/fulfilments/{f}/attachments` (multipart), `DELETE …/{attachment}` | §6.2; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line |
+| `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
 | `GET /orders/{id}/costs` | the quote against the actuals (§6.4) |
 | `GET/PUT /orders/price-book` | §5.1 |
@@ -253,8 +254,9 @@ tab of the Orders page:
   (§8.3).
 - `pricing_policy`: `machine_rate_per_hour` (decimal, may be 0), `setup_fee` (per
   plate, decimal), `labour_per_item` (decimal), `markup_percent` (decimal), `rounding`
-  (`none` or `to_minor_unit`, the default; `to_major` rounds the unit price up to the
-  next whole currency unit, the shop owner's choice).
+  (`to_minor_unit`, the default: each line rounds as §3.6 says and the unit price is
+  their sum; or `to_major`: the unit price is then rounded up to the next whole
+  currency unit, the shop owner's choice).
 
 The policy and the filament prices in force are copied into each quote's lines, so the
 book can change freely afterwards.
@@ -301,9 +303,12 @@ stored as a quote, and never accepted. A filament with no density gives none.
 ### 5.4 Printing an item
 
 `order_item_print` starts a `PrintRunWorkflow` for the item: the source is the
-accepted quote's sliced file (its digest must match, else the print is refused and
-the item wants a re-quote), the request's `filament_plan` maps each slot to a spool
-of the slot's filament, and `copies` is the quantity still to print. The run's
+accepted quote's sliced file (its digest must match, else the print is refused with
+`requote_needed` and the item wants a re-quote), the request's `filament_plan` maps
+each slot to a spool of the slot's filament, and `copies` is the quantity still to
+print. A flow reaches it as `queue_print({"order_item_id": id}, request)` (§7.2), so
+the grant's `printers`, `max_prints` and `max_filament_g` bounds apply as they do to
+any print. The run's
 `subject` is `order_item:<id>`, which is how the outcome finds its way back (§6.1).
 The item's status follows the run: `queued` when the run succeeds (F7: queued, not
 printed), `printing` on the first `print.progress` for its send, `printed` or `failed`
@@ -330,9 +335,9 @@ path and editable by hand:
 - `notes`.
 
 An item is `fulfilled` when its attempts' succeeded quantities reach its quantity and a
-person (or the flow, within its grant) marks it so with `POST …/fulfilments/{f}` body
-`{"accept": true}`; it is `failed` when the latest attempt failed, and a new attempt
-returns it to `approved`.
+person (or the flow, within its grant) accepts the attempt with
+`POST …/fulfilments/{f}/accept` (§4); it is `failed` when the latest attempt failed,
+and a new attempt returns it to `approved`.
 
 ### 6.2 Attachments
 
@@ -432,15 +437,16 @@ order = tool("order_get", {"id": ev.order_id})
 for item in order["items"]:
     if item["status"] != "approved":
         continue
-    quote = tool("order_item_quote", {"order_id": order["id"], "item_id": item["id"]})
-    if quote["total_minor"] != item["accepted_quote"]["total_minor"]:
-        a = wait_for_human(f"Item {item['title']} re-quoted at {quote['total']} "
-                           f"(accepted {item['accepted_quote']['total']}). Proceed?")
-        if a.answer.lower() != "yes":
+    out = queue_print({"order_item_id": item["id"]}, {})   # §5.4: the accepted quote's file
+    if out["error"] == "requote_needed":                    # its sliced file is gone or stale
+        quote = tool("order_item_quote", {"order_id": order["id"], "item_id": item["id"]})
+        a = wait_for_human(f"{item['title']} re-quoted at {quote['total_minor']} minor units "
+                           f"(accepted {item['accepted_quote']['total_minor']}). Accept and print?")
+        if a.answer.strip().lower() != "yes":
             continue
-    out = queue_print({"output_id": item["output_id"]},
-                      {"order_item_id": item["id"], **tool("order_item_print_request",
-                                                           {"order_id": order["id"], "item_id": item["id"]})})
+        tool("order_item_accept_quote", {"order_id": order["id"], "item_id": item["id"],
+                                         "quote_id": quote["id"]})
+        out = queue_print({"order_item_id": item["id"]}, {})
     if out["status"] != "succeeded":
         wait_for_human(f"Print of {item['title']} did not queue: {out['error']}")
 done = agent("Check every printed item of this order, add the finished photo and the "
@@ -454,9 +460,12 @@ if inputs().notify:
 
 What this relies on, and what the design adds for it:
 
-- `queue_print` takes an `order_item_id` in its request, which `order_item_print`
-  honours by setting the run's subject (§5.4); the item's status then follows the
-  print with no further script work.
+- `queue_print`'s source gains a third kind, `{"order_item_id"}`: the call is sent to
+  `order_item_print` (§5.4), which fills the request from the accepted quote, checks
+  the file's digest and sets the run's subject; the request argument may only narrow
+  it (a printer, fewer copies). The item's status then follows the print with no
+  further script work, and a stale quote comes back as `requote_needed`, never as a
+  print of the wrong file (Ruling 2).
 - A person is asked only where the grant does not cover the call: `queue_print` is
   covered by the trigger's standing grant (`printers`, `max_prints`, `max_filament_g`,
   F13); `order_notify_customer` is outward and is covered only by a rule naming it.
@@ -481,7 +490,6 @@ What this relies on, and what the design adds for it:
 `agent/src/tools/orders.ts`, one `defineTool` per route of §4, named `customer_list`,
 `customer_get`, `customer_upsert`, `order_list`, `order_get`, `order_create`,
 `order_item_add`, `order_item_quote`, `order_item_accept_quote`, `order_accept`,
-`order_item_print_request` (the `PrintRunRequest` the item's accepted quote implies),
 `order_item_fulfil`, `order_attach` (by `workspace_path`, as uploads are, #2329),
 `order_ship`, `order_costs`, `price_book_get`, `price_book_set`. All are `write` or
 `read` tier: local records. `order_notify_customer` is the one `outward` tool: it
@@ -604,8 +612,10 @@ menu "Order this"; the print detail page "Attach to order item".
    the file. The Bambuddy slicer path and the native one price identically.
 5. **The order's status is derived past `accepted`.** No route writes `ready`,
    `in_production` or `closed`; `close` is a check that can refuse.
-6. **Nothing is deleted from an order.** Items cancel, quotes stay unaccepted,
-   attempts keep their provenance, customers archive.
+6. **Nothing the process produced is deleted.** Items past `draft` cancel, quotes
+   stay unaccepted, attempts keep their provenance, customers archive. A `draft` item
+   and a mis-uploaded attachment are the two things a person may delete, and the
+   order's audit line records each.
 7. **Bambuddy is reached through one seam, and only when configured.** `orders/`
    never imports the client; the seam's null implementation is the one without
    `bambuddy_url`.
