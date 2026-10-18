@@ -3,12 +3,13 @@ D1, Task 6b).
 
 ``SpoolRefresh`` runs on the ``library`` queue, served in the API process, every
 ``spool_overlay_refresh_seconds`` (the Schedule ``scadbuddy-spool-providers-<queue>``,
-overlap SKIP, and once at each boot; 0 deletes it). A run is one activity
-(`spools/activities.py` ``spool_providers_refresh``): each configured provider's
-records into Postgres, then the printers' trays. It is never started, signalled or
-awaited by the print dialog, which reads only what it wrote: the hot path never waits
-on Bambuddy. A refresh that fails is not retried within its run; the next tick is the
-retry, as it is for the sweeps.
+overlap SKIP, and once at each boot; 0 deletes it). A run lists the providers
+(``spool_providers_list``), refreshes each in an activity of its own
+(``spool_provider_refresh``: its records into Postgres, a failure recorded as its own),
+then records the printers' trays (``spool_trays_seen``); `spools/activities.py`. It is
+never started, signalled or awaited by the print dialog, which reads only what it
+wrote: the hot path never waits on Bambuddy. A step that fails is not retried within
+its run; the next tick is the retry, as it is for the sweeps.
 
 On the versioned ``library`` worker (#4090) it is AUTO_UPGRADE (`VersionedSpoolRefresh`),
 so a run left open across a deploy replays on the new code: a change to the commands
@@ -23,18 +24,26 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.client import Client, ScheduleActionStartWorkflow
 from temporalio.common import RetryPolicy, VersioningBehavior
+from temporalio.exceptions import ActivityError
 
 from scadbuddy.workflows.housekeeping import ensure_workflow_schedule
 
 SPOOL_REFRESH_WORKFLOW = "SpoolRefresh"
 SPOOL_SCHEDULE = "scadbuddy-spool-providers"
-REFRESH_ACTIVITY = "spool_providers_refresh"
-#: Each provider's read is bounded at a minute (`activities.PROVIDER_TIMEOUT`); a few
-#: providers, then the writes.
-REFRESH_TIMEOUT = timedelta(minutes=5)
-#: A run that can never finish ends, and the Schedule's overlap SKIP stops holding
-#: later ticks back.
+LIST_ACTIVITY = "spool_providers_list"
+PROVIDER_ACTIVITY = "spool_provider_refresh"
+SEEN_ACTIVITY = "spool_trays_seen"
+#: Listing the providers reads nothing.
+LIST_TIMEOUT = timedelta(seconds=30)
+#: One provider's refresh is bounded at a minute (`activities.PROVIDER_TIMEOUT`), then
+#: its failure is recorded.
+PROVIDER_TIMEOUT = timedelta(seconds=90)
+#: Every printer's latest report, then a write per tagged tray.
+SEEN_TIMEOUT = timedelta(minutes=2)
+#: Each provider is its own activity, so the run grows with them; a run that can never
+#: finish still ends, and the Schedule's overlap SKIP stops holding later ticks back.
 RUN_TIMEOUT = timedelta(minutes=15)
+_ONCE = RetryPolicy(maximum_attempts=1)
 
 
 def spool_schedule_id_for(task_queue: str) -> str:
@@ -46,13 +55,33 @@ def spool_schedule_id_for(task_queue: str) -> str:
 class SpoolRefresh:
     @workflow.run
     async def run(self) -> dict[str, str]:
-        """What came of each provider: ``refreshed``, ``failed`` or ``skipped``."""
-        outcome: dict[str, str] = await workflow.execute_activity(
-            REFRESH_ACTIVITY,
-            result_type=dict[str, str],
-            start_to_close_timeout=REFRESH_TIMEOUT,
-            retry_policy=RetryPolicy(maximum_attempts=1),
+        """What came of each provider, in priority order: ``refreshed``, ``failed`` or
+        ``skipped``. One provider's failure never stops the next, nor the trays."""
+        names: list[str] = await workflow.execute_activity(
+            LIST_ACTIVITY,
+            result_type=list[str],
+            start_to_close_timeout=LIST_TIMEOUT,
+            retry_policy=_ONCE,
         )
+        outcome: dict[str, str] = {}
+        for name in names:
+            try:
+                outcome[name] = await workflow.execute_activity(
+                    PROVIDER_ACTIVITY,
+                    name,
+                    result_type=str,
+                    start_to_close_timeout=PROVIDER_TIMEOUT,
+                    retry_policy=_ONCE,
+                )
+            except ActivityError:
+                workflow.logger.warning("could not refresh the spool provider %s", name)
+                outcome[name] = "failed"
+        try:
+            await workflow.execute_activity(
+                SEEN_ACTIVITY, start_to_close_timeout=SEEN_TIMEOUT, retry_policy=_ONCE
+            )
+        except ActivityError:
+            workflow.logger.warning("could not record what the printers' trays show")
         return outcome
 
 

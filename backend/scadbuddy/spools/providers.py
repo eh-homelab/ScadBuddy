@@ -27,6 +27,9 @@ class SpoolProvider(Protocol):
     name: str
     #: What a person reads in the overlay's note: "Bambuddy".
     label: str
+    #: Lower first: the order the overlay prefers providers' records in (a tray's
+    #: remaining weight is the first fresh record's), and the order they are refreshed.
+    priority: int
 
     async def configured(self) -> bool:
         """False: the refresh skips it and leaves its rows as they are."""
@@ -55,7 +58,8 @@ class DuplicateProviderError(ValueError):
 def discover_providers(
     core: Core, components: Components, package: ModuleType = scadbuddy
 ) -> list[SpoolProvider]:
-    """Every feature's providers, by feature name; two named alike are refused."""
+    """Every feature's providers by `SpoolProvider.priority`, then name; two named alike
+    are refused."""
     found: list[SpoolProvider] = []
     names: set[str] = set()
     for builds in feature_exports(PROVIDER_MODULE, PROVIDER_ATTR, package):
@@ -69,4 +73,4 @@ def discover_providers(
                 )
             names.add(provider.name)
             found.append(provider)
-    return found
+    return sorted(found, key=lambda provider: (provider.priority, provider.name))

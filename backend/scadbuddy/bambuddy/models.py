@@ -900,6 +900,10 @@ class SpoolAssignment(BambuddyModel):
     ams_id: int
     tray_id: int
     spool: Spool | None = None
+    #: What Bambuddy saw in the tray when it assigned the spool (#3818):
+    #: ``tests/bambuddy/recordings/inventory-assignments.json``.
+    fingerprint_type: str | None = None
+    fingerprint_color: str | None = None
 
 
 class FilamentGroup(BambuddyModel):

@@ -9,14 +9,14 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 
-from scadbuddy.spools.models import SeenTray, SpoolSnapshot
-from scadbuddy.spools.store import SPOOL_OVERLAY_STALE, SpoolStore
+from scadbuddy.spools.models import SeenTray, SpoolLocation, SpoolSnapshot, tray_fingerprint
+from scadbuddy.spools.store import SPOOL_OVERLAY_STALE, SpoolStore, repoint_tray_links
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
-PRINTER = "printer-1"
+PRINTER = uuid.UUID("5d0c8f1e-0000-4000-8000-000000000001")
 UUID_A = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
 TAG_A = "1A2B3C4D5E6F7081"
 ZERO_UUID = "0" * 32
@@ -45,7 +45,6 @@ def tray(
         material=material,
         colour=colour,
         tray_info_idx="GFA00",
-        fingerprint=f"{material}|{colour}|11",
     )
 
 
@@ -100,8 +99,8 @@ async def test_all_zeros_is_never_a_key(store: SpoolStore, pg_pool: PgPool) -> N
         "bambuddy", [record("9", tray_uuid=ZERO_UUID, tag_uid=ZERO_TAG)], NOW
     )
     assert rows(pg_pool, "SELECT id FROM physical_spools") == []
-    (row,) = rows(pg_pool, "SELECT physical_spool_id, linked_by FROM spool_provider_records")
-    assert row == {"physical_spool_id": None, "linked_by": None}
+    assert len(rows(pg_pool, "SELECT 1 FROM spool_provider_records")) == 1
+    assert rows(pg_pool, "SELECT 1 FROM spool_record_links") == []
 
 
 async def test_a_record_the_provider_no_longer_lists_is_dropped(
@@ -147,6 +146,7 @@ async def test_a_manual_link_is_dropped_when_the_trays_fingerprint_changes(
     await store.replace_records("bambuddy", [record("13")], NOW)
     await store.link(PRINTER, tray(1, 2), provider="bambuddy", record_id="13")
     changed = tray(1, 2, colour="#00FF00")
+    assert changed.fingerprint != tray(1, 2).fingerprint
     overlay = await store.overlay(PRINTER, [changed], now=NOW, providers=["bambuddy"])
     (only,) = overlay.trays
     assert only.physical_spool_id is None
@@ -171,10 +171,7 @@ async def test_a_manual_link_moves_a_record_and_never_duplicates_one(
     assert third.records["bambuddy"].record_id == "13"
     moved = await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="14")
     assert moved.records["bambuddy"].record_id == "14"
-    linked = rows(
-        pg_pool,
-        "SELECT record_id FROM spool_provider_records WHERE physical_spool_id IS NOT NULL",
-    )
+    linked = rows(pg_pool, "SELECT record_id FROM spool_record_links")
     assert linked == [{"record_id": "14"}]
 
 
@@ -186,8 +183,8 @@ async def test_the_schema_refuses_two_records_of_one_provider_on_one_spool(
     with pytest.raises(psycopg.errors.UniqueViolation):
         rows(
             pg_pool,
-            "UPDATE spool_provider_records SET physical_spool_id = %s, linked_by = 'manual'"
-            " WHERE record_id = '10'",
+            "INSERT INTO spool_record_links (provider, record_id, physical_spool_id, linked_by)"
+            " VALUES ('bambuddy', '10', %s, 'manual')",
             spool["id"],
         )
 
@@ -199,10 +196,7 @@ async def test_two_records_naming_one_tag_link_neither(store: SpoolStore, pg_poo
         "bambuddy", [record("1", tag_uid=TAG_A), record("2", tag_uid=TAG_A)], NOW
     )
     assert rows(pg_pool, "SELECT id FROM physical_spools") == []
-    assert all(
-        r["physical_spool_id"] is None
-        for r in rows(pg_pool, "SELECT physical_spool_id FROM spool_provider_records")
-    )
+    assert rows(pg_pool, "SELECT 1 FROM spool_record_links") == []
 
 
 async def test_a_stale_provider_is_left_out_and_named(store: SpoolStore) -> None:
@@ -266,3 +260,204 @@ async def test_link_refuses_what_it_cannot_find(store: SpoolStore) -> None:
         await store.link(PRINTER, tray(), physical_spool_id=uuid.uuid4())
     with pytest.raises(ValueError):
         await store.link(PRINTER, tray())
+
+
+# -- review of #4180 -------------------------------------------------------------------
+
+
+async def test_a_manual_link_survives_a_refresh_that_leaves_the_record_out(
+    store: SpoolStore,
+) -> None:
+    """C1: a person's link is not the provider's cache: an empty answer, or a record
+    missing from one refresh, leaves it."""
+    await store.replace_records("bambuddy", [record("1")], NOW)
+    linked = await store.link(PRINTER, tray(1, 2), provider="bambuddy", record_id="1")
+    await store.replace_records("bambuddy", [], NOW + timedelta(minutes=5))
+    missing = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW + timedelta(minutes=5), providers=["bambuddy"]
+    )
+    assert missing.trays[0].physical_spool_id == linked.physical_spool_id
+    assert missing.trays[0].records == {}
+    await store.replace_records("bambuddy", [record("1")], NOW + timedelta(minutes=10))
+    back = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW + timedelta(minutes=10), providers=["bambuddy"]
+    )
+    assert back.trays[0].records["bambuddy"].record_id == "1"
+
+
+async def test_a_manual_link_survives_an_archive_and_restore(store: SpoolStore) -> None:
+    """C1: an archived spool is not listed (`BambuddyClient.spools` excludes them), and
+    comes back when restored."""
+    await store.replace_records("bambuddy", [record("1"), record("2")], NOW)
+    await store.link(PRINTER, tray(0, 3), provider="bambuddy", record_id="1")
+    await store.replace_records("bambuddy", [record("2")], NOW + timedelta(minutes=5))
+    await store.replace_records("bambuddy", [record("1"), record("2")], NOW + timedelta(minutes=10))
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 3)], now=NOW + timedelta(minutes=10), providers=["bambuddy"]
+    )
+    assert overlay.trays[0].linked_by == "manual"
+    assert overlay.trays[0].records["bambuddy"].record_id == "1"
+
+
+async def test_a_manually_linked_record_that_learns_a_new_tag_tags_its_spool(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """I1: no spool has the key yet, so it is the linked spool's, and RFID takes over."""
+    await store.replace_records("bambuddy", [record("1")], NOW)
+    linked = await store.link(PRINTER, tray(255, 0), provider="bambuddy", record_id="1")
+    await store.replace_records("bambuddy", [record("1", tray_uuid=UUID_A)], NOW)
+    (spool,) = rows(pg_pool, "SELECT id, tray_uuid FROM physical_spools")
+    assert spool == {"id": linked.physical_spool_id, "tray_uuid": UUID_A}
+    (link,) = rows(pg_pool, "SELECT linked_by FROM spool_record_links")
+    assert link == {"linked_by": "rfid"}
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 1, tray_uuid=UUID_A)], now=NOW, providers=["bambuddy"]
+    )
+    assert overlay.trays[0].physical_spool_id == linked.physical_spool_id
+    assert overlay.trays[0].records["bambuddy"].record_id == "1"
+
+
+async def test_a_manually_linked_record_whose_tag_names_another_spool_moves_to_it(
+    store: SpoolStore,
+) -> None:
+    """I1: the tag is the evidence (Bambuddy's own `get_spool_by_tag` prefers it); the
+    hand-linked spool keeps its tray link and loses the record."""
+    await store.seen([tray(0, 1, tray_uuid=UUID_A)])
+    await store.replace_records("bambuddy", [record("1")], NOW)
+    linked = await store.link(PRINTER, tray(255, 0), provider="bambuddy", record_id="1")
+    await store.replace_records("bambuddy", [record("1", tray_uuid=UUID_A)], NOW)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(0, 1, tray_uuid=UUID_A), tray(255, 0)],
+        now=NOW,
+        providers=["bambuddy"],
+    )
+    tagged, untagged = overlay.trays
+    assert tagged.linked_by == "rfid"
+    assert tagged.records["bambuddy"].record_id == "1"
+    assert untagged.physical_spool_id == linked.physical_spool_id
+    assert untagged.records == {}
+
+
+@pytest.mark.parametrize("state", [10, 11, 15])
+def test_the_fingerprint_ignores_the_trays_state(state: int) -> None:
+    """I2: `state` is a bitfield that changes as the AMS feeds and scans."""
+    assert tray_fingerprint("PLA", "#FF0000") == tray_fingerprint(" PLA ", "ff0000ff")
+    assert tray(1, 2).fingerprint == tray_fingerprint("PLA", "#FF0000")
+    assert str(state) not in tray(1, 2).fingerprint.split("|")
+
+
+async def test_a_link_made_while_the_tray_was_not_fed_holds_once_it_feeds(
+    store: SpoolStore,
+) -> None:
+    """I2: the same tray, read at state 10 when linked and 11 or 15 later, is the same
+    fingerprint, since the state is not in it."""
+    await store.replace_records("bambuddy", [record("1")], NOW)
+    linked = await store.link(PRINTER, tray(1, 2), provider="bambuddy", record_id="1")
+    overlay = await store.overlay(PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"])
+    assert overlay.trays[0].physical_spool_id == linked.physical_spool_id
+
+
+def located(record_id: str, ams_id: int, tray_id: int, **fields: object) -> SpoolSnapshot:
+    return record(
+        record_id,
+        colour="#FF0000",
+        location=SpoolLocation(
+            printer="bambuddy:1",
+            ams_id=ams_id,
+            tray_id=tray_id,
+            fingerprint=tray_fingerprint("PLA", "#FF0000"),
+        ),
+        **fields,
+    )
+
+
+async def test_a_providers_own_assignment_seeds_an_untagged_tray(store: SpoolStore) -> None:
+    """I5: a mapping a person already made in the provider is shown, not asked again."""
+    await store.replace_records("bambuddy", [located("13", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
+    )
+    (only,) = overlay.trays
+    assert only.linked_by == "provider"
+    assert only.records["bambuddy"].record_id == "13"
+    # Another printer's assignment, or one whose tray has changed, is not this tray's.
+    other = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:2"}
+    )
+    assert other.trays[0].records == {}
+    changed = await store.overlay(
+        PRINTER,
+        [tray(1, 2, colour="#00FF00")],
+        now=NOW,
+        providers=["bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert changed.trays[0].records == {}
+
+
+async def test_a_persons_link_wins_over_the_providers_assignment(store: SpoolStore) -> None:
+    await store.replace_records("bambuddy", [located("13", 1, 2), record("14")], NOW)
+    await store.link(PRINTER, tray(1, 2), provider="bambuddy", record_id="14")
+    overlay = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
+    )
+    assert overlay.trays[0].linked_by == "manual"
+    assert overlay.trays[0].records["bambuddy"].record_id == "14"
+
+
+async def test_a_success_clears_the_last_failure(store: SpoolStore) -> None:
+    """Minor 3."""
+    await store.failed("bambuddy", NOW, "ApiError")
+    await store.replace_records("bambuddy", [], NOW + timedelta(minutes=5))
+    (refresh,) = await store.refreshes()
+    assert (refresh.failed_at, refresh.failure) == (None, None)
+
+
+async def test_seen_moves_a_tag_to_the_spool_it_was_read_on(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """Minor 8: a tag read beside another tray_uuid is that spool's now; a tag read
+    beside its spool's first unknown tray_uuid gives the spool that uuid."""
+    other = "B" * 32
+    await store.seen([tray(0, 0, tag_uid=TAG_A)])
+    await store.seen([tray(0, 0, tray_uuid=UUID_A, tag_uid=TAG_A)])
+    assert rows(pg_pool, "SELECT tray_uuid, tag_uid FROM physical_spools") == [
+        {"tray_uuid": UUID_A, "tag_uid": TAG_A}
+    ]
+    await store.seen([tray(0, 1, tray_uuid=other, tag_uid=TAG_A)])
+    spools = rows(pg_pool, "SELECT tray_uuid, tag_uid FROM physical_spools ORDER BY tray_uuid")
+    assert spools == [
+        {"tray_uuid": UUID_A, "tag_uid": None},
+        {"tray_uuid": other, "tag_uid": TAG_A},
+    ]
+
+
+async def test_a_key_is_matched_as_bambuddy_normalises_it(store: SpoolStore) -> None:
+    """Minor 1: hex only; a tag_uid's last 16 digits, a tray_uuid's first 32."""
+    await store.seen([tray(tray_uuid=f"{UUID_A}FF", tag_uid=f"00:{TAG_A}")])
+    await store.replace_records(
+        "bambuddy", [record("9", tray_uuid=UUID_A.lower(), tag_uid=TAG_A)], NOW
+    )
+    overlay = await store.overlay(
+        PRINTER, [tray(tray_uuid=UUID_A)], now=NOW, providers=["bambuddy"]
+    )
+    assert overlay.trays[0].records["bambuddy"].record_id == "9"
+
+
+async def test_a_merged_printers_tray_links_move_to_the_printer_it_merged_into(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """The registry's merge of a synthetic-serial Bambuddy row into the real one
+    repoints the tray links in its own transaction; a tray both link keeps the real
+    printer's."""
+    synthetic, real = uuid.uuid4(), uuid.uuid4()
+    await store.replace_records("bambuddy", [record("1"), record("2"), record("3")], NOW)
+    await store.link(synthetic, tray(0, 0), provider="bambuddy", record_id="1")
+    await store.link(synthetic, tray(0, 1), provider="bambuddy", record_id="2")
+    await store.link(real, tray(0, 1), provider="bambuddy", record_id="3")
+    with pg_pool.connection() as conn, conn.transaction():
+        repoint_tray_links(conn, synthetic, real)
+    overlay = await store.overlay(real, [tray(0, 0), tray(0, 1)], now=NOW, providers=["bambuddy"])
+    assert [t.records["bambuddy"].record_id for t in overlay.trays] == ["1", "3"]
+    assert rows(pg_pool, "SELECT 1 FROM tray_spool_links WHERE printer_id = %s", synthetic) == []

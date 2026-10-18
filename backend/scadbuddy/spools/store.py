@@ -1,27 +1,38 @@
-"""``physical_spools``, ``spool_provider_records``, ``spool_provider_refreshes`` and
-``tray_spool_links`` (plan 2026-10-18 D1, migration ``20261018T1744Z_physical_spools``).
+"""``physical_spools``, ``spool_provider_records``, ``spool_record_links``,
+``spool_provider_refreshes`` and ``tray_spool_links`` (plan 2026-10-18 D1, migration
+``20261018T1744Z_physical_spools``).
 
-A provider's refresh (:meth:`SpoolStore.replace_records`) rewrites that provider's rows
-in one transaction; a person's manual link (:meth:`SpoolStore.link`) is the only other
-writer of them. Every write takes one advisory lock, so two writers never race to make
-the same physical spool. :meth:`SpoolStore.overlay`, which the print dialog reads, only
-reads: the mapping from tray to spool is resolved at the time of the read, and a manual
-link whose tray changed simply no longer matches.
+``spool_provider_records`` is a cache: each provider's refresh
+(:meth:`SpoolStore.replace_records`) rewrites its own rows. Which physical spool each
+record is lives apart, in ``spool_record_links``, so a record a refresh leaves out (an
+empty answer, an archived spool) keeps its link and is shown again when it comes back.
+Every write takes one advisory lock, so two writers never race to make the same physical
+spool. :meth:`SpoolStore.overlay`, which the print dialog reads, only reads: the mapping
+from tray to spool is resolved at the time of the read.
 
-How a record finds its spool, in order: a manual link a person made (kept across
-refreshes); else the record's ``tray_uuid``, else its ``tag_uid``, against
-``physical_spools`` (a spool is made for a key never seen before). A key two of one
-provider's records carry links neither of them, since it cannot say which is in the
-tray (Bambuddy's own recording, ``tests/bambuddy/recordings/inventory-spools.json``,
-carries one placeholder ``tag_uid`` on seven spools). Two records of one provider never
-share a spool (``UNIQUE (physical_spool_id, provider)``): the first claim wins, manual
-links before RFID ones, and the rest stay unlinked.
+How a record finds its spool: the record's ``tray_uuid``, else its ``tag_uid``, against
+``physical_spools``. A key is the evidence, as Bambuddy treats it
+(``get_spool_by_tag``, ``backend/app/services/spool_tag_matcher.py:405-436`` at
+maziggy/bambuddy ``0d427510``, "Prefers tray_uuid match over tag_uid"): a record a person
+linked by hand that later reports a key no spool has gives that key to its spool, and
+one whose key names another spool moves there, its old spool keeping its tray link.
+Without a key, a person's link stands. A spool is made for a key never seen before. A
+key two of one provider's records carry links neither of them, since it cannot say
+which is in the tray (Bambuddy's own recording,
+``tests/bambuddy/recordings/inventory-spools.json``, carries one placeholder ``tag_uid``
+on seven spools). Two records of one provider never share a spool
+(``UNIQUE (physical_spool_id, provider)``): RFID claims first, then the links already
+made, and a record whose spool another claimed is left unlinked.
+
+How a tray finds its spool: its keys; else, untagged, a person's tray link whose
+fingerprint still matches; else a fresh provider record whose own location is this
+tray (`SpoolSnapshot.location`), which never overrides a person's link.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -32,13 +43,15 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.spools.models import (
+    FoundBy,
     LinkedBy,
     Overlay,
     ProviderRefresh,
     SeenTray,
     SpoolSnapshot,
     TraySpool,
-    clean_key,
+    clean_tag_uid,
+    clean_tray_uuid,
 )
 
 #: An overlay older than this is left out with a note: three missed refreshes at the
@@ -48,6 +61,7 @@ SPOOL_OVERLAY_STALE = timedelta(minutes=30)
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:spools', 0))"
 
 Conn = Connection[DictRow]
+Keys = tuple[str | None, str | None]
 
 
 class SpoolStore:
@@ -62,8 +76,8 @@ class SpoolStore:
     async def replace_records(
         self, provider: str, snapshots: Sequence[SpoolSnapshot], at: datetime
     ) -> None:
-        """``provider``'s whole inventory as of ``at``: every record upserted and linked,
-        those it no longer lists removed, and its refresh recorded."""
+        """``provider``'s whole inventory as of ``at``: its cached records replaced, the
+        RFID links brought up to date, and its refresh recorded (clearing any failure)."""
         await self._call(self._replace_records, provider, list(snapshots), at)
 
     async def failed(self, provider: str, at: datetime, failure: str) -> None:
@@ -83,21 +97,26 @@ class SpoolStore:
 
     async def overlay(
         self,
-        printer_id: str,
+        printer_id: UUID,
         trays: Sequence[SeenTray],
         *,
         now: datetime,
-        providers: Iterable[str],
+        providers: Sequence[str],
+        located: Mapping[str, str] | None = None,
     ) -> Overlay:
         """Each tray's spool and the fresh records of it, and every one of ``providers``
-        whose records are stale or missing. Reads only."""
-        return await self._call(self._overlay, printer_id, list(trays), now, list(providers))
+        (in priority order) whose records are stale or missing. ``located`` names this
+        printer in each provider's own terms (``{"bambuddy": "bambuddy:1"}``), for the
+        providers' own assignments of untagged trays. Reads only."""
+        return await self._call(
+            self._overlay, printer_id, list(trays), now, list(providers), dict(located or {})
+        )
 
     # -- a person's links ---------------------------------------------------------------
 
     async def link(
         self,
-        printer_id: str,
+        printer_id: UUID,
         tray: SeenTray,
         *,
         physical_spool_id: UUID | None = None,
@@ -116,69 +135,75 @@ class SpoolStore:
             self._link, printer_id, tray, physical_spool_id, provider, record_id
         )
 
-    async def unlink(self, printer_id: str, ams_id: int, tray_id: int) -> None:
+    async def unlink(self, printer_id: UUID, ams_id: int, tray_id: int) -> None:
         """Forget which spool is in the tray; the spool and its records stay."""
         await self._call(self._unlink, printer_id, ams_id, tray_id)
 
     # -- sync ---------------------------------------------------------------------------
 
     def _replace_records(self, provider: str, snapshots: list[SpoolSnapshot], at: datetime) -> None:
+        listed: dict[str, SpoolSnapshot] = {}
+        for snapshot in snapshots:
+            listed.setdefault(snapshot.record_id, snapshot)
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
-            manual: dict[str, UUID] = {
-                row["record_id"]: row["physical_spool_id"]
+            conn.execute("DELETE FROM spool_provider_records WHERE provider = %s", (provider,))
+            for snapshot in listed.values():
+                conn.execute(
+                    "INSERT INTO spool_provider_records (provider, record_id, snapshot,"
+                    " refreshed_at) VALUES (%s, %s, %s, %s)",
+                    (provider, snapshot.record_id, Jsonb(snapshot.model_dump(mode="json")), at),
+                )
+            existing = {
+                row["record_id"]: row
                 for row in conn.execute(
-                    "SELECT record_id, physical_spool_id FROM spool_provider_records"
-                    " WHERE provider = %s AND linked_by = 'manual'",
+                    "SELECT record_id, physical_spool_id, linked_by, linked_at"
+                    " FROM spool_record_links WHERE provider = %s ORDER BY linked_at",
                     (provider,),
                 )
             }
-            ambiguous = _ambiguous(snapshots)
-            claimed: set[UUID] = set()
-            links: dict[str, tuple[UUID, LinkedBy]] = {}
-            for snapshot in snapshots:
-                spool = manual.get(snapshot.record_id)
-                if spool is not None and spool not in claimed:
-                    claimed.add(spool)
-                    links[snapshot.record_id] = (spool, "manual")
-            for snapshot in snapshots:
-                if snapshot.record_id in links:
+            ambiguous = _ambiguous(_keys_of(s.tray_uuid, s.tag_uid) for s in listed.values())
+            claimed: dict[UUID, str] = {}
+            handled: set[str] = set()
+            final: dict[str, tuple[UUID, LinkedBy]] = {}
+            for snapshot in listed.values():
+                keys = _unambiguous(_keys_of(snapshot.tray_uuid, snapshot.tag_uid), ambiguous)
+                if keys == (None, None):
                     continue
-                tray_uuid, tag_uid = _keys(snapshot.tray_uuid, snapshot.tag_uid, ambiguous)
-                if tray_uuid is None and tag_uid is None:
-                    continue
-                spool = _spool_for(
-                    conn,
-                    tray_uuid,
-                    tag_uid,
-                    material=snapshot.material,
-                    colour=snapshot.colour,
-                    tray_info_idx=None,
-                    seen_at=None,
+                handled.add(snapshot.record_id)
+                current = existing.get(snapshot.record_id)
+                spool = _spool_for_record(
+                    conn, keys, snapshot, current["physical_spool_id"] if current else None
                 )
                 if spool not in claimed:
-                    claimed.add(spool)
-                    links[snapshot.record_id] = (spool, "rfid")
-            conn.execute("DELETE FROM spool_provider_records WHERE provider = %s", (provider,))
-            for snapshot in snapshots:
-                spool, linked_by = links.get(snapshot.record_id, (None, None))
+                    claimed[spool] = snapshot.record_id
+                    final[snapshot.record_id] = (spool, "rfid")
+            for record_id, row in existing.items():
+                spool = row["physical_spool_id"]
+                if record_id in handled or spool in claimed:
+                    continue
+                claimed[spool] = record_id
+                final[record_id] = (spool, row["linked_by"])
+            conn.execute("DELETE FROM spool_record_links WHERE provider = %s", (provider,))
+            for record_id, (spool, linked_by) in final.items():
+                kept = existing.get(record_id)
+                since = (
+                    kept["linked_at"]
+                    if kept is not None
+                    and kept["physical_spool_id"] == spool
+                    and kept["linked_by"] == linked_by
+                    else None
+                )
                 conn.execute(
-                    "INSERT INTO spool_provider_records"
-                    " (provider, record_id, physical_spool_id, linked_by, snapshot, refreshed_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s)"
-                    " ON CONFLICT (provider, record_id) DO NOTHING",
-                    (
-                        provider,
-                        snapshot.record_id,
-                        spool,
-                        linked_by,
-                        Jsonb(snapshot.model_dump(mode="json")),
-                        at,
-                    ),
+                    "INSERT INTO spool_record_links"
+                    " (provider, record_id, physical_spool_id, linked_by, linked_at)"
+                    " VALUES (%s, %s, %s, %s, COALESCE(%s, now()))",
+                    (provider, record_id, spool, linked_by, since),
                 )
             conn.execute(
                 "INSERT INTO spool_provider_refreshes (provider, refreshed_at) VALUES (%s, %s)"
-                " ON CONFLICT (provider) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at",
+                " ON CONFLICT (provider) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at,"
+                " failed_at = NULL, failure = NULL",
                 (provider, at),
             )
 
@@ -192,24 +217,13 @@ class SpoolStore:
             )
 
     def _seen(self, trays: list[SeenTray]) -> None:
-        ambiguous = _ambiguous(trays)
+        ambiguous = _ambiguous(_keys_of(t.tray_uuid, t.tag_uid) for t in trays)
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
-            now = conn.execute("SELECT now() AS now").fetchone()
-            assert now is not None
             for tray in trays:
-                tray_uuid, tag_uid = _keys(tray.tray_uuid, tray.tag_uid, ambiguous)
-                if tray_uuid is None and tag_uid is None:
-                    continue
-                _spool_for(
-                    conn,
-                    tray_uuid,
-                    tag_uid,
-                    material=tray.material,
-                    colour=tray.colour,
-                    tray_info_idx=tray.tray_info_idx,
-                    seen_at=now["now"],
-                )
+                keys = _unambiguous(_keys_of(tray.tray_uuid, tray.tag_uid), ambiguous)
+                if keys != (None, None):
+                    _spool_seen(conn, keys, tray)
 
     def _refreshes(self) -> list[ProviderRefresh]:
         with self._pool.connection() as conn:
@@ -222,7 +236,12 @@ class SpoolStore:
             ]
 
     def _overlay(
-        self, printer_id: str, trays: list[SeenTray], now: datetime, providers: list[str]
+        self,
+        printer_id: UUID,
+        trays: list[SeenTray],
+        now: datetime,
+        providers: list[str],
+        located: dict[str, str],
     ) -> Overlay:
         with self._pool.connection() as conn:
             refreshed = {
@@ -239,76 +258,62 @@ class SpoolStore:
                 if refreshed.get(name) is None or now - refreshed[name] > SPOOL_OVERLAY_STALE
             }
             fresh = [name for name in providers if name not in stale]
-            found = [_resolve(conn, printer_id, tray) for tray in trays]
-            spools = [spool for spool, _ in found if spool is not None]
-            records = _records(conn, spools, fresh)
-        return Overlay(
-            trays=[
-                TraySpool(
-                    ams_id=tray.ams_id,
-                    tray_id=tray.tray_id,
-                    physical_spool_id=spool,
-                    linked_by=linked_by,
-                    records=records.get(spool, {}) if spool is not None else {},
-                )
-                for tray, (spool, linked_by) in zip(trays, found, strict=True)
-            ],
-            stale=stale,
-        )
+            found = [_tray_spool(conn, printer_id, tray, fresh, located) for tray in trays]
+        return Overlay(trays=found, stale=stale)
 
     def _link(
         self,
-        printer_id: str,
+        printer_id: UUID,
         tray: SeenTray,
         physical_spool_id: UUID | None,
         provider: str | None,
         record_id: str | None,
     ) -> TraySpool:
-        tray_uuid, tag_uid = clean_key(tray.tray_uuid), clean_key(tray.tag_uid)
-        tagged = tray_uuid is not None or tag_uid is not None
+        keys = _keys_of(tray.tray_uuid, tray.tag_uid)
+        tagged = keys != (None, None)
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
-            record: dict[str, Any] | None = None
+            record_spool: UUID | None = None
             if provider is not None and record_id is not None:
-                record = conn.execute(
-                    "SELECT physical_spool_id FROM spool_provider_records"
-                    " WHERE provider = %s AND record_id = %s FOR UPDATE",
-                    (provider, record_id),
-                ).fetchone()
-                if record is None:
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM spool_provider_records WHERE provider = %s"
+                        " AND record_id = %s",
+                        (provider, record_id),
+                    ).fetchone()
+                    is None
+                ):
                     raise LookupError(f"{provider} has no spool record {record_id}")
-            if physical_spool_id is not None and not _exists(conn, physical_spool_id):
+                record_spool = _linked_spool(conn, provider, record_id)
+            if (
+                physical_spool_id is not None
+                and conn.execute(
+                    "SELECT 1 FROM physical_spools WHERE id = %s", (physical_spool_id,)
+                ).fetchone()
+                is None
+            ):
                 raise LookupError(f"no physical spool {physical_spool_id}")
             if tagged:
-                spool = _spool_for(
-                    conn,
-                    tray_uuid,
-                    tag_uid,
-                    material=tray.material,
-                    colour=tray.colour,
-                    tray_info_idx=tray.tray_info_idx,
-                    seen_at=None,
-                )
+                spool = _spool_seen(conn, keys, tray)
                 if physical_spool_id is not None and physical_spool_id != spool:
                     raise ValueError("the tray's RFID tag names another spool")
             elif physical_spool_id is not None:
                 spool = physical_spool_id
-            elif record is not None and record["physical_spool_id"] is not None:
-                spool = record["physical_spool_id"]
+            elif record_spool is not None:
+                spool = record_spool
             else:
-                current, _ = _resolve(conn, printer_id, tray)
+                current = _manual_tray_spool(conn, printer_id, tray)
                 spool = current if current is not None else _new_spool(conn, tray)
             if provider is not None and record_id is not None:
                 conn.execute(
-                    "UPDATE spool_provider_records SET physical_spool_id = NULL, linked_by = NULL"
-                    " WHERE provider = %s AND physical_spool_id = %s AND record_id <> %s",
+                    "DELETE FROM spool_record_links WHERE provider = %s AND"
+                    " (physical_spool_id = %s OR record_id = %s)",
                     (provider, spool, record_id),
                 )
                 conn.execute(
-                    "UPDATE spool_provider_records"
-                    " SET physical_spool_id = %s, linked_by = 'manual'"
-                    " WHERE provider = %s AND record_id = %s",
-                    (spool, provider, record_id),
+                    "INSERT INTO spool_record_links (provider, record_id, physical_spool_id,"
+                    " linked_by) VALUES (%s, %s, %s, 'manual')",
+                    (provider, record_id, spool),
                 )
             if not tagged:
                 conn.execute(
@@ -325,16 +330,16 @@ class SpoolStore:
                     " fingerprint = EXCLUDED.fingerprint, linked_at = now()",
                     (printer_id, tray.ams_id, tray.tray_id, spool, tray.fingerprint),
                 )
-            records = _records(conn, [spool], None)
+            records = _records(conn, spool, None)
         return TraySpool(
             ams_id=tray.ams_id,
             tray_id=tray.tray_id,
             physical_spool_id=spool,
             linked_by="rfid" if tagged else "manual",
-            records=records.get(spool, {}),
+            records=records,
         )
 
-    def _unlink(self, printer_id: str, ams_id: int, tray_id: int) -> None:
+    def _unlink(self, printer_id: UUID, ams_id: int, tray_id: int) -> None:
         with self._pool.connection() as conn:
             conn.execute(
                 "DELETE FROM tray_spool_links WHERE printer_id = %s AND ams_id = %s"
@@ -343,47 +348,32 @@ class SpoolStore:
             )
 
 
-def _ambiguous(items: Sequence[SpoolSnapshot | SeenTray]) -> set[str]:
-    """The keys more than one of ``items`` carries."""
+def _keys_of(tray_uuid: str | None, tag_uid: str | None) -> Keys:
+    return clean_tray_uuid(tray_uuid), clean_tag_uid(tag_uid)
+
+
+def _ambiguous(all_keys: Any) -> set[str]:
+    """The keys more than one of ``all_keys`` carries."""
     seen: set[str] = set()
     twice: set[str] = set()
-    for item in items:
-        for key in {clean_key(item.tray_uuid), clean_key(item.tag_uid)} - {None}:
-            assert key is not None
+    for keys in all_keys:
+        for key in {key for key in keys if key is not None}:
             (twice if key in seen else seen).add(key)
     return twice
 
 
-def _keys(
-    tray_uuid: str | None, tag_uid: str | None, ambiguous: set[str]
-) -> tuple[str | None, str | None]:
-    uuid_key, tag_key = clean_key(tray_uuid), clean_key(tag_uid)
+def _unambiguous(keys: Keys, ambiguous: set[str]) -> Keys:
+    tray_uuid, tag_uid = keys
     return (
-        None if uuid_key in ambiguous else uuid_key,
-        None if tag_key in ambiguous else tag_key,
+        None if tray_uuid in ambiguous else tray_uuid,
+        None if tag_uid in ambiguous else tag_uid,
     )
 
 
-def _exists(conn: Conn, spool: UUID) -> bool:
-    return (
-        conn.execute("SELECT 1 FROM physical_spools WHERE id = %s", (spool,)).fetchone() is not None
-    )
-
-
-def _spool_for(
-    conn: Conn,
-    tray_uuid: str | None,
-    tag_uid: str | None,
-    *,
-    material: str | None,
-    colour: str | None,
-    tray_info_idx: str | None,
-    seen_at: datetime | None,
-) -> UUID:
-    """The physical spool ``tray_uuid`` (else ``tag_uid``) names, made when none does.
-    A missing key is filled in; what a tray reports (``seen_at`` set) also updates its
-    material and colour, and its tag (each read of a spool may be either of its two
-    tags)."""
+def _find(conn: Conn, keys: Keys) -> UUID | None:
+    """The spool ``tray_uuid`` names, else the one ``tag_uid`` names, unless that spool
+    has another ``tray_uuid``: then the tag is on a spool of its own."""
+    tray_uuid, tag_uid = keys
     row = None
     if tray_uuid is not None:
         row = conn.execute(
@@ -391,61 +381,85 @@ def _spool_for(
         ).fetchone()
     if row is None and tag_uid is not None:
         row = conn.execute(
-            "SELECT id FROM physical_spools WHERE tag_uid = %s", (tag_uid,)
+            "SELECT id FROM physical_spools WHERE tag_uid = %s"
+            " AND (%s::text IS NULL OR tray_uuid IS NULL)",
+            (tag_uid, tray_uuid),
         ).fetchone()
-    if row is None:
+    return None if row is None else row["id"]
+
+
+def _tag_free(conn: Conn, tag_uid: str | None, spool: UUID | None) -> str | None:
+    """``tag_uid`` unless a spool other than ``spool`` has it: only a tray's read moves a
+    tag, never a provider's record."""
+    if tag_uid is None:
+        return None
+    taken = conn.execute(
+        "SELECT 1 FROM physical_spools WHERE tag_uid = %s AND id IS DISTINCT FROM %s",
+        (tag_uid, spool),
+    ).fetchone()
+    return None if taken else tag_uid
+
+
+def _spool_for_record(conn: Conn, keys: Keys, snapshot: SpoolSnapshot, linked: UUID | None) -> UUID:
+    """The spool a record's keys name: an existing one (its missing keys filled in), else
+    the untagged spool it is already linked to (given the keys), else a new one."""
+    tray_uuid, tag_uid = keys
+    spool = _find(conn, keys)
+    if spool is None and linked is not None:
+        untagged = conn.execute(
+            "SELECT 1 FROM physical_spools WHERE id = %s AND tray_uuid IS NULL AND tag_uid IS NULL",
+            (linked,),
+        ).fetchone()
+        spool = linked if untagged else None
+    if spool is None:
+        made = conn.execute(
+            "INSERT INTO physical_spools (tray_uuid, tag_uid, material, colour)"
+            " VALUES (%s, %s, %s, %s) RETURNING id",
+            (tray_uuid, _tag_free(conn, tag_uid, None), snapshot.material, snapshot.colour),
+        ).fetchone()
+        assert made is not None
+        new: UUID = made["id"]
+        return new
+    # Found by its tag when it has a tray_uuid no spool has: free to fill in.
+    conn.execute(
+        "UPDATE physical_spools SET tray_uuid = COALESCE(tray_uuid, %s),"
+        " tag_uid = COALESCE(tag_uid, %s), material = COALESCE(material, %s),"
+        " colour = COALESCE(colour, %s) WHERE id = %s",
+        (tray_uuid, _tag_free(conn, tag_uid, spool), snapshot.material, snapshot.colour, spool),
+    )
+    return spool
+
+
+def _spool_seen(conn: Conn, keys: Keys, tray: SeenTray) -> UUID:
+    """The spool a tray's keys name, made when none does, brought up to what the tray
+    reports. The tag read moves to it: each read of a spool may be either of its tags."""
+    tray_uuid, tag_uid = keys
+    spool = _find(conn, keys)
+    if spool is None:
+        if tag_uid is not None:
+            conn.execute("UPDATE physical_spools SET tag_uid = NULL WHERE tag_uid = %s", (tag_uid,))
         made = conn.execute(
             "INSERT INTO physical_spools"
             " (tray_uuid, tag_uid, material, colour, tray_info_idx, last_seen_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (tray_uuid, tag_uid, material, colour, tray_info_idx, seen_at),
+            " VALUES (%s, %s, %s, %s, %s, now()) RETURNING id",
+            (tray_uuid, tag_uid, tray.material, tray.colour, tray.tray_info_idx),
         ).fetchone()
         assert made is not None
-        spool: UUID = made["id"]
-        return spool
-    spool = row["id"]
-    if tag_uid is not None and seen_at is not None:
-        # The tag moves to the spool it was read on.
+        new: UUID = made["id"]
+        return new
+    if tag_uid is not None:
         conn.execute(
             "UPDATE physical_spools SET tag_uid = NULL WHERE tag_uid = %s AND id <> %s",
             (tag_uid, spool),
         )
     conn.execute(
-        "UPDATE physical_spools SET"
-        " tray_uuid = COALESCE(tray_uuid, %(tray_uuid)s),"
-        " tag_uid = CASE WHEN %(seen)s THEN COALESCE(%(tag_uid)s, tag_uid)"
-        "   ELSE COALESCE(tag_uid, %(tag_uid)s) END,"
-        " material = CASE WHEN %(seen)s THEN COALESCE(%(material)s, material)"
-        "   ELSE COALESCE(material, %(material)s) END,"
-        " colour = CASE WHEN %(seen)s THEN COALESCE(%(colour)s, colour)"
-        "   ELSE COALESCE(colour, %(colour)s) END,"
-        " tray_info_idx = COALESCE(%(tray_info_idx)s, tray_info_idx),"
-        " last_seen_at = COALESCE(%(seen_at)s, last_seen_at)"
-        " WHERE id = %(id)s",
-        {
-            "id": spool,
-            # Found by its tag when it has a tray_uuid no spool has: free to fill in.
-            "tray_uuid": tray_uuid,
-            "tag_uid": tag_uid
-            if tag_uid is not None and not _taken(conn, tag_uid, spool)
-            else None,
-            "material": material,
-            "colour": colour,
-            "tray_info_idx": tray_info_idx,
-            "seen": seen_at is not None,
-            "seen_at": seen_at,
-        },
+        "UPDATE physical_spools SET tray_uuid = COALESCE(tray_uuid, %s),"
+        " tag_uid = COALESCE(%s, tag_uid), material = COALESCE(%s, material),"
+        " colour = COALESCE(%s, colour), tray_info_idx = COALESCE(%s, tray_info_idx),"
+        " last_seen_at = now() WHERE id = %s",
+        (tray_uuid, tag_uid, tray.material, tray.colour, tray.tray_info_idx, spool),
     )
     return spool
-
-
-def _taken(conn: Conn, tag_uid: str, spool: UUID) -> bool:
-    return (
-        conn.execute(
-            "SELECT 1 FROM physical_spools WHERE tag_uid = %s AND id <> %s", (tag_uid, spool)
-        ).fetchone()
-        is not None
-    )
 
 
 def _new_spool(conn: Conn, tray: SeenTray) -> UUID:
@@ -459,44 +473,102 @@ def _new_spool(conn: Conn, tray: SeenTray) -> UUID:
     return spool
 
 
-def _resolve(conn: Conn, printer_id: str, tray: SeenTray) -> tuple[UUID | None, LinkedBy | None]:
-    """The spool in ``tray``: by its keys, else by a manual link whose fingerprint still
-    matches. Reads only."""
-    tray_uuid, tag_uid = clean_key(tray.tray_uuid), clean_key(tray.tag_uid)
-    for column, key in (("tray_uuid", tray_uuid), ("tag_uid", tag_uid)):
-        if key is None:
-            continue
-        query = f"SELECT id FROM physical_spools WHERE {column} = %s"
-        row = conn.execute(query.encode(), (key,)).fetchone()
-        if row is not None:
-            return row["id"], "rfid"
-    if tray_uuid is not None or tag_uid is not None:
-        # A tagged tray is its tag's spool or none: a link from before it was tagged is
-        # not its spool.
-        return None, None
-    link = conn.execute(
+def _linked_spool(conn: Conn, provider: str, record_id: str) -> UUID | None:
+    row = conn.execute(
+        "SELECT physical_spool_id FROM spool_record_links WHERE provider = %s AND record_id = %s",
+        (provider, record_id),
+    ).fetchone()
+    return None if row is None else row["physical_spool_id"]
+
+
+def _manual_tray_spool(conn: Conn, printer_id: UUID, tray: SeenTray) -> UUID | None:
+    row = conn.execute(
         "SELECT physical_spool_id FROM tray_spool_links"
         " WHERE printer_id = %s AND ams_id = %s AND tray_id = %s AND fingerprint = %s",
         (printer_id, tray.ams_id, tray.tray_id, tray.fingerprint),
     ).fetchone()
-    if link is None:
-        return None, None
-    return link["physical_spool_id"], "manual"
+    return None if row is None else row["physical_spool_id"]
 
 
-def _records(
-    conn: Conn, spools: list[UUID], providers: list[str] | None
-) -> dict[UUID, dict[str, SpoolSnapshot]]:
-    """Each spool's records, of ``providers`` only when given."""
-    if not spools:
-        return {}
-    found: dict[UUID, dict[str, SpoolSnapshot]] = {}
-    for row in conn.execute(
-        "SELECT physical_spool_id, provider, snapshot FROM spool_provider_records"
-        " WHERE physical_spool_id = ANY(%s) AND (%s::text[] IS NULL OR provider = ANY(%s))",
-        (spools, providers, providers),
-    ):
-        found.setdefault(row["physical_spool_id"], {})[row["provider"]] = (
-            SpoolSnapshot.model_validate(row["snapshot"])
+def _located(
+    conn: Conn, tray: SeenTray, fresh: list[str], located: dict[str, str]
+) -> tuple[str, SpoolSnapshot] | None:
+    """The first fresh provider's record whose own location is this tray, with what the
+    provider saw there still in it."""
+    for provider in fresh:
+        printer = located.get(provider)
+        if printer is None:
+            continue
+        for row in conn.execute(
+            "SELECT snapshot FROM spool_provider_records WHERE provider = %s"
+            " AND snapshot->'location'->>'printer' = %s"
+            " AND (snapshot->'location'->>'ams_id')::int = %s"
+            " AND (snapshot->'location'->>'tray_id')::int = %s ORDER BY record_id",
+            (provider, printer, tray.ams_id, tray.tray_id),
+        ):
+            snapshot = SpoolSnapshot.model_validate(row["snapshot"])
+            assert snapshot.location is not None
+            if snapshot.location.fingerprint in (None, tray.fingerprint):
+                return provider, snapshot
+    return None
+
+
+def _tray_spool(
+    conn: Conn, printer_id: UUID, tray: SeenTray, fresh: list[str], located: dict[str, str]
+) -> TraySpool:
+    keys = _keys_of(tray.tray_uuid, tray.tag_uid)
+    spool: UUID | None
+    found_by: FoundBy | None = None
+    records: dict[str, SpoolSnapshot] = {}
+    if keys != (None, None):
+        # A tagged tray is its tag's spool or none: a link from before it was tagged is
+        # not its spool.
+        spool = _find(conn, keys)
+        found_by = "rfid" if spool is not None else None
+    else:
+        spool = _manual_tray_spool(conn, printer_id, tray)
+        found_by = "manual" if spool is not None else None
+        if spool is None and (hit := _located(conn, tray, fresh, located)) is not None:
+            provider, snapshot = hit
+            spool = _linked_spool(conn, provider, snapshot.record_id)
+            found_by = "provider"
+            records[provider] = snapshot
+    if spool is not None:
+        records = {**_records(conn, spool, fresh), **records}
+    return TraySpool(
+        ams_id=tray.ams_id,
+        tray_id=tray.tray_id,
+        physical_spool_id=spool,
+        linked_by=found_by,
+        records=records,
+    )
+
+
+def _records(conn: Conn, spool: UUID, providers: list[str] | None) -> dict[str, SpoolSnapshot]:
+    """The spool's listed records, of ``providers`` only when given, in their order."""
+    found = {
+        row["provider"]: SpoolSnapshot.model_validate(row["snapshot"])
+        for row in conn.execute(
+            "SELECT l.provider, r.snapshot FROM spool_record_links l"
+            " JOIN spool_provider_records r USING (provider, record_id)"
+            " WHERE l.physical_spool_id = %s AND (%s::text[] IS NULL OR l.provider = ANY(%s))",
+            (spool, providers, providers),
         )
-    return found
+    }
+    order = providers if providers is not None else sorted(found)
+    return {name: found[name] for name in order if name in found}
+
+
+def repoint_tray_links(conn: Conn, merged: UUID, into: UUID) -> None:
+    """Move printer ``merged``'s tray links to printer ``into``, on ``conn`` and in its
+    transaction: the printer registry's merge of a synthetic-serial Bambuddy row into
+    the real one runs it beside the other references it repoints. Where both printers
+    have a link for one tray, ``into``'s stands."""
+    conn.execute(
+        "DELETE FROM tray_spool_links m USING tray_spool_links i WHERE m.printer_id = %s"
+        " AND i.printer_id = %s AND i.ams_id = m.ams_id AND i.tray_id = m.tray_id",
+        (merged, into),
+    )
+    conn.execute(
+        "UPDATE tray_spool_links SET printer_id = %s WHERE printer_id = %s", (into, merged)
+    )

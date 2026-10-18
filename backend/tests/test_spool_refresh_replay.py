@@ -4,8 +4,9 @@ On the versioned ``library`` worker it is AUTO_UPGRADE (`VersionedSpoolRefresh`)
 run left open across a deploy replays on the new code. A change to the commands
 ``SpoolRefresh.run`` issues goes behind ``workflow.patched``; this test is what says so.
 
-``refreshed`` was recorded with a refresh that answered, ``failed`` with one that raised
-(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below). Never re-record them: a
+``refreshed`` was recorded with two providers that answered, ``failed`` with a provider
+whose activity raised and a trays step that raised (``SCADBUDDY_RECORD_HISTORIES=1`` runs
+the recording below). Never re-record them: a
 later change adds a history recorded on the changed code beside them.
 """
 
@@ -18,10 +19,15 @@ from pathlib import Path
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
+from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
-from scadbuddy.workflows.spool_refresh import REFRESH_ACTIVITY, SpoolRefresh
+from scadbuddy.workflows.spool_refresh import (
+    LIST_ACTIVITY,
+    PROVIDER_ACTIVITY,
+    SEEN_ACTIVITY,
+    SpoolRefresh,
+)
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "spool_refresh_histories"
@@ -45,23 +51,31 @@ def recording_temporal() -> Iterator[str]:
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
 @pytest.mark.parametrize("name", ["refreshed", "failed"])
 async def test_record(recording_temporal: str, name: str) -> None:
-    @activity.defn(name=REFRESH_ACTIVITY)
-    async def refresh() -> dict[str, str]:
+    @activity.defn(name=LIST_ACTIVITY)
+    async def names() -> list[str]:
+        return ["a", "b"]
+
+    @activity.defn(name=PROVIDER_ACTIVITY)
+    async def refresh(provider: str) -> str:
+        if name == "failed" and provider == "a":
+            raise RuntimeError("could not record the failure")
+        return "refreshed"
+
+    @activity.defn(name=SEEN_ACTIVITY)
+    async def seen() -> None:
         if name == "failed":
-            raise RuntimeError("the store is down")
-        return {"bambuddy": "refreshed"}
+            raise RuntimeError("no reports")
 
     client = await Client.connect(recording_temporal)
     queue = f"spools-{uuid.uuid4().hex[:8]}"
-    async with Worker(client, task_queue=queue, workflows=[SpoolRefresh], activities=[refresh]):
+    async with Worker(
+        client, task_queue=queue, workflows=[SpoolRefresh], activities=[names, refresh, seen]
+    ):
         handle = await client.start_workflow(
             SpoolRefresh.run, id=f"spool-providers-{queue}", task_queue=queue
         )
-        if name == "failed":
-            with pytest.raises(WorkflowFailureError):
-                await handle.result()
-        else:
-            assert await handle.result() == {"bambuddy": "refreshed"}
+        expected = {"a": "failed" if name == "failed" else "refreshed", "b": "refreshed"}
+        assert await handle.result() == expected
         history = await handle.fetch_history()
     HISTORIES.mkdir(exist_ok=True)
     (HISTORIES / f"{name}.json").write_text(history.to_json())
