@@ -173,9 +173,11 @@ async def test_a_batch_takes_the_oldest_rows_up_to_its_limit(
         await target.aclose()
 
 
-async def test_a_missing_source_object_is_recorded_on_its_row_and_retried_by_a_new_run(
+async def test_a_missing_source_object_forgets_its_row_so_it_cannot_hold_the_flip(
     pool: Pool, tmp_path: Path, target: S3ContentBackend
 ) -> None:
+    """#4084: a deleted model's Bambuddy files were gone, and their rows sat in
+    `failed` for ever, so `failed_count` never reached 0."""
     src = local_content(tmp_path / "a", pool)
     gone = await src.put("piece", b"gone", name="g", scope=SCOPE)
     kept = await src.put("piece", b"kept", name="k", scope=SCOPE)
@@ -186,23 +188,28 @@ async def test_a_missing_source_object_is_recorded_on_its_row_and_retried_by_a_n
     try:
         started = index.now()
         result = await _batch(index, src.backend, target, started=started)
-        assert result == MigrationBatch(moved=1, remaining=0, failed=[key])
-        backend, _, error = _copy(pool, key)
-        assert backend is None and error is not None and error.startswith("BlobMissingError")
+        assert result == MigrationBatch(moved=1, remaining=0, failed=[], forgotten=[key])
+        assert index.get(key) is None
         assert _copy(pool, f"piece-{kept.sha256}")[0] == "s3"
-        assert index.migration_counts("local", "s3") == (0, 1, 1)
-        assert index.migration_failures("local", "s3", limit=10) == [(key, error)]
-        # The same run does not try it again.
-        assert await _batch(index, src.backend, target, started=started) == MigrationBatch(
-            moved=0, remaining=0, failed=[]
-        )
-        # A new run does, and a copy clears the error.
-        (src.backend.root / gone.backend_id).write_bytes(b"gone")
-        assert (await _batch(index, src.backend, target)).moved == 1
-        assert _copy(pool, key)[0::2] == ("s3", None)
+        assert index.migration_counts("local", "s3") == (0, 0, 1)
         assert index.migration_failures("local", "s3", limit=10) == []
     finally:
         await target.aclose()
+
+
+async def test_forgetting_a_missing_object_spares_a_row_put_again_meanwhile(
+    pool: Pool, tmp_path: Path
+) -> None:
+    src = local_content(tmp_path / "a", pool)
+    ref = await src.put("piece", b"bytes", name="p", scope=SCOPE)
+    key = f"piece-{ref.sha256}"
+    index = BlobIndex(pool)
+    # The row now names another object of the same bytes, as a re-put would leave it.
+    stale = ref.model_copy(update={"backend_id": "an-object-that-was-deleted"})
+    assert index.forget_missing(key, stale) is False
+    assert index.get(key) is not None
+    assert index.forget_missing(key, ref) is True
+    assert index.get(key) is None
 
 
 async def test_a_source_object_that_is_not_its_sha_is_recorded(

@@ -367,6 +367,17 @@ class BlobIndex:
                 (error, key, ref.sha256, ref.backend),
             )
 
+    def forget_missing(self, key: str, ref: BlobRef) -> bool:
+        """Drop ``key``'s row if it still names ``ref``, object and all (#4084): one its
+        backend no longer has. A row re-put meanwhile names another object and stays."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM store_blobs"
+                " WHERE key = %s AND sha256 = %s AND backend = %s AND backend_id = %s",
+                (key, ref.sha256, ref.backend, ref.backend_id),
+            )
+        return cursor.rowcount > 0
+
     def switch_migrated(self, backend: str) -> int:
         """Point every row copied to ``backend`` at its copy, in one statement: the
         migration's switch, run when a process starts on ``backend``."""
