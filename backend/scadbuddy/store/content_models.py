@@ -32,7 +32,8 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
 
 #: Kinds whose life the sweep decides: pieces and slices by `blob_refs` and grace,
 #: snapshots (a cache of git) by grace alone. Assets have `AssetStore.sweep`; fonts and
-#: library files (released with their row) are never swept.
+#: library files are skipped here: `print_library/sweep.py` `sweep_library` purges their
+#: trash and collects the blobs no row names.
 SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot", "slice")
 
 
