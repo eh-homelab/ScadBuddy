@@ -28,6 +28,8 @@ agent/dist
 agent/node_modules
 agent/coverage
 node_modules
+# Cargo's build output (gigabytes on a dev host).
+workers/rust/target
 
 # Python build/test detritus. .venv in particular: a host venv has absolute
 # paths and the wrong interpreter, and copying it over the image's /opt/venv

@@ -869,8 +869,8 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     # Build, lint, mypy, the container smoke and the real-backend e2e; the backend
-    # suite is `backend-pytest` (#1167).
-    timeout-minutes: 30
+    # suite is `backend-pytest` (#1167), the slicer image `slicer-image` (#3821).
+    timeout-minutes: 45
     # For the backend tests that need Postgres: every one that builds the app
     # (the settings live there, #401), the render queue's store, the `render_jobs`
     # projection the Temporal path writes (#424) and the other `requires_postgres`
@@ -1560,6 +1560,113 @@ jobs:
     with:
       run: ${{ needs.go-select.outputs.run }}
 
+  # ── Rust workers (workers/rust/, spec 2026-10-16 §7) ───────────────────────
+  #
+  # Never path-gated: `CI Summary` requires it, and a skip it counted as a pass
+  # would be the vacuous-green trap `freshness` describes.
+  rust:
+    name: Rust workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: workers/rust
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # One pin, rust-toolchain.toml's; the action takes it as an input.
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" | tee -a "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: workers/rust
+
+      # The Temporal Core SDK's build runs protoc (its README).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # The worker's tests start their own dev server from this CLI and skip
+      # without one. The same version and amd64 digest as the `agent` job and the
+      # Dockerfile's `test` stage (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64);
+      # bump together.
+      - name: Install the Temporal CLI
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        env:
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+        run: cargo test --workspace --locked
+
+  # ── The slicer worker's image (#3821) ─────────────────────────────────────
+  #
+  # The Dockerfile's `slicer` target: the Rust worker and the pinned Bambu Studio
+  # CLI. A job of its own, so a Rust-only change does not wait on the backend
+  # image; it shares none of that image's stages. A release build and the
+  # AppImage download when its cache misses. Never path-gated, as `rust`.
+  slicer-image:
+    name: Slicer image build and smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      # Its own `scope=slicer`, which build-image.yml's `slicer` job writes. The
+      # build already runs `scadbuddy-slicer --check-cli` as root; the two runs
+      # below repeat it as the image's own user, the way the cluster runs it.
+      - name: Build the slicer image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slicer
+          load: true
+          tags: scadbuddy-slicer:ci
+          # Read-only: the repo's Actions cache is at its ceiling (#743); build-image.yml's
+          # `slicer` job is the scope's only writer.
+          cache-from: type=gha,scope=slicer
+
+      - name: Slicer smoke
+        run: |
+          set -euo pipefail
+          docker run --rm scadbuddy-slicer:ci scadbuddy-slicer --check-cli
+          count="$(docker run --rm scadbuddy-slicer:ci /opt/bambu-studio/AppRun --help 2>&1 | grep -c -- '--slice')"
+          echo "AppRun --help names --slice on ${count} line(s)"
+          test "$count" -ge 1
+
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
   # backend/openapi.json and both schema.d.ts files are generated at build and
@@ -2026,7 +2133,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness, go-client]
+    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2062,6 +2169,8 @@ jobs:
           MODELS_RESULT: ${{ needs.models.result }}
           GO_SELECT_RESULT: ${{ needs.go-select.result }}
           GO_RESULT: ${{ needs.go.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2129,6 +2238,9 @@ jobs:
           # changes" itself when `go-select` found none, so a skip is a failure.
           assert "Select Go work"                         "$GO_SELECT_RESULT" true
           assert "Go modules"                             "$GO_RESULT"       true
+          # Always required, never path-gated.
+          assert "Rust workers"                           "$RUST_RESULT"     true
+          assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" true
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore

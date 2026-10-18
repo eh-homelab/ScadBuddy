@@ -1195,6 +1195,53 @@ see the subagents bullet for what the second needs.
 - The new GHCR package needs the one-time **public** visibility step
   described above.
 
+### Slicer worker (#3821)
+
+The `slicer` task queue's worker (spec
+`docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §7) runs on
+`ghcr.io/eh-homelab/scadbuddy-slicer` (the Dockerfile's `--target slicer`, published
+by the `slicer` job in `build-image.yml` with the same tags). It is the Rust worker
+`scadbuddy-slicer` with the Bambu Studio CLI v02.08.02.61, pinned by the AppImage's
+sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own.
+
+- Its whole configuration is six variables: `SCADBUDDY_TEMPORAL_ADDRESS` (required),
+  `SCADBUDDY_TEMPORAL_NAMESPACE` (default `default`),
+  `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` (default `slicer`),
+  `SCADBUDDY_SLICER_CONCURRENCY` (slices at once; default half the cores, at least
+  one), `SCADBUDDY_SLICER_SHUTDOWN_GRACE_SECONDS` (below) and the standard `OTEL_*`.
+  `BAMBU_STUDIO_CLI` overrides where the CLI is (the image's `/opt/bambu-studio/AppRun`),
+  for running the worker outside the image.
+- On SIGTERM it stops taking slices and lets the running ones go on for
+  `SCADBUDDY_SLICER_SHUTDOWN_GRACE_SECONDS` (default 20). Past that it cancels them:
+  each CLI's process group is killed and the slice fails as a retryable
+  `WorkerShutdown`, so its retry starts at once on another pod instead of after the
+  heartbeat timeout (with a single replica, when the replacement pod is up). Keep the grace below the Deployment's
+  `terminationGracePeriodSeconds` (Kubernetes' default is 30), with room for that
+  report: if the pod is killed first, the slice is lost with it and its retry waits out
+  the heartbeat timeout.
+- It mounts no volume and holds no credentials: no Postgres, no store keys, no
+  Bambuddy client. Each slice reads and writes its files through short-lived
+  transfer URLs in the activity's payload, so the pod must reach the API's internal
+  URL (`SCADBUDDY_API_INTERNAL_URL`, the API's Service) and, when `store_backend` is
+  `s3`, the bucket's endpoint.
+- It serves `/healthz` and `/metrics` on `9090`.
+- It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
+  of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
+  details are always one `{"exit_code", "stderr_tail"}` object, and exit 192, a
+  validation failure, is non-retryable), `SlicerWorkerError` (the worker's own failure,
+  such as its temp directory or starting the CLI: retryable, a message and no details),
+  `TransferRefused` (a transfer URL that will never work: non-retryable) and
+  `TransferError` (a transfer worth another attempt). Decode details only for a
+  `SlicerError`.
+- The CLI gets only `PATH`, `LANG`, `LC_ALL`, `TZ`, `LD_LIBRARY_PATH` and `APPDIR` (each
+  when set) and `HOME` (the slice's temp directory when `HOME` is unset or not
+  writable): nothing else in the pod's environment, such as `OTEL_EXPORTER_OTLP_HEADERS`,
+  reaches it.
+- It runs as uid 10001 with `HOME=/tmp` and writes only under `/tmp`, so mount an
+  `emptyDir` there and keep the root filesystem read-only.
+- The new GHCR package needs the one-time **public** visibility step
+  described above.
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:

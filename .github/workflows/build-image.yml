@@ -3,8 +3,9 @@ name: Build Image
 
 # Publishes ghcr.io/eh-homelab/scadbuddy for the cluster to pull, the AI
 # agent sidecar as ghcr.io/eh-homelab/scadbuddy-agent (the `agent` job below),
-# and the durable sessions sidecar as ghcr.io/eh-homelab/scadbuddy-agent-durable
-# (the `agent-durable` job, #1056).
+# the durable sessions sidecar as ghcr.io/eh-homelab/scadbuddy-agent-durable
+# (the `agent-durable` job, #1056), and the slicer worker as
+# ghcr.io/eh-homelab/scadbuddy-slicer (the `slicer` job, #3821).
 #
 # THE PACKAGE MUST BE PUBLIC. Nodes on the target cluster pull ghcr.io through
 # an ANONYMOUS Nexus proxy (`ghcr-proxy`), so a per-pod imagePullSecret
@@ -409,6 +410,112 @@ jobs:
           set -euo pipefail
           {
             echo "### Published \`ghcr.io/eh-homelab/scadbuddy-agent-durable\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The slicer worker (#3821, spec 2026-10-16 §7): the Dockerfile's `slicer`
+  # target, the Rust `slicer` queue worker with the pinned Bambu Studio CLI,
+  # published as ghcr.io/eh-homelab/scadbuddy-slicer and run as a Deployment of
+  # its own (README.md, "Slicer worker"). Same tag scheme as the other images, so
+  # one `sha-<short>` names every image of a commit.
+  #
+  # `continue-on-error` for the reason the agent jobs have it: a first publish of
+  # a new package (private until its visibility is changed, see the header) must
+  # not hold back a backend deploy. Drop it in the change that pins this image in
+  # eh-homelab/clusters.
+  slicer:
+    name: Build and push slicer (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+        with:
+          images: ghcr.io/eh-homelab/scadbuddy-slicer
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=ScadBuddy slicer
+            org.opencontainers.image.description=Bambu Studio slicer worker for ScadBuddy
+
+      # The same label as the other jobs: `X.Y.Z` for a `vX.Y.Z` tag,
+      # `sha-<short>` otherwise.
+      - name: Pick the version label
+        id: label
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            version="sha-${SHA:0:7}"
+          fi
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
+      # The build runs `scadbuddy-slicer --check-cli` against the pinned CLI.
+      #
+      # `type=gha` on a hosted runner only, as above. Its own scope, which
+      # ci.yml's `image` job only reads, written here at mode=min (the repo's
+      # Actions cache is at its ceiling, #743).
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slicer
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SCADBUDDY_REVISION=${{ github.sha }}
+            SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
+          provenance: false
+          cache-from: type=gha,scope=slicer
+          cache-to: type=gha,scope=slicer,mode=min
+
+      - name: Report the published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`ghcr.io/eh-homelab/scadbuddy-slicer\`"
             echo
             echo "**Digest:** \`${DIGEST}\`"
             echo

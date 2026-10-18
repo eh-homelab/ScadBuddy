@@ -201,6 +201,20 @@ device). The Go toolchain is pinned in six places, moved together: `go.work`'s
 `toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, and `GOTOOLCHAIN` in
 `go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
+Rust workers (`workers/rust/`, one Cargo workspace; the `rust` CI job):
+
+```bash
+cd workers/rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+`rust-toolchain.toml` pins the toolchain (rustup installs it). The Temporal Core SDK's
+build needs `protoc` on `PATH` (`apt-get install protobuf-compiler`). `Cargo.lock` is
+committed; CI runs clippy and the tests `--locked`, with the same Temporal CLI as the
+`agent` job in `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`.
+
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
@@ -731,6 +745,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`internal/api` the client wrapper, `internal/fsys` the tree, cache, writes and the
   unsent queue, `internal/telemetry` OTel; README there). Its unsent writes are the
   only copy of a save, under the state directory, never the cache.
+- `workers/rust/` — Rust Temporal workers and tools (spec 2026-10-16 §7):
+  `crates/sb-slicer` the `slice_plate` activity, `crates/sb-transfer` GET/PUT of
+  `TransferUrl`s (each body's sha256 reported, never checked: a `TransferUrl` carries
+  none), `crates/sb-temporal` the worker bootstrap (slicer only),
+  `bins/scadbuddy-slicer` the `slicer` queue's worker; `vectors/` pins payloads against
+  the pydantic models (`UPDATE_SLICE_VECTORS=1` in `backend/tests/slicing/test_models.py`).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which

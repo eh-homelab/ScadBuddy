@@ -1,0 +1,132 @@
+{
+  "input": [
+    {
+      "allow_newer_file": true,
+      "arrange": "no",
+      "debug": 1,
+      "filament_presets": [
+        {
+          "expires_at": "2026-10-16T12:00:00Z",
+          "headers": {
+            "X-ScadBuddy-Transfer": "tok"
+          },
+          "url": "http://api/api/v1/internal/blobs/slice/f1"
+        },
+        {
+          "expires_at": "2026-10-16T12:00:00Z",
+          "headers": {
+            "X-ScadBuddy-Transfer": "tok"
+          },
+          "url": "http://api/api/v1/internal/blobs/slice/f2"
+        }
+      ],
+      "input_3mf": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {
+          "X-ScadBuddy-Transfer": "tok"
+        },
+        "url": "http://api/api/v1/internal/blobs/slice/in"
+      },
+      "machine_preset": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {
+          "X-ScadBuddy-Transfer": "tok"
+        },
+        "url": "http://api/api/v1/internal/blobs/slice/m"
+      },
+      "plate": 1,
+      "process_preset": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {
+          "X-ScadBuddy-Transfer": "tok"
+        },
+        "url": "http://api/api/v1/internal/blobs/slice/p"
+      },
+      "sliced_3mf": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {},
+        "url": "http://garage/scadbuddy/prod/slice/out?X-Amz-Signature=sig"
+      },
+      "slicedata": null
+    },
+    {
+      "allow_newer_file": false,
+      "arrange": "auto",
+      "debug": 3,
+      "filament_presets": [
+        {
+          "expires_at": "2026-10-16T12:00:00Z",
+          "headers": {
+            "X-ScadBuddy-Transfer": "tok"
+          },
+          "url": "http://api/api/v1/internal/blobs/slice/f1"
+        }
+      ],
+      "input_3mf": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {
+          "X-ScadBuddy-Transfer": "tok"
+        },
+        "url": "http://api/api/v1/internal/blobs/slice/in"
+      },
+      "machine_preset": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {
+          "X-ScadBuddy-Transfer": "tok"
+        },
+        "url": "http://api/api/v1/internal/blobs/slice/m"
+      },
+      "plate": 0,
+      "process_preset": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {
+          "X-ScadBuddy-Transfer": "tok"
+        },
+        "url": "http://api/api/v1/internal/blobs/slice/p"
+      },
+      "sliced_3mf": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {},
+        "url": "http://garage/scadbuddy/prod/slice/out?X-Amz-Signature=sig"
+      },
+      "slicedata": {
+        "expires_at": "2026-10-16T12:00:00Z",
+        "headers": {},
+        "url": "http://garage/scadbuddy/prod/slice/data?X-Amz-Signature=sig"
+      }
+    }
+  ],
+  "output": [
+    {
+      "elapsed_seconds": 12.5,
+      "exit_code": 0,
+      "sliced_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sliced_size": 1234,
+      "slicedata_sha256": null,
+      "slicedata_size": null,
+      "stderr_tail": "",
+      "warnings": [
+        "w"
+      ]
+    },
+    {
+      "elapsed_seconds": 0.5,
+      "exit_code": 0,
+      "sliced_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sliced_size": 1,
+      "slicedata_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "slicedata_size": 9,
+      "stderr_tail": "tail",
+      "warnings": []
+    }
+  ],
+  "progress": [
+    {
+      "message": "Slicing",
+      "plate_count": 2,
+      "plate_index": 0,
+      "plate_percent": 50,
+      "total_percent": 25
+    }
+  ]
+}

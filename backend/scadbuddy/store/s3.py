@@ -15,7 +15,7 @@ import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, get_args
 
 from aiobotocore.config import AioConfig
 from aiobotocore.session import get_session
@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 _CHUNK = 1 << 20
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
-_OBJECT = re.compile(r"(piece|snapshot|asset|font)/[0-9a-f]{64}")
+_OBJECT = re.compile(
+    "(" + "|".join(re.escape(kind) for kind in get_args(BlobKind)) + ")/[0-9a-f]{64}"
+)
 
 
 def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
