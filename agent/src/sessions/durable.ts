@@ -91,11 +91,22 @@ export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 type WireOwner = { kind: string; id: string; label: string }
 type ImageRef = { name: string; mediaType: string }
 
+/** A tool result the plugin holds for Claude (its `ToolOutcome`), passed through as it is. */
+type ToolOutcome = { content: unknown; is_error: boolean; blocks: unknown[] | null }
+
+/**
+ * What the agent still owes at its checkpoint (#4173): the results its next segment
+ * delivers (a stopped turn's paused calls), whether that segment continues in a copy of
+ * the session, and the calls that already ran, as the plugin's `AgentState` keeps them.
+ */
+export type Owed = { pending: Record<string, ToolOutcome>; fork_next: boolean; recent_call_ids: string[] }
+
 /**
  * The part of the plugin's `AgentState` a fork seeds (#2688): the Claude session, where it
- * was last committed, and its transcript entries as JSON text, as the workflow keeps them.
+ * was last committed, its transcript entries as JSON text, as the workflow keeps them, and
+ * what it still owes there (#4173).
  */
-export type ForkedAgent = { session_id: string; checkpoint: string; conversation: string[] }
+export type ForkedAgent = { session_id: string; checkpoint: string; conversation: string[] } & Owed
 
 /** DurableSession's input (models.py `SessionStart`); the agent's state starts empty, or a fork's copy. */
 export type SessionStart = {
@@ -108,7 +119,7 @@ export type SessionStart = {
 }
 
 /** One page of `fork_point` (models.py `ForkPoint`). */
-type ForkPointPage = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] }
+type ForkPointPage = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] } & Partial<Owed>
 
 /** A durable session's committed conversation, for a fork. */
 export type ForkSource = {
@@ -118,6 +129,8 @@ export type ForkSource = {
   /** A turn runs: what it has written past the checkpoint is not in `entries`' committed part yet. */
   busy: boolean
   entries: SessionStoreEntry[]
+  /** What the agent owes at `checkpoint` (the first page's): only a child cut there takes it. */
+  owed: Owed
 }
 
 /** The `send_message` Update's argument (models.py `Message`); each turn carries its own append (#2525). */
@@ -457,6 +470,8 @@ export class DurableTurns {
           checkpoint: first.checkpoint,
           busy: first.busy,
           entries: texts.map((t) => JSON.parse(t) as SessionStoreEntry),
+          // A worker from before #4173 sends none: nothing owed it can say.
+          owed: { pending: first.pending ?? {}, fork_next: first.fork_next ?? false, recent_call_ids: first.recent_call_ids ?? [] },
         }
       }
     } catch (err) {

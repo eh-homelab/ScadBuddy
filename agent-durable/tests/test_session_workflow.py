@@ -1303,3 +1303,51 @@ async def test_a_fork_starts_with_the_parents_conversation_and_goes_on_from_it(
     raw = b"".join(e.SerializeToString() for e in (await forked.fetch_history()).events)
     assert b"render it" not in raw
     assert (await _fork_point(handle, limit=1 << 20)).entries == point.entries
+
+
+async def test_a_fork_of_an_interrupted_turn_carries_what_its_parent_still_owes(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#4173: a turn stopped at a paused call commits nothing past that pause; its result
+    waits in the agent's ``pending`` for the next segment. ``fork_point`` hands that on
+    with the checkpoint, so the child's first segment delivers it as the parent's would
+    (seeded without it, the engine re-announced the paused call and the segment failed)."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    [entry] = await _parked(handle)
+    await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+    assert await settled(connect, sid) == "idle"
+    point = await _fork_point(handle, limit=1 << 20)
+    assert point.busy is False
+    call = entry["id"].rsplit(":", 1)[-1]  # durable:<session>:<run>:<tool_use_id>
+    assert list(point.pending) == [call]
+    assert point.pending[call].is_error
+    assert point.fork_next is True
+
+    child = await insert_session(agent_db)
+    seed = AgentState(
+        session_id=point.session_id,
+        checkpoint=point.checkpoint,
+        conversation=point.entries,
+        pending=point.pending,
+        recent_call_ids=point.recent_call_ids,
+        fork_next=point.fork_next,
+    )
+    forked = await harness.client.start_workflow(
+        DurableSession.run,
+        SessionStart(session_id=child, creator=ME, owner=ME, agent=seed),
+        id=f"session-{child}",
+        task_queue=harness.queue,
+        execution_timeout=timedelta(minutes=10),
+    )
+    harness.handles.append(forked)
+    await send(forked, "and now?")
+    assert await settled(connect, child) == "idle"
+    log = await events(agent_db, child)
+    assert not [e for e in log if e["type"] == "error"]
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    # The scripted model reports its history's last call: the parent's, ended by the stop.
+    assert len(texts) == 1 and texts[0].startswith("print_output: error")
+    assert harness.stand_in.ran == []
+    grown = await _fork_point(forked, limit=1 << 20)
+    assert grown.pending == {} and grown.fork_next is False

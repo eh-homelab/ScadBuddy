@@ -1079,4 +1079,13 @@ class DurableSession:
             busy=self._agent.busy,
             total=len(texts),
             entries=texts[start:end],
+            **(
+                {
+                    "pending": state.pending,
+                    "fork_next": state.fork_next,
+                    "recent_call_ids": state.recent_call_ids,
+                }
+                if start == 0
+                else {}
+            ),
         )

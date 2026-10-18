@@ -2363,9 +2363,15 @@ export class SessionManager {
     if (!entries || !history) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
     }
+    const checkpoint = entries.at(-1)!.uuid!
+    // At the parent's checkpoint the child takes what the parent still owes there (#4173):
+    // a turn stopped at a paused call left its result for the next segment, which the
+    // child's first segment must deliver. A reply before it owes nothing; the calls that
+    // already ran never run again either way.
+    const owed = checkpoint === source.checkpoint ? source.owed : { pending: {}, fork_next: false, recent_call_ids: source.owed.recent_call_ids }
     return {
       turns,
-      agent: { session_id: source.claudeSessionId, checkpoint: entries.at(-1)!.uuid!, conversation: entries.map((e) => JSON.stringify(e)) },
+      agent: { session_id: source.claudeSessionId, checkpoint, conversation: entries.map((e) => JSON.stringify(e)), ...owed },
       history,
     }
   }

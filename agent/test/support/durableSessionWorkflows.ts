@@ -7,7 +7,8 @@ import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate,
 // `hold_cancel` signalled, `cancel_input` never answers (a worker that is down). The
 // `turn` Query names the turn it holds, None between turns, as the real one does.
 // `fork_point` (#2688) serves the conversation `set_conversation` gave it, or the one it
-// was started with (a fork's), a page at a time as the real one does.
+// was started with (a fork's), a page at a time as the real one does, with what the agent
+// still owes at its checkpoint on the first page (#4173).
 
 type Message = { turn_id: string; text: string; author: unknown; images: { name: string; mediaType: string }[] }
 
@@ -18,8 +19,9 @@ export const holdCancel = defineSignal('hold_cancel')
 export const endTurn = defineSignal('end_turn')
 export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[] }>('recorded')
 export const turn = defineQuery<string | null>('turn')
-type Conversation = { session_id: string; checkpoint: string; conversation: string[] }
-type ForkPoint = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] }
+type Owed = { pending?: Record<string, unknown>; fork_next?: boolean; recent_call_ids?: string[] }
+type Conversation = { session_id: string; checkpoint: string; conversation: string[] } & Owed
+type ForkPoint = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] } & Owed
 export const setConversation = defineSignal<[Conversation & { busy?: boolean }]>('set_conversation')
 export const forkPoint = defineQuery<ForkPoint, [{ start: number; limit: number }]>('fork_point')
 
@@ -44,6 +46,7 @@ export async function DurableSession(start: unknown): Promise<void> {
       busy: busy || held?.busy === true,
       total: texts.length,
       entries: texts.slice(from, end),
+      ...(from === 0 ? { pending: held?.pending ?? {}, fork_next: held?.fork_next ?? false, recent_call_ids: held?.recent_call_ids ?? [] } : {}),
     }
   })
   setHandler(turn, () => (busy ? (messages.at(-1)?.turn_id ?? null) : null))
