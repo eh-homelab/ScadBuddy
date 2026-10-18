@@ -468,3 +468,26 @@ def test_with_bambuddy_down_the_strip_hides_what_it_hid(client: TestClient) -> N
     down = client.get("/api/v1/print/printers/now").json()["printers"]
 
     assert [(card["printer_id"], card["activity"]) for card in down] == [(1, "unknown")]
+
+
+@respx.mock
+def test_an_unlink_survives_the_strips_next_read(client: TestClient) -> None:
+    """claude-review on #4186: the strip's `ensure_bambuddy` must not link the printer
+    again by its serial, so the row stays unlinked and can be deleted."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    created = client.post("/api/v1/printers", json={"serial": SERIAL, "name": "Mine"})
+    pid = created.json()["id"]
+    linked = client.put(f"/api/v1/printers/{pid}/bambuddy", json={"bambuddy_printer_id": 1})
+    assert linked.status_code == 200, linked.text
+    assert client.delete(f"/api/v1/printers/{pid}/bambuddy").status_code == 200
+
+    strip = client.get("/api/v1/print/printers/now")
+
+    assert strip.status_code == 200, strip.text
+    assert client.get(f"/api/v1/printers/{pid}").json()["bambuddy_printer_id"] is None
+    assert [card["printer_id"] for card in strip.json()["printers"]] == [1]  # still shown
+    assert client.delete(f"/api/v1/printers/{pid}").status_code == 204

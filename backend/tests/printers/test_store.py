@@ -4,6 +4,7 @@ only its own row opens it."""
 
 from __future__ import annotations
 
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -372,3 +373,42 @@ def test_the_rows_remember_which_bambuddy_printers_were_active(printers: Printer
     assert printers.require(b.id).bambuddy_active is False
     printers.mark_bambuddy_active({1, 2})
     assert printers.require(b.id).bambuddy_active is True
+
+
+def test_an_unlinked_serial_is_not_linked_again_by_ensure(printers: PrinterStore) -> None:
+    """The unlink is remembered (`bambuddy_unlinked_id`): the Bambuddy printer gets its
+    synthetic row instead, and a later link by the user clears the memory."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    printers.link_bambuddy(row.id, 1)
+    printers.unlink_bambuddy(row.id)
+    for _ in range(2):
+        other = printers.ensure_bambuddy(1, serial=SERIAL, name="P1", model=None)
+        assert other.id != row.id and other.serial == "bambuddy-1"
+        assert printers.require(row.id).bambuddy_printer_id is None
+    relinked = printers.link_bambuddy(row.id, 1)
+    assert relinked.bambuddy_printer_id == 1 and relinked.bambuddy_unlinked_id is None
+    assert printers.get(other.id) is None  # the synthetic row merged into it
+
+
+def test_an_unlink_racing_an_ensure_stays_unlinked(printers: PrinterStore) -> None:
+    for attempt in range(8):
+        serial = f"01P00A00000010{attempt}"
+        row = printers.create(PrinterCreate(serial=serial, name=f"R{attempt}"))
+        printers.link_bambuddy(row.id, 100 + attempt)
+        barrier = threading.Barrier(2)
+
+        def unlink(row_id: str = row.id, barrier: threading.Barrier = barrier) -> None:
+            barrier.wait()
+            printers.unlink_bambuddy(row_id)
+
+        def ensure(
+            bid: int = 100 + attempt, serial: str = serial, barrier: threading.Barrier = barrier
+        ) -> None:
+            barrier.wait()
+            printers.ensure_bambuddy(bid, serial=serial, name="P", model=None)
+
+        with ThreadPoolExecutor(2) as pool:
+            for done in [pool.submit(unlink), pool.submit(ensure)]:
+                done.result(timeout=10)
+        printers.ensure_bambuddy(100 + attempt, serial=serial, name="P", model=None)
+        assert printers.require(row.id).bambuddy_printer_id is None

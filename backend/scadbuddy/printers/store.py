@@ -52,7 +52,7 @@ from scadbuddy.printers.models import (
 Pool = ConnectionPool[Connection[DictRow]]
 
 _COLUMNS = (
-    "id, serial, name, model, bambuddy_printer_id, lan_host, lan_cert_sha256,"
+    "id, serial, name, model, bambuddy_printer_id, bambuddy_unlinked_id, lan_host, lan_cert_sha256,"
     " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, bambuddy_active,"
     " created_at, updated_at"
 )
@@ -295,7 +295,12 @@ class PrinterStore:
                     raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
                 self._merge(conn, holder.id, row.id)
                 merged = holder.id
-            linked = self._update(conn, row.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,))
+            linked = self._update(
+                conn,
+                row.id,
+                "bambuddy_printer_id = %s, bambuddy_unlinked_id = NULL",
+                (bambuddy_printer_id,),
+            )
         if merged is not None:
             self._announce(merged, linked.id)
         return linked
@@ -313,8 +318,18 @@ class PrinterStore:
             )
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
-        with self.pool.connection() as conn:
-            return self._update(conn, printer_id, "bambuddy_printer_id = NULL", ())
+        """Take the Bambuddy link off, and remember which it was, so the next strip read
+        (`ensure_bambuddy`) gives that Bambuddy printer its own synthetic row rather than
+        link this one again by its serial. Under the lock `ensure_bambuddy` takes."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(_LOCK)
+            return self._update(
+                conn,
+                printer_id,
+                "bambuddy_unlinked_id = COALESCE(bambuddy_printer_id, bambuddy_unlinked_id),"
+                " bambuddy_printer_id = NULL",
+                (),
+            )
 
     def link_lan(self, printer_id: str, body: LanLink, *, cert_sha256: str) -> PrinterRow:
         if self.kek is None:
@@ -401,6 +416,10 @@ class PrinterStore:
         the lock, so a strip read waits on no writer."""
         with self.pool.connection() as conn:
             linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+            if linked is not None and self._adopts(linked, serial):
+                holder = self._one(conn, "serial", serial)
+                if holder is not None and holder.bambuddy_unlinked_id == bambuddy_printer_id:
+                    return linked  # the user unlinked the serial's row: nothing to adopt
         if linked is not None and not self._adopts(linked, serial):
             return linked
         merged: tuple[str, str] | None = None
@@ -434,6 +453,15 @@ class PrinterStore:
         linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
         if linked is not None and not self._adopts(linked, serial):
             return linked, None
+        if serial is not None:
+            holder = self._one(conn, "serial", serial)
+            if holder is not None and holder.bambuddy_unlinked_id == bambuddy_printer_id:
+                # The user unlinked this Bambuddy printer from the serial's row: it is
+                # never linked again by serial. The Bambuddy printer keeps (or gets) its
+                # synthetic row, as one whose serial is withheld does.
+                if linked is not None:
+                    return linked, None
+                serial = None
         if serial is not None:
             holder = self._one(conn, "serial", serial)
             if holder is None and linked is not None:  # the synthetic row learns its serial

@@ -101,7 +101,12 @@ class PrinterWatch:
         )
         deadline = workflow.now() + bound
         # A restart that came with this run's start (signal-with-start) asks for nothing
-        # more than the start itself.
+        # more than the start itself. Clearing it is safe after a continue-as-new too: a
+        # new run starts with a fresh instance, so the only restart it can hold arrived
+        # with its own first task, before any attempt; the attempt this loop is about to
+        # start reads the row as it is now, which is all a restart asks for. A restart
+        # sent to the old run after its last task is delivered to the new run as a
+        # signal during its run, and handled by the loop below.
         self.restart = False
         while True:
             attempt: workflow.ActivityHandle[str] = workflow.start_activity(

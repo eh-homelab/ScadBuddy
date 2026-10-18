@@ -34,6 +34,9 @@ class PrinterRow(BaseModel):
     name: str
     model: str | None = None
     bambuddy_printer_id: int | None = None
+    #: The Bambuddy printer last unlinked from this row; `ensure_bambuddy` never links
+    #: it again by serial (only `link_bambuddy` does, and clears this).
+    bambuddy_unlinked_id: int | None = None
     lan_host: str | None = None
     #: The pinned leaf certificate's SHA-256 (hex), recorded by the LAN link's probe.
     lan_cert_sha256: str | None = None

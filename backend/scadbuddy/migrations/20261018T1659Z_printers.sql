@@ -11,6 +11,9 @@ CREATE TABLE printers (
     name text NOT NULL,
     model text,
     bambuddy_printer_id integer UNIQUE,
+    -- The Bambuddy printer the user last unlinked from this row: never linked again by
+    -- its serial (the strip's ensure), only by the user.
+    bambuddy_unlinked_id integer,
     lan_host text,
     lan_cert_sha256 text,
     access_code_sealed bytea,
