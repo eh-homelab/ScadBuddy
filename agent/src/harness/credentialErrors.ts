@@ -181,7 +181,10 @@ function utc(year: number, month: number, day: number, hour: number, minute: num
  * across the new year, next year's. Undefined when the text names none, or one that
  * is not a time; the caller then keeps the default cooldown. A classic turn's text is
  * Claude Code's, the same as a durable segment's result, so it names the reset an
- * OAuth key's probe cannot ask for (`probeCredential`).
+ * OAuth key's probe cannot ask for (`probeCredential`): measured on Claude Code 2.1.296,
+ * an OAuth key's 429 with `anthropic-ratelimit-unified-status: rejected` ends in
+ * "You've hit your session limit · resets 6:35pm (UTC)" (test/fallback.e2e.test.ts), in
+ * the zone Claude Code runs in, which options.ts pins to UTC.
  *
  * The text names the minute, never the second, so a reset within RESET_GRACE_MS
  * before `now` is one that is passing now, not tomorrow's (or next year's):
