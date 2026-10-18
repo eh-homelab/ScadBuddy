@@ -190,6 +190,30 @@ def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
         pytest.skip("openscad is not on PATH")
 
 
+#: A real printer for the LAN client's live tests (#3823); unset, they skip.
+PRINTER_ENV = (
+    "SCADBUDDY_TEST_PRINTER_HOST",
+    "SCADBUDDY_TEST_PRINTER_SERIAL",
+    "SCADBUDDY_TEST_PRINTER_ACCESS_CODE",
+)
+# Read at import, as the database URL is: the API tests scrub SCADBUDDY_* variables.
+_PRINTER = {name: os.environ.get(name) or None for name in PRINTER_ENV}
+
+
+def printer_env() -> dict[str, str] | None:
+    """``host``, ``serial`` and ``access_code`` of the test printer, or None."""
+    if any(value is None for value in _PRINTER.values()):
+        return None
+    host, serial, code = (_PRINTER[name] or "" for name in PRINTER_ENV)
+    return {"host": host, "serial": serial, "access_code": code}
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_printer(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("requires_printer") and printer_env() is None:
+        pytest.skip(f"no test printer: set {', '.join(PRINTER_ENV)}")
+
+
 @pytest.fixture(autouse=True)
 def _skip_without_fixtures(request: pytest.FixtureRequest) -> None:
     if not request.node.get_closest_marker("requires_fixtures"):
