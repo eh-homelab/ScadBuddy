@@ -165,6 +165,61 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
     assert settings["wipe_tower_y"] == ["5"]
 
 
+def test_project_settings_size_every_filament_for_a_slice_with_no_profiles(
+    tmp_path: Path,
+) -> None:
+    """Bambu Studio's CLI with no profiles takes this file as its whole config, and
+    segfaults without ``filament_diameter``; a multi-colour one then needs
+    ``filament_is_support`` the length of ``filament_colour`` (#4089)."""
+    parts = [
+        ColourPart(index, f"Color {index}", colour, trimesh.creation.box(extents=(4, 4, 4)))
+        for index, colour in enumerate(["#FF0000", "#00FF00", "#0000FF"], start=1)
+    ]
+    out = tmp_path / "three.3mf"
+    write_plates_3mf([single_plate(parts)], [p.colour for p in parts], out, thumbnails=None)
+    settings = _settings_of(out)
+    assert settings["filament_diameter"] == ["1.75", "1.75", "1.75"]
+    assert settings["filament_is_support"] == ["0", "0", "0"]
+    # Beside the five keys spec §3 requires.
+    for key in (
+        "printer_settings_id",
+        "print_settings_id",
+        "filament_settings_id",
+        "nozzle_diameter",
+        "printable_height",
+    ):
+        assert key in settings
+
+
+def _restated(payload: bytes, **changes: list[str] | None) -> bytes:
+    """``payload`` with ``project_settings.config`` keys set, or removed for ``None``."""
+    settings = _settings_of_bytes(payload)
+    for key, value in changes.items():
+        if value is None:
+            settings.pop(key)
+        else:
+            settings[key] = value
+    restated = (json.dumps(settings, indent=4) + "\n").encode()
+    return _with_entries(payload, {"Metadata/project_settings.config": restated})
+
+
+def test_re_placing_a_file_written_before_4089_adds_the_filament_vectors(
+    written: Path,
+) -> None:
+    old = _restated(written.read_bytes(), filament_diameter=None, filament_is_support=None)
+    assert "filament_diameter" not in _settings_of_bytes(old)
+    settings = _settings_of_bytes(replate_3mf(old, plate_for("H2C")))
+    assert settings["filament_diameter"] == ["1.75", "1.75"]
+    assert settings["filament_is_support"] == ["0", "0"]
+
+
+def test_re_placing_keeps_the_filament_vectors_a_file_states(written: Path) -> None:
+    thick = _restated(written.read_bytes(), filament_diameter=["2.85", "2.85"])
+    settings = _settings_of_bytes(replate_3mf(thick, plate_for("A1")))
+    assert settings["filament_diameter"] == ["2.85", "2.85"]
+    assert settings["filament_is_support"] == ["0", "0"]
+
+
 def _settings_of(out: Path) -> dict[str, object]:
     with zipfile.ZipFile(out) as archive:
         settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
@@ -780,6 +835,8 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         "filament_settings_id": ["ScadBuddy", "ScadBuddy"],
         "nozzle_diameter": ["0.4"],
         "printable_height": "250",
+        "filament_diameter": ["1.75", "1.75"],
+        "filament_is_support": ["0", "0"],
         "wipe_tower_x": ["98"],
         "wipe_tower_y": ["5"],
     }
@@ -839,6 +896,9 @@ class TestBambuProjectIdentity:
             settings = json.loads(archive.read("Metadata/project_settings.config"))
         assert all(key in settings for key in self.REQUIRED)
         assert "wipe_tower_x" not in settings
+        # A slice with no profiles segfaults without it (#4089).
+        assert settings["filament_diameter"] == ["1.75"]
+        assert settings["filament_is_support"] == ["0"]
 
     def test_filament_settings_id_has_one_entry_per_colour(self, written: Path) -> None:
         with zipfile.ZipFile(written) as archive:

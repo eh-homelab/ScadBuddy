@@ -490,6 +490,29 @@ PRESET_PLACEHOLDER = "ScadBuddy"
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
 
 
+#: Every Bambu printer ScadBuddy lays out for takes 1.75 mm filament, and ScadBuddy
+#: has no other source for it: no filament profile it reads states a diameter.
+FILAMENT_DIAMETER = "1.75"
+
+
+def filament_vectors(filaments: int) -> dict[str, list[str]]:
+    """The per-filament options a 0-profile slice needs, one entry per filament (#4089).
+
+    Bambuddy's preview slice runs Bambu Studio's CLI with no profiles, so the file's own
+    ``project_settings.config`` is the whole config. ``Preset::normalize`` (Preset.cpp
+    445-470) sizes the per-filament vectors only when ``filament_diameter`` is present;
+    without it the CLI segfaults (exit 139). With it, a file of more than one colour
+    stops on ``filament_is_support's count 1 not equal to filament_colour's size`` (exit
+    251), so that is stated too, "0" for each: no ScadBuddy filament is a support one.
+    Measured with ``ghcr.io/maziggy/bambu-studio-api:daily`` (BambuStudio 02.08.02.61);
+    spec 2026-09-22 §3 says how. Placeholders under ``--load-settings``, which
+    supplies the real filament presets."""
+    return {
+        "filament_diameter": [FILAMENT_DIAMETER] * filaments,
+        "filament_is_support": ["0"] * filaments,
+    }
+
+
 def printer_preset(plate: PlateGeometry, nozzle: str) -> str:
     """The printer preset a 3MF laid out for ``plate`` names, as Bambu Studio names
     it (``"Bambu Lab A1 0.4 nozzle"``): Bambuddy's slice dialog pre-picks the printer
@@ -564,6 +587,8 @@ def project_settings(
         "filament_settings_id": [PRESET_PLACEHOLDER for _ in colours],
         "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
         "printable_height": _number(plate.height),
+        # Required-or-segfault on a slice with no profiles (#4089).
+        **filament_vectors(len(colours)),
     }
     stated = [(materials or {}).get(colour.upper(), "") for colour in colours]
     if stated and all(stated):
@@ -1203,6 +1228,10 @@ def replate_3mf(
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
             settings["printable_height"] = _number(plate.height)
+            # A file written before #4089 lacks these, and Bambuddy's preview slice
+            # segfaults on it; a file that states them keeps its own.
+            for key, value in filament_vectors(len(settings.get("filament_colour", []))).items():
+                settings.setdefault(key, value)
             # Named for this printer and the nozzle the file states, as the writer
             # names it, so a re-placed file is the one written for this printer.
             stated = next(iter(settings.get("nozzle_diameter") or []), None)
