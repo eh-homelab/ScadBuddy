@@ -57,7 +57,9 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', 
       },
     },
   )
-  setHandler(cancelInput, () => {
+  setHandler(cancelInput, ({ reason }) => {
+    // A cancel_input that fails in its handler, as one whose resolve_input could not be written.
+    if (reason === 'fail in the handler') throw ApplicationFailure.nonRetryable('resolve_input failed', 'ResolveFailed')
     const was = entry.state
     entry.state = 'resolved'
     return was === 'pending' ? 'cancelled' : 'none'
