@@ -599,9 +599,9 @@ RUN git --version > /tmp/git-version \
 # matching interpreter rather than failing the build. Pointing the install dir
 # at a fixed path keeps whatever it fetched inside the image.
 # UV_CACHE_DIR is pinned outside $HOME on purpose. uv defaults it to
-# ~/.cache/uv; the layers below run as root, so that cache would be created
-# root-owned under the runtime user's HOME, and the first `uv run` as uid 10001
-# then dies with "failed to open file ... Permission denied" — a failure that
+# ~/.cache/uv; the lockfile sync below runs as root, so that cache would be
+# created root-owned under the runtime user's HOME, and the first `uv run` as
+# uid 10001 then dies with "failed to open file ... Permission denied" — a failure that
 # only appears when something invokes uv at RUNTIME, i.e. in the test stage,
 # never in a plain image build.
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
@@ -611,28 +611,36 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_COMPILE_BYTECODE=1 \
     PATH=/opt/venv/bin:$PATH
 
+# The venv, the cache and /app's own files are owned by scadbuddy as they are
+# written, never by a recursive chown afterwards: changing a file's owner copies it into
+# a new layer, so a `chown -R` below `COPY backend/` re-shipped the whole venv
+# (~249 MB compressed) on every commit even though its own layer was cached.
+RUN install -d -o scadbuddy -g scadbuddy /app/backend
 WORKDIR /app/backend
 
 # Lockfile layer: dependencies resolve from pyproject.toml + uv.lock alone, so
-# editing backend source does not re-download the dependency tree.
-COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+# editing backend source does not re-download the dependency tree. This one
+# sync runs as root so the interpreter uv fetches into UV_PYTHON_INSTALL_DIR
+# stays root-owned; the chown is in the same RUN, over files this layer itself
+# created, so it adds nothing to the layer.
+COPY --chown=scadbuddy:scadbuddy backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project \
+    && chown -R scadbuddy:scadbuddy /opt/venv /opt/uv-cache
 
-COPY backend/ ./
+USER scadbuddy
+COPY --chown=scadbuddy:scadbuddy backend/ ./
 RUN uv sync --frozen --no-dev
 
 # The seed catalogue and the bundle the backend serves. Models live in the
 # image (read-only, versioned with the repo); user uploads live on the PVC
 # under SCADBUDDY_DATA_DIR.
-COPY models/ /app/models/
-COPY --from=frontend /src/frontend/dist /app/frontend/dist
+COPY --chown=scadbuddy:scadbuddy models/ /app/models/
+COPY --chown=scadbuddy:scadbuddy --from=frontend /src/frontend/dist /app/frontend/dist
 
-RUN chown -R scadbuddy:scadbuddy /app /opt/venv /opt/uv-cache
-
-# Last of the app layers, after the dependency sync and the chown: bumping the
-# openscad-lsp ARGs then rebuilds this one copy and nothing above it. Outside
-# /app, so the chown has nothing to do with it; `test` and `runtime` both
-# inherit it from here.
+# Last of the app layers, after the dependency sync: bumping the openscad-lsp
+# ARGs then rebuilds this one copy and nothing above it. Root-owned (a COPY
+# without --chown is, whatever the USER), outside /app; `test` and `runtime`
+# both inherit it from here.
 COPY --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
 
 ENV SCADBUDDY_DATA_DIR=/data \
@@ -656,9 +664,10 @@ RUN python -m scadbuddy.library.library_seed verify /app/libraries \
 # what those tests are marked for, and it exists nowhere else in CI.
 FROM app AS test
 
-# Re-chown: this sync runs as root and rewrites both the venv and the cache.
-RUN uv sync --frozen \
-    && chown -R scadbuddy:scadbuddy /opt/venv /opt/uv-cache
+# As scadbuddy (`app` ends as it), which owns the venv and the cache, so
+# nothing needs a chown afterwards. Root again for the CLI's install.
+RUN uv sync --frozen
+USER root
 
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
