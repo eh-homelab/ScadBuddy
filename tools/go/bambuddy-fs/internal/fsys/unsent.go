@@ -1167,10 +1167,16 @@ func status(err error) int {
 }
 
 // queueable is whether a failed upload is worth sending again: everything but a
-// refusal of the request itself, which would only be refused again.
+// refusal of the request itself, which would only be refused again. That includes
+// Bambuddy's own 4xx, which ScadBuddy relays as a 502 (#4142: a name with a colon, a
+// .3mf that is not a ZIP), but not its 408 or 429, which a later attempt may not meet.
 func queueable(err error) bool {
 	switch status(err) {
 	case 400, 413, 415, 422:
+		return false
+	}
+	var e *api.Error
+	if errors.As(err, &e) && e.Upstream >= 400 && e.Upstream < 500 && e.Upstream != 408 && e.Upstream != 429 {
 		return false
 	}
 	return true

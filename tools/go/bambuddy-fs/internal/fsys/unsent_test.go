@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
 )
 
 // retrying mounts lib as releases does, with the retrier running at a backoff of
@@ -669,6 +671,76 @@ func TestAQueuedWriteTheLibraryRefusesIsKeptAside(t *testing.T) {
 	if got := names(t, dir); len(got) != 0 {
 		t.Fatalf("listed: %v", got)
 	}
+}
+
+func TestAWriteBambuddyRefusesThroughScadBuddyIsKeptAsideAfterOneAttempt(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.down = true
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.3mf"), []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	var before int
+	lib.locked(func() {
+		// ScadBuddy's 502 relaying Bambuddy's 400 (#4142): the same bytes would be refused again.
+		lib.down, lib.failUploads, lib.failStatus, lib.failUpstream = false, 1000, http.StatusBadGateway, http.StatusBadRequest
+		before = len(lib.keys)
+	})
+	eventually(t, "the refusal", func() bool {
+		q := queued(t, state)
+		return len(q) == 1 && q[0].Refused
+	})
+	var sent int
+	lib.locked(func() { sent = len(lib.keys) - before })
+	if sent != 1 {
+		t.Fatalf("sent %d times after the refusal began, want 1", sent)
+	}
+}
+
+func TestQueueableTellsARefusalFromAFailure(t *testing.T) {
+	for _, c := range []struct {
+		status, upstream int
+		want             bool
+	}{
+		{502, 0, true},    // Bambuddy not answering
+		{503, 0, true},    // ScadBuddy deploying
+		{502, 500, true},  // Bambuddy's own failure
+		{502, 429, true},  // Bambuddy limiting requests
+		{502, 408, true},  // Bambuddy's timeout
+		{502, 400, false}, // Bambuddy refusing the request
+		{502, 410, false},
+		{422, 0, false}, // ScadBuddy refusing the request
+	} {
+		err := &api.Error{Op: "upload", Status: c.status, Upstream: c.upstream}
+		if got := queueable(err); got != c.want {
+			t.Errorf("queueable(%d relaying %d) = %v, want %v", c.status, c.upstream, got, c.want)
+		}
+	}
+}
+
+func TestANameWithAColonIsRefusedBeforeAnythingIsStored(t *testing.T) {
+	lib := newFakeLibrary()
+	state := t.TempDir()
+	dir := mount(t, lib, Options{StateDir: state})
+	logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "x.3mf"), []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Explorer's Zone.Identifier stream beside a file copied in through \\wsl$.
+	_, err := os.Create(filepath.Join(dir, "x.3mf:Zone.Identifier"))
+	if !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("create: %v, want EINVAL", err)
+	}
+	if err := os.Rename(filepath.Join(dir, "x.3mf"), filepath.Join(dir, "y:z.3mf")); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("rename: %v, want EINVAL", err)
+	}
+	if q := queued(t, state); len(q) != 0 {
+		t.Fatalf("queued: %+v", q)
+	}
+	eventually(t, "the upload", func() bool { return libraryHas(lib, map[string]string{"0/x.3mf": "abc"}) })
 }
 
 func TestOfTwoReloadedSavesOfOneNameTheLaterIsSent(t *testing.T) {

@@ -238,6 +238,13 @@ func TestErrnoMapping(t *testing.T) {
 	if invalid.Detail != `[{"msg":"bad"}]` {
 		t.Errorf("invalid: %+v", invalid)
 	}
+	// A refusal ScadBuddy relays (#4142): Bambuddy's own status, at the top or in a failed operation's extensions.
+	relayed := errorFrom("upload", 502, []byte(`{"status":502,"detail":"Bambuddy answered 400 when asked to upload a:b","bambuddy_status":400}`))
+	inOperation := errorFrom("upload", 502, []byte(`{"detail":"Bambuddy answered 400","extensions":{"bambuddy_status":400}}`))
+	own := errorFrom("upload", 502, []byte(`{"status":502,"detail":"Bambuddy could not be reached"}`))
+	if relayed.Upstream != 400 || inOperation.Upstream != 400 || own.Upstream != 0 || relayed.Status != 502 {
+		t.Errorf("upstream: %+v %+v %+v", relayed, inOperation, own)
+	}
 }
 
 func TestDownloadStreamsAndUploadSendsAKey(t *testing.T) {
