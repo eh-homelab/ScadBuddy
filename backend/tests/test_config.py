@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from scadbuddy.core import config as config_module
 from scadbuddy.core.config import (
     ACTIVITY_TIMEOUT_MARGIN,
+    Config,
     available_cpus,
     default_solid_concurrency,
     load_config,
@@ -204,6 +207,19 @@ def test_the_default_solid_concurrency_is_derived() -> None:
     assert config.solid_slots() == default_solid_concurrency(
         available_cpus(), config.render_concurrency, config.check_concurrency
     )
+
+
+def test_a_process_serving_no_editor_checks_keeps_no_cpu_back_for_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The standalone render worker (prod: 4 CPUs, 2 renders at once) gets 2 slots a
+    job, not the API's (4 - 1) // 2 = 1."""
+    monkeypatch.setattr(config_module, "available_cpus", lambda: 4)
+    api = Config(render_concurrency=2, check_concurrency=1)
+    assert api.solid_slots() == 1
+    assert replace(api, serves_checks=False).solid_slots() == 2
+    # A value set by hand wins either way.
+    assert replace(api, serves_checks=False, solid_concurrency=3).solid_slots() == 3
 
 
 def test_a_negative_solid_concurrency_is_refused_by_name(monkeypatch: pytest.MonkeyPatch) -> None:

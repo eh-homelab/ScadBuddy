@@ -17,7 +17,8 @@ DEFAULT_RENDER_TIMEOUT = 120.0
 # Jobs rendered at once by each process: each is one or more `openscad` processes.
 DEFAULT_RENDER_CONCURRENCY = 2
 # Per-colour wrapper renders one job runs at once (spec §6.3). 0 (the default) derives
-# it from the CPUs this process may use -- see `default_solid_concurrency`.
+# it from the CPUs the process running the renders may use -- see
+# `default_solid_concurrency`.
 DEFAULT_SOLID_CONCURRENCY = 0
 # The derived default never goes past this, however many cores the host has: past a
 # handful of colours at once the gain is gone and the memory is not.
@@ -138,6 +139,9 @@ class Config:
     render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
     render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
+    #: False in the standalone render worker, which serves no editor checks: its
+    #: derived solid slots then keep no CPU back for them.
+    serves_checks: bool = True
     job_ttl: float = DEFAULT_JOB_TTL
     # Never sent to the browser: the catalogue is fetched server-side (issue #82).
     google_fonts_api_key: str | None = None
@@ -251,7 +255,9 @@ class Config:
         if self.solid_concurrency:
             return self.solid_concurrency
         return default_solid_concurrency(
-            available_cpus(), self.render_concurrency, self.check_concurrency
+            available_cpus(),
+            self.render_concurrency,
+            self.check_concurrency if self.serves_checks else 0,
         )
 
 

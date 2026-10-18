@@ -169,7 +169,7 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'rendering',
     label: 'Colours rendered at once, per job',
     kind: 'count',
-    help: '0 works it out from the CPUs this container may use.',
+    help: "0 works it out from the CPUs of the container that renders: the render worker's when it runs on its own, else the API's.",
   },
   {
     name: 'check_concurrency',

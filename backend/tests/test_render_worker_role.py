@@ -27,6 +27,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
+from scadbuddy.core.config import available_cpus, default_solid_concurrency
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetMeta, AssetStore
 from scadbuddy.library.history import ModelHistory
@@ -55,8 +56,9 @@ from scadbuddy.render.worker_role import (
 from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
 from scadbuddy.store.content import BlobScope, ContentStore
 from scadbuddy.store.index import BlobIndex
-from scadbuddy.worker import run_worker
-from scadbuddy.workflows.models import piece_key
+from scadbuddy.worker import build_worker_deps, run_worker
+from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.models import PrepareResult, piece_key
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
 from tests.support.renders import render_to_end
@@ -321,6 +323,8 @@ def test_the_full_key_is_hidden_once_a_render_key_is_stored(
     _put(owner, "bambuddy_render_api_key", "narrow")
     current = load_render_store_settings(granted, _defaults(tmp_path))
     assert (current.api_key, current.key_is_fallback) == ("narrow", False)
+    _put(owner, "solid_concurrency", 3)
+    assert load_render_store_settings(granted, _defaults(tmp_path)).solid_concurrency == 3
     with granted.connection() as conn:
         names = {row["name"] for row in conn.execute("SELECT name FROM render_settings")}
     assert names == {
@@ -328,6 +332,7 @@ def test_the_full_key_is_hidden_once_a_render_key_is_stored(
         "bambuddy_url",
         "library_folder_id",
         "bambuddy_render_api_key",
+        "solid_concurrency",
     }
     # A render key cleared in Settings (a JSON null) is no render key.
     _put(owner, "bambuddy_render_api_key", None)
@@ -345,6 +350,42 @@ def test_the_view_passes_every_render_field(owner: Pool) -> None:
         conn.execute("DELETE FROM settings WHERE name = 'bambuddy_render_api_key'")
         names = {row["name"] for row in conn.execute("SELECT name FROM render_settings")}
         assert names == set(RENDER_FIELDS) - {"bambuddy_render_api_key"}
+
+
+async def test_the_settings_pages_solid_concurrency_reaches_the_worker_live(
+    owner: Pool, granted: Pool, worker_conninfo: str, tmp_path: Path
+) -> None:
+    """The per-colour slots a person saves reach a worker that reads settings only
+    through `render_settings` (#601), and a change reaches it without a restart."""
+    settings = _defaults(tmp_path).model_copy(update={"database_url": worker_conninfo})
+    deps, store = await asyncio.to_thread(build_worker_deps, settings)
+    try:
+        # Re-read on every call, not on the 30 s TTL.
+        store.source.ttl = 0
+        acts = RenderActivities(deps)
+        prepared = PrepareResult(version="v", scad="model.scad", schema_cache="")
+        # The worker serves no editor checks, so its default keeps no CPU for them.
+        derived = default_solid_concurrency(available_cpus(), deps.config.render_concurrency, 0)
+
+        async def slots() -> tuple[int, int]:
+            config = await acts._solids_config(prepared)
+            return config.solid_concurrency, config.solid_slots()
+
+        assert await slots() == (0, derived)
+        _put(owner, "solid_concurrency", 3)
+        assert await slots() == (3, 3)
+        _put(owner, "solid_concurrency", 5)
+        assert await slots() == (5, 5)
+        # 0 is "work it out": the derived default again.
+        _put(owner, "solid_concurrency", 0)
+        assert await slots() == (0, derived)
+        # Cleared in Settings: the environment's, as the API resolves it.
+        _put(owner, "solid_concurrency", 4)
+        _put(owner, "solid_concurrency", None)
+        assert await slots() == (0, derived)
+    finally:
+        await store.aclose()
+        deps.projection.close()
 
 
 def test_the_api_grants_the_role_at_start(
