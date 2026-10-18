@@ -56,6 +56,8 @@ RISK_TIERS = frozenset({"read", "write", "outward"})
 #: agent harness/ownPlugin.ts `ownPluginTierOf`: a skill is instructions, and a subagent
 #: calls only tools the session already has.
 READ_BUILTINS = frozenset({"Skill", "Agent", "Task"})
+#: runner.py IMAGES_SERVER: the session's own images shown to the model, read.
+IMAGES_PREFIX = "mcp__scadbuddy_images__"
 
 
 def _blank(value: Any) -> Any:
@@ -80,10 +82,13 @@ def logged_input(raw: Any) -> dict[str, Any]:
 
 def risk_of(name: str, tiers: Mapping[str, str]) -> str:
     """A call's risk label: its tier, a subagent's ``mcp__scadbuddy__<tool>`` that tool's
-    (runner.py SegmentCalls), the own plugin's built-ins read, anything else outward."""
+    (runner.py SegmentCalls), the own plugin's built-ins and the images tools read, anything
+    else outward."""
     if name in tiers:
         return tiers[name]
     if name in READ_BUILTINS:
+        return "read"
+    if name.startswith(IMAGES_PREFIX):
         return "read"
     if name.startswith(subagents.PREFIX):
         return tiers.get(name.removeprefix(subagents.PREFIX), "outward")

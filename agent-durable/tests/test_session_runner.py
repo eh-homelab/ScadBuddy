@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ProcessError, ResultError
+from claude_agent_sdk import HookMatcher, ProcessError, ResultError
 from fake_anthropic import FakeAnthropic
 from session_support import (
     MANIFEST,
@@ -174,7 +174,12 @@ async def test_a_segment_runs_with_the_credential_and_what_is_left_of_the_budget
     extra = dict(made["extra_options"])
     assert set(extra.pop("mcp_servers")) == {IMAGES_SERVER}
     # The segment's own calls, published as they run (SegmentCalls).
-    assert set(extra.pop("hooks")) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+    assert set(extra.pop("hooks")) == {
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStart",
+    }
     assert extra == {
         "system_prompt": {"type": "preset", "preset": "claude_code", "append": "Be careful."},
         "allowed_tools": [VIEW_TOOL_IMAGES_TOOL],
@@ -897,27 +902,31 @@ def test_segment_calls_skip_what_the_plugin_publishes_itself() -> None:
     assert vars(plugin_runner)["PREFIX"] == DURABLE_PREFIX
 
 
+def _segment_hooks(calls: SegmentCalls) -> dict[str, Any]:
+    """Each hook of the segment's calls by its event (typed loosely: the tests pass dicts)."""
+    return {event: matchers[-1].hooks[0] for event, matchers in calls.hooks().items()}
+
+
 async def test_segment_calls_publish_a_segments_own_calls_as_they_run() -> None:
     """Skill, Agent and a subagent's calls go out as they start and end, the subagent's
     under its Agent call; the calls the workflow runs and publishes do not."""
     calls = SegmentCalls(["Bash"])
-    hooks = calls.hooks()
-    started: Any = hooks["PreToolUse"][0].hooks[0]
-    ended: Any = hooks["PostToolUse"][0].hooks[0]
-    failed: Any = hooks["PostToolUseFailure"][0].hooks[0]
+    hook = _segment_hooks(calls)
     seen: list[dict[str, Any]] = []
     token = _EMIT.set(seen.append)
     try:
-        await started({"tool_name": "Skill", "tool_input": {"skill": "authoring"}}, "s1", None)
-        await ended({"tool_name": "Skill"}, "s1", None)
-        await started({"tool_name": "Agent", "tool_input": {}}, "a1", None)
+        await hook["PreToolUse"]({"tool_name": "Skill", "tool_input": {"skill": "a"}}, "s1", None)
+        await hook["PostToolUse"]({"tool_name": "Skill"}, "s1", None)
+        await hook["PreToolUse"]({"tool_name": "Agent", "tool_input": {}}, "a1", None)
         sub = {"tool_name": "mcp__scadbuddy__get_model", "tool_input": {}, "agent_id": "x"}
-        await started(sub, "c1", None)
-        await failed({**sub, "hook_event_name": "PostToolUseFailure"}, "c1", None)
-        await started({"tool_name": f"{DURABLE_PREFIX}render_model", "tool_input": {}}, "d1", None)
-        await started({"tool_name": "Bash", "tool_input": {}}, "b1", None)
-        await ended({"tool_name": "Agent"}, "a1", None)
-        await started(sub, "c2", None)  # no Agent call open: no parent
+        await hook["PreToolUse"](sub, "c1", None)
+        failure = {**sub, "hook_event_name": "PostToolUseFailure"}
+        await hook["PostToolUseFailure"](failure, "c1", None)
+        durable = {"tool_name": f"{DURABLE_PREFIX}render_model", "tool_input": {}}
+        await hook["PreToolUse"](durable, "d1", None)
+        await hook["PreToolUse"]({"tool_name": "Bash", "tool_input": {}}, "b1", None)
+        await hook["PostToolUse"]({"tool_name": "Agent"}, "a1", None)
+        await hook["PreToolUse"](sub, "c2", None)  # no Agent call open: no parent
     finally:
         _EMIT.reset(token)
     assert [(e["type"], e["id"], e.get("parent"), e.get("status")) for e in seen] == [
@@ -929,6 +938,58 @@ async def test_segment_calls_publish_a_segments_own_calls_as_they_run() -> None:
         ("tool_result", "a1", None, "done"),
         ("tool_call", "c2", None, None),
     ]
+
+
+async def test_segment_calls_nest_each_subagent_under_its_own_agent_call() -> None:
+    """Of two Agent calls at once, each subagent's calls name the call that started it,
+    matched by SubagentStart in call order."""
+    calls = SegmentCalls([])
+    hook = _segment_hooks(calls)
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await hook["PreToolUse"]({"tool_name": "Agent", "tool_input": {}}, "a1", None)
+        await hook["PreToolUse"]({"tool_name": "Agent", "tool_input": {}}, "a2", None)
+        await hook["SubagentStart"]({"agent_id": "x", "agent_type": "t"}, None, None)
+        await hook["SubagentStart"]({"agent_id": "y", "agent_type": "t"}, None, None)
+        for agent_id, call in (("y", "cy"), ("x", "cx")):
+            await hook["PreToolUse"](
+                {"tool_name": "mcp__scadbuddy__grep", "tool_input": {}, "agent_id": agent_id},
+                call,
+                None,
+            )
+    finally:
+        _EMIT.reset(token)
+    parents = {e["id"]: e.get("parent") for e in seen if e["type"] == "tool_call"}
+    assert (parents["cx"], parents["cy"]) == ("a1", "a2")
+
+
+async def test_segment_calls_close_what_an_attempt_left_open() -> None:
+    """A call its attempt never finished is published as failed when the segment ends,
+    so a retried attempt never leaves it running in the panel; a closed one is not
+    published twice."""
+    calls = SegmentCalls([])
+    hook = _segment_hooks(calls)
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await hook["PreToolUse"]({"tool_name": "Skill", "tool_input": {}}, "s1", None)
+        await hook["PreToolUse"]({"tool_name": "Agent", "tool_input": {}}, "a1", None)
+        await hook["PostToolUse"]({"tool_name": "Skill"}, "s1", None)
+        calls.close()
+        calls.close()
+    finally:
+        _EMIT.reset(token)
+    results = [(e["id"], e["status"]) for e in seen if e["type"] == "tool_result"]
+    assert results == [("s1", "done"), ("a1", "failed")]
+
+
+def test_segment_calls_keep_the_hooks_already_given() -> None:
+    """Merged after another part's hooks (or a later pin's), never in place of them."""
+    theirs = HookMatcher(hooks=[])
+    merged = SegmentCalls([]).hooks({"PreToolUse": [theirs], "Stop": [theirs]})
+    assert merged["PreToolUse"][0] is theirs and len(merged["PreToolUse"]) == 2
+    assert merged["Stop"] == [theirs]
 
 
 async def test_a_first_credentials_answer_still_reaches_the_transcript(

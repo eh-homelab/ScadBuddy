@@ -569,12 +569,19 @@ class SegmentCalls:
     (its own server's and ``tool_activities``), and of the segment itself only the main
     agent's text, so a turn spent in a skill or a subagent showed nothing until it ended.
 
-    A subagent's call names the ``Agent`` call that runs it as ``parent`` when only one
-    is open; the hooks are not told which, so of several at once none is named."""
+    A subagent's call names the ``Agent`` call that runs it as ``parent``: the hooks give
+    a subagent's ``agent_id`` but not the call that started it, so each ``SubagentStart``
+    takes the oldest ``Agent`` call not yet matched (Claude Code starts them in call
+    order), or, with none to take, the one open ``Agent`` call. A call still open when the
+    segment ends (``close``: a failed or retried attempt) is published as failed, so the
+    panel never keeps it running."""
 
     def __init__(self, activities: list[str]) -> None:
         self._activities = activities
-        self._agents: set[str] = set()
+        self._open: dict[str, str] = {}  # call id: tool name
+        self._agents: list[str] = []  # open Agent calls of the main agent, in order
+        self._unmatched: list[str] = []  # Agent calls no SubagentStart has taken yet
+        self._parents: dict[str, str] = {}  # agent_id: its Agent call
 
     def _workflows(self, name: str) -> bool:
         """The plugin's ``decides_alone``: a call the workflow runs and publishes itself."""
@@ -582,6 +589,18 @@ class SegmentCalls:
         return name.startswith(DURABLE_PREFIX) or any(
             fnmatch.fnmatchcase(tool, p) for p in self._activities if p
         )
+
+    def _parent(self, agent_id: str) -> str | None:
+        parent = self._parents.get(agent_id)
+        if parent is None and len(self._agents) == 1:
+            parent = self._agents[0]
+        return parent
+
+    async def _subagent(self, data: Any, _tool_use_id: str | None, _context: Any) -> Any:
+        agent_id = str(data.get("agent_id") or "")
+        if agent_id and agent_id not in self._parents and self._unmatched:
+            self._parents[agent_id] = self._unmatched.pop(0)
+        return {}
 
     async def _started(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
         name = str(data.get("tool_name") or "")
@@ -594,36 +613,54 @@ class SegmentCalls:
             "name": name,
             "input": data.get("tool_input") or {},
         }
-        if data.get("agent_id") and len(self._agents) == 1:
-            event["parent"] = next(iter(self._agents))
-        elif not data.get("agent_id") and name in AGENT_TOOLS:
-            self._agents.add(call)
+        agent_id = str(data.get("agent_id") or "")
+        if agent_id:
+            parent = self._parent(agent_id)
+            if parent is not None:
+                event["parent"] = parent
+        elif name in AGENT_TOOLS:
+            self._agents.append(call)
+            self._unmatched.append(call)
+        self._open[call] = name
         emit(event)
         return {}
 
     async def _ended(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
-        name = str(data.get("tool_name") or "")
         call = str(data.get("tool_use_id") or tool_use_id or "")
-        if not call or self._workflows(name):
+        if call not in self._open:
             return {}
-        self._agents.discard(call)
         failed = data.get("hook_event_name") == "PostToolUseFailure"
-        emit(
-            {
-                "type": "tool_result",
-                "id": call,
-                "name": name,
-                "status": "failed" if failed else "done",
-            }
-        )
+        self._finish(call, "failed" if failed else "done")
         return {}
 
-    def hooks(self) -> dict[str, list[HookMatcher]]:
-        return {
+    def _finish(self, call: str, status: str) -> None:
+        name = self._open.pop(call)
+        if call in self._agents:
+            self._agents.remove(call)
+        if call in self._unmatched:
+            self._unmatched.remove(call)
+        emit({"type": "tool_result", "id": call, "name": name, "status": status})
+
+    def close(self) -> None:
+        """Every call still open published as failed: its attempt ended without it."""
+        for call in list(self._open):
+            self._finish(call, "failed")
+
+    def hooks(
+        self, given: dict[str, list[HookMatcher]] | None = None
+    ) -> dict[str, list[HookMatcher]]:
+        """These hooks after any ``given`` (another part's, or a later pin's), never in place
+        of them."""
+        ours = {
             "PreToolUse": [HookMatcher(hooks=[self._started])],
             "PostToolUse": [HookMatcher(hooks=[self._ended])],
             "PostToolUseFailure": [HookMatcher(hooks=[self._ended])],
+            "SubagentStart": [HookMatcher(hooks=[self._subagent])],
         }
+        merged = dict(given or {})
+        for event, matchers in ours.items():
+            merged[event] = [*merged.get(event, []), *matchers]
+        return merged
 
 
 class ScadBuddyRunner:
@@ -991,10 +1028,14 @@ class ScadBuddyRunner:
         plugins += [{"type": "local", "path": d} for d in self._packages(workflow_id, context)]
         if plugins:
             extra["plugins"] = plugins
-        extra["hooks"] = SegmentCalls(list(inp.tool_activities)).hooks()
-        out = await self._on_credentials(
-            session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
-        )
+        calls = SegmentCalls(list(inp.tool_activities))
+        extra["hooks"] = calls.hooks(extra.get("hooks"))
+        try:
+            out = await self._on_credentials(
+                session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
+            )
+        finally:
+            calls.close()
         if out.cost_usd > 0 or not out.is_error:
             async with self._connect() as conn:
                 await conn.execute(

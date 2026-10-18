@@ -90,6 +90,14 @@ def test_a_segments_own_call_keeps_its_parent_and_takes_its_tools_tier() -> None
     assert call("mcp__scadbuddy__unknown")["risk"] == "outward"
     assert [call(n)["risk"] for n in ("Skill", "Agent", "Task")] == ["read"] * 3
     assert "parent" not in call("Skill", parent="")
+    assert call("mcp__scadbuddy_images__view_tool_images")["risk"] == "read"
+
+
+def test_the_images_prefix_is_the_runners_images_server() -> None:
+    from scadbuddy_durable.session.events import IMAGES_PREFIX
+    from scadbuddy_durable.session.runner import IMAGES_SERVER
+
+    assert f"mcp__{IMAGES_SERVER}__" == IMAGES_PREFIX
 
 
 def test_a_logged_input_blanks_secrets_and_is_capped() -> None:
