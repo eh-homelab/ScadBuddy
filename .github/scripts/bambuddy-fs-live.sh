@@ -153,8 +153,8 @@ fi
 cd "$repo/tools/go/bambuddy-fs"
 out="$(mktemp)"
 BAMBUDDY_FS_LIVE_API="http://127.0.0.1:${port}/api/v1" \
-  go test -run TestLiveMount -count=1 -v ./internal/fsys/ | tee "$out"
-if ! grep -q -- '--- PASS: TestLiveMount' "$out"; then
+  go test -run '^TestLiveMount$' -count=1 -v ./internal/fsys/ | tee "$out"
+if ! grep -qE -- '^--- PASS: TestLiveMount \(' "$out"; then
   echo "::error::TestLiveMount did not pass (it skipped, or never ran)"
   exit 1
 fi
