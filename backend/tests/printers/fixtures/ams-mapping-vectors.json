@@ -1,0 +1,90 @@
+{
+  "about": "ams_mapping / ams_mapping2 / use_ams per filament slot, from a native plan's trays (#3818 tier A, Task 7; scadbuddy/printers/ams_mapping.py cites each encoding). A slot is {slot_id (1-based), ams_id, tray_id} as bambuddy/trays.py numbers trays: the external holders are ams_id 255, tray 0 (Ext-L, vt_tray 254) and tray 1 (Ext-R, vt_tray 255).",
+  "vectors": [
+    {
+      "name": "AMS-A slot 1",
+      "dual_nozzle": false,
+      "filament_count": 1,
+      "slots": [{"slot_id": 1, "ams_id": 0, "tray_id": 0}],
+      "ams_mapping": [0],
+      "ams_mapping2": [{"ams_id": 0, "slot_id": 0}],
+      "use_ams": true
+    },
+    {
+      "name": "AMS-B slot 3",
+      "dual_nozzle": false,
+      "filament_count": 1,
+      "slots": [{"slot_id": 1, "ams_id": 1, "tray_id": 2}],
+      "ams_mapping": [6],
+      "ams_mapping2": [{"ams_id": 1, "slot_id": 2}],
+      "use_ams": true
+    },
+    {
+      "name": "AMS-HT 128",
+      "dual_nozzle": true,
+      "filament_count": 1,
+      "slots": [{"slot_id": 1, "ams_id": 128, "tray_id": 0}],
+      "ams_mapping": [128],
+      "ams_mapping2": [{"ams_id": 128, "slot_id": 0}],
+      "use_ams": true
+    },
+    {
+      "name": "external on a single-nozzle printer, beside an AMS tray",
+      "dual_nozzle": false,
+      "filament_count": 2,
+      "slots": [
+        {"slot_id": 1, "ams_id": 255, "tray_id": 0},
+        {"slot_id": 2, "ams_id": 0, "tray_id": 1}
+      ],
+      "ams_mapping": [-1, 1],
+      "ams_mapping2": [{"ams_id": 255, "slot_id": 0}, {"ams_id": 0, "slot_id": 1}],
+      "use_ams": true
+    },
+    {
+      "name": "external left on a dual-nozzle printer",
+      "dual_nozzle": true,
+      "filament_count": 2,
+      "slots": [
+        {"slot_id": 1, "ams_id": 255, "tray_id": 0},
+        {"slot_id": 2, "ams_id": 0, "tray_id": 0}
+      ],
+      "ams_mapping": [-1, 0],
+      "ams_mapping2": [{"ams_id": 254, "slot_id": 0}, {"ams_id": 0, "slot_id": 0}],
+      "use_ams": true
+    },
+    {
+      "name": "external right on a dual-nozzle printer",
+      "dual_nozzle": true,
+      "filament_count": 1,
+      "slots": [{"slot_id": 1, "ams_id": 255, "tray_id": 1}],
+      "ams_mapping": [-1],
+      "ams_mapping2": [{"ams_id": 255, "slot_id": 0}],
+      "use_ams": false
+    },
+    {
+      "name": "slots 1 and 3 used, 2 unchosen",
+      "dual_nozzle": true,
+      "filament_count": 3,
+      "slots": [
+        {"slot_id": 1, "ams_id": 0, "tray_id": 3},
+        {"slot_id": 3, "ams_id": 129, "tray_id": 0}
+      ],
+      "ams_mapping": [3, -1, 129],
+      "ams_mapping2": [
+        {"ams_id": 0, "slot_id": 3},
+        {"ams_id": 255, "slot_id": 255},
+        {"ams_id": 129, "slot_id": 0}
+      ],
+      "use_ams": true
+    },
+    {
+      "name": "only external, with an unused slot after it",
+      "dual_nozzle": false,
+      "filament_count": 2,
+      "slots": [{"slot_id": 1, "ams_id": 255, "tray_id": 0}],
+      "ams_mapping": [-1, -1],
+      "ams_mapping2": [{"ams_id": 255, "slot_id": 0}, {"ams_id": 255, "slot_id": 255}],
+      "use_ams": false
+    }
+  ]
+}
