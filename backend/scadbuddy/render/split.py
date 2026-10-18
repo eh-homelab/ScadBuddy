@@ -34,6 +34,12 @@ class Paint:
 
     codes: tuple[str, ...]
     colours: tuple[str, ...]
+    #: Each code places its colours by its face's corners in the reverse of the mesh's
+    #: order (#4015): the part was mirrored, so its faces were turned to keep facing out,
+    #: and a code cannot be turned with them (a two-side split cuts its triangle along a
+    #: median, which a mirror moves to the other one). The 3MF writer stores such a part
+    #: mirrored back with a mirroring component, as Bambu Studio keeps the mirror.
+    reversed: bool = False
 
     def used(self) -> list[str]:
         """The colours the painting prints with, in extruder order."""
@@ -56,6 +62,7 @@ class Paint:
         return Paint(
             tuple(remap(code, mapping) if code else "" for code in self.codes),
             tuple(wanted),
+            self.reversed,
         )
 
 
@@ -93,6 +100,8 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
             out.append(part)
             continue
         faces = np.asarray(part.mesh.faces)
+        if part.paint.reversed:
+            faces = faces[:, ::-1]  # the corners in the codes' order
         corners = np.asarray(part.mesh.vertices, dtype=np.float64)[faces]
         own = part.colour.upper()
         by_code: dict[str, list[int]] = {}
@@ -112,6 +121,8 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
             if not chunks:
                 continue
             triangles = np.concatenate(chunks)
+            if part.paint.reversed:
+                triangles = triangles[:, ::-1]  # facing out again, as the part's faces do
             mesh = trimesh.Trimesh(
                 vertices=triangles.reshape(-1, 3),
                 faces=np.arange(len(triangles) * 3).reshape(-1, 3),

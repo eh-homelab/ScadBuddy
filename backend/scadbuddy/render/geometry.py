@@ -111,8 +111,11 @@ from scadbuddy.meshmodel.section import Section, layer_areas, measure
 from scadbuddy.meshmodel.shared import WALL, JointSpec
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
+    IDENTITY,
     MODEL_SETTINGS_NAME,
+    PRODUCTION_NS,
     PROJECT_SETTINGS_NAME,
+    ROOT_MODEL_NAME,
     laid_out_plates,
     parse_model,
 )
@@ -368,6 +371,35 @@ def _plate_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], 
         raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
 
 
+def _component_transforms(archive: zipfile.ZipFile) -> dict[str, np.ndarray]:
+    """Each object file the root places by a component transform other than the
+    identity, and that transform as a 3x4 (rows: the 3MF's matrix, then its
+    translation). The writer emits one only to mirror a mirrored painting back where it
+    prints (`bambu3mf._mirror_plane`, #4015)."""
+    root = parse_model(archive, ROOT_MODEL_NAME).root
+    found: dict[str, np.ndarray] = {}
+    for component in root.iter(f"{{{CORE_NS}}}component"):
+        text = component.get("transform")
+        path = (component.get(f"{{{PRODUCTION_NS}}}path") or "").lstrip("/")
+        if not text or text == IDENTITY or not path:
+            continue
+        values = [float(value) for value in text.split()]
+        if len(values) != 12 or not np.isfinite(values).all():
+            raise ValueError(f"component transform {text!r} is not 12 finite numbers")
+        found[path] = np.array(values).reshape(4, 3)
+    return found
+
+
+def _placed(
+    vertices: np.ndarray, faces: np.ndarray, transform: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """``vertices`` through a 3MF ``transform`` (row vectors: ``p M + t``), and the
+    faces turned to keep facing out when it mirrors."""
+    moved = vertices @ transform[:3] + transform[3]
+    mirrors = np.linalg.det(transform[:3]) < 0
+    return moved, faces[:, ::-1] if mirrors else faces
+
+
 def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
     parts: list[ColourPart] = []
     with zipfile.ZipFile(path) as archive:
@@ -407,14 +439,18 @@ def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], i
                     extruders[int(part_id)] = int(extruder)
                 if part_id.isdigit() and part_node.get("subtype") == "negative_part":
                     negative.add(int(part_id))
+        placed = _component_transforms(archive)
         for index in indices:
             if index in negative:
                 continue
-            model = parse_model(archive, f"3D/Objects/object_{index}.model")
+            name = f"3D/Objects/object_{index}.model"
+            model = parse_model(archive, name)
             obj = model.root.find(f".//{{{CORE_NS}}}object")
             meshes = list(model.meshes.values())
             vertices = meshes[0].vertices if meshes else np.empty((0, 3))
             faces = meshes[0].faces if meshes else np.empty((0, 3), dtype=np.int64)
+            if name in placed:
+                vertices, faces = _placed(vertices, faces, placed[name])
             name = (obj.get("name") if obj is not None else None) or f"Color {index}"
             number = extruders.get(index, index)
             colour = normalise_colour(colours[number - 1] if 1 <= number <= len(colours) else None)

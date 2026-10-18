@@ -65,7 +65,7 @@ from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, render_solids, solid_file, solid_mesh
-from scadbuddy.render.split import ColourPart, split_by_material
+from scadbuddy.render.split import ColourPart, Paint, split_by_material
 from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 
 # The `X as X` imports above are re-exports: the job models lived here before they
@@ -280,6 +280,13 @@ class PlateLayout:
                         "solid": source.solid,
                         **({"negative": True} if part.negative else {}),
                         **({"paint": source.paint} if source.paint is not None else {}),
+                        # A mirrored painting's corner order (#4015), which the piece's mesh
+                        # file does not carry.
+                        **(
+                            {"paint_reversed": True}
+                            if part.paint is not None and part.paint.reversed
+                            else {}
+                        ),
                         # Left out for the first object, so a layout of one reads as before.
                         **({"object": number} if number != 1 else {}),
                     }
@@ -322,6 +329,8 @@ class PlateLayout:
                 mesh, paint = split.mesh, split.paint
             if source.paint is not None:
                 mesh, paint = read_carried(work / source.paint, mesh)
+            if paint is not None and entry.get("paint_reversed"):
+                paint = Paint(paint.codes, paint.colours, reversed=True)
             return (
                 ColourPart(
                     entry["material_index"],

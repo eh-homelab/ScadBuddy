@@ -579,12 +579,6 @@ class _Reader:
                 f"object {name} is painted, but the file names no Bambu Studio filaments"
                 " for its paint"
             )
-        if mirrored:
-            # Reversing each face to keep it facing out would move its painting: the
-            # code places colour by the face's own corners, in their order.
-            raise UnreadableObjectsError(
-                f"object {name} is painted and mirrored, which Arrange cannot carry over"
-            )
         _check_faces(faces, points)
         # Charged on every placement, as its faces are: each copy carries its codes on.
         self._spend(paint_digits=sum(map(len, codes)))
@@ -602,7 +596,14 @@ class _Reader:
                 f"object {name} is painted with extruder {max(used)}, and the file has"
                 f" {len(self.filaments)} filaments"
             )
-        return self.colour_of(extruder), points, faces, Paint(codes, tuple(self.filaments))
+        # A mirror turns the faces inside out, so they are turned back to face out; the
+        # codes keep the source's corner order, which `Paint.reversed` records (#4015).
+        return (
+            self.colour_of(extruder),
+            points,
+            faces[:, ::-1] if mirrored else faces,
+            Paint(codes, tuple(self.filaments), reversed=bool(mirrored)),
+        )
 
     def item(
         self, model: str, object_id: str, matrix: np.ndarray
@@ -743,7 +744,7 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     if (plates and plate not in plates) or (not plates and plate != 1):
         raise NoSuchPlateError(plate, count)
     instances: dict[str, int] = {}
-    by_colour: dict[str, list[ColourPart]] = {}
+    by_colour: dict[tuple[str, bool], list[ColourPart]] = {}
     for item in items:
         object_id = item.get("objectid", "")
         instance = instances.get(object_id, 0)
@@ -755,9 +756,11 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         for part in parts:
             if part.negative:
                 continue  # cut out by the slicer: neither shown nor checked
-            by_colour.setdefault(part.colour, []).append(part)
+            # A mirrored painting joins only its like: one `Paint.reversed` per part.
+            reversed_ = part.paint is not None and part.paint.reversed
+            by_colour.setdefault((part.colour, reversed_), []).append(part)
     found: list[ColourPart] = []
-    for index, (colour, parts) in enumerate(by_colour.items(), start=1):
+    for index, ((colour, _), parts) in enumerate(by_colour.items(), start=1):
         meshes = [part.mesh for part in parts]
         joined = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         if isinstance(joined, trimesh.Trimesh):
@@ -782,7 +785,7 @@ def _joined_paint(parts: list[ColourPart]) -> Paint | None:
     codes: list[str] = []
     for part in parts:
         codes += part.paint.codes if part.paint is not None else [""] * len(part.mesh.faces)
-    return Paint(tuple(codes), painted[0].colours)
+    return Paint(tuple(codes), painted[0].colours, painted[0].reversed)
 
 
 def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_Archive], T]) -> T:
