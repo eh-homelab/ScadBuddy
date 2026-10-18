@@ -998,6 +998,8 @@ export function LibraryPage() {
                 : undefined
           }
           onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
+          // #3651 — an arranged file opens on the project its sources are all in.
+          content={!printing && printArranged ? arranged?.from : undefined}
           onRan={() => (printing ? undefined : setArrangedSent(true))}
         />
         {batchParam !== null && <BatchPrintDialog key={batchParam} batchId={batchParam} onClose={closeBatch} />}

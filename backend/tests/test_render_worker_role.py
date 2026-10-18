@@ -31,7 +31,13 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetMeta, AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutLeases, InstallPermits
-from scadbuddy.library.settings_store import RENDER_FIELDS, load_render_store_settings
+from scadbuddy.library.settings_store import (
+    RENDER_FIELDS,
+    S3_FIELDS,
+    SettingsPatch,
+    SettingsStore,
+    load_render_store_settings,
+)
 from scadbuddy.render import worker_role
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.pg_store import Migration, migrate
@@ -142,8 +148,32 @@ def _defaults(tmp_path: Path) -> Settings:
 # ── the role's reach ──────────────────────────────────────────────────────────
 
 
-def test_the_role_holds_every_grant_and_cannot_read_the_settings_table(granted: Pool) -> None:
+def test_the_role_holds_every_grant_and_cannot_read_the_settings_table(
+    granted: Pool, pg_conninfo: str, tmp_path: Path
+) -> None:
+    store = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
+    )
+    store.open()
+    try:
+        store.save(
+            SettingsPatch(
+                store_s3_endpoint="http://garage:3900",
+                store_s3_region="garage",
+                store_s3_bucket="sb",
+                store_s3_prefix="prod",
+                store_s3_access_key_id="GK1",
+                store_s3_secret_access_key="s3cr3t",
+                store_s3_path_style=False,
+            )
+        )
+    finally:
+        store.close()
     with granted.connection() as conn:
+        readable = {row["name"] for row in conn.execute("SELECT name FROM render_settings")}
+        assert set(S3_FIELDS) <= readable
         assert missing_privileges(conn) == []
         assert pending_migrations(conn) == []
         with pytest.raises(psycopg.errors.InsufficientPrivilege):

@@ -197,9 +197,9 @@ vendor`, for consumers outside the workspace) and then runs `go work vendor`; it
 runs `go work sync`, which would move a lagging client's `go.mod` past its own
 `vendor/modules.txt` and edit bambuddy-fs's `go.mod` on a client-only change (#2686).
 bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without the
-device). The Go toolchain is pinned in five places, moved together: `go.work`'s
+device). The Go toolchain is pinned in six places, moved together: `go.work`'s
 `toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, and `GOTOOLCHAIN` in
-`go-module-ci.yml` and in `ci.yml`'s two freshness steps.
+`go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
@@ -383,7 +383,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
   (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that
-  wires them, reading `store_backend` (a stored setting) at start.
+  wires them, reading `store_backend` (a stored setting) at start, through `backends.py`
+  (`build_backend`, and `UnrecordedSweeper`, the sweep of objects an upload left without a
+  row). `s3.py` is `S3ContentBackend` (`store_backend` `s3`, multipart above 64 MiB).
+  `migrate.py` and `workflows/store_migration.py` copy blobs between backends in two
+  phases (copy and record, then flip `store_backend` and restart; `api/store.py`
+  `/store/migrate`).
 
   `python -m scadbuddy.store.verify_bambuddy` re-measures §6.3; it has not yet been
   run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
@@ -678,8 +683,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `temporalio-claude-agent-sdk` (ai-integrations#33, git-pinned by SHA in `uv.lock`, never
   vendored), shipped as the Dockerfile's `agent-durable` target, trusted like `agent`
   (clusters runs it as a Deployment of its own; its subagents reach the agent's
-  `/internal/durable/subagent-mcp` from the peers `routes/durableSubagents.ts` stores). `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (open
-  only; the agent alone writes it); `check_cli_version.py` is the build's bundled-CLI
+  `/internal/durable/subagent-mcp` from the peers `routes/durableSubagents.ts` stores). `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (only
+  the agent writes a secret; a segment records its key's health, `record_health`,
+  #2320: used, a 60 s cooldown on a 429, or `last_error`, never a disable, which waits
+  on the agent's probe); `check_cli_version.py` is the build's bundled-CLI
   check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
   not the TypeScript SDK's). `python -m scadbuddy_durable` serves `/healthz` on 8082
   and runs the `agent` queue's worker (`worker.py`; without its variables, health only,
@@ -835,6 +842,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   note is re-dated only when what backs it was re-checked.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
+- Every `docker/setup-buildx-action` step sets `driver-opts:
+  image=mirror.gcr.io/moby/buildkit:buildx-stable-1` (#3370): Docker Hub refuses some
+  anonymous pulls from hosted runners, which failed jobs before any test ran. A new
+  buildx step needs it too. The tag floats with buildx's own default; nothing would
+  bump a digest pinned there.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a

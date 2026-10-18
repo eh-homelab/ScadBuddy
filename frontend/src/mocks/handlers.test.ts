@@ -24,6 +24,7 @@ import {
   MAX_PRESETS,
   resetMockState,
   setMockMedia,
+  setMockPlateSlots,
   setMockPresets,
   setMockUploadLimit,
 } from './handlers'
@@ -954,6 +955,34 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect((await put({ library_folder_id: null })).status).toBe(422)
   })
 
+  it('refuses the S3 store without its endpoint, bucket and keys, as the backend does', async () => {
+    const put = (body: Record<string, unknown>) =>
+      fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const bare = await put({ store_backend: 's3' })
+    expect(bare.status).toBe(422)
+    expect(((await bare.json()) as { detail: string }).detail).toBe(
+      'the S3 store needs its endpoint, bucket, access key id and secret access key saved first',
+    )
+    const fields = {
+      store_s3_endpoint: 'https://s3.example.test',
+      store_s3_bucket: 'renders',
+      store_s3_access_key_id: 'AKIA',
+    }
+    expect((await put({ store_backend: 's3', ...fields })).status).toBe(422)
+    expect((await api.getSettings()).store_backend).toBe('local')
+    const saved = await put({ store_backend: 's3', ...fields, store_s3_secret_access_key: 'shh' })
+    expect(saved.status).toBe(200)
+    const settings = (await saved.json()) as Record<string, unknown>
+    expect(settings.has_store_s3_secret_access_key).toBe(true)
+    expect(settings).not.toHaveProperty('store_s3_secret_access_key')
+    // With the store on S3, clearing the secret alone is refused too.
+    expect((await put({ store_s3_secret_access_key: '' })).status).toBe(422)
+  })
+
   it('refuses an upload over the limit with a 413 naming it', async () => {
     const saved = (await api.getSettings()).media_upload_max_bytes
     try {
@@ -1153,6 +1182,34 @@ describe('the prints mock', () => {
     expect(failed.media.timelapse).toBeNull()
     expect(failed.outcome.failure_reason).toBe('Spaghetti detected')
     expect((await fetch('/api/v1/prints/99')).status).toBe(404)
+  })
+})
+
+/** #3762 review — the filament read answers for the plates' own slots, not their numbers. */
+describe("the filament mock reads each plate's own slots", () => {
+  beforeEach(() => resetMockState())
+
+  const outputId = outputs[0]!.id
+
+  async function slots(query: string): Promise<number[]> {
+    const response = await fetch(`/api/v1/print/outputs/${outputId}/filaments?${query}`)
+    const body = (await response.json()) as { slots: { slot_id: number }[] }
+    return body.slots.map((slot) => slot.slot_id)
+  }
+
+  it('maps plate N to slot N when the output names no slots', async () => {
+    expect(await slots('plate_id=2')).toEqual([2])
+    expect(await slots('plate_ids=1&plate_ids=2')).toEqual([1, 2])
+  })
+
+  it("answers with the chosen plates' own slots when the numbering differs", async () => {
+    // Plate 1 prints slot 2 only, plate 2 slot 1 only, plate 3 both.
+    setMockPlateSlots(outputId, { 1: [2], 2: [1], 3: [1, 2] })
+    expect(await slots('plate_id=1')).toEqual([2])
+    expect(await slots('plate_ids=2')).toEqual([1])
+    expect(await slots('plate_ids=1&plate_ids=2')).toEqual([1, 2])
+    expect(await slots('plate_ids=1')).toEqual([2])
+    expect(await slots('all_plates=true')).toEqual([1, 2])
   })
 })
 

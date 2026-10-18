@@ -19,6 +19,7 @@ import {
   printRunPoll,
 } from './client'
 import type { MediaView } from './types'
+import { CURSOR_HEADER, inReadScope, ReadScope } from '../lib/readCursor'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
 const picture = media[GALLERY_SLUG]![0]!
@@ -1814,6 +1815,23 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       expect(reads()).toBe(1)
       expect(a).toEqual(b)
       expect(a).not.toBe(b)
+    })
+
+    it("gives a caller that joins it the shared request's cursor", async () => {
+      server.use(
+        http.get('/api/v1/settings', () =>
+          HttpResponse.json({ display_unit: 'mm' }, { headers: { [CURSOR_HEADER]: 'e3' } }),
+        ),
+        http.get('/api/v1/fonts', () => HttpResponse.json([], { headers: { [CURSOR_HEADER]: 'e9' } })),
+      )
+      const starter = new ReadScope()
+      const joiner = new ReadScope()
+      await Promise.all([
+        inReadScope(starter, () => api.getSettings()),
+        inReadScope(joiner, () => Promise.all([api.getSettings(), api.listFonts()])),
+      ])
+      expect(starter.cursors()).toEqual(['e3'])
+      expect(joiner.cursors()?.sort()).toEqual(['e3', 'e9'])
     })
 
     it('reads afresh once the shared request has answered', async () => {

@@ -25,7 +25,7 @@ export function ReadmeButton({ slug }: { slug: string }) {
         <DialogHeader>
           <DialogTitle>README</DialogTitle>
         </DialogHeader>
-        <ScrollArea className="-mx-4 min-h-0 flex-1 px-4 [&_[data-slot=scroll-area-viewport]>div]:block!">
+        <ScrollArea className="-mx-4 min-h-0 flex-1 px-4">
           <Readme slug={slug} />
         </ScrollArea>
       </DialogContent>

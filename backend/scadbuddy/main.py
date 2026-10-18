@@ -52,6 +52,7 @@ from scadbuddy.api.limits import (
     BodySizeGate,
     RouteLimit,
 )
+from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
@@ -78,7 +79,7 @@ from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
-from scadbuddy.library.assets import referenced_asset_ids
+from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
@@ -96,12 +97,15 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
+from scadbuddy.store.backends import UnrecordedSweeper
+from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
@@ -138,6 +142,7 @@ from scadbuddy.workflows.previews import (
     ensure_preview_schedule,
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.store_migration import StoreMigration
 
 API_PREFIX = "/api/v1"
 
@@ -229,11 +234,16 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
-    ``stop``, once set, ends it before its next asset (#2140).
+    ``stop``, once set, ends it before its next asset (#2140), and before and after
+    reading the references, which no per-asset check can interrupt (#2554).
     """
+    if stopped(stop):
+        return []
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
+    if stopped(stop):
+        return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
@@ -313,7 +323,10 @@ async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = N
         if stop is not None and stop.is_set():
             # Stopped (#2140): only mark what it removed, which no later sweep could
             # find otherwise -- `reconcile` retries marked copies, never a diff against
-            # the volume. The next sweep's reconcile removes them.
+            # the volume. The next sweep's reconcile removes them. This runs inside the
+            # shutdown's bounded join: one that times out cancels it, and a copy left
+            # unmarked then is never retried, so it stays in the store until something
+            # else removes it (#2554).
             if removed:
                 await remote.mark_swept(removed, cutoff=cutoff)
             return
@@ -343,6 +356,7 @@ async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = Fa
 async def _sweep_blobs_logged(state: AppState) -> None:
     """The Temporal path's blob store: the pieces no job references any more. Only
     the Schedule's sweep runs it, so a failure is logged and fails its activity."""
+    unrecorded = 0
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
@@ -355,19 +369,23 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     state.store.content, state.refs, grace=state.config.job_ttl
                 )
                 backend = state.store.content.backend
-                if isinstance(backend, BambuddyContentBackend):
+                if isinstance(backend, UnrecordedSweeper):
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
-                    removed += await backend.sweep_unrecorded(cutoff=cutoff)
+                    index = state.store.content.index
+                    swept = await backend.sweep_unrecorded(
+                        cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
+                    )
+                    unrecorded = swept if isinstance(swept, int) else len(swept)
             except BaseException:
                 # BaseException on purpose: a cancelled sweep must stay cancelled, not be
                 # replaced by the trim's own failure below.
                 failed = True
                 raise
             finally:
-                # Both steps above need Bambuddy (a stale blob's release is a round
-                # trip too): one that is down must not stop the local cache being
-                # trimmed, or it grows for as long as Bambuddy stays down (#2115).
+                # Both steps above need the remote store (a stale blob's release is a
+                # round trip too): one that is down must not stop the local cache being
+                # trimmed, or it grows for as long as the remote stays down (#2115).
                 if isinstance(state.store.blobs, CachedBlobStore):
                     try:
                         await asyncio.to_thread(state.store.blobs.evict)
@@ -381,6 +399,8 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
+    if unrecorded:
+        logger.info("removed unrecorded uploads", extra={"count": unrecorded})
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
         # A swept piece is no geometry's source any more (`store/geometry.py`).
@@ -1066,6 +1086,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
+        migrate_activity(lambda: state.settings_store.pool, state.settings),
     ]
     try:
         while not stop.is_set():
@@ -1073,7 +1094,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire],
+                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire, StoreMigration],
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
@@ -1258,6 +1279,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # will not start) releases what is open, the store and its pool included, rather
     # than leaking it for this failed boot.
     try:
+        # Spec 2026-10-16 §4.3: once the store is ready, the rows a migration copied to
+        # its backend are that backend's.
+        switched = await asyncio.to_thread(BlobIndex(pool).switch_migrated, current.store_backend)
+        if switched:
+            logger.info(
+                "switched migrated blobs",
+                extra={"backend": current.store_backend, "rows": switched},
+            )
         state.paths.ensure()
         # Before the built-in sync: an existing models directory becomes revision 1,
         # so what a newer image changes in a built-in is a commit on top of it rather
@@ -1419,6 +1448,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     models.install_model_handlers(app)
     # A commit made for the agent is authored as the agent (#252).
     app.add_middleware(AgentAuthorship)
+    # What each read saw of the event bus, so the UI need not read twice (#1039).
+    app.add_middleware(EventCursor, events=lambda: state.events)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(

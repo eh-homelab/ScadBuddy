@@ -62,8 +62,10 @@ export function useFilamentPlan(
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
   // later plate uses still gets a row (spec §2 step 1); several plates read just theirs
-  // (#3652). A string, so the effect below sees a change of plates, not of array.
+  // (#3652). The effect below runs on a change of `plateKey`, not of array, and reads
+  // the plates themselves through `latestPlate`.
   const chosenPlates = plateKey(plate)
+  const latestPlate = useLatest(plate)
   const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
 
   /**
@@ -133,19 +135,20 @@ export function useFilamentPlan(
       setPlan(seeded)
     }
     const printerId = choices.printer_id ?? null
-    const chosen = chosenPlates === 'all' ? [] : chosenPlates.split(',').filter(Boolean).map(Number)
+    const asked = latestPlate.current
+    const chosen = asked === 'all' ? [] : asked
     // Plate 1 is in the choices read already; so is a set emptied while it is changed,
     // which nothing prints until a plate is chosen.
-    if (chosenPlates !== 'all' && chosen.length <= 1 && (chosen[0] ?? 1) === 1) {
+    if (asked !== 'all' && chosen.length <= 1 && (chosen[0] ?? 1) === 1) {
       seed(choices.filaments)
       return
     }
     sourceApi(current)
       .getFilaments(
-        chosenPlates === 'all'
+        asked === 'all'
           ? { printerId, allPlates: true }
           : chosen.length > 1
-            ? { printerId, plateIds: chosen }
+            ? { printerId, plateIds: [...chosen] }
             : { printerId, plateId: chosen[0] ?? 1 },
       )
       .then((next) => token === filamentAttempt.current && seed(next))
@@ -158,7 +161,9 @@ export function useFilamentPlan(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, key, latest, chosenPlates, rememberedPlan, carry, retries])
+    // `latest` and `latestPlate` are stable refs, listed for exhaustive-deps, which cannot
+    // see through `useLatest`; `chosenPlates` is what re-runs this on a change of plates.
+  }, [choices, key, latest, latestPlate, chosenPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =

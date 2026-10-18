@@ -327,6 +327,32 @@ class Metrics:
         self.worker_cache_bytes = Gauge(
             "scadbuddy_worker_cache_bytes", "Bytes in this process's local piece cache.", registry=r
         )
+        # The worker's event-loop watch (#3788, `core.loop_watch`).
+        self.event_loop_lag = Histogram(
+            "scadbuddy_event_loop_lag_seconds",
+            "How late a no-op posted to the worker's event loop ran.",
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+            registry=r,
+        )
+        self.event_loop_stalls = Counter(
+            "scadbuddy_event_loop_stalls",
+            "Times the worker's event loop did not run for over a second; each is logged"
+            " with every thread's stack.",
+            registry=r,
+        )
+        self.default_executor_wait = Histogram(
+            "scadbuddy_default_executor_wait_seconds",
+            "How long a no-op handed to the event loop's default executor (asyncio.to_thread)"
+            " waited for a thread.",
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+            registry=r,
+        )
+        self.default_executor_stalls = Counter(
+            "scadbuddy_default_executor_stalls",
+            "Times the default executor had no free thread for over a second; each is logged"
+            " with every thread's stack.",
+            registry=r,
+        )
         self.render_data_bytes = Gauge(
             "scadbuddy_render_data_bytes",
             "Bytes allocated under the render worker's data directory, as kubelet counts an"

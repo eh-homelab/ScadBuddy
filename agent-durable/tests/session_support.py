@@ -276,14 +276,18 @@ def tools_worker(client: Client, stand_in: StandInTools) -> Worker:
 
 
 async def start_session(
-    client: Client, sid: str, task_queue: str, system_append: str | None = None
+    client: Client,
+    sid: str,
+    task_queue: str,
+    system_append: str | None = None,
+    execution_timeout: timedelta = timedelta(minutes=10),
 ) -> WorkflowHandle[DurableSession, None]:
     return await client.start_workflow(
         DurableSession.run,
         SessionStart(session_id=sid, creator=ME, owner=ME, system_append=system_append),
         id=f"session-{sid}",
         task_queue=task_queue,
-        execution_timeout=timedelta(minutes=10),
+        execution_timeout=execution_timeout,
     )
 
 

@@ -659,6 +659,141 @@ async def test_an_interactive_pin_lifts_a_background_store_still_queued(
     assert not api._stores.locked() and not api._background_stores.locked()
 
 
+async def test_a_promotion_left_by_the_last_store_does_not_lift_the_next(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2553: the last store's `ended` runs a loop step after it finishes, so its set
+    promotion can still be there when the next store of that key starts. A background
+    store must still queue for the background slot, as no interactive pin joined it."""
+    api_paths = DataPaths(tmp_path / "api")
+    stalled, wanted = "e1" * 20, "e2" * 20
+    for rev in (stalled, wanted):
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    uploading = {rev: asyncio.Event() for rev in (stalled, wanted)}
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        rev = stalled if str(kwargs["name"]) == f"src-{stalled[:12]}.zip" else wanted
+        uploading[rev].set()
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", stalled, background=True)
+    await asyncio.wait_for(uploading[stalled].wait(), 5)
+    # What the last store of `wanted` left: its event, set, its `ended` not yet run.
+    left = asyncio.Event()
+    left.set()
+    api._promoted[snapshot_key("demo", wanted)] = left
+
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", wanted, background=True)
+    await asyncio.sleep(0.05)
+    assert not uploading[wanted].is_set()  # queued for the one background slot
+
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+    assert not api._stores.locked() and not api._background_stores.locked()
+
+
+async def test_the_next_store_starts_unpromoted_before_the_last_one_has_ended(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2553, in the real order: an interactive pin joined a background store, so its
+    key is promoted; that store finishes, and the next store of the key starts in the
+    loop step between its finishing and its ``ended`` running. The next store starts
+    unpromoted, and the late ``ended`` leaves the next store's pin alone."""
+    api = SnapshotStore(content, DataPaths(tmp_path / "api"), history=None, wait=_gives_up)
+    key = snapshot_key("demo", "e3" * 20)
+    loop = asyncio.get_running_loop()
+    release, hold = asyncio.Event(), asyncio.Event()
+    seen: dict[str, object] = {}
+
+    def start_next() -> None:
+        last = api._pins[key][0]
+        seen["last_done"] = last.done()
+        seen["next"] = api._store("demo", "e3" * 20, background=True)[0]
+        promoted = api._promoted.get(key)
+        seen["promoted"] = promoted is not None and promoted.is_set()
+
+    calls = 0
+
+    async def ensure(slug: str, revision: str, *, background: bool = False) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+            # Runs after this task's result is set, before its done callbacks.
+            loop.call_soon(start_next)
+            return revision
+        await hold.wait()
+        return revision
+
+    api.ensure = ensure  # type: ignore[method-assign]
+    first = api._store("demo", "e3" * 20, background=True)[0]
+    api._store("demo", "e3" * 20, background=False)  # an interactive pin joins it
+    assert api._promoted[key].is_set()
+
+    release.set()
+    await first
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert seen["last_done"] is True
+    assert seen["promoted"] is False
+    assert api._pins[key][0] is seen["next"]  # the late `ended` did not drop it
+    hold.set()
+    await cast("asyncio.Task[str]", seen["next"])
+
+
+async def _held_background_slot(tmp_path: Path, content: ContentStore) -> SnapshotStore:
+    """A store whose one background slot is taken, so a background `_slot` queues."""
+    api = SnapshotStore(content, DataPaths(tmp_path / "api"), history=None)
+    await api._background_stores.acquire()
+    assert api._background_stores.locked()
+    return api
+
+
+async def test_a_background_store_cancelled_while_queued_takes_no_slot(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2553: `_slot`'s cancel while it still waits for the background slot."""
+    api = await _held_background_slot(tmp_path, content)
+    slot = asyncio.create_task(api._slot("k", background=True))
+    await asyncio.sleep(0.01)
+    assert not slot.done()
+    slot.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await slot
+    api._background_stores.release()
+    assert not api._background_stores.locked()
+    assert not api._stores.locked()
+
+
+async def test_a_cancel_that_loses_the_race_to_the_acquire_releases_the_slot(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2553: the slot is freed and the cancel arrives in the same step, before the
+    queued acquire has resumed: whichever wins, no background slot is left held."""
+    api = await _held_background_slot(tmp_path, content)
+    slot = asyncio.create_task(api._slot("k", background=True))
+    await asyncio.sleep(0.01)
+    assert not slot.done()
+    api._background_stores.release()  # the waiting acquire is woken ...
+    slot.cancel()  # ... and cancelled before it runs
+    try:
+        held = await slot
+    except asyncio.CancelledError:
+        pass
+    else:
+        held.release()  # it won: the caller releases it, as `ensure` does
+    assert not api._background_stores.locked()
+    assert not api._stores.locked()
+
+
 async def test_a_caller_gone_mid_pin_leaves_the_store_running(
     tmp_path: Path, content: ContentStore
 ) -> None:

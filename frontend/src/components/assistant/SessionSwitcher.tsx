@@ -228,7 +228,9 @@ function SessionRow({
             open ? 'border-primary' : 'border-transparent'
           }`}
         >
-          <span className="truncate text-[13px]">{s.title}</span>
+          <span className="truncate text-[13px]" title={s.title}>
+            {s.title}
+          </span>
           <span className="flex flex-wrap items-center gap-1.5">
             {open && <Badge className="h-[18px] px-1.5 text-[10.5px]">Open</Badge>}
             {s.parentId && <span className="text-[10.5px] text-muted-foreground">fork</span>}

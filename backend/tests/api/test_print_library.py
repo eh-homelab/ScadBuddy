@@ -400,6 +400,33 @@ def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
 
 
 @respx.mock
+def test_a_library_run_reads_the_project_list_once(client: TestClient) -> None:
+    """#4008 review — a library file's check resolves the default project too, and the
+    plan reuses it: a Settings default Bambuddy no longer has is one read, then the
+    inbox."""
+    configure(client)
+    saved = client.put("/api/v1/settings", json={"last_project_id": 99})
+    assert saved.status_code == 200, saved.text
+    projects = respx.get(f"{API}/projects/").mock(return_value=httpx.Response(200, json=[]))
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert upload.calls.last.request.url.params["folder_id"] == "2"
+    assert projects.call_count == 1
+
+
+@respx.mock
 def test_a_library_print_queues_with_the_options_remembered_for_that_file(
     client: TestClient,
 ) -> None:
@@ -708,6 +735,44 @@ def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
     sent = json.loads(queued.calls.last.request.content)
     assert sent["plate_id"] == queued_plate
     assert sent["manual_start"] is held
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("plate_ids", "warning", "queued_plates"),
+    [
+        ([3, 2, 1], "This file holds no plate 2, so it is left out.", [1, 3]),
+        ([1, 2, 4], "This file holds no plates 2 and 4, so they are left out.", [1]),
+        # One chosen plate is `plate_id` (#3768 review): the file's first, said the same.
+        ([2], "This file holds no plate 2, so plate 1 is queued instead.", [1]),
+    ],
+)
+def test_a_sliced_file_leaves_out_chosen_plates_it_does_not_hold(
+    client: TestClient, plate_ids: list[int], warning: str, queued_plates: list[int]
+) -> None:
+    """#3762 review: of several chosen plates, the ones a sliced file holds are queued
+    and the rest are named in a warning, never refused (#2671). Like every sliced
+    mismatch, each is held for a manual start (#2954)."""
+    warning += " Held for a manual start."
+    configure(client)
+    sliced_file(104, sliced_3mf(plates=(1, 3)))
+    run_routes()
+    queued = queue_route()
+    request = {**SLICED_RUN, "plate_ids": plate_ids}
+
+    check = client.post("/api/v1/print/library/104/check", json=request)
+    run = run_library(client, 104, json=request)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert {"kind": "sliced-plate-missing", "slot_id": None, "message": warning} in check.json()[
+        "warnings"
+    ]
+    assert run.status_code == 200, run.text
+    assert any(w["message"] == warning for w in run.json()["warnings"])
+    sent = [json.loads(call.request.content) for call in queued.calls]
+    assert sorted(body["plate_id"] for body in sent) == queued_plates
+    assert all(body["manual_start"] is True for body in sent)
 
 
 @respx.mock

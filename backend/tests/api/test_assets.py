@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from scadbuddy import main as main_module
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -557,3 +559,40 @@ def test_an_upload_the_blob_store_has_no_room_for_is_a_507(
     )
     assert response.status_code == 507, response.text
     assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]
+
+
+def _never(*args: object, **kwargs: object) -> Any:
+    raise AssertionError("read after the sweep was stopped")
+
+
+def test_a_stopped_sweep_reads_no_references() -> None:
+    """#2554: a shutdown before the sweep starts reads nothing: the reference reads
+    cannot be interrupted once begun, and would hold the shutdown's join."""
+    stop = threading.Event()
+    stop.set()
+    state = SimpleNamespace(
+        render=SimpleNamespace(store=SimpleNamespace(list_jobs=_never)),
+        assets=SimpleNamespace(sweep=_never),
+    )
+    assert sweep_assets(state, stop) == []  # type: ignore[arg-type]
+
+
+def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2554: stopped during the reference reads, it returns before the per-asset pass."""
+    stop = threading.Event()
+
+    def referenced(paths: object, params: object) -> set[str]:
+        stop.set()  # the shutdown arrives while the templates are read
+        return set()
+
+    monkeypatch.setattr(main_module, "referenced_asset_ids", referenced)
+    state = SimpleNamespace(
+        render=SimpleNamespace(store=SimpleNamespace(list_jobs=list)),
+        presets=SimpleNamespace(saved_params=list),
+        paths=None,
+        assets=SimpleNamespace(sweep=_never),
+        config=SimpleNamespace(asset_sweep_grace=0),
+    )
+    assert sweep_assets(state, stop) == []  # type: ignore[arg-type]

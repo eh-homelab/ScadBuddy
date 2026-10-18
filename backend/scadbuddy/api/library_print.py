@@ -14,7 +14,7 @@ import contextlib
 import hashlib
 import logging
 import os
-from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Sequence
 from functools import partial
 from typing import Annotated, BinaryIO
 
@@ -124,8 +124,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/print/library", tags=["print"])
 
-#: The operations record's subject for a library delete, restore, copy, move or rename.
+#: The operations record's subject for a library operation on several files, or none yet.
 LIBRARY_FILES_SUBJECT = "library-files"
+
+
+def library_subject(file_ids: Sequence[int]) -> str:
+    """One file's operation names it, ``library:<id>`` as its prints do, so the Activity
+    page's Subject filter finds the file (#3856). Several files share one subject."""
+    return f"library:{file_ids[0]}" if len(file_ids) == 1 else LIBRARY_FILES_SUBJECT
+
 
 FileIdPath = Annotated[int, Path(ge=1)]
 FolderIdPath = Annotated[int, Path(ge=1)]
@@ -272,7 +279,7 @@ async def post_library_delete(
         ops,
         response,
         kind=ops.kinds["library_file_delete"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=library_subject(body.file_ids),
         request=body,
         idempotency_key=idempotency_key,
     )
@@ -297,7 +304,7 @@ async def post_library_restore(
         ops,
         response,
         kind=ops.kinds["library_file_restore"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=library_subject(body.file_ids),
         request=body,
         idempotency_key=idempotency_key,
     )
@@ -327,7 +334,7 @@ async def post_library_move(
         ops,
         response,
         kind=ops.kinds["library_file_move"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=library_subject(body.file_ids),
         request=body,
         idempotency_key=idempotency_key,
     )
@@ -356,7 +363,7 @@ async def post_library_copy(
         ops,
         response,
         kind=ops.kinds["library_file_copy"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=library_subject(body.file_ids),
         request=body,
         idempotency_key=idempotency_key,
     )
@@ -382,7 +389,7 @@ async def post_library_rename(
         ops,
         response,
         kind=ops.kinds["library_file_rename"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=library_subject([body.file_id]),
         request=body,
         idempotency_key=idempotency_key,
     )
@@ -408,7 +415,7 @@ async def patch_library_folder(
         ops,
         response,
         kind=ops.kinds["library_folder_update"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=f"library-folder:{folder_id}",
         request={"folder_id": folder_id, "update": body.model_dump(mode="json", exclude_none=True)},
         idempotency_key=idempotency_key,
     )
@@ -436,7 +443,7 @@ async def post_library_folder_delete(
         ops,
         response,
         kind=ops.kinds["library_folder_delete"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=f"library-folder:{folder_id}",
         request={"folder_id": folder_id},
         idempotency_key=idempotency_key,
     )
@@ -573,7 +580,7 @@ async def patch_library_file(
         ops,
         response,
         kind=ops.kinds["library_file_update"],
-        subject=LIBRARY_FILES_SUBJECT,
+        subject=library_subject([file_id]),
         request={"file_id": file_id, "update": body.model_dump(mode="json", exclude_none=True)},
         idempotency_key=idempotency_key,
     )

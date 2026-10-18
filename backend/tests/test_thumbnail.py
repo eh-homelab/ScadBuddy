@@ -17,7 +17,7 @@ import pytest
 import trimesh
 
 from scadbuddy.render import thumbnail
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.render.thumbnail import (
     MAX_BREAKDOWN_COLOURS,
     MAX_VIEW_SIZE,
@@ -516,3 +516,27 @@ def test_a_plate_drawn_in_small_chunks_is_the_same_image(monkeypatch: pytest.Mon
     whole = render_plate_thumbnails(_two_colour_parts())
     monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 5)
     assert render_plate_thumbnails(_two_colour_parts()) == whole
+
+
+def test_a_painted_part_shows_its_paint_and_picks_as_one_part() -> None:
+    """#3956: a blue box painted pink on top looks pink from above, and the pick map
+    still has it as one part."""
+    box = trimesh.creation.box(extents=(40, 20, 6))
+    top = box.face_normals[:, 2] > 0.9
+    codes = tuple("4" if up else "" for up in top)  # extruder 1 on the top faces
+    thumbnails = render_plate_thumbnails(
+        [ColourPart(1, "Color 1", BLUE, box, Paint(codes, (PINK,)))]
+    )
+    seen = read_png(thumbnails.top)
+    pixels = seen[seen[..., 3] == 255][:, :3].astype(int)
+    assert (pixels[:, 0] > pixels[:, 2]).mean() > 0.95  # red over blue: pink
+    assert _opaque_colours(read_png(thumbnails.pick)).tolist() == [[0, 0, 1]]
+
+
+def test_a_colour_only_the_painting_uses_gets_a_breakdown_tile() -> None:
+    box = trimesh.creation.box(extents=(40, 20, 6))
+    codes = tuple("4" if up else "" for up in box.face_normals[:, 2] > 0.9)
+    breakdown = render_colour_breakdown(
+        [ColourPart(1, "Color 1", BLUE, box, Paint(codes, (PINK,)))]
+    )
+    assert breakdown.colours == [BLUE, PINK]

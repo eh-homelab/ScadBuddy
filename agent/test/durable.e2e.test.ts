@@ -3,11 +3,11 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { mkdtemp, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { durableHealthPort } from '../evals/durable.js'
 import type { Database } from '../src/db.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -57,14 +57,6 @@ const skip = !hasUv()
       ? `${TEST_DATABASE_URL_ENV} is not set`
       : undefined
 
-async function freePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const { port } = server.address() as { port: number }
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
-
 /** The test schema in the database URL, for a client that takes no search_path setting. */
 function withSearchPath(url: string, schema: string): string {
   const u = new URL(url)
@@ -96,7 +88,6 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     const kekB64 = randomBytes(32).toString('base64')
     await writeFile(path.join(dir, 'kek'), kekB64, { mode: 0o600 })
     await writeManifest(path.join(dir, 'tools.json'))
-    const port = await freePort()
     worker = spawn('uv', ['run', '--frozen', 'python', '-m', 'scadbuddy_durable'], {
       cwd: DURABLE_DIR,
       env: {
@@ -107,7 +98,7 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
         SCADBUDDY_SECRET_KEY_FILE: path.join(dir, 'kek'),
         SCADBUDDY_DURABLE_TOOLS_JSON: path.join(dir, 'tools.json'),
         SCADBUDDY_DURABLE_CWD: dir,
-        SCADBUDDY_DURABLE_HEALTH_PORT: String(port),
+        SCADBUDDY_DURABLE_HEALTH_PORT: '0',
         SCADBUDDY_DURABLE_SCRIPTED: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -116,11 +107,15 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     worker.stderr?.on('data', (d: Buffer) => (workerLog += d.toString()))
     // uv may sync the worker's environment first.
     const deadline = Date.now() + 240_000
+    let port: number | undefined
     for (;;) {
       if (worker.exitCode !== null) throw new Error(`the durable worker exited: ${workerLog}`)
-      const status = await fetch(`http://127.0.0.1:${port}/healthz`)
-        .then((r) => r.json() as Promise<{ worker?: string }>)
-        .catch(() => undefined)
+      port ??= durableHealthPort(workerLog)
+      const status = port === undefined
+        ? undefined
+        : await fetch(`http://127.0.0.1:${port}/healthz`)
+            .then((r) => r.json() as Promise<{ worker?: string }>)
+            .catch(() => undefined)
       if (status?.worker === 'running') break
       if (status?.worker && status.worker !== 'starting') throw new Error(`the durable worker is ${status.worker}: ${workerLog}`)
       if (Date.now() > deadline) throw new Error(`the durable worker did not start: ${workerLog}`)

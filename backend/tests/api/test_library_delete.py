@@ -12,7 +12,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from tests.api.test_send import BASE, configure
-from tests.support.operations import press
+from tests.support.operations import press, subjects
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -64,6 +64,25 @@ def test_one_file_goes_to_bambuddy_s_trash(client: TestClient) -> None:
     }
     assert gone.called
     assert gone.calls.last.request.headers["X-API-Key"] == "s3cret"
+
+
+@respx.mock
+def test_one_file_s_delete_names_the_file_as_its_subject(client: TestClient) -> None:
+    """#3856: the Activity page's Subject filter finds the operation by its file."""
+    configure(client)
+    files((89, False), (90, False))
+    queue()
+    respx.delete(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(200, json={"status": "success", "trashed": True})
+    )
+    respx.post(f"{API}/library/bulk-delete").mock(
+        return_value=httpx.Response(200, json={"deleted_files": 0, "deleted_folders": 0})
+    )
+
+    assert delete(client, 89).status_code == 200
+    assert delete(client, 89, 90).status_code == 200
+
+    assert subjects(client, "library_file_delete") == ["library:89", "library-files"]
 
 
 @respx.mock

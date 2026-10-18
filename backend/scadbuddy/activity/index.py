@@ -150,8 +150,13 @@ _VISIBLE = sql.SQL("source <> ''")
 #: subject ``library:<id>``; an output's run its bare id (``run_subject``) and its subject
 #: ``output:<id>``. Both are read as the ``kind:id`` key; the rows keep what was written.
 #: A model slug of exactly 32 hex digits would read as an output: none is made that way.
+#: The mapping is written three times: :data:`_SUBJECT_KEY` (SQL), :func:`subject_key`
+#: (Python) and ``subjectKey`` in frontend/src/mocks/features/activity.ts (the msw mock).
+#: Change all three together; a test pins only the first two against each other.
 _LIBRARY_RUN = re.compile(r"library-([0-9]+)")
 _OUTPUT_ID = re.compile(r"[0-9a-f]{32}")
+# The subject filter compares this expression, so a plain index on ``activity.subject``
+# cannot serve it: one added for that filter has to be an expression index on this CASE.
 _SUBJECT_KEY = sql.SQL(
     "CASE WHEN subject ~ '^library-[0-9]+$' THEN 'library:' || substr(subject, 9)"
     " WHEN subject ~ '^[0-9a-f]{32}$' THEN 'output:' || subject ELSE subject END"
@@ -160,7 +165,8 @@ _SUBJECT_KEY = sql.SQL(
 
 def subject_key(subject: str) -> str:
     """``subject`` as :data:`_SUBJECT_KEY` reads it: the key one subject is counted and
-    filtered under, whichever spelling wrote it."""
+    filtered under, whichever spelling wrote it. The msw mock's ``subjectKey`` copies it
+    too (see the note above ``_LIBRARY_RUN``)."""
     if match := _LIBRARY_RUN.fullmatch(subject):
         return f"library:{match[1]}"
     if _OUTPUT_ID.fullmatch(subject):

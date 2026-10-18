@@ -96,6 +96,7 @@ def test_a_saved_key_is_sealed_in_its_row_and_reads_back(
             bambuddy_api_key="full-key-123456",
             bambuddy_render_api_key="render-key-123456",
             google_fonts_api_key="fonts-key-123456",
+            store_s3_secret_access_key="s3-key-123456",
         )
     )
     rows = _rows(keyed.database_url)
@@ -111,6 +112,27 @@ def test_a_saved_key_is_sealed_in_its_row_and_reads_back(
     assert store.snapshot().sources["bambuddy_api_key"] == "stored"
     render = load_render_store_settings(store.pool, keyed)
     assert render.api_key == "render-key-123456"
+
+
+def test_the_secret_access_key_is_sealed_and_opens_for_render_workers(
+    store: SettingsStore, keyed: Settings
+) -> None:
+    store.save(
+        SettingsPatch(
+            store_s3_endpoint="http://garage:3900",
+            store_s3_bucket="sb",
+            store_s3_access_key_id="GK1",
+            store_s3_secret_access_key="s3-key-123456",
+        )
+    )
+    # Readiness reads the sealed row opened: a switch to s3 is not refused.
+    store.save(SettingsPatch(store_backend="s3"))
+    rows = _rows(keyed.database_url)
+    assert set(rows["store_s3_secret_access_key"]) == {"sealed"}
+    assert "123456" not in json.dumps(rows)
+    assert store.load().store_s3_secret_access_key == "s3-key-123456"
+    render = load_render_store_settings(store.pool, keyed)
+    assert render.s3 is not None and render.s3.secret_access_key == "s3-key-123456"
 
 
 def test_a_cleared_key_stays_a_null_row(store: SettingsStore, keyed: Settings) -> None:
