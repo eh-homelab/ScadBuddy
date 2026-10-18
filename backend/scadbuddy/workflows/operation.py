@@ -20,7 +20,12 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
+from temporalio.common import (
+    RetryPolicy,
+    SearchAttributeKey,
+    SearchAttributeUpdate,
+    VersioningBehavior,
+)
 from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
@@ -233,3 +238,22 @@ class OperationWorkflow:
         """§4.2's attributes: identifiers and states only, never content."""
         if self.search_attributes:
             workflow.upsert_search_attributes(list(pairs))
+
+
+@workflow.defn(name=OPERATION_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedOperationWorkflow(OperationWorkflow):
+    """``Operation`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE, as it is
+    on ``scadbuddy-print`` (`client.print_deployment`, #2066), although a command is
+    short. A Kubernetes rollout stops each old replica within its termination grace
+    (30 s), and a library kind runs for up to its ``run_timeout`` (minutes: a pin's
+    clone, a copy, a font install): Pinned, a run whose attempt the old build's last
+    replica was holding would retry on a version nothing polls any more, and its record
+    would stay ``running`` until someone moved it by hand. AUTO_UPGRADE moves it to the
+    current build at its next task, which replays it; the committed histories
+    (``tests/test_operation_replay.py``) hold that, as they do for the print worker's.
+    Its own class because an unversioned worker cannot complete a workflow that
+    declares a behavior (the API's in-process ``bambuddy`` worker)."""
+
+    @workflow.run
+    async def run(self, input: OperationInput) -> Operation:
+        return await super().run(input)

@@ -27,6 +27,7 @@ from scadbuddy.flows.agent_tools import AgentTools, AgentToolsUnavailableError
 from scadbuddy.main import create_app
 from scadbuddy.render import submit as submit_module
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.workflows.client import DEPLOYMENT_NAME, LIBRARY_DEPLOYMENT_NAME
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
 from scadbuddy.workflows.previews import preview_schedule_id_for
@@ -194,7 +195,7 @@ def _clients_wait_for_the_render_build(
 ) -> None:
     """Every `TestClient` an api test enters (this module's `client`, a module's own,
     one around `create_app`) is handed over once its app's in-process worker's build
-    serves the render queue: a render started before then waits unrouted, and on a
+    serves the render and library queues: a render started before then waits unrouted, and on a
     loaded host (the dev server's SetCurrentVersion taking 10 s) outlived the submit's
     deadline as a 503. An app with no in-process worker is not waited on."""
     enter = TestClient.__enter__
@@ -205,22 +206,29 @@ def _clients_wait_for_the_render_build(
         settings = state.settings if isinstance(state, AppState) else None
         if settings is None or not settings.temporal_worker_inprocess:
             return test_client
-        queue, build_id = settings.temporal_task_queue_render, settings.revision
-        serving = workflow_reaper.run(
-            wait_until_build_serves(
-                _reaper_client(workflow_reaper),
-                queue,
-                build_id,
-                timeout=BUILD_SERVES_TIMEOUT,
-                poll=BUILD_SERVES_POLL,
-                max_poll=BUILD_SERVES_MAX_POLL,
-            ),
-            # Past the wait's own bound by its last check's describe.
-            timeout=BUILD_SERVES_TIMEOUT + 10,
-        )
-        if not serving:
-            self.__exit__(None, None, None)
-            pytest.fail(f"build {build_id!r} never came to serve task queue {queue!r}")
+        build_id = settings.revision
+        # The library queue too (#4090): its worker is a version of its own deployment,
+        # and a command started before that version routes the queue waits unrouted.
+        for queue, deployment in (
+            (settings.temporal_task_queue_render, DEPLOYMENT_NAME),
+            (settings.temporal_task_queue_library, LIBRARY_DEPLOYMENT_NAME),
+        ):
+            serving = workflow_reaper.run(
+                wait_until_build_serves(
+                    _reaper_client(workflow_reaper),
+                    queue,
+                    build_id,
+                    timeout=BUILD_SERVES_TIMEOUT,
+                    poll=BUILD_SERVES_POLL,
+                    max_poll=BUILD_SERVES_MAX_POLL,
+                    deployment_name=deployment,
+                ),
+                # Past the wait's own bound by its last check's describe.
+                timeout=BUILD_SERVES_TIMEOUT + 10,
+            )
+            if not serving:
+                self.__exit__(None, None, None)
+                pytest.fail(f"build {build_id!r} never came to serve task queue {queue!r}")
         return test_client
 
     monkeypatch.setattr(TestClient, "__enter__", entered)

@@ -11,14 +11,17 @@ sweep is best effort, as the loop's were: one that fails is logged, fails its ac
 (the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
 tries again.
 
-The ``library`` worker is unversioned (unlike the render worker), so a run left open
-across a deploy replays on the new code: ``Housekeeping.run`` must stay
-replay-compatible. A change to its command sequence (a step added, the loop reordered)
-goes behind ``workflow.patched``. A run that fails on replay anyway ends at its
-`housekeeping_timeout`. Activities are not covered by that: a replica still on the old
-build takes a sweep the new one added to `SWEEPS` and fails it as unregistered, and a
-sweep is not retried, so it waits for the next tick. A release that adds a sweep is
-rolled out with ``Recreate`` (README, "Uploaded files").
+The ``library`` worker is versioned (#4090): the ``scadbuddy-library`` Worker
+Deployment, each API build one version of it, made current at start
+(`main._run_library_worker`). ``Housekeeping`` is AUTO_UPGRADE
+(`VersionedHousekeeping`): a run outlives a rollout (up to its `housekeeping_timeout`),
+so it moves to the current build on its next workflow task and replays there.
+``Housekeeping.run`` must stay replay-compatible: a change to its command sequence (a
+step added, the loop reordered) goes behind ``workflow.patched``. A run that fails on
+replay anyway ends at its `housekeeping_timeout`. The activity tasks of an
+AUTO_UPGRADE run start on the run's target version, the current build, so a sweep a
+new build adds to `SWEEPS` is never handed to an old replica that would fail it as
+unregistered; an old replica only finishes the attempts it had already started.
 """
 
 from __future__ import annotations
@@ -42,10 +45,10 @@ from temporalio.client import (
     ScheduleUpdate,
     ScheduleUpdateInput,
 )
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, VersioningBehavior
 from temporalio.exceptions import ActivityError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.worker import Worker, WorkflowRunner
+from temporalio.worker import Worker, WorkerDeploymentConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 with workflow.unsafe.imports_passed_through():
@@ -237,6 +240,20 @@ class Housekeeping:
         return failed
 
 
+@workflow.defn(name=HOUSEKEEPING_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedHousekeeping(Housekeeping):
+    """``Housekeeping`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE: a
+    Schedule's run lasts up to its `housekeeping_timeout`, longer than a rollout, and
+    Pinned it would hold the old build's last replica until it ended or be stranded
+    when that replica stopped. Its own class because an unversioned worker cannot
+    complete a workflow that declares a behavior (the tests' workers). Changes still
+    go behind ``workflow.patched``, in ``Housekeeping``."""
+
+    @workflow.run
+    async def run(self, sweeps: list[str] | None = None) -> list[str]:
+        return await super().run(sweeps)
+
+
 def library_worker(
     client: Client,
     task_queue: str,
@@ -245,6 +262,7 @@ def library_worker(
     workflows: Sequence[type] = (),
     workflow_runner: WorkflowRunner | None = None,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
+    deployment_config: WorkerDeploymentConfig | None = None,
 ) -> Worker:
     """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
     library commands' ``Operation``, the preview backfill). A stop gives a running
@@ -253,14 +271,20 @@ def library_worker(
     `main.SWEEP_SHUTDOWN_JOIN` more for its thread to return (#1708), so the lifespan
     does not close the stores under it. ``workflow_runner`` is the app's
     `client.sandboxed_runner` (#2014), passed in: this module runs in the sandbox, so
-    it does not import the client's."""
+    it does not import the client's. With ``deployment_config`` (the API's,
+    `client.library_deployment`, #4090) it is versioned and serves
+    `VersionedHousekeeping`, and every one of ``workflows`` must name its own
+    versioning behavior: the deployment has no default, so the SDK refuses one that
+    does not."""
+    housekeeping = Housekeeping if deployment_config is None else VersionedHousekeeping
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[Housekeeping, *workflows],
+        workflows=[housekeeping, *workflows],
         activities=activities,
         workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
+        deployment_config=deployment_config,
     )
 
 

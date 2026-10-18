@@ -6,8 +6,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
+from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import (
     CountWorkflowExecutionsRequest,
+    DescribeTaskQueueRequest,
     DescribeWorkerDeploymentRequest,
     SetWorkerDeploymentCurrentVersionRequest,
 )
@@ -48,6 +51,9 @@ RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
 #: The print worker's deployment (#1060, spec 2026-10-01 §5.5): `--queue bambuddy`.
 PRINT_DEPLOYMENT_NAME = "scadbuddy-print"
+#: The API's ``library`` worker's deployment (#4090): housekeeping, the preview
+#: backfill, the library commands, flow trigger fires and the store migration.
+LIBRARY_DEPLOYMENT_NAME = "scadbuddy-library"
 RPC_TIMEOUT = timedelta(seconds=10)
 
 logger = logging.getLogger(__name__)
@@ -206,6 +212,17 @@ def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
     )
 
 
+def library_deployment(build_id: str) -> WorkerDeploymentConfig:
+    """``scadbuddy-library`` at ``build_id`` (#4090), with no default behavior: the SDK
+    then refuses to build the worker unless every workflow on it names its own
+    (`housekeeping.library_worker`), so a workflow added to the queue cannot go
+    unversioned by default."""
+    return WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion(deployment_name=LIBRARY_DEPLOYMENT_NAME, build_id=build_id),
+        use_worker_versioning=True,
+    )
+
+
 async def make_current(
     client: Client,
     *,
@@ -244,6 +261,26 @@ async def current_routing(
     return current.build_id or None, response.conflict_token
 
 
+async def routes_to(
+    client: Client, task_queue: str, *, deployment_name: str, build_id: str
+) -> bool:
+    """Whether ``task_queue`` itself routes new work to ``build_id`` of
+    ``deployment_name``: `DescribeTaskQueue`'s versioning info, what matching routes
+    by. A version is current in the deployment a moment before its queues hear of it
+    (0.2-0.3 s on the dev server, #4090); until then the previous build still gets the
+    queue's new tasks."""
+    described = await client.workflow_service.describe_task_queue(
+        DescribeTaskQueueRequest(
+            namespace=client.namespace,
+            task_queue=TaskQueue(name=task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL),
+            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+    current = described.versioning_info.current_deployment_version
+    return current.deployment_name == deployment_name and current.build_id == build_id
+
+
 async def is_current(
     client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
 ) -> bool:
@@ -276,6 +313,7 @@ async def drained(
 
 __all__ = [
     "DEPLOYMENT_NAME",
+    "LIBRARY_DEPLOYMENT_NAME",
     "PRINT_DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
@@ -284,9 +322,11 @@ __all__ = [
     "drained",
     "follow_worker",
     "is_current",
+    "library_deployment",
     "make_current",
     "pydantic_data_converter",
     "render_worker",
+    "routes_to",
 ]
 
 
