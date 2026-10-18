@@ -33,6 +33,7 @@ from scadbuddy.render.bambu3mf import (
     PRODUCTION_NS,
     SLOT_HINT_NAME,
     ArchiveTooLargeError,
+    FilamentMap,
     PlateParts,
     cover_names,
     hint_painted_slots,
@@ -456,6 +457,90 @@ def _with_entries(payload: bytes, extra: dict[str, bytes]) -> bytes:
         for name, data in extra.items():
             out.writestr(name, data)
     return buffer.getvalue()
+
+
+def _plates_of(payload: bytes) -> list[dict[str, str]]:
+    """Each ``<plate>``'s metadata in ``payload``'s model settings, as key → value."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = ET.fromstring(archive.read("Metadata/model_settings.config"))
+    return [
+        {entry.get("key", ""): entry.get("value", "") for entry in plate.findall("metadata")}
+        for plate in root.findall("plate")
+    ]
+
+
+#: Green right, black left (#3955), High Flow on both sides, chosen by hand.
+PINNED = FilamentMap(("2", "1"), ("1", "1"), pinned=True)
+
+
+def test_a_map_chosen_by_hand_is_stated_on_every_plate_in_nozzle_manual_mode(
+    written: Path,
+) -> None:
+    """#3955: the deployed slicer follows a plate's "Nozzle Manual" map, with the
+    project's ``filament_nozzle_map``, and regroups the project's own Manual one."""
+    payload = add_plate(written, 2).read_bytes()
+    for stated in (
+        replate_3mf(payload, plate_for("H2C"), nozzle_diameter="0.4", filament_map=PINNED),
+        state_nozzles(payload, filament_map=PINNED),
+    ):
+        expected = {
+            "filament_map_mode": "Nozzle Manual",
+            "filament_maps": "2 1",
+            "filament_volume_maps": "1 1",
+        }
+        plates = _plates_of(stated)
+        assert len(plates) == 2
+        assert all(expected.items() <= plate.items() for plate in plates)
+        settings = _settings_of_bytes(stated)
+        assert settings["filament_map"] == ["2", "1"]
+        assert settings["filament_volume_map"] == ["1", "1"]
+        # One nozzle per side: the filaments on a side share it.
+        assert settings["filament_nozzle_map"] == ["1", "0"]
+
+
+def test_a_plates_own_map_is_replaced_by_the_one_chosen_by_hand(written: Path) -> None:
+    """An author's plate may state a map of its own; the plate keeps one of each key."""
+    with zipfile.ZipFile(io.BytesIO(written.read_bytes())) as archive:
+        config = archive.read("Metadata/model_settings.config").decode()
+    own = config.replace(
+        "<plate>\n",
+        '<plate>\n    <metadata key="filament_map_mode" value="Auto For Flush"/>\n'
+        '    <metadata key="filament_maps" value="1 1"/>\n',
+        1,
+    )
+    payload = _with_entries(written.read_bytes(), {"Metadata/model_settings.config": own.encode()})
+
+    stated = state_nozzles(payload, filament_map=PINNED)
+
+    with zipfile.ZipFile(io.BytesIO(stated)) as archive:
+        text = archive.read("Metadata/model_settings.config").decode()
+    assert text.count('key="filament_map_mode"') == 1
+    assert text.count('key="filament_maps"') == 1
+    [plate] = _plates_of(stated)
+    assert plate["filament_map_mode"] == "Nozzle Manual"
+    assert plate["filament_maps"] == "2 1"
+
+
+def test_a_planned_map_leaves_the_plates_to_the_slicers_grouping(written: Path) -> None:
+    """#3955: with no side chosen by hand the slicer's Auto For Flush groups the
+    filaments, within the sides the nozzle stats offer, as before."""
+    planned = FilamentMap(("2", "1"), ("1", "1"))
+    payload = written.read_bytes()
+    for stated in (
+        replate_3mf(payload, plate_for("H2C"), nozzle_diameter="0.4", filament_map=planned),
+        state_nozzles(payload, filament_map=planned),
+    ):
+        assert all("filament_map_mode" not in plate for plate in _plates_of(stated))
+        assert "filament_nozzle_map" not in _settings_of_bytes(stated)
+
+
+def test_a_pinned_map_of_another_count_is_not_stated(written: Path) -> None:
+    """The slicer indexes the map by filament: one that does not fit is left out."""
+    stated = state_nozzles(
+        written.read_bytes(), filament_map=FilamentMap(("1",), ("0",), pinned=True)
+    )
+    assert all("filament_map_mode" not in plate for plate in _plates_of(stated))
+    assert "filament_nozzle_map" not in _settings_of_bytes(stated)
 
 
 def test_stating_the_nozzles_of_a_library_file_changes_nothing_else(written: Path) -> None:

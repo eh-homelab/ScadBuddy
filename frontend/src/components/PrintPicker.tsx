@@ -1542,7 +1542,12 @@ export function PrintPicker({
                             value={nozzles}
                             onChange={picker.changeNozzles}
                           />
-                          <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
+                          <NozzlePlanStep
+                            plan={check.verdict?.nozzle_plan}
+                            sides={selection.sides}
+                            onSide={picker.setSide}
+                            keepsSides={!multiPlate}
+                          />
                           {check.verdict?.rack && (
                             <RackNozzleStep
                               rack={check.verdict.rack}
@@ -1655,6 +1660,7 @@ export function PrintPicker({
                 colors={previewColors}
                 slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, single ?? 'all') : previewSlice.result}
                 nozzlePlan={previewSlice.plan}
+                keepsSides={!multiPlate}
                 plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
                   // The plates offered: a sliced file's own, not every plate Bambuddy lists.
                   plates: plates.length,
