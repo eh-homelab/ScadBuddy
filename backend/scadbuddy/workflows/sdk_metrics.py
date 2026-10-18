@@ -23,7 +23,7 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 logger = logging.getLogger(__name__)
 
 #: How long a scrape waits for the exporter before it answers without it.
-READ_TIMEOUT = 2.0
+SDK_READ_TIMEOUT = 2.0
 
 
 @functools.cache
@@ -37,13 +37,13 @@ def sdk_runtime(port: int) -> Runtime:
     )
 
 
-async def sdk_exposition(port: int) -> bytes:
-    """The exporter's text, or nothing when it does not answer: a scrape never fails
+async def sdk_exposition(port: int, client: httpx.AsyncClient) -> bytes:
+    """The exporter's text, read with ``client`` (one per health server, so a scrape
+    reuses its connection), or nothing when it does not answer: a scrape never fails
     for it, it just lacks the SDK's series that once."""
     try:
-        async with httpx.AsyncClient(timeout=READ_TIMEOUT) as client:
-            response = await client.get(f"http://127.0.0.1:{port}/metrics")
-            response.raise_for_status()
+        response = await client.get(f"http://127.0.0.1:{port}/metrics")
+        response.raise_for_status()
     except httpx.HTTPError as err:
         logger.debug("the Temporal SDK's metrics could not be read: %s", err)
         return b""

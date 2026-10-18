@@ -738,19 +738,22 @@ workers restart.
     `asyncio.to_thread`: an activity that starts with one waits for a free thread
     while the loop runs on. For a hang it does not catch,
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
-  - Every worker's `/metrics` also carries the Temporal SDK's own series (#3788):
-    `temporal_workflow_task_execution_latency`, `temporal_workflow_task_schedule_to_start_latency`,
-    `temporal_activity_schedule_to_start_latency` and the rest, in seconds. The SDK exports
-    them on loopback (`SCADBUDDY_TEMPORAL_SDK_METRICS_PORT`, 9464; 0 turns it off) and the
-    worker appends them to its own exposition, so the scrape target is unchanged. Their
-    `namespace` label is the Temporal namespace, which Prometheus keeps as
-    `exported_namespace`.
     The renders dashboard's "Worker event loops" panel charts the render and print
     workers by `job="scadbuddy-render"` and `job="scadbuddy-print"`. Each `job` is
     the name of the worker's Service, which its ServiceMonitor scrapes (eh-homelab/clusters
     `applications/scadbuddy/scadbuddy-{render,print}.yaml`, no `jobLabel`), so renaming
     either Service empties its series. `scadbuddy-projects` has no scrape target, so
     its stalls show only in its log.
+  - Every worker's `/metrics` also carries the Temporal SDK's own series (#3788):
+    `temporal_workflow_task_execution_latency`, `temporal_workflow_task_schedule_to_start_latency`,
+    `temporal_activity_schedule_to_start_latency` and the rest, in seconds. The SDK exports
+    them on loopback (`SCADBUDDY_TEMPORAL_SDK_METRICS_PORT`, 9464; 0 turns it off) and the
+    worker appends them to its own exposition, so the scrape target is unchanged. Their
+    `namespace` label is the Temporal namespace, which Prometheus keeps as
+    `exported_namespace`. A port another process holds leaves a worker without them
+    (logged once at start) rather than stopping it. The renders dashboard's "Worker
+    Temporal tasks" panel charts them for the render and print workers; the projects
+    worker exports them too, but with no scrape target nothing reads them.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.

@@ -12,13 +12,14 @@ import os
 import signal
 import socket
 import time
-from collections.abc import Awaitable, Callable, Generator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.applications import Starlette
@@ -106,7 +107,7 @@ from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.projects_worker import projects_worker
-from scadbuddy.workflows.sdk_metrics import sdk_exposition, sdk_runtime
+from scadbuddy.workflows.sdk_metrics import SDK_READ_TIMEOUT, sdk_exposition, sdk_runtime
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -638,10 +639,19 @@ def _health_app(
                 logger.exception("could not read the store's gauges")
         body = generate_latest(metrics.registry)
         if sdk_port is not None:
-            body += await sdk_exposition(sdk_port)
+            body += await sdk_exposition(sdk_port, sdk_reader)
         return Response(body, media_type=CONTENT_TYPE_LATEST)
 
-    return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
+    @contextlib.asynccontextmanager
+    async def lifespan(_: Starlette) -> AsyncIterator[None]:
+        async with sdk_reader:
+            yield
+
+    # One connection to the SDK's exporter for every scrape, closed with the server.
+    sdk_reader = httpx.AsyncClient(timeout=SDK_READ_TIMEOUT)
+    return Starlette(
+        routes=[Route("/healthz", healthz), Route("/metrics", exposition)], lifespan=lifespan
+    )
 
 
 #: Where a worker serves /healthz and /metrics: a port to bind, or a socket already
@@ -652,9 +662,31 @@ HealthListen = int | socket.socket
 
 def _sdk_runtime(settings: Settings) -> tuple[Runtime | None, int | None]:
     """The Runtime a worker connects with when it connects for itself, and the port
-    its /metrics reads the SDK's series from (#3788); neither when the port is 0."""
+    its /metrics reads the SDK's series from (#3788); neither when the port is 0, or
+    when the exporter cannot bind it: the series are optional, the worker is not."""
     port = settings.temporal_sdk_metrics_port
-    return (sdk_runtime(port), port) if port else (None, None)
+    if not port:
+        return None, None
+    try:
+        return sdk_runtime(port), port
+    except ValueError as err:
+        # The SDK raises ValueError when its exporter's port is taken (two workers in
+        # one network namespace, as in a compose or dev run).
+        logger.warning("serving no Temporal SDK metrics on port %d: %s", port, err)
+        return None, None
+
+
+async def _own_client(settings: Settings, client: Client | None) -> tuple[Client, int | None]:
+    """``client``, or one this worker connects for itself on the SDK metrics Runtime,
+    and the port its /metrics reads them from: none for a client it was handed, whose
+    Runtime it did not choose."""
+    if client is not None:
+        return client, None
+    runtime, sdk_port = _sdk_runtime(settings)
+    return (
+        await connect(settings.temporal_address, settings.temporal_namespace, runtime=runtime),
+        sdk_port,
+    )
 
 
 def _health_server(
@@ -770,12 +802,7 @@ async def run_worker(
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
-        sdk_port: int | None = None
-        if client is None:
-            runtime, sdk_port = _sdk_runtime(settings)
-            client = await connect(
-                settings.temporal_address, settings.temporal_namespace, runtime=runtime
-            )
+        client, sdk_port = await _own_client(settings, client)
         server = (
             _health_server(
                 settings,
@@ -941,12 +968,7 @@ async def run_print_worker(
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
         await deps.events.start()
-        sdk_port: int | None = None
-        if client is None:
-            runtime, sdk_port = _sdk_runtime(settings)
-            client = await connect(
-                settings.temporal_address, settings.temporal_namespace, runtime=runtime
-            )
+        client, sdk_port = await _own_client(settings, client)
         queue = settings.temporal_task_queue_bambuddy
         build_id = settings.revision
         workers = [

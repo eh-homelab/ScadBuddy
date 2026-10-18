@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import uuid
 from datetime import timedelta
+from typing import cast
 
 import httpx
 import pytest
@@ -54,14 +55,16 @@ async def test_a_client_on_the_sdk_runtime_exports_workflow_task_latency() -> No
                 execution_timeout=timedelta(seconds=30),
             )
         assert result == "hi"
-        text = (await sdk_exposition(port)).decode()
+        async with httpx.AsyncClient() as http:
+            text = (await sdk_exposition(port, http)).decode()
     # The series #3788 found missing from the worker's exposition.
     assert "temporal_workflow_task_execution_latency" in text
     assert "temporal_workflow_task_schedule_to_start_latency" in text
 
 
 async def test_nothing_listening_reads_as_no_sdk_series() -> None:
-    assert await sdk_exposition(_free_port()) == b""
+    async with httpx.AsyncClient() as http:
+        assert await sdk_exposition(_free_port(), http) == b""
 
 
 async def test_metrics_appends_the_sdk_series_only_with_a_port(
@@ -69,7 +72,7 @@ async def test_metrics_appends_the_sdk_series_only_with_a_port(
 ) -> None:
     asked: list[int] = []
 
-    async def fake(port: int) -> bytes:
+    async def fake(port: int, _: httpx.AsyncClient) -> bytes:
         asked.append(port)
         return b"temporal_workflow_task_execution_latency_count 3\n"
 
@@ -93,3 +96,34 @@ def test_the_runtime_is_built_once_per_port() -> None:
 def test_port_zero_turns_the_sdk_metrics_off(settings: Settings) -> None:
     off = settings.model_copy(update={"temporal_sdk_metrics_port": 0})
     assert worker_module._sdk_runtime(off) == (None, None)
+
+
+def test_a_taken_port_serves_no_sdk_metrics_rather_than_stopping_the_worker(
+    settings: Settings,
+) -> None:
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        taken = settings.model_copy(update={"temporal_sdk_metrics_port": held.getsockname()[1]})
+        assert worker_module._sdk_runtime(taken) == (None, None)
+
+
+async def test_a_worker_reads_the_sdk_series_only_from_a_client_it_connected(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtimes: list[object] = []
+    own = cast(Client, "own")
+
+    async def fake_connect(address: str, namespace: str, *, runtime: object = None) -> Client:
+        runtimes.append(runtime)
+        return own
+
+    monkeypatch.setattr(worker_module, "connect", fake_connect)
+    port = _free_port()
+    cfg = settings.model_copy(update={"temporal_sdk_metrics_port": port})
+
+    handed = cast(Client, "handed")
+    assert await worker_module._own_client(cfg, handed) == (handed, None)
+    assert runtimes == []
+    assert await worker_module._own_client(cfg, None) == (own, port)
+    assert runtimes == [sdk_runtime(port)]
