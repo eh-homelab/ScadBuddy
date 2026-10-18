@@ -271,6 +271,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS: where the agent service serves its tools
     # as activities (#1055); a flow's `tool(...)` calls them there (#1057).
     temporal_task_queue_agent_tools: str = "agent-tools"
+    # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
+    # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
+    # it off.
+    temporal_sdk_metrics_port: int = 9464
     # SCADBUDDY_AGENT_INTERNAL_URL: the agent sidecar beside this API, on the pod's
     # loopback (#2704). The flow routes read the agent's tools and their tiers from it
     # (agent/src/routes/flowTools.ts), and refuse when it does not answer.
@@ -520,6 +524,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " together; a form only the API reads would split them."
         ),
         "temporal_namespace": "Paired with the Temporal address; set with it by the deployment.",
+        "temporal_sdk_metrics_port": (
+            "A loopback port each worker's Temporal SDK exports on, read by that worker's"
+            " /metrics (#3788). Fixed by the deployment, like the workers' other Temporal"
+            " settings: only a worker process reads it."
+        ),
         "temporal_task_queue_render": (
             "Paired with the Temporal address: the API and the render workers must name the"
             " same queue, and only the deployment sets both."

@@ -11,6 +11,7 @@ from typing import Any
 from temporal_agent_harness.plugin import AgentHarnessPlugin
 from temporalio.client import Client
 from temporalio.contrib.opentelemetry import TracingInterceptor
+from temporalio.runtime import Runtime
 
 from scadbuddy.workflows.payload_codec import PayloadKeys, flows_converter
 
@@ -22,7 +23,12 @@ def harness_plugins(tools: Sequence[Callable[..., Any]]) -> list[AgentHarnessPlu
 
 
 async def connect_flows(
-    address: str, namespace: str, keys: PayloadKeys, *, lazy: bool = False
+    address: str,
+    namespace: str,
+    keys: PayloadKeys,
+    *,
+    lazy: bool = False,
+    runtime: Runtime | None = None,
 ) -> Client:
     return await Client.connect(
         address,
@@ -30,4 +36,5 @@ async def connect_flows(
         data_converter=flows_converter(keys),
         lazy=lazy,
         interceptors=[TracingInterceptor()],
+        runtime=runtime,
     )
