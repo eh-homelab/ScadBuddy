@@ -23,6 +23,10 @@ pub struct WorkerSettings {
     /// group is killed and its failure reported before the pod is: the retry then starts
     /// at once instead of after the heartbeat timeout.
     pub shutdown_grace: Duration,
+    /// The longest the SDK holds back a heartbeat ([`sb_slicer::runner::KEEPALIVE`] outside
+    /// tests). Its own default is 80% of the heartbeat timeout (48 s under spec §5.2's
+    /// 60 s), and a cancel reaches the activity only in a heartbeat's answer.
+    pub heartbeat_throttle: Duration,
 }
 
 /// Serves `activities` on `settings.task_queue` until `stop` resolves (SIGTERM, in
@@ -40,6 +44,7 @@ pub async fn run_worker(
         .register_activities(activities)
         .tuner(tuner(settings.concurrency))
         .graceful_shutdown_period(settings.shutdown_grace)
+        .max_heartbeat_throttle_interval(settings.heartbeat_throttle)
         .build();
     let mut worker =
         Worker::new(runtime, client, options).context("could not create the worker")?;

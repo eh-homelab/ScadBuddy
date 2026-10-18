@@ -2159,6 +2159,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "futures",
  "prometheus",
  "sb-slicer",
  "sb-temporal",

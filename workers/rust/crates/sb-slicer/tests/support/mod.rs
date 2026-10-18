@@ -25,6 +25,8 @@ use sb_transfer::Transfer;
 pub struct Seen {
     pub gets: Vec<String>,
     pub puts: BTreeMap<String, Vec<u8>>,
+    /// How long `/stall/...` and `/stall-sink/...` wait before they answer.
+    pub stall: StdDuration,
 }
 
 pub type Shared = Arc<Mutex<Seen>>;
@@ -39,12 +41,27 @@ async fn sink(State(s): State<Shared>, UrlPath(name): UrlPath<String>, body: Byt
     StatusCode::OK
 }
 
-/// `GET /blob/{name}` answers `contents of {name}`; `PUT /sink/{name}` keeps the body.
+async fn stalled_blob(state: State<Shared>, name: UrlPath<String>) -> String {
+    let stall = state.lock().unwrap().stall;
+    tokio::time::sleep(stall).await;
+    blob(state, name).await
+}
+
+async fn stalled_sink(state: State<Shared>, name: UrlPath<String>, body: Bytes) -> StatusCode {
+    let stall = state.lock().unwrap().stall;
+    tokio::time::sleep(stall).await;
+    sink(state, name, body).await
+}
+
+/// `GET /blob/{name}` answers `contents of {name}`; `PUT /sink/{name}` keeps the body;
+/// `/stall/{name}` and `/stall-sink/{name}` do the same after `Seen::stall`.
 pub async fn serve() -> (String, Shared) {
     let state: Shared = Arc::default();
     let app = Router::new()
         .route("/blob/{name}", get(blob))
         .route("/sink/{name}", put(sink))
+        .route("/stall/{name}", get(stalled_blob))
+        .route("/stall-sink/{name}", put(stalled_sink))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -90,6 +107,7 @@ pub fn activities(mode: &str) -> SlicerActivities {
         cli: fake(mode),
         transfer: Transfer::new(),
         stages: Stages::register(&prometheus::Registry::new()),
+        keepalive: sb_slicer::runner::KEEPALIVE,
     }
 }
 

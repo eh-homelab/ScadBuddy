@@ -300,13 +300,7 @@ impl Coalesce {
 
     fn repeat(&mut self, on_progress: &mut impl FnMut(SliceProgress)) {
         self.called = Instant::now();
-        on_progress(self.sent.clone().unwrap_or(SliceProgress {
-            plate_index: 0,
-            plate_count: 0,
-            plate_percent: 0,
-            total_percent: 0,
-            message: String::new(),
-        }));
+        on_progress(self.sent.clone().unwrap_or_default());
     }
 
     fn due(&self) -> Option<Instant> {

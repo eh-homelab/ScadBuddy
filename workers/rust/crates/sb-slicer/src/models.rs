@@ -44,7 +44,7 @@ fn default_debug() -> u8 {
 }
 
 /// One heartbeat's details.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SliceProgress {
     pub plate_index: u32,
     pub plate_count: u32,

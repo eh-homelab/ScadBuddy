@@ -1,10 +1,12 @@
 //! The `slice_plate` activity (spec 2026-10-16 §5.2): download the inputs, run the CLI,
-//! heartbeat its progress, upload the output.
+//! upload the output, heartbeating throughout: the CLI's progress as it comes, and the
+//! last progress again at least every `keepalive`, transfers included.
 
 use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sb_temporal::Stages;
 use sb_transfer::{Transfer, TransferError, Transferred};
@@ -14,7 +16,7 @@ use tracing::Instrument as _;
 use tracing::field::Empty;
 
 use crate::error;
-use crate::models::{SlicePlateInput, SlicePlateOutput, TransferUrl};
+use crate::models::{SlicePlateInput, SlicePlateOutput, SliceProgress, TransferUrl};
 use crate::runner::{self, RunError, RunRequest};
 
 /// The activity's type name, what callers start it by (spec §5.2).
@@ -32,6 +34,10 @@ pub struct SlicerActivities {
     pub cli: PathBuf,
     pub transfer: Transfer,
     pub stages: Stages,
+    /// The longest the activity goes without a heartbeat ([`runner::KEEPALIVE`] outside
+    /// tests): Temporal fails an activity silent past its heartbeat timeout and delivers
+    /// cancellation only on a heartbeat, so a slow transfer must beat too.
+    pub keepalive: Duration,
 }
 
 #[activities]
@@ -43,7 +49,12 @@ impl SlicerActivities {
         ctx: ActivityContext,
         input: SlicePlateInput,
     ) -> Result<SlicePlateOutput, ActivityError> {
-        let span = tracing::info_span!("slice.plate", plate = input.plate, exit_code = Empty);
+        let span = tracing::info_span!(
+            "slice.plate",
+            plate = input.plate,
+            exit_code = Empty,
+            cancelled_pgid = Empty
+        );
         let cancel = CancellationToken::new();
         let watcher = tokio::spawn({
             let ctx = ctx.clone();
@@ -53,18 +64,41 @@ impl SlicerActivities {
                 cancel.cancel();
             }
         });
-        let result = slice(&self, &ctx, input, &cancel, &span)
+        let (progress, rx) = tokio::sync::mpsc::unbounded_channel();
+        let beats = tokio::spawn(heartbeat(ctx.clone(), rx, self.keepalive));
+        let result = slice(&self, input, &progress, &cancel, &span)
             .instrument(span.clone())
             .await;
         watcher.abort();
+        beats.abort();
         result
+    }
+}
+
+/// Heartbeats at once, then each progress `rx` delivers as it comes, and the last one
+/// again (zeroed before the first) whenever `keepalive` passes without one, until every
+/// sender is dropped or the task is aborted.
+async fn heartbeat(
+    ctx: ActivityContext,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<SliceProgress>,
+    keepalive: Duration,
+) {
+    let mut last = SliceProgress::default();
+    loop {
+        // Only a payload conversion can fail here, and a missed beat is harmless.
+        let _ = ctx.record_heartbeat(last.clone()).await;
+        match tokio::time::timeout(keepalive, rx.recv()).await {
+            Ok(Some(progress)) => last = progress,
+            Ok(None) => return,
+            Err(_) => {}
+        }
     }
 }
 
 async fn slice(
     acts: &SlicerActivities,
-    ctx: &ActivityContext,
     input: SlicePlateInput,
+    progress: &tokio::sync::mpsc::UnboundedSender<SliceProgress>,
     cancel: &CancellationToken,
     span: &tracing::Span,
 ) -> Result<SlicePlateOutput, ActivityError> {
@@ -113,29 +147,27 @@ async fn slice(
         arrange: input.arrange,
         allow_newer_file: input.allow_newer_file,
         debug: input.debug,
-        keepalive: runner::KEEPALIVE,
+        keepalive: acts.keepalive,
     };
 
-    // Progress goes through a channel so the callback stays synchronous and heartbeats
-    // keep their order; the channel closes when `run` returns and drops its sender.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let run = runner::run(
+    // Progress goes through the heartbeat task's channel so the callback stays
+    // synchronous and heartbeats keep their order.
+    let tx = progress.clone();
+    let outcome = runner::run(
         req,
         move |progress| {
             let _ = tx.send(progress);
         },
         cancel.clone(),
-    );
-    let beats = async {
-        while let Some(progress) = rx.recv().await {
-            // Only a payload conversion can fail here, and a missed beat is harmless.
-            let _ = ctx.record_heartbeat(progress).await;
-        }
-    };
-    let (outcome, ()) = tokio::join!(run, beats);
+    )
+    .await;
     let outcome = match outcome {
         Ok(o) => o,
-        Err(RunError::Cancelled { .. }) => return Err(ActivityError::cancelled()),
+        Err(RunError::Cancelled { pgid }) => {
+            // The killed group, so a process that outlived the kill can be traced to it.
+            span.record("cancelled_pgid", pgid);
+            return Err(ActivityError::cancelled());
+        }
         Err(e @ RunError::Io(_)) => return Err(error::local(e)),
     };
     // Every finished run, failed or not, as Python's `stage_duration` records them.
@@ -158,10 +190,11 @@ async fn slice(
         (Some(url), Some(dir)) => {
             let zip = at("slicedata.zip");
             let (src, dest) = (dir.clone(), zip.clone());
-            tokio::task::spawn_blocking(move || zip_dir(&src, &dest))
-                .await
-                .map_err(error::local)?
-                .map_err(error::local)?;
+            let zipping = tokio::task::spawn_blocking(move || zip_dir(&src, &dest));
+            tokio::select! {
+                () = cancel.cancelled() => return Err(ActivityError::cancelled()),
+                r = zipping => r.map_err(error::local)?.map_err(error::local)?,
+            }
             Some(unless_cancelled(cancel, acts.transfer.put(url, &zip)).await?)
         }
         _ => None,

@@ -7,9 +7,10 @@ mod support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::future::{Either, select};
 use sb_slicer::activity::{SLICE_PLATE, SLICER_ERROR, VALIDATION_EXIT};
 use sb_slicer::models::{SlicePlateInput, SlicePlateOutput};
 use scadbuddy_slicer::WorkerSettings;
@@ -20,8 +21,8 @@ use temporalio_common::{RetryPolicy, UntypedActivity};
 use temporalio_sdk::testing::{EphemeralExe, LocalWorkflowEnvironmentOptions, WorkflowEnvironment};
 use temporalio_sdk::workflows::{workflow, workflow_methods};
 use temporalio_sdk::{
-    ActivityExecutionError, ActivityOptions, Runtime, Worker, WorkerOptions, WorkflowContext,
-    WorkflowResult,
+    ActivityCancellationType, ActivityExecutionError, ActivityOptions, CancellableFuture as _,
+    Runtime, Worker, WorkerOptions, WorkflowContext, WorkflowResult,
 };
 
 /// The test workflow's queue: the worker under test registers no workflows.
@@ -32,12 +33,22 @@ const OK_QUEUE: &str = "slicer-test";
 const INVALID_QUEUE: &str = "slicer-test-192";
 const DRAIN_QUEUE: &str = "slicer-test-drain";
 const DRAIN_CALLER_QUEUE: &str = "slicer-test-drain-caller";
+const STALL_QUEUE: &str = "slicer-test-stall";
+const STALL_CALLER_QUEUE: &str = "slicer-test-stall-caller";
+const CANCEL_QUEUE: &str = "slicer-test-cancel";
+const CANCEL_CALLER_QUEUE: &str = "slicer-test-cancel-caller";
+/// The heartbeat timeout of the stalled-transfer tests, and their stall: well past it.
+const SHORT_HEARTBEAT: Duration = Duration::from_secs(2);
+const STALL: Duration = Duration::from_secs(5);
 
-/// The workflow's input: which slicer queue to call.
+/// The workflow's input: which slicer queue to call, its heartbeat timeout, and when (if
+/// ever) to cancel the activity.
 #[derive(Debug, Serialize, Deserialize)]
 struct Call {
     queue: String,
     input: SlicePlateInput,
+    heartbeat_timeout: Duration,
+    cancel_after: Option<Duration>,
 }
 
 /// What the workflow saw: the output, or how the activity failed.
@@ -66,16 +77,26 @@ impl SliceCaller {
     async fn run(ctx: &mut WorkflowContext<Self>, call: Call) -> WorkflowResult<Seen> {
         let options = ActivityOptions::with_start_to_close_timeout(Duration::from_secs(60))
             .task_queue(call.queue)
-            // Well above `sb_slicer::runner::KEEPALIVE` (10 s).
-            .heartbeat_timeout(Duration::from_secs(30))
+            .heartbeat_timeout(call.heartbeat_timeout)
+            // A cancel resolves when the activity reports it, not when it is requested.
+            .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
             .retry_policy(RetryPolicy::builder().maximum_attempts(1).build())
             .build();
         // By the activity's type name, as the Python caller starts it: the typed
         // reference would hide a registered name that differs.
         let input = RawValue::from_value(&call.input, ctx.payload_converter());
-        let result = ctx
-            .execute_activity(UntypedActivity::new(SLICE_PLATE), input, options)
-            .await;
+        let activity =
+            Box::pin(ctx.execute_activity(UntypedActivity::new(SLICE_PLATE), input, options));
+        let result = match call.cancel_after {
+            None => activity.await,
+            Some(after) => match select(activity, Box::pin(ctx.timer(after))).await {
+                Either::Left((result, _)) => result,
+                Either::Right((_, activity)) => {
+                    activity.cancel();
+                    activity.await
+                }
+            },
+        };
         Ok(match result {
             Ok(output) => Seen {
                 output: Some(output.to_value(ctx.payload_converter())),
@@ -163,6 +184,7 @@ fn settings(queue: &str, shutdown_grace: Duration) -> WorkerSettings {
         task_queue: queue.to_owned(),
         concurrency: 1,
         shutdown_grace,
+        heartbeat_throttle: sb_slicer::runner::KEEPALIVE,
     }
 }
 
@@ -178,21 +200,33 @@ fn caller_worker(runtime: &Runtime, client: &Client, queue: &str) -> Worker {
     .unwrap()
 }
 
-/// Starts `SliceCaller` on `caller_queue`, calling the slicer on `queue`.
+/// A call to the slicer on `queue`, with a heartbeat timeout well above
+/// `sb_slicer::runner::KEEPALIVE` (10 s) and no cancel.
+fn call(queue: &str, input: SlicePlateInput) -> Call {
+    Call {
+        queue: queue.to_owned(),
+        input,
+        heartbeat_timeout: Duration::from_secs(30),
+        cancel_after: None,
+    }
+}
+
+/// Starts `SliceCaller` on `caller_queue` with `call`.
 async fn start(
     client: &Client,
     caller_queue: &str,
-    queue: &str,
-    input: SlicePlateInput,
+    call: Call,
 ) -> temporalio_client::WorkflowHandle<
     Client,
     impl temporalio_common::HasWorkflowDefinition<Output = Seen>,
 > {
-    let call = Call {
-        queue: queue.to_owned(),
-        input,
-    };
-    let id = format!("slice-caller-{queue}-{}", std::process::id());
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+    let id = format!(
+        "slice-caller-{}-{}-{}",
+        call.queue,
+        std::process::id(),
+        RUNS.fetch_add(1, Ordering::SeqCst)
+    );
     client
         .start_workflow(
             SliceCaller::run,
@@ -203,9 +237,9 @@ async fn start(
         .unwrap()
 }
 
-/// Runs `SliceCaller` on `queue` to the end and returns what it saw.
-async fn slice(client: &Client, queue: &str, input: SlicePlateInput) -> Seen {
-    let handle = start(client, CALLER_QUEUE, queue, input).await;
+/// Runs `SliceCaller` on `caller_queue` to the end and returns what it saw.
+async fn run_call(client: &Client, caller_queue: &str, call: Call) -> Seen {
+    let handle = start(client, caller_queue, call).await;
     tokio::time::timeout(
         Duration::from_secs(60),
         handle.get_result(WorkflowGetResultOptions::default()),
@@ -213,6 +247,11 @@ async fn slice(client: &Client, queue: &str, input: SlicePlateInput) -> Seen {
     .await
     .expect("the workflow finishes within 60 s")
     .unwrap()
+}
+
+/// Runs `SliceCaller` on `queue` to the end and returns what it saw.
+async fn slice(client: &Client, queue: &str, input: SlicePlateInput) -> Seen {
+    run_call(client, CALLER_QUEUE, call(queue, input)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -332,7 +371,8 @@ async fn shutdown_cancels_a_running_slice_after_the_grace() {
 
     let (handle, pgid) = tokio::select! {
         started = async {
-            let handle = start(&client, DRAIN_CALLER_QUEUE, DRAIN_QUEUE, support::input(&base)).await;
+            let call = call(DRAIN_QUEUE, support::input(&base));
+            let handle = start(&client, DRAIN_CALLER_QUEUE, call).await;
             (handle, fake_cli_group().await)
         } => started,
         r = &mut slicer => panic!("the slicer worker stopped early: {r:?}"),
@@ -370,6 +410,140 @@ async fn shutdown_cancels_a_running_slice_after_the_grace() {
     assert_eq!(failure.type_name.as_deref(), Some("WorkerShutdown"));
     assert!(!failure.non_retryable);
     assert!(transfers.lock().unwrap().puts.is_empty());
+
+    env.shutdown().await.unwrap();
+}
+
+/// A slicer worker on `queue` whose activity heartbeats every 300 ms and whose SDK sends
+/// them as often, against a transfer server whose `/stall/...` routes answer after `STALL`.
+async fn stalling_worker(
+    runtime: &Runtime,
+    client: &Client,
+    queue: &str,
+) -> (
+    impl std::future::Future<Output = anyhow::Result<()>>,
+    String,
+    support::Shared,
+) {
+    let (base, transfers) = support::serve().await;
+    transfers.lock().unwrap().stall = STALL;
+    let mut activities = support::activities("");
+    activities.keepalive = Duration::from_millis(300);
+    let worker = scadbuddy_slicer::run_worker(
+        runtime,
+        client.clone(),
+        WorkerSettings {
+            heartbeat_throttle: Duration::from_millis(300),
+            ..settings(queue, Duration::from_secs(20))
+        },
+        activities,
+        Arc::new(AtomicBool::new(false)),
+        std::future::pending(),
+    );
+    (worker, base, transfers)
+}
+
+/// `support::input` with the input GET from `get` and the output PUT to `put`.
+fn routed(base: &str, get: &str, put: &str) -> SlicePlateInput {
+    let mut input = support::input(base);
+    input.input_3mf = support::url(base, get);
+    input.sliced_3mf = support::url(base, put);
+    input
+}
+
+/// A transfer stalled past the heartbeat timeout: the activity's keepalive goes on through
+/// it, so a stalled GET, and then a stalled PUT, still slice.
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_transfers_keep_heartbeating() {
+    let Some(env) = start_server().await else {
+        return;
+    };
+    let client = env.client().clone();
+    let runtime = Runtime::from_current_tokio(Default::default()).unwrap();
+    let (slicer, base, transfers) = stalling_worker(&runtime, &client, STALL_QUEUE).await;
+    let mut caller = caller_worker(&runtime, &client, STALL_CALLER_QUEUE);
+    let stalled = |get: &str, put: &str| Call {
+        heartbeat_timeout: SHORT_HEARTBEAT,
+        ..call(STALL_QUEUE, routed(&base, get, put))
+    };
+
+    let checks = async {
+        let seen = run_call(
+            &client,
+            STALL_CALLER_QUEUE,
+            stalled("/stall/input", "/sink/a"),
+        )
+        .await;
+        assert!(
+            seen.output.is_some(),
+            "a stalled GET still slices: {:?}",
+            seen.failure
+        );
+
+        let seen = run_call(
+            &client,
+            STALL_CALLER_QUEUE,
+            stalled("/blob/input", "/stall-sink/b"),
+        )
+        .await;
+        assert!(
+            seen.output.is_some(),
+            "a stalled PUT still slices: {:?}",
+            seen.failure
+        );
+        assert_eq!(
+            transfers.lock().unwrap().puts["b"].as_slice(),
+            b"PK fake 3mf"
+        );
+    };
+    tokio::select! {
+        () = checks => {}
+        r = slicer => panic!("the slicer worker stopped: {r:?}"),
+        r = caller.run() => panic!("the caller worker stopped: {r:?}"),
+    }
+
+    env.shutdown().await.unwrap();
+}
+
+/// A cancel during a stalled GET reaches the activity on its next heartbeat and ends it
+/// then, not when the GET answers. The default 30 s heartbeat timeout: a short one would
+/// end the activity itself (the SDK times it out locally), cancel or no cancel.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_ends_a_stalled_get() {
+    let Some(env) = start_server().await else {
+        return;
+    };
+    let client = env.client().clone();
+    let runtime = Runtime::from_current_tokio(Default::default()).unwrap();
+    let (slicer, base, transfers) = stalling_worker(&runtime, &client, CANCEL_QUEUE).await;
+    let mut caller = caller_worker(&runtime, &client, CANCEL_CALLER_QUEUE);
+
+    let checks = async {
+        let started = Instant::now();
+        let seen = run_call(
+            &client,
+            CANCEL_CALLER_QUEUE,
+            Call {
+                cancel_after: Some(Duration::from_millis(500)),
+                ..call(CANCEL_QUEUE, routed(&base, "/stall/input", "/sink/c"))
+            },
+        )
+        .await;
+        // `WaitCancellationCompleted`: the workflow hears when the activity has ended.
+        let failure = seen.failure.expect("a cancelled activity");
+        assert!(failure.kind.starts_with("cancelled/"), "{failure:?}");
+        assert!(
+            started.elapsed() < STALL,
+            "the cancel ended the stalled GET: {:?}",
+            started.elapsed()
+        );
+        assert!(transfers.lock().unwrap().puts.is_empty());
+    };
+    tokio::select! {
+        () = checks => {}
+        r = slicer => panic!("the slicer worker stopped: {r:?}"),
+        r = caller.run() => panic!("the caller worker stopped: {r:?}"),
+    }
 
     env.shutdown().await.unwrap();
 }

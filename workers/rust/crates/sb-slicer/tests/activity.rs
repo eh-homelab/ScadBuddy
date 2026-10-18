@@ -196,3 +196,48 @@ async fn a_failed_slice_still_records_its_stage_time() {
     let slice = stages.stage_seconds.with_label_values(&["slice"]);
     assert_eq!(slice.get_sample_count(), 1);
 }
+
+/// The keepalive runs for the whole activity, not only while the CLI does: a stalled GET
+/// repeats the zeroed progress and a stalled PUT the last one, each at least every
+/// `keepalive`.
+#[tokio::test]
+async fn stalled_transfers_keep_heartbeating() {
+    let (base, seen) = serve().await;
+    seen.lock().unwrap().stall = std::time::Duration::from_millis(800);
+    let beats: Arc<Mutex<Vec<SliceProgress>>> = Arc::default();
+    let mut acts = activities("");
+    acts.keepalive = std::time::Duration::from_millis(100);
+    let env = ActivityEnvironment::builder()
+        .register_activities(acts)
+        .on_heartbeat({
+            let beats = beats.clone();
+            move |details| {
+                let p = details.downcast::<SliceProgress>().expect("SliceProgress");
+                beats.lock().unwrap().push(*p);
+            }
+        })
+        .build();
+    let mut req = input(&base);
+    req.input_3mf = url(&base, "/stall/input");
+    req.sliced_3mf = url(&base, "/stall-sink/sliced");
+    env.run(SlicerActivities::slice_plate, req).await.unwrap();
+
+    let beats = beats.lock().unwrap();
+    let before_cli = beats
+        .iter()
+        .take_while(|p| p.plate_count == 0 && p.total_percent == 0)
+        .count();
+    assert!(
+        before_cli >= 4,
+        "{before_cli} beats during the GET: {beats:?}"
+    );
+    let done = beats
+        .iter()
+        .position(|p| p.total_percent == 100)
+        .expect("a 100% beat");
+    let after_cli = beats[done..]
+        .iter()
+        .filter(|p| p.total_percent == 100)
+        .count();
+    assert!(after_cli >= 5, "{after_cli} beats at 100%: {beats:?}");
+}

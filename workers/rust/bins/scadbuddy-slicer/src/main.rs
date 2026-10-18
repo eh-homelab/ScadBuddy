@@ -112,6 +112,7 @@ async fn worker() -> anyhow::Result<()> {
         task_queue: env.task_queue.clone(),
         concurrency: env.concurrency,
         shutdown_grace: shutdown_grace(std::env::var(GRACE_VAR).ok().as_deref())?,
+        heartbeat_throttle: sb_slicer::runner::KEEPALIVE,
     };
     let mut sigterm = signal(SignalKind::terminate())?;
     let registry = prometheus::Registry::new();
@@ -130,6 +131,7 @@ async fn worker() -> anyhow::Result<()> {
         cli,
         transfer: Transfer::new(),
         stages,
+        keepalive: sb_slicer::runner::KEEPALIVE,
     };
     let stop = async move {
         sigterm.recv().await;
