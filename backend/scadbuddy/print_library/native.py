@@ -291,13 +291,17 @@ class NativeLibrary:
         return await self._insert(row, folder_id)
 
     async def _insert(self, row: NativeFile, folder_id: int | None) -> NativeFile:
-        """The row for a blob just stored; the folder deleted since its check is the
-        FK's refusal, the 404, with the blob released."""
+        """The row for a blob just stored. Any failure releases the blob first, since a
+        `library` blob is never swept and one no row names would stay for good; the
+        folder deleted since its check is the FK's refusal, the 404."""
         try:
             return await asyncio.to_thread(self.rows.insert_file, row)
         except ForeignKeyViolation:
             await self.content.delete(row.blob_key)
             raise _folder_not_found(folder_id) from None
+        except BaseException:
+            await self.content.delete(row.blob_key)
+            raise
 
     async def copy(self, file_id: int, folder_id: int | None) -> NativeFile:
         """A new file, the same bytes: the source's object indexed under the copy's key

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
+import psycopg
 import pytest
 import trimesh
 
@@ -346,3 +347,27 @@ async def test_a_cover_past_the_cap_is_no_thumbnail(native: NativeLibrary, tmp_p
         z.writestr("Metadata/thumbnail.png", b"\0" * (9 << 20))
     f = await upload(native, plain)
     assert not f.has_thumbnail and await native.thumbnail(f.id, None) is None
+
+
+@pytest.mark.parametrize("copying", [False, True])
+async def test_a_failed_insert_leaves_no_library_blob(
+    native: NativeLibrary, three_mf: Path, monkeypatch: pytest.MonkeyPatch, copying: bool
+) -> None:
+    # A `library` blob is never swept, so one the row never named would stay for good.
+    source = await upload(native, three_mf) if copying else None
+    tried: list[NativeFile] = []
+
+    def broken(row: NativeFile) -> NativeFile:
+        tried.append(row)
+        raise psycopg.OperationalError("the connection dropped")
+
+    monkeypatch.setattr(native.rows, "insert_file", broken)
+    with pytest.raises(psycopg.OperationalError):
+        if source is not None:
+            await native.copy(source.id, None)
+        else:
+            await upload(native, three_mf)
+    [row] = tried
+    assert await native.content.stat(row.blob_key) is None
+    if source is not None:
+        assert await downloaded(native, source.id) == three_mf.read_bytes()
