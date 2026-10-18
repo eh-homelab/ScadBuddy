@@ -29,6 +29,7 @@ from scadbuddy.activity.index import (
 )
 from scadbuddy.api import (
     health,
+    internal_blobs,
     libraries,
     library_print,
     media,
@@ -1529,6 +1530,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
+            # The slicer worker's upload (plan 2026-10-16-native-slicer-rust-worker).
+            internal_blobs.PUT_ROUTE_LIMIT,
         ],
     )
     # A write from a page on another origin is refused before its body is read (#962).

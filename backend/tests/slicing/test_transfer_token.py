@@ -86,3 +86,31 @@ def test_another_kek_is_refused() -> None:
 def test_malformed_values_are_refused(value: str) -> None:
     with pytest.raises(TokenError):
         verify(SECRET, value, method="GET", blob_key="slice-abc", now=BEFORE)
+
+
+def test_the_standard_alphabet_is_refused() -> None:
+    """``+`` and ``/`` decode to the same bytes as ``-`` and ``_``: only the URL-safe
+    spelling verifies."""
+    for n in range(1000):
+        token = sign(SECRET, TransferToken(method="GET", blob_key=f"slice-{n}", expires_at=AT))
+        standard = token.replace("-", "+").replace("_", "/")
+        if standard != token:
+            break
+    else:
+        raise AssertionError("no token used a URL-safe character")
+    assert verify(SECRET, token, method="GET", blob_key=f"slice-{n}", now=BEFORE)
+    with pytest.raises(TokenError):
+        verify(SECRET, standard, method="GET", blob_key=f"slice-{n}", now=BEFORE)
+
+
+def test_non_zero_padding_bits_are_refused() -> None:
+    body, mac = sign(SECRET, TOKEN).split(".")
+    # 32 bytes are 43 characters and one "=": the 43rd carries 2 bits no byte uses.
+    assert len(mac) == 44 and mac.endswith("=")
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    last = alphabet.index(mac[42])
+    assert last % 4 == 0
+    padded = mac[:42] + alphabet[last + 1] + "="
+    assert base64.urlsafe_b64decode(padded) == base64.urlsafe_b64decode(mac)
+    with pytest.raises(TokenError):
+        verify(SECRET, f"{body}.{padded}", method="GET", blob_key="slice-abc", now=BEFORE)

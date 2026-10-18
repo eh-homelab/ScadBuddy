@@ -19,8 +19,10 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.preview import MAX_SLICED_BYTES
 from scadbuddy.core.secrets import load_kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
@@ -37,7 +39,7 @@ from scadbuddy.slicing.transfer import (
     Transfers,
     TransferUnavailableError,
 )
-from scadbuddy.slicing.transfer_token import TransferToken, sign, transfer_key
+from scadbuddy.slicing.transfer_token import TokenError, TransferToken, sign, transfer_key, verify
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
@@ -323,3 +325,97 @@ def test_transfer_puts_prune(pool: Pool) -> None:
     kept = puts.get("pending-new")
     assert kept is not None
     assert (kept.key, kept.sha256, kept.size) == ("slice-b", "b", 2)
+
+
+def test_a_minted_url_expires_with_its_token(tmp_path: Path, pool: Pool) -> None:
+    """The token carries whole seconds, so the URL's ``expires_at`` is floored to match:
+    the worker never sends a request the route refuses as expired."""
+    at = datetime(2026, 10, 16, 12, 0, 0, 654321, tzinfo=UTC)
+    secret = bytes(32)
+    transfers = Transfers(
+        local_content(tmp_path / "blobs", pool),
+        TransferPuts(pool),
+        internal_base_url=INTERNAL,
+        secret=secret,
+        now=lambda: at,
+    )
+    put = transfers.mint_put()
+    for method, key, url in (
+        ("GET", "slice-abc", transfers.internal_get("slice-abc")),
+        ("PUT", put.pending_key, put.url),
+    ):
+        assert url.expires_at == datetime(2026, 10, 16, 14, 0, 0, tzinfo=UTC)
+        token = url.headers[TRANSFER_HEADER]
+        last = url.expires_at - timedelta(microseconds=1)
+        assert verify(secret, token, method=method, blob_key=key, now=last)
+        with pytest.raises(TokenError):
+            verify(secret, token, method=method, blob_key=key, now=url.expires_at)
+
+
+def test_a_pending_put_never_prints_its_token(blob_client: TestClient) -> None:
+    put = _transfers(blob_client).mint_put()
+    token = put.url.headers[TRANSFER_HEADER]
+    for text in (repr(put), str(put)):
+        assert token not in text
+        assert put.pending_key in text
+    with pytest.raises(ValidationError) as caught:
+        PendingPut.model_validate({"url": {**put.url.model_dump(mode="json"), "expires_at": "x"}})
+    assert token not in str(caught.value)
+
+
+def test_a_put_declaring_more_than_a_sliced_3mf_is_413(blob_client: TestClient) -> None:
+    put = _transfers(blob_client).mint_put()
+    headers = {**put.url.headers, "Content-Length": str(MAX_SLICED_BYTES + 1)}
+    response = _upload(blob_client, _path(put.url), headers, b"x")
+    assert response.status_code == 413
+    assert TransferPuts(_state(blob_client).projection.pool).get(put.pending_key) is None
+
+
+def test_a_streamed_put_past_a_sliced_3mf_is_413(blob_client: TestClient) -> None:
+    """No Content-Length and no Content-Type: the body is counted as it arrives."""
+    put = _transfers(blob_client).mint_put()
+
+    def body() -> Iterator[bytes]:
+        yield bytes(MAX_SLICED_BYTES + 1)
+
+    response: httpx.Response = blob_client.put(
+        _path(put.url), headers=put.url.headers, content=body(), follow_redirects=False
+    )
+    assert "content-length" not in response.request.headers
+    assert "content-type" not in response.request.headers
+    assert response.status_code == 413
+    assert TransferPuts(_state(blob_client).projection.pool).get(put.pending_key) is None
+
+
+def test_mint_get_reads_through_the_route_off_s3(blob_client: TestClient, tmp_path: Path) -> None:
+    """Off S3 `mint_get` is the internal route's URL, and the route serves it."""
+    state = _state(blob_client)
+    s3 = state.store.content
+    local = local_content(tmp_path / "local", state.projection.pool)
+    state.store.content = local
+    try:
+        assert blob_client.portal is not None
+        ref = blob_client.portal.call(partial(local.put, "slice", b"local", name="x", scope=SCOPE))
+        transfers = Transfers(
+            local,
+            TransferPuts(state.projection.pool),
+            internal_base_url=INTERNAL,
+            secret=_secret(blob_client),
+        )
+        url = blob_client.portal.call(transfers.mint_get, f"slice-{ref.sha256}")
+        response = _get(blob_client, _path(url), url.headers)
+        assert response.status_code == 200
+        assert response.content == b"local"
+    finally:
+        state.store.content = s3
+
+
+def test_finish_put_refuses_a_key_no_longer_stored(blob_client: TestClient) -> None:
+    put = _transfers(blob_client).mint_put()
+    assert _upload(blob_client, _path(put.url), put.url.headers, b"gone").status_code == 204
+    assert blob_client.portal is not None
+    blob_client.portal.call(
+        _content(blob_client).delete, f"slice-{hashlib.sha256(b'gone').hexdigest()}"
+    )
+    with pytest.raises(TransferRecordError, match="no longer stored"):
+        _finish(blob_client, put, b"gone")

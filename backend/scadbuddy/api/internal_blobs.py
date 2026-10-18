@@ -12,6 +12,7 @@ header."""
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 from datetime import UTC, datetime
 from typing import Annotated
@@ -20,6 +21,8 @@ from fastapi import APIRouter, Header, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.limits import RouteLimit
+from scadbuddy.bambuddy.preview import MAX_SLICED_BYTES
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.transfer import (
@@ -33,6 +36,17 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 
 router = APIRouter(prefix=INTERNAL_BLOBS.removeprefix("/api/v1"), include_in_schema=False)
+
+#: For ``main.py``'s `BodySizeGate`: every PUT here, whatever its content type, refused
+#: on its Content-Length or, without one, as the body streams, so a worker's token
+#: cannot fill the spool before the store's own room check, which runs on the whole body.
+PUT_ROUTE_LIMIT = RouteLimit(
+    "PUT",
+    re.compile(rf"^{re.escape(INTERNAL_BLOBS)}/"),
+    MAX_SLICED_BYTES,
+    "a sliced 3MF",
+    "fixed, bambuddy/preview.py MAX_SLICED_BYTES",
+)
 
 TokenHeader = Annotated[str | None, Header(alias=TRANSFER_HEADER)]
 

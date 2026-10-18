@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer_token import Method, TransferToken, sign
@@ -41,6 +41,9 @@ class TransferRecordError(RuntimeError):
 
 
 class PendingPut(BaseModel):
+    #: Its URL's token stays out of a `ValidationError` (`TransferUrl` redacts its repr).
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     url: TransferUrl
     pending_key: str
 
@@ -114,7 +117,9 @@ class Transfers:
                 "the native slicer needs SCADBUDDY_SECRET_KEY_FILE: its transfer URLs are"
                 " signed with a key derived from it"
             )
-        expires_at = self.now() + TRANSFER_TTL
+        # Whole seconds, as the token carries: the URL then says the instant the route
+        # stops taking it, not up to a second after.
+        expires_at = (self.now() + TRANSFER_TTL).replace(microsecond=0)
         token = TransferToken(method=method, blob_key=key, expires_at=expires_at)
         return TransferUrl(
             url=f"{self.internal_base_url}{INTERNAL_BLOBS}/{key}",
@@ -123,7 +128,10 @@ class Transfers:
         )
 
     def internal_get(self, key: str) -> TransferUrl:
-        """The internal GET route's URL of ``key``, whether or not it is stored."""
+        """The internal GET route's URL of ``key``, whether or not it is stored, on any
+        backend. Public for the route's tests, which run on moto's S3, where `mint_get`
+        presigns instead. A caller that needs ``key`` stored (a `BlobMissingError` now,
+        not a 404 from the worker later) uses `mint_get`."""
         return self._internal("GET", key)
 
     async def mint_get(self, key: str) -> TransferUrl:
@@ -133,7 +141,10 @@ class Transfers:
             raise BlobMissingError(key)
         backend = self.content.backend
         if isinstance(backend, S3ContentBackend):
-            expires_at = self.now() + TRANSFER_TTL
+            # botocore signs with its own clock (X-Amz-Date, whole seconds), which an
+            # injected ``now`` cannot move; read before the presign and floored, this
+            # ``expires_at`` is never later than the URL's real expiry on the real clock.
+            expires_at = (self.now() + TRANSFER_TTL).replace(microsecond=0)
             url = await backend.presign_get(stat.ref.backend_id, TRANSFER_TTL)
             return TransferUrl(url=url, expires_at=expires_at)
         return self.internal_get(key)
@@ -145,7 +156,8 @@ class Transfers:
 
     async def finish_put(self, put: PendingPut, *, sha256: str, size: int) -> str:
         """The key the PUT to ``put`` was stored under, once the worker's reported
-        sha256 and size are the ones the route stored."""
+        sha256 and size are the ones the route stored and the key is stored still (the
+        `slice` kind is swept, and nothing holds it until the caller's `BlobRefs.add`)."""
         row = await asyncio.to_thread(self.puts.get, put.pending_key)
         if row is None:
             raise TransferRecordError(f"nothing was PUT to {put.pending_key}")
@@ -154,4 +166,6 @@ class Transfers:
                 f"{put.pending_key} was PUT as {row.size} bytes of sha256 {row.sha256},"
                 f" not {size} bytes of {sha256}"
             )
+        if await self.content.stat(row.key) is None:
+            raise TransferRecordError(f"{put.pending_key}'s {row.key} is no longer stored")
         return row.key

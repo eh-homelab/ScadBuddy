@@ -51,7 +51,12 @@ def _b64(data: bytes) -> str:
 
 
 def _unb64(text: str) -> bytes:
-    return base64.b64decode(text.encode("ascii"), altchars=b"-_", validate=True)
+    """Only the one spelling `_b64` writes: `b64decode` also takes ``+`` and ``/`` and
+    non-zero padding bits, so several strings would verify as one token."""
+    data = base64.b64decode(text.encode("ascii"), altchars=b"-_", validate=True)
+    if _b64(data) != text:
+        raise ValueError("not canonical base64")
+    return data
 
 
 def _mac(secret: bytes, body: bytes) -> bytes:
