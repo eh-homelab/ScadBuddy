@@ -185,7 +185,7 @@ pub async fn run(
     let mut group = Group(Some(pgid));
 
     let stderr = Arc::new(Mutex::new(Vec::new()));
-    let stderr_task = tokio::spawn(keep_tail(child.stderr.take(), stderr.clone()));
+    let mut stderr_task = tokio::spawn(keep_tail(child.stderr.take(), stderr.clone()));
     let stdout_task = tokio::spawn(keep_tail(child.stdout.take(), Arc::default()));
 
     let mut lines = LineBuffer::default();
@@ -214,8 +214,13 @@ pub async fn run(
             () = tokio::time::sleep_until(keepalive.into()) => progress.repeat(&mut on_progress),
         }
     };
-    // The leader is reaped: its pid is free, so the group must not be signalled by it.
-    group.0 = None;
+    // Whatever the CLI left in its group dies now, once (`kill` clears the guard, so the
+    // group is never signalled again). The leader is reaped, but the kernel hands out a pid
+    // only while no process group has it as its id: if stragglers exist, the id is still
+    // their group's and this reaches only them; if none do, killpg fails with ESRCH. Only
+    // a process given the freed pid in the microseconds since `wait` returned that also
+    // made itself a group leader in them could be hit, and only by this one signal.
+    group.kill();
     let elapsed = started.elapsed();
 
     // Everything the CLI wrote before it exited is in the pipe's buffer.
@@ -223,7 +228,10 @@ pub async fn run(
     take(read, &mut progress, &mut warnings, &mut on_progress);
     progress.flush(&mut on_progress);
 
-    let _ = tokio::time::timeout(STDERR_GRACE, stderr_task).await;
+    // A stream still open past the grace is held by something the kill could not reach
+    // (outside the group); its reader is stopped, not left running.
+    let _ = tokio::time::timeout(STDERR_GRACE, &mut stderr_task).await;
+    stderr_task.abort();
     stdout_task.abort();
     let stderr_tail = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
 
@@ -238,7 +246,7 @@ pub async fn run(
     })
 }
 
-/// Kills the process group on drop unless the leader was reaped.
+/// Kills the process group, at most once: on [`Group::kill`] or on drop.
 struct Group(Option<Pid>);
 
 impl Group {
