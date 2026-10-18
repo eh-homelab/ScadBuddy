@@ -1,0 +1,343 @@
+"""`printers`: the registry's rows (#3823, plan 2026-10-16-printer-identity-native-path,
+Task 2).
+
+The access code is sealed under the KEK (`core/secrets.py` `seal_secret`) with the AAD
+``printer:<id>:<serial>``, so a sealed value copied onto another row does not open there.
+`open_access_code` is the only read of the sealed columns; nothing else selects them,
+and no exception here carries the code.
+
+Every write that changes which row holds a serial or a Bambuddy id runs under one
+transaction-scoped advisory lock, so two concurrent `ensure_bambuddy` calls (two
+``/printers/now`` reads) never race into a unique violation.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
+
+from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
+from scadbuddy.printers.models import (
+    LanLink,
+    PrinterCreate,
+    PrinterPatch,
+    PrinterRow,
+    is_synthetic_serial,
+    synthetic_serial,
+)
+
+Pool = ConnectionPool[Connection[DictRow]]
+
+_COLUMNS = (
+    "id, serial, name, model, bambuddy_printer_id, lan_host, lan_cert_sha256,"
+    " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, created_at,"
+    " updated_at"
+)
+_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))"
+
+
+class PrinterNotFoundError(LookupError):
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(f"no printer {printer_id}")
+        self.printer_id = printer_id
+
+
+class SerialTakenError(Exception):
+    """Another row already holds the serial."""
+
+    def __init__(self, existing_id: str) -> None:
+        super().__init__(f"printer {existing_id} already has this serial")
+        self.existing_id = existing_id
+
+
+class BambuddyLinkTakenError(Exception):
+    """Another row (or this one, to another Bambuddy printer) already holds the link."""
+
+    def __init__(self, existing_id: str, bambuddy_printer_id: int) -> None:
+        super().__init__(
+            f"printer {existing_id} is already linked to Bambuddy printer {bambuddy_printer_id}"
+        )
+        self.existing_id = existing_id
+        self.bambuddy_printer_id = bambuddy_printer_id
+
+
+class KekMissingError(Exception):
+    def __init__(self) -> None:
+        super().__init__("LAN printing needs SCADBUDDY_SECRET_KEY_FILE")
+
+
+class NoAccessCodeError(LookupError):
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(f"printer {printer_id} has no LAN access code")
+        self.printer_id = printer_id
+
+
+class SerialUnknownError(ValueError):
+    """A LAN link needs the printer's real serial: its MQTT topics are named by it."""
+
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(f"printer {printer_id}'s serial is not known, so it cannot be linked")
+        self.printer_id = printer_id
+
+
+def access_code_aad(printer_id: str, serial: str) -> str:
+    return f"printer:{printer_id}:{serial}"
+
+
+def _row(data: dict[str, Any]) -> PrinterRow:
+    return PrinterRow.model_validate(data)
+
+
+class PrinterStore:
+    def __init__(self, pool: Pool, kek: Kek | None) -> None:
+        self.pool = pool
+        self.kek = kek
+
+    # ── reads ─────────────────────────────────────────────────────────────────────
+
+    def _one(self, conn: Connection[DictRow], where: str, value: object) -> PrinterRow | None:
+        found = conn.execute(f"SELECT {_COLUMNS} FROM printers WHERE {where} = %s", (value,))
+        data = found.fetchone()
+        return None if data is None else _row(data)
+
+    def get(self, printer_id: str) -> PrinterRow | None:
+        with self.pool.connection() as conn:
+            return self._one(conn, "id", printer_id)
+
+    def by_serial(self, serial: str) -> PrinterRow | None:
+        with self.pool.connection() as conn:
+            return self._one(conn, "serial", serial)
+
+    def by_bambuddy_id(self, bambuddy_printer_id: int) -> PrinterRow | None:
+        with self.pool.connection() as conn:
+            return self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+
+    def list(self) -> list[PrinterRow]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {_COLUMNS} FROM printers ORDER BY name, id").fetchall()
+        return [_row(data) for data in rows]
+
+    def require(self, printer_id: str) -> PrinterRow:
+        row = self.get(printer_id)
+        if row is None:
+            raise PrinterNotFoundError(printer_id)
+        return row
+
+    def resolve_bambuddy_id(self, printer_id: str | int | None) -> int | None:
+        """The Bambuddy integer behind a registry id, an integer passed through, or
+        ``None``: the one way the tables still keyed by the Bambuddy printer id are
+        reached from a registry id (plan, "Deferred to 3b")."""
+        if printer_id is None or isinstance(printer_id, int):
+            return printer_id
+        row = self.get(printer_id)
+        return None if row is None else row.bambuddy_printer_id
+
+    # ── writes ────────────────────────────────────────────────────────────────────
+
+    def create(self, body: PrinterCreate) -> PrinterRow:
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(_LOCK)
+            return self._insert(
+                conn,
+                serial=body.serial,
+                name=body.name,
+                model=body.model,
+                preferred_path=body.preferred_path,
+                bambuddy_printer_id=None,
+            )
+
+    def _insert(
+        self,
+        conn: Connection[DictRow],
+        *,
+        serial: str,
+        name: str,
+        model: str | None,
+        preferred_path: str,
+        bambuddy_printer_id: int | None,
+    ) -> PrinterRow:
+        existing = self._one(conn, "serial", serial)
+        if existing is not None:
+            raise SerialTakenError(existing.id)
+        data = conn.execute(
+            f"INSERT INTO printers (id, serial, name, model, preferred_path, bambuddy_printer_id)"
+            f" VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
+            (str(uuid.uuid4()), serial, name, model, preferred_path, bambuddy_printer_id),
+        ).fetchone()
+        assert data is not None
+        return _row(data)
+
+    def _update(
+        self, conn: Connection[DictRow], printer_id: str, sets: str, args: tuple[Any, ...]
+    ) -> PrinterRow:
+        data = conn.execute(
+            f"UPDATE printers SET {sets}, updated_at = now() WHERE id = %s RETURNING {_COLUMNS}",
+            (*args, printer_id),
+        ).fetchone()
+        if data is None:
+            raise PrinterNotFoundError(printer_id)
+        return _row(data)
+
+    def patch(self, printer_id: str, body: PrinterPatch) -> PrinterRow:
+        with self.pool.connection() as conn:
+            current = self._one(conn, "id", printer_id)
+            if current is None:
+                raise PrinterNotFoundError(printer_id)
+            return self._update(
+                conn,
+                printer_id,
+                "name = %s, preferred_path = %s",
+                (body.name or current.name, body.preferred_path or current.preferred_path),
+            )
+
+    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
+        """Link ``printer_id`` to a Bambuddy printer. A row `ensure_bambuddy` made for
+        that Bambuddy printer while its serial was withheld (a synthetic serial, no LAN
+        link) gives the link up and is removed; any other holder refuses."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(_LOCK)
+            row = self._one(conn, "id", printer_id)
+            if row is None:
+                raise PrinterNotFoundError(printer_id)
+            if row.bambuddy_printer_id == bambuddy_printer_id:
+                return row
+            if row.bambuddy_printer_id is not None:
+                raise BambuddyLinkTakenError(row.id, row.bambuddy_printer_id)
+            holder = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+            if holder is not None:
+                if not (is_synthetic_serial(holder.serial) and holder.lan_host is None):
+                    raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
+                conn.execute("DELETE FROM printers WHERE id = %s", (holder.id,))
+            return self._update(
+                conn, printer_id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
+            )
+
+    def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
+        with self.pool.connection() as conn:
+            return self._update(conn, printer_id, "bambuddy_printer_id = NULL", ())
+
+    def link_lan(self, printer_id: str, body: LanLink, *, cert_sha256: str) -> PrinterRow:
+        if self.kek is None:
+            raise KekMissingError()
+        with self.pool.connection() as conn, conn.transaction():
+            row = self._one(conn, "id", printer_id)
+            if row is None:
+                raise PrinterNotFoundError(printer_id)
+            if is_synthetic_serial(row.serial):
+                raise SerialUnknownError(printer_id)
+            sealed = seal_secret(self.kek, body.access_code, access_code_aad(row.id, row.serial))
+            return self._update(
+                conn,
+                printer_id,
+                "lan_host = %s, lan_cert_sha256 = %s, access_code_sealed = %s,"
+                " access_code_dek_sealed = %s, access_code_kek_id = %s",
+                (
+                    body.host,
+                    cert_sha256,
+                    sealed.secret_sealed,
+                    sealed.dek_sealed,
+                    sealed.kek_id,
+                ),
+            )
+
+    def unlink_lan(self, printer_id: str) -> PrinterRow:
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (printer_id,))
+            return self._update(
+                conn,
+                printer_id,
+                "lan_host = NULL, lan_cert_sha256 = NULL, access_code_sealed = NULL,"
+                " access_code_dek_sealed = NULL, access_code_kek_id = NULL",
+                (),
+            )
+
+    def open_access_code(self, printer_id: str) -> str:
+        """The LAN access code, opened under the KEK. Raises `SealError` when the
+        sealed value is not this row's (or another key sealed it)."""
+        if self.kek is None:
+            raise KekMissingError()
+        with self.pool.connection() as conn:
+            data = conn.execute(
+                "SELECT id, serial, access_code_sealed, access_code_dek_sealed,"
+                " access_code_kek_id FROM printers WHERE id = %s",
+                (printer_id,),
+            ).fetchone()
+        if data is None:
+            raise PrinterNotFoundError(printer_id)
+        if data["access_code_sealed"] is None:
+            raise NoAccessCodeError(printer_id)
+        envelope = Envelope(
+            secret_sealed=bytes(data["access_code_sealed"]),
+            dek_sealed=bytes(data["access_code_dek_sealed"]),
+            kek_id=data["access_code_kek_id"],
+        )
+        return open_secret(self.kek, envelope, access_code_aad(data["id"], data["serial"]))
+
+    def ensure_bambuddy(
+        self, bambuddy_printer_id: int, *, serial: str | None, name: str, model: str | None
+    ) -> PrinterRow:
+        """The row for a Bambuddy printer, made when there is none: the row linking that
+        id; else the row holding ``serial`` (which it links, if that row has no Bambuddy
+        link); else a new row, ``preferred_path`` ``bambuddy``. Without a serial (Bambuddy
+        withheld it) the new row's serial is `synthetic_serial`, so an unlinked Bambuddy
+        printer still gets exactly one row; once the serial is known a synthetic row
+        adopts it, or gives way to the row that already holds it."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(_LOCK)
+            linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+            if linked is not None:
+                if (
+                    serial is None
+                    or linked.serial == serial
+                    or not is_synthetic_serial(linked.serial)
+                ):
+                    return linked
+                holder = self._one(conn, "serial", serial)
+                if holder is None:
+                    return self._update(conn, linked.id, "serial = %s", (serial,))
+                if holder.bambuddy_printer_id is None:
+                    conn.execute("DELETE FROM printers WHERE id = %s", (linked.id,))
+                    return self._update(
+                        conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
+                    )
+                return linked
+            if serial is not None:
+                holder = self._one(conn, "serial", serial)
+                if holder is not None and holder.bambuddy_printer_id is None:
+                    return self._update(
+                        conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
+                    )
+                if holder is None:
+                    return self._insert(
+                        conn,
+                        serial=serial,
+                        name=name,
+                        model=model,
+                        preferred_path="bambuddy",
+                        bambuddy_printer_id=bambuddy_printer_id,
+                    )
+                # A re-added printer: the serial's row is linked to another Bambuddy
+                # printer. This one gets a row of its own, as one with no serial would.
+            own = self._one(conn, "serial", synthetic_serial(bambuddy_printer_id))
+            if own is not None:  # its link was taken off; it is still this printer's
+                return self._update(
+                    conn, own.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
+                )
+            return self._insert(
+                conn,
+                serial=synthetic_serial(bambuddy_printer_id),
+                name=name,
+                model=model,
+                preferred_path="bambuddy",
+                bambuddy_printer_id=bambuddy_printer_id,
+            )
+
+    def delete(self, printer_id: str) -> None:
+        with self.pool.connection() as conn:
+            gone = conn.execute("DELETE FROM printers WHERE id = %s", (printer_id,))
+            if gone.rowcount == 0:
+                raise PrinterNotFoundError(printer_id)
