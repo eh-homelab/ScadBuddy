@@ -125,6 +125,21 @@ async fn a_cancelled_slice_leaves_no_process_behind() {
     assert_group_gone(pgid).await;
 }
 
+#[tokio::test]
+async fn a_finished_slice_leaves_no_process_behind() {
+    let (result, _seen, _p) = run_fake("straggler").await;
+    let outcome = result.unwrap();
+    assert_eq!(outcome.exit_code, 0);
+    let pgid: i32 = outcome
+        .stderr_tail
+        .lines()
+        .find_map(|l| l.strip_prefix("pgid "))
+        .expect("the fake names its group")
+        .parse()
+        .unwrap();
+    assert_group_gone(pgid).await;
+}
+
 #[test]
 fn command_line_is_the_argv_the_spec_fixes() {
     let cli = fake("");

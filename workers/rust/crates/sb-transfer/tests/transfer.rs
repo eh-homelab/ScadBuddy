@@ -149,6 +149,27 @@ async fn expired_url_is_refused_before_any_request() {
 }
 
 #[tokio::test]
+async fn an_invalid_header_is_refused_before_any_request_without_its_value() {
+    let (base, state) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("src"), b"x").unwrap();
+    let t = Transfer::new();
+    for (name, value) in [("bad name", "tok"), ("x-scadbuddy-transfer", "s3cret\n")] {
+        let u = url(&base, "/blob", &[(name, value)]);
+        for result in [
+            t.get(&u, &dir.path().join("x")).await,
+            t.put(&u, &dir.path().join("src")).await,
+        ] {
+            let Err(e @ TransferError::InvalidHeader(_)) = result else {
+                panic!("expected InvalidHeader, got {result:?}");
+            };
+            assert!(!e.to_string().contains("s3cret"), "{e}");
+        }
+    }
+    assert_eq!(state.lock().unwrap().requests, 0);
+}
+
+#[tokio::test]
 async fn put_streams_the_file_and_reports_its_digest() {
     let (base, state) = serve().await;
     let dir = tempfile::tempdir().unwrap();

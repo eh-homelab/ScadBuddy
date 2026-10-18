@@ -29,7 +29,10 @@ fn failure(
 
 pub(crate) fn transfer(e: TransferError) -> ActivityError {
     let refused = match &e {
-        TransferError::Missing | TransferError::Expired | TransferError::Refused(_) => true,
+        TransferError::Missing
+        | TransferError::Expired
+        | TransferError::Refused(_)
+        | TransferError::InvalidHeader(_) => true,
         TransferError::Status(code) => !(*code >= 500 || *code == 429),
         TransferError::Io(_) | TransferError::Http(_) => false,
     };
@@ -48,6 +51,17 @@ pub(crate) fn slicer(exit_code: i32, stderr_tail: &str) -> ActivityError {
         SLICER_ERROR,
         exit_code == VALIDATION_EXIT,
         Some(json!({"exit_code": exit_code, "stderr_tail": stderr_tail})),
+    )
+}
+
+/// The CLI exited 0 without the sliced 3MF (a plate with nothing to slice): the same
+/// input does the same again, so no retry helps.
+pub(crate) fn no_output(stderr_tail: &str) -> ActivityError {
+    failure(
+        "the slicer exited 0 without the sliced 3MF".to_owned(),
+        SLICER_ERROR,
+        true,
+        Some(json!({"exit_code": 0, "stderr_tail": stderr_tail})),
     )
 }
 
@@ -121,6 +135,11 @@ mod tests {
             on_the_wire(slicer(VALIDATION_EXIT, "")),
             (SLICER_ERROR.to_owned(), true, Some(details))
         );
+        let details = json!({"exit_code": 0, "stderr_tail": "empty plate"});
+        assert_eq!(
+            on_the_wire(no_output("empty plate")),
+            (SLICER_ERROR.to_owned(), true, Some(details))
+        );
     }
 
     #[test]
@@ -131,6 +150,10 @@ mod tests {
         assert_eq!(kind(TransferError::Expired), refused());
         assert_eq!(kind(TransferError::Status(302)), refused());
         assert_eq!(kind(TransferError::Status(400)), refused());
+        assert_eq!(
+            kind(TransferError::InvalidHeader("bad name".into())),
+            refused()
+        );
     }
 
     #[test]

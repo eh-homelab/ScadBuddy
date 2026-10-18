@@ -342,7 +342,9 @@ A `SlicerError` with exit 192 is shown as the slicer's own message (the CLI prin
 validation failure to stderr before exiting; `stderr_tail` carries it). The preview
 pane's `slice-error` alert shows it verbatim, and the run fails with it as its
 `failure`. A retryable exit (a crash) retries three times with the activity's retry
-policy, then fails the same way.
+policy, then fails the same way. An exit 0 that leaves no sliced 3MF (a plate with
+nothing to slice) is a non-retryable `SlicerError` with details `{exit_code: 0,
+stderr_tail}`, since the same input exports nothing again.
 
 ## 6. Tier 3: printers with one identity
 

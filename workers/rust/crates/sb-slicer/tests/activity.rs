@@ -163,7 +163,7 @@ fn details(err: ActivityEnvironmentError) -> (String, bool, Option<serde_json::V
 }
 
 #[tokio::test]
-async fn an_exit_0_without_output_is_a_slicer_error_before_any_put() {
+async fn an_exit_0_without_output_is_a_non_retryable_slicer_error_before_any_put() {
     let (base, seen) = serve().await;
     let env = ActivityEnvironment::builder()
         .register_activities(activities("no-output"))
@@ -174,7 +174,7 @@ async fn an_exit_0_without_output_is_a_slicer_error_before_any_put() {
         .unwrap_err();
     let (type_name, non_retryable, details) = details(err);
     assert_eq!(type_name, SLICER_ERROR);
-    assert!(!non_retryable);
+    assert!(non_retryable, "the same input exports nothing again");
     let details = details.expect("details");
     assert_eq!(details["exit_code"], 0);
     let tail = details["stderr_tail"].as_str().expect("a stderr tail");
