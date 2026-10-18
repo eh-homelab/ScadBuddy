@@ -16,6 +16,7 @@ import {
   type ProbeVerdict,
   cooldownUntil,
   probeCredential,
+  rateLimitResetFromText,
 } from './credentialErrors.js'
 import { CONTINUE_PROMPT } from './continuePrompt.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
@@ -442,6 +443,8 @@ export async function* runWithFallback(
     const secret = current.credential.secret
     const reason = redact(failure.message || verdict, [secret])
     let outcome: AttemptOutcome
+    /** The reset a rate limit's own text named, when it named one. */
+    let named: number | undefined
     if (verdict === 'permanent') {
       // Confirmed before it disables (see the top of this file), on the
       // probe's own model, so a refusal of this turn's model or features
@@ -465,8 +468,12 @@ export async function* runWithFallback(
             ? { class: 'rate_limited', reason, until: check.until }
             : { class: 'transient', reason }
     } else if (verdict === 'rate_limited') {
-      // Recorded now with the default; the probe's answer replaces it below.
-      outcome = { class: 'rate_limited', reason, until: cooldownUntil(undefined, Date.now()) }
+      // Recorded now with the reset the text names (#4107: a subscription limit's
+      // "resets Oct 21, 4am (UTC)"), else the default; the probe's answer replaces it
+      // below, unless the probe could not tell.
+      const now = Date.now()
+      named = rateLimitResetFromText(failure.message ?? '', now)
+      outcome = { class: 'rate_limited', reason, until: cooldownUntil(named, now) }
     } else {
       outcome = { class: 'transient', reason }
     }
@@ -484,7 +491,9 @@ export async function* runWithFallback(
       pending.push(
         probe(current.credential, model, base.signal)
           .then((answer) =>
-            base.signal?.aborted
+            // An `unknown` answer (always, for an OAuth key) knows less than the
+            // reset the text named: that one stands.
+            base.signal?.aborted || (answer.verdict === 'unknown' && named !== undefined)
               ? undefined
               : options.report(
                   current,

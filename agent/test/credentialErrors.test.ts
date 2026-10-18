@@ -12,6 +12,7 @@ import {
   type ProbeVerdict,
   probeCredential,
   rateLimitResetFromHeaders,
+  rateLimitResetFromText,
   refusesTheKey,
 } from '../src/harness/credentialErrors.js'
 import { type FakeAnthropic, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -87,6 +88,64 @@ describe('describeApiFailure (#1101)', () => {
     ],
   ])('words a refused credential by what the probe said of it: %s', (probe, said) => {
     expect(describeApiFailure({ status: 403, message: 'blocked' }, probe === undefined ? {} : { probe })).toBe(said)
+  })
+})
+
+// The same cases as agent-durable's tests/test_credentials.py for `rate_limit_reset` (#4093).
+describe('rateLimitResetFromText (#4107)', () => {
+  const NOW = Date.parse('2026-10-17T22:16:05Z')
+  const at = (iso: string) => Date.parse(iso)
+
+  it.each([
+    // #4088: the four results measured in prod on 2026-10-17 at 22:16 UTC.
+    ["You've hit your weekly limit · resets 1pm (UTC)", '2026-10-18T13:00:00Z'],
+    ["You've hit your session limit · resets 10:30pm (UTC)", '2026-10-17T22:30:00Z'],
+    ["You've hit your weekly limit · resets 11pm (UTC)", '2026-10-17T23:00:00Z'],
+    ["You've hit your weekly limit · resets Oct 21, 4am (UTC)", '2026-10-21T04:00:00Z'],
+    ['API Error: 429 · resets 12am (UTC)', '2026-10-18T00:00:00Z'],
+    ['resets 12pm (UTC)', '2026-10-18T12:00:00Z'],
+    ['resets 9:30PM (utc)', '2026-10-18T21:30:00Z'],
+    // Past the grace, a time alone is tomorrow's.
+    ['resets 10pm (UTC)', '2026-10-18T22:00:00Z'],
+  ])('reads %j as the next such time in UTC', (text, iso) => {
+    expect(rateLimitResetFromText(text, NOW)).toBe(at(iso))
+  })
+
+  it('rolls a time past midnight and a date past the year end', () => {
+    const late = at('2026-12-31T23:50:00Z')
+    expect(rateLimitResetFromText('resets 1:05am (UTC)', late)).toBe(at('2027-01-01T01:05:00Z'))
+    expect(rateLimitResetFromText('resets Jan 2, 4am (UTC)', late)).toBe(at('2027-01-02T04:00:00Z'))
+    expect(rateLimitResetFromText('resets Dec 31, 11:55pm (UTC)', late)).toBe(at('2026-12-31T23:55:00Z'))
+  })
+
+  it.each([
+    // The text names the minute only: one just passed is passing now (#4093 review).
+    'resets 10:16pm (UTC)',
+    'resets 10:15pm (UTC)',
+    'resets 10:02pm (UTC)',
+    'resets Oct 17, 10:15pm (UTC)',
+    'resets Oct 17, 10pm (UTC)',
+    // A date earlier this year has passed; it is not next year's.
+    'resets Sep 3, 4am (UTC)',
+    'resets Jan 2, 4am (UTC)',
+    // Text naming no reset, or one that is not a time.
+    '',
+    'API Error: 429 rate limited',
+    'resets soon',
+    'resets 1pm (PST)',
+    'resets 13pm (UTC)',
+    'resets 0am (UTC)',
+    'resets 10:75pm (UTC)',
+    'resets Foo 21, 4am (UTC)',
+    'resets Feb 30, 4am (UTC)',
+  ])('keeps the default cooldown for %j', (text) => {
+    expect(rateLimitResetFromText(text, NOW)).toBeUndefined()
+    expect(cooldownUntil(rateLimitResetFromText(text, NOW), NOW).getTime()).toBe(NOW + DEFAULT_COOLDOWN_MS)
+  })
+
+  it('still holds a named reset to a day', () => {
+    const until = rateLimitResetFromText("You've hit your weekly limit · resets Oct 21, 4am (UTC)", NOW)
+    expect(cooldownUntil(until, NOW).getTime()).toBe(NOW + MAX_COOLDOWN_MS)
   })
 })
 
