@@ -818,8 +818,10 @@ workers restart.
      that misses does, and the piece re-renders when next wanted. Only once the
      source is seen serving: a batch that copied nothing, and whose source no longer
      has any object the run already copied, fails its misses instead (a wrong
-     Bambuddy URL must not empty the index), with the error saying to check the
-     source's settings.
+     Bambuddy URL must not empty the index). The oldest rows go first, so a healthy
+     source's first batch can be such misses alone: `POST` again once the copy has
+     moved something, and the new run forgets them. If every row fails this way,
+     check the source's settings.
   4. Only when `GET` shows both `remaining` and `failed_count` at `0`, set **Blob
      store** to `s3` and restart every replica together: the API and every render
      worker at once. After that flip no retry is possible (`POST` answers 409), so a

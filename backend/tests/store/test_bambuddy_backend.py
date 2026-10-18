@@ -497,8 +497,8 @@ async def test_a_failed_download_other_than_404_is_not_blob_missing(pool: Pool) 
     with pytest.raises(ApiError) as raised:
         async for _ in backend.download("9"):
             pass
-    # The client reports an upstream failure as 502; anything but 404 is not "gone".
-    assert raised.value.status != 404 and not isinstance(raised.value, BlobMissingError)
+    # The client reports an upstream failure as 502: not "gone", unlike a 404.
+    assert raised.value.status == 502 and not isinstance(raised.value, BlobMissingError)
     await backend.aclose()
 
 
