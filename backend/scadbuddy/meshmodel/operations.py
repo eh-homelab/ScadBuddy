@@ -50,6 +50,8 @@ from scadbuddy.operations.kinds import (
     to_thread_to_end,
     waiting_on_bambuddy,
 )
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.reads import NativeReads, no_native, reads_for
 from scadbuddy.render.bambu3mf import stl_3mf
 from scadbuddy.render.objects3mf import UnreadableObjectsError, check_stl, read_objects
 from scadbuddy.render.read_budget import ReadBudget, budget_of
@@ -187,7 +189,11 @@ def _answered(fn: Step) -> Step:
     return answered
 
 
-def mesh_kinds(state: AppState) -> list[OperationKind]:
+def mesh_kinds(state: AppState, library: NativeReads = no_native) -> list[OperationKind]:
+    """The mesh model kinds; a library source that is a native file (#3827) is read from
+    ``library``, asked when the kind runs, since the kinds are built before the settings
+    say which library serves."""
+
     def _record(record: Any) -> dict[str, Any]:
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped
@@ -221,12 +227,18 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             # The check read the file's record; only its bytes are fetched here, as they
             # are, so an STL is budgeted below before anything loads it.
             filename, kind = checked["filename"], checked["file_type"]
-            library = LibrarySource(
-                file_id=source["file_id"], colours=[], plates=[], filename=filename, file_type=kind
-            )
+            file_id = source["file_id"]
             settings = await asyncio.to_thread(state.settings_store.load)
             async with client_for(settings) as client:
-                payload = await library.download(client)
+                files = reads_for(file_id, client, await library())
+                payload = await LibrarySource(
+                    file_id=file_id,
+                    colours=[],
+                    plates=[],
+                    filename=filename,
+                    file_type=kind,
+                    files=files,
+                ).download(client)
             if payload is None:
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, f"{filename} is too large to read"
@@ -249,8 +261,11 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         if source["kind"] != "bambuddy_library":
             return {}
         settings = await asyncio.to_thread(state.settings_store.load)
+        native = await library()
         async with waiting_on_bambuddy(), client_for(settings) as client:
-            file = await client.library_file(source["file_id"])
+            file = await reads_for(source["file_id"], client, native).library_file(
+                source["file_id"]
+            )
         kind = (file.file_type or "").lower()
         if kind == SLICED_TYPE or not printable(kind):
             what = "sliced" if kind == SLICED_TYPE else f"a {kind or 'file of unknown type'}"
@@ -394,7 +409,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         raise TypeError(
             f"the mesh model kinds need the API's AppState, not a {type(core).__name__}"
         )
-    return mesh_kinds(core)
+    return mesh_kinds(core, components.get(PRINT_LIBRARY).serving_native)
 
 
 OPERATION_KINDS: KindsBuild = _kinds

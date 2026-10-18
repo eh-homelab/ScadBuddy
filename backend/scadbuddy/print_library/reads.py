@@ -4,7 +4,7 @@ satisfy these, structurally."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import TYPE_CHECKING, Protocol
 
 from fastapi import status
@@ -50,3 +50,12 @@ def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None)
             status.HTTP_404_NOT_FOUND, f"library file {file_id} not found", file_id=file_id
         )
     return native
+
+
+#: The native library a kind reads a native file from (#3827), asked when the kind runs:
+#: the kinds are built before the settings say which library serves.
+NativeReads = Callable[[], Awaitable[LibraryReads | None]]
+
+
+async def no_native() -> LibraryReads | None:
+    return None

@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.print_source import (
     SpoolFullError,
     printable,
 )
+from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.render.glb import footprint_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import LAYOUT_NAME
@@ -159,13 +160,15 @@ async def read_library_objects(
     cache: Path,
     budget: ReadBudget | None = None,
     downloads: DownloadCache | None = None,
+    files: LibraryReads | None = None,
 ) -> LibraryObjects:
     """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
-    hash, else downloaded and read within ``budget`` (the defaults when None). A file
-    deleted in Bambuddy is the client's 404; one that cannot be arranged is
+    hash, else downloaded and read within ``budget`` (the defaults when None). The file
+    is read from ``files`` (a native file, #3827), else from Bambuddy. A file deleted in
+    Bambuddy is the client's 404; one that cannot be arranged is
     :class:`NotArrangeableError`."""
     spend = budget or ReadBudget()
-    file = await client.library_file(file_id)
+    file = await (files or client).library_file(file_id)
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
         raise NotArrangeableError(
@@ -191,7 +194,7 @@ async def read_library_objects(
         objects = [obj.model_copy(update={"library_file_id": file_id}) for obj in kept.objects]
         return LibraryObjects(file_id, file.filename, objects)
     source = LibrarySource(
-        file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind
+        file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind, files=files
     )
     try:
         async with spooled_3mf(

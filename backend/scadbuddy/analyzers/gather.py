@@ -34,6 +34,7 @@ from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.plate import plate_for
@@ -63,6 +64,7 @@ async def gather_context(
     cache: Path | None = None,
     budget: ReadBudget | None = None,
     downloads: DownloadCache | None = None,
+    native: LibraryReads | None = None,
 ) -> AnalysisContext:
     """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
@@ -71,7 +73,8 @@ async def gather_context(
     ``library_subject`` judges a file in Bambuddy's library instead (#1753), as any
     print is judged: its mesh is read from the 3MF the print path fetches (cached under
     ``cache``), and its slots off the file itself. It has no output, so the checks that
-    read one (plate fit: the file prints where its author placed it) say so."""
+    read one (plate fit: the file prints where its author placed it) say so. A native
+    file (#3827) is read from ``native``, never asked of Bambuddy."""
     context = AnalysisContext(
         slug=slug, params=params, request=request, output=meta, library_file_id=library_subject
     )
@@ -96,9 +99,9 @@ async def gather_context(
             if library_subject is not None:
                 assert cache is not None, "a library file's mesh is cached"
                 await _read_library_geometry(
-                    context, client, cache, library_subject, budget, downloads
+                    context, client, cache, library_subject, budget, downloads, native
                 )
-            await _read_bambuddy(context, client, settings, remembered, library_file_id)
+            await _read_bambuddy(context, client, settings, remembered, library_file_id, native)
 
     model = context.printer.model if context.printer and context.printer.model else None
     plate = plate_for(model)
@@ -138,11 +141,18 @@ async def _read_library_geometry(
     file_id: int,
     budget: ReadBudget | None,
     downloads: DownloadCache | None = None,
+    native: LibraryReads | None = None,
 ) -> None:
     """The library file's plate, measured as an output's is (#1753)."""
     try:
         context.geometry = await library_geometry(
-            client, cache, file_id, context.request.plate_id, budget, downloads
+            client,
+            cache,
+            file_id,
+            context.request.plate_id,
+            budget,
+            downloads,
+            reads_for(file_id, client, native),
         )
     except NotViewableError as error:
         context.unavailable["geometry"] = f"the 3MF cannot be analysed: {error.reason}"
@@ -158,6 +168,7 @@ async def _read_bambuddy(
     settings: StoredSettings,
     remembered: ModelPrintChoices | None,
     library_file_id: int | None,
+    native: LibraryReads | None = None,
 ) -> None:
     request = context.request
     meta = context.output
@@ -212,7 +223,9 @@ async def _read_bambuddy(
     try:
         if request.all_plates and context.library_file_id is not None:
             # As the library file's filament step reads them: Bambuddy's plates.
-            listed = await client.library_plates(context.library_file_id)
+            listed = await reads_for(context.library_file_id, client, native).library_plates(
+                context.library_file_id
+            )
             plate_ids = sorted(plate.index for plate in listed.plates) or [1]
         elif request.all_plates and context.model_3mf is not None:
             plates = await asyncio.to_thread(plates_of, context.model_3mf)
@@ -233,6 +246,7 @@ async def _read_bambuddy(
             printer_id=context.printer.id if context.printer else None,
             plate_ids=plate_ids,
             fallback_colours=list(meta.colors) if meta is not None else None,
+            native=native,
         )
         context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:

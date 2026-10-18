@@ -41,6 +41,7 @@ from scadbuddy.bambuddy.filaments import (
     seed_plan,
 )
 from scadbuddy.bambuddy.models import (
+    FilamentRequirements,
     Printer,
     PrinterStatus,
     SlotChoice,
@@ -51,9 +52,11 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.print_run import filament_options
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
+from scadbuddy.print_library.reads import LibraryReads
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
+NATIVE_ID = 1_000_000_007
 
 
 def spools() -> list[Spool]:
@@ -454,6 +457,48 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
     ]
     assert (spools.call_count, assignments.call_count) == (1, 1)
     assert (printer.call_count, remain.call_count) == (1, 1)
+
+
+class _NativeReads:
+    """A native library's reads (#3827): a native file's requirement is the empty one."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[int, int | None]] = []
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements:
+        self.asked.append((file_id, plate_id))
+        return FilamentRequirements(file_id=file_id, filename="plug.3mf", plate_id=plate_id)
+
+
+@respx.mock
+async def test_filament_slots_of_a_native_file_never_ask_bambuddy(
+    bambuddy: BambuddyClient,
+) -> None:
+    """A native file's slots are its own (empty) requirement, so they fall back to the
+    colours given and read as unknown; Bambuddy is asked for the spools only."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    native = _NativeReads()
+
+    [built] = await gather_plate_options(
+        bambuddy,
+        library_file_id=NATIVE_ID,
+        plate_ids=[1],
+        fallback_colours=["#FF0000"],
+        native=cast(LibraryReads, native),
+    )
+
+    assert native.asked == [(NATIVE_ID, 1)]
+    assert [(slot.slot_id, slot.used_grams) for slot in built.slots] == [(1, None)]
+    assert [
+        call.request.url.path for call in respx.calls if "/library/" in call.request.url.path
+    ] == []
 
 
 # --- the failure path (#525): shared reads first, then the plates and the printer ---

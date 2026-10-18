@@ -1010,7 +1010,8 @@ async def _raw_left_unrecorded(
     listed = await _listing(client, folder)
     if listed is None:
         return None
-    rows = [row for row in listed if row.filename == filename and row.file_size == size]
+    name = filename.casefold()
+    rows = [row for row in listed if row.filename.casefold() == name and row.file_size == size]
     if not rows:
         return None
     recorded = await uploads.recorded([row.id for row in rows])

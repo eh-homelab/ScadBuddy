@@ -1061,6 +1061,9 @@ async def test_a_raw_copy_an_attempt_left_unrecorded_is_taken(tmp_path: Path) ->
     client = cast(BambuddyClient, bambuddy)
     with pytest.raises(RuntimeError):
         await source.raw_copy(client, None)
+    # Matched by name as `_left_unrecorded` matches, whatever its case.
+    [left] = bambuddy.files
+    bambuddy.files = [left.model_copy(update={"filename": left.filename.upper()})]
 
     taken = await source.raw_copy(client, None)
 

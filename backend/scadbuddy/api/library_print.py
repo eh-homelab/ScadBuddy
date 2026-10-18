@@ -688,14 +688,19 @@ class LibraryFileObjects(BaseModel):
     summary="The objects Arrange reads from a library file",
 )
 async def get_library_objects(
-    file_id: FileIdPath, store: SettingsStoreDep, state: StateDep, budget: ReadBudgetDep
+    file_id: FileIdPath,
+    store: SettingsStoreDep,
+    state: StateDep,
+    budget: ReadBudgetDep,
+    library: PrintLibraryDep,
 ) -> LibraryFileObjects:
     """Each object the file's 3MF places, with its count (#1863): what the Arrange
     dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the
     arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends
     the read budgets in effect, each overridable for this request (#2087)."""
+    native = await library.serving_native()
     async with client_for(store.load()) as client:
-        found = (await read_plain_files(client, [file_id], state, budget))[file_id]
+        found = (await read_plain_files(client, [file_id], state, budget, native))[file_id]
     return LibraryFileObjects(
         file_id=file_id,
         filename=found.filename,

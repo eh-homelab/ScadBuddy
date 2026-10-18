@@ -9,6 +9,7 @@ import json
 import os
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -20,10 +21,11 @@ import respx
 import trimesh
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR, get_render
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -31,10 +33,15 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
 from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import ReuseLostError
+from tests.api.test_analyzers import SILK_REQUEST
+from tests.api.test_analyzers import bambuddy_routes as analysis_routes
+from tests.api.test_analyzers import library_routes as analysis_library_routes
+from tests.api.test_arrange_api import Arranger
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import flow_copy_routes, run_library, uploaded_name
 from tests.api.test_print_run_choices import body as run_body
@@ -707,3 +714,111 @@ def test_the_internal_routes_on_bambuddy_answer_404(client: TestClient) -> None:
     response = client.get("/api/v1/internal/library/1000000001")
     assert response.status_code == 404
     assert response.json()["file_id"] == 1000000001
+
+
+# --- Task 7b: the other readers of a native file ------------------------------------------
+
+
+@pytest.fixture
+def arranger(native_client: TestClient) -> Iterator[Arranger]:
+    recorded = Arranger()
+    native_client.app.dependency_overrides[get_render] = lambda: recorded  # type: ignore[attr-defined]
+    yield recorded
+    native_client.app.dependency_overrides.pop(get_render, None)  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_arrange_reads_a_native_files_objects(
+    native_client: TestClient, uploaded: NativeFile, model: str, arranger: Arranger
+) -> None:
+    configure(native_client)
+
+    listed = native_client.get(f"/api/v1/print/library/{uploaded.id}/objects")
+    response = native_client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": uploaded.id}], "slug": model},
+    )
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["filename"] == "bracket.3mf"
+    assert response.status_code == 202, response.text
+    [inputs] = arranger.inputs
+    assert inputs.sources == [f"library:{uploaded.id}"]
+    assert _asked_bambuddy_for(uploaded.id) == []
+
+
+@respx.mock
+def test_arrange_resolves_a_filed_files_output(
+    native_client: TestClient,
+    uploaded_with_output: NativeFile,
+    arranger: Arranger,
+    model: str,
+    paths: DataPaths,
+) -> None:
+    """The file is the output's copy, so its objects come from the output's manifest:
+    this one records none, which is the output's own 409, naming it."""
+    configure(native_client)
+    assert uploaded_with_output.output_id is not None
+    meta = paths.outputs / model / uploaded_with_output.output_id / "meta.json"
+    meta.write_text(
+        OutputMeta(
+            id=uploaded_with_output.output_id,
+            slug=model,
+            job_id="j",
+            created_at=datetime.now(UTC),
+            bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 4), size=(10, 10, 4)),
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+
+    response = native_client.post(
+        "/api/v1/outputs/arrange", json={"objects": [{"library_file_id": uploaded_with_output.id}]}
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["output_ids"] == [uploaded_with_output.output_id]
+    assert arranger.inputs == []
+
+
+@respx.mock
+def test_create_model_from_a_native_library_file(
+    native_client: TestClient, uploaded: NativeFile
+) -> None:
+    configure(native_client)
+
+    created = native_client.post(
+        "/api/v1/models/from-mesh",
+        json={"name": "Bracket", "library_file_id": uploaded.id},
+        headers=press(),
+    )
+
+    assert created.status_code == 201, created.text
+    scene = native_client.get(f"/api/v1/models/{created.json()['slug']}/scene").json()
+    assert scene["scene"]["source"]["file_id"] == uploaded.id
+    assert _asked_bambuddy_for(uploaded.id) == []
+
+
+@respx.mock
+def test_all_plates_analysis_of_a_native_file_reads_native_plates(
+    native_client: TestClient, uploaded: NativeFile
+) -> None:
+    configure(native_client)
+    analysis_routes()
+    # The printer and its loaded spools; the file's own routes are there to be refused.
+    analysis_library_routes(uploaded.id, b"")
+
+    response = native_client.post(
+        "/api/v1/analyzers/run",
+        json={
+            "target": {"library_file_id": uploaded.id},
+            "request": {**SILK_REQUEST, "all_plates": True},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["library_file_id"] == uploaded.id
+    inputs = {row["name"]: row for row in report["inputs"]}
+    assert inputs["geometry"]["available"], inputs["geometry"]
+    assert inputs["inventory"]["available"], inputs["inventory"]
+    assert _asked_bambuddy_for(uploaded.id) == []
