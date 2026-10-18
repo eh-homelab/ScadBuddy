@@ -6,7 +6,10 @@ on `follow_queue`, as `FollowPrint`'s does: the activity holds its MQTT connecti
 as long as the printer is reachable, so it must not take a slot a print run's short
 activities wait for. Both are served by the print worker (`worker.run_print_worker`)
 and, in-process, by the API (`main._run_print_worker`). Its id is
-``printer-<serial>``: one per physical printer, whichever registry row names it.
+``printer-<registry id>``: one per physical printer, since a serial is one row's. Never
+the serial: a workflow id rides on every Temporal span (``temporalWorkflowID``) and on
+the SDK's failed-attempt warnings (#4186 re-review N1). A LAN-linked row's id is stable:
+a merge removes only synthetic rows, which take no LAN link.
 
 The activity's attempts retry without end (`FOLLOW_RETRY`): a printer switched off is
 an attempt that fails to connect, then the next. Every `CONTINUE_AFTER`, or when the
@@ -68,8 +71,8 @@ class PrinterWatchInput(BaseModel):
     printer_id: str
 
 
-def watch_id(serial: str) -> str:
-    return f"printer-{serial}"
+def watch_id(printer_id: str) -> str:
+    return f"printer-{printer_id}"
 
 
 @workflow.defn(name=PRINTER_WATCH_WORKFLOW)
@@ -135,27 +138,27 @@ class PrinterWatch:
             workflow.continue_as_new(args=[printer_id, continue_after_seconds])
 
 
-async def ensure_watch(client: Client, task_queue: str, printer_id: str, serial: str) -> None:
-    """Start ``serial``'s watch unless one is running (the sweep's: a running watch is
+async def ensure_watch(client: Client, task_queue: str, printer_id: str) -> None:
+    """Start the printer's watch unless one is running (the sweep's: a running watch is
     left as it is)."""
     with suppress(WorkflowAlreadyStartedError):
         await client.start_workflow(
             PRINTER_WATCH_WORKFLOW,
             args=[printer_id, None],
-            id=watch_id(serial),
+            id=watch_id(printer_id),
             task_queue=task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             rpc_timeout=RPC_TIMEOUT,
         )
 
 
-async def restart_watch(client: Client, task_queue: str, printer_id: str, serial: str) -> None:
-    """Start ``serial``'s watch, or restart the running one on the row as it is now:
+async def restart_watch(client: Client, task_queue: str, printer_id: str) -> None:
+    """Start the printer's watch, or restart the running one on the row as it is now:
     signal-with-start, so a ``stop`` still being handled cannot swallow it."""
     await client.start_workflow(
         PRINTER_WATCH_WORKFLOW,
         args=[printer_id, None],
-        id=watch_id(serial),
+        id=watch_id(printer_id),
         task_queue=task_queue,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         start_signal=RESTART_SIGNAL,
@@ -163,10 +166,10 @@ async def restart_watch(client: Client, task_queue: str, printer_id: str, serial
     )
 
 
-async def stop_watch(client: Client, serial: str) -> None:
-    """Signal ``serial``'s watch to end; a watch that is not running is left alone."""
+async def stop_watch(client: Client, printer_id: str) -> None:
+    """Signal the printer's watch to end; a watch that is not running is left alone."""
     try:
-        await client.get_workflow_handle(watch_id(serial)).signal(
+        await client.get_workflow_handle(watch_id(printer_id)).signal(
             STOP_SIGNAL, rpc_timeout=RPC_TIMEOUT
         )
     except RPCError as error:
@@ -182,7 +185,7 @@ async def ensure_watches(printers: PrinterStore, client: Client, task_queue: str
         if row.lan_host is None:
             continue
         try:
-            await ensure_watch(client, task_queue, row.id, row.serial)
+            await ensure_watch(client, task_queue, row.id)
         except Exception:
             logger.warning("could not start a printer watch", extra={"printer_id": row.id})
             continue

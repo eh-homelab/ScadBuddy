@@ -37,13 +37,14 @@ class PrinterReportStore:
             )
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
-        """Heard from, with nothing new to say."""
+        """Heard from as late as ``seen_at``, with nothing new to say; never earlier than
+        what the row already says."""
         key = printer_uuid(printer_id)
         if key is None:
             return
         with self.pool.connection() as conn:
             conn.execute(
-                "UPDATE printer_reports SET seen_at = %s WHERE printer_id = %s",
+                "UPDATE printer_reports SET seen_at = GREATEST(seen_at, %s) WHERE printer_id = %s",
                 (seen_at, printer_id),
             )
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import hashlib
+import logging
 import socket
 import ssl
 import threading
@@ -273,7 +274,9 @@ async def test_reports_merge_and_skip_what_is_not_a_print_report(
     assert (client.host, client.port) == ("10.0.0.9", 8883)
     assert client.kwargs["username"] == "bblp" and client.kwargs["password"] == "12345678"
     # #4186 review I3: paho proves the link itself, well inside the 90 s offline window.
-    assert client.kwargs["keepalive"] == 15
+    assert client.kwargs["keepalive"] == 10
+    # paho's DEBUG lines name the SUBSCRIBE topic, so its logger stays at WARNING.
+    assert client.kwargs["logger"].getEffectiveLevel() >= logging.WARNING
     assert isinstance(client.kwargs["tls_context"], ssl.SSLContext)
     assert client.subscribed == ["device/01P00A000000001/report"]
     assert client.published == [

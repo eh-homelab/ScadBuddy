@@ -62,11 +62,17 @@ FTP_BLOCK = 64 * 1024
 #: printers never send one (ha-bambulab skips the unwrap for that reason); the ``226``
 #: reply, not the close, says the file arrived.
 UNWRAP_TIMEOUT = 5.0
-#: MQTT keepalive: paho pings at this interval and drops a link with no answer, so a
-#: printer that vanished is noticed well inside `status.STALE_AFTER` (90 s).
-KEEPALIVE = 15
+#: MQTT keepalive: paho sends a PINGREQ after this long with no traffic and closes the
+#: link at its next check without a PINGRESP, so a live link has had inbound traffic
+#: within two keepalives (paho 2.1 ``_check_keepalive``). The watch stamps its touch
+#: with that bound (`watch.LINK_PROOF`).
+KEEPALIVE = 10
 
 logger = logging.getLogger(__name__)
+#: paho's own logger, for aiomqtt: at DEBUG it logs the SUBSCRIBE topic, which names the
+#: serial, so it never goes below WARNING whatever the process's level.
+_MQTT_LOGGER = logging.getLogger("scadbuddy.printers.lan.mqtt")
+_MQTT_LOGGER.setLevel(logging.WARNING)
 
 
 class CertificateMismatchError(ssl.SSLError):
@@ -227,6 +233,7 @@ class LanPrinter:
             tls_insecure=True,  # the pin is the check; the certificate names no host
             timeout=10.0,
             keepalive=KEEPALIVE,
+            logger=_MQTT_LOGGER,
         )
 
     async def probe(self, timeout: float = 10.0) -> LanReport:

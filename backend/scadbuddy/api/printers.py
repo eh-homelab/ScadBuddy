@@ -173,7 +173,7 @@ async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
         )
     await _call(lambda: printers.store.delete(printer_id))
     if row.lan_host is not None:
-        await printers.watches.stop(row.id, row.serial)
+        await printers.watches.stop(row.id)
     printers.changed(printer_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -254,7 +254,7 @@ async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> Pri
         )
         raise ApiError(status.HTTP_502_BAD_GATEWAY, PROBE_FAILED) from None
     linked = await _call(lambda: printers.store.link_lan(printer_id, body, cert_sha256=cert_sha256))
-    await printers.watches.restart(linked.id, linked.serial)
+    await printers.watches.restart(linked.id)
     printers.changed(printer_id)
     return linked
 
@@ -262,6 +262,6 @@ async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> Pri
 @router.delete("/{printer_id}/lan", response_model=PrinterRow, summary="Unlink its LAN link")
 async def unlink_lan(printers: PrintersDep, printer_id: str) -> PrinterRow:
     row = await _call(lambda: printers.store.unlink_lan(printer_id))
-    await printers.watches.stop(row.id, row.serial)
+    await printers.watches.stop(row.id)
     printers.changed(printer_id)
     return row

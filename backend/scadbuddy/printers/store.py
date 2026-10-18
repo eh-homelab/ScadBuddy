@@ -15,13 +15,22 @@ just deleted when another row turns out to be the same printer (a synthetic row 
 serial is learned, a Bambuddy link taken over): `_merge` moves everything that names the
 gone row onto the kept one in the same transaction. Its list is `PRINTER_REFERENCES`;
 a table that names a printer adds itself there (`tests/printers/test_store.py` checks
-that every foreign key to ``printers`` is listed). #4180's ``tray_spool_links`` and Task
-8's activity attribution join it as they land.
+that every foreign key to ``printers`` is listed), in one of two forms:
+
+- a `PrinterReference` (table, column), for a plain column or one row per printer;
+- a `RepointHook`, ``hook(conn, merged, into)``, for a table whose key holds more than
+  the printer and whose conflicts only it can settle. It runs on the merge's connection,
+  inside its transaction, while both rows still exist; raising undoes the merge. This is
+  how #4180's ``tray_spool_links`` (primary key ``(printer_id, ams_id, tray_id)``)
+  registers itself: its ``spools.store.repoint_tray_links``, in which ``into``'s link
+  wins, added here once both have merged (#4190). Task 8's activity attribution joins
+  the same way.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,8 +53,8 @@ Pool = ConnectionPool[Connection[DictRow]]
 
 _COLUMNS = (
     "id, serial, name, model, bambuddy_printer_id, lan_host, lan_cert_sha256,"
-    " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, created_at,"
-    " updated_at"
+    " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, bambuddy_active,"
+    " created_at, updated_at"
 )
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))"
 
@@ -104,9 +113,13 @@ class PrinterReference:
     unique: bool = False
 
 
+#: ``hook(conn, merged, into)``: repoint one table's references from ``merged`` to
+#: ``into`` inside the merge's transaction (module docstring).
+RepointHook = Callable[[Connection[DictRow], str, str], None]
+
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
 #: later table keyed by ``printers.id``.
-PRINTER_REFERENCES: tuple[PrinterReference, ...] = (
+PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
 )
 
@@ -232,6 +245,9 @@ class PrinterStore:
         ``gone`` names ``kept`` (a unique one is dropped when ``kept`` has its own), then
         ``gone`` is deleted. In the caller's transaction, under its lock."""
         for ref in PRINTER_REFERENCES:
+            if not isinstance(ref, PrinterReference):
+                ref(conn, gone, kept)
+                continue
             if ref.unique:
                 conn.execute(
                     f"DELETE FROM {ref.table} WHERE {ref.column} = %s AND EXISTS"
@@ -283,6 +299,18 @@ class PrinterStore:
         if merged is not None:
             self._announce(merged, linked.id)
         return linked
+
+    def mark_bambuddy_active(self, active: Iterable[int]) -> None:
+        """Record which linked Bambuddy printers Bambuddy lists as active now, so a strip
+        read while it is down shows the same ones. Writes only the rows that change."""
+        ids = sorted(set(active))
+        with self.pool.connection() as conn:
+            conn.execute(
+                "UPDATE printers SET bambuddy_active = (bambuddy_printer_id = ANY(%s)),"
+                " updated_at = now() WHERE bambuddy_printer_id IS NOT NULL"
+                " AND bambuddy_active IS DISTINCT FROM (bambuddy_printer_id = ANY(%s))",
+                (ids, ids),
+            )
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
         with self.pool.connection() as conn:

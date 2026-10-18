@@ -18,6 +18,9 @@ CREATE TABLE printers (
     access_code_kek_id text,
     preferred_path text NOT NULL DEFAULT 'auto'
         CHECK (preferred_path IN ('bambuddy', 'native', 'auto')),
+    -- Whether Bambuddy listed the linked printer as active when it last answered: the
+    -- strip shows the same printers while Bambuddy is down.
+    bambuddy_active boolean NOT NULL DEFAULT true,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK ((access_code_sealed IS NULL) = (access_code_dek_sealed IS NULL)),

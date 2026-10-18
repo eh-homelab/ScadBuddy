@@ -431,3 +431,40 @@ def test_now_without_bambuddy_configured_still_lists_lan_printers(client: TestCl
     cards = {card["id"]: card for card in response.json()["printers"]}
     assert (cards[reported]["path"], cards[reported]["activity"]) == ("native", "idle")
     assert (cards[silent]["path"], cards[silent]["activity"]) == ("none", "offline")
+
+
+@respx.mock
+def test_with_bambuddy_down_the_strip_hides_what_it_hid(client: TestClient) -> None:
+    """#4186 re-review N4: an inactive or removed Bambuddy printer stays off the strip
+    during an outage, from what Bambuddy last listed."""
+    configure(client)
+    listing = respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {**printer(1), "serial_number": SERIAL},
+                {**printer(2), "serial_number": "01P00A000000002"},
+            ],
+        )
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/printers/2/status").mock(return_value=httpx.Response(200, json=status(2)))
+    first = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert [card["printer_id"] for card in first] == [1, 2]
+    listing.mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {**printer(1), "serial_number": SERIAL},
+                {**printer(2, active=False), "serial_number": "01P00A000000002"},
+            ],
+        )
+    )
+    assert [
+        c["printer_id"] for c in client.get("/api/v1/print/printers/now").json()["printers"]
+    ] == [1]
+    listing.mock(return_value=httpx.Response(503))
+
+    down = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert [(card["printer_id"], card["activity"]) for card in down] == [(1, "unknown")]

@@ -41,7 +41,6 @@ from scadbuddy.workflows.printer_watch import (
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "printer_watch_histories"
-SERIAL = "01P00A000000001"
 PRINTER = "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b"
 
 
@@ -93,14 +92,14 @@ async def _serving(address: str) -> AsyncIterator[tuple[Client, str]]:
 async def _attempts(client: Client) -> int:
     """The attempt number of the running activity, 0 while none has started. (A
     retried activity's started event is written only when it closes.)"""
-    described = await client.get_workflow_handle(watch_id(SERIAL)).describe()
+    described = await client.get_workflow_handle(watch_id(PRINTER)).describe()
     pending = described.raw_description.pending_activities
     if not pending or pending[0].state != PendingActivityState.PENDING_ACTIVITY_STATE_STARTED:
         return 0
     return len(
         [
             e
-            for e in (await client.get_workflow_handle(watch_id(SERIAL)).fetch_history()).events
+            for e in (await client.get_workflow_handle(watch_id(PRINTER)).fetch_history()).events
             if e.HasField("activity_task_scheduled_event_attributes")
         ]
     )
@@ -123,10 +122,10 @@ recording = pytest.mark.skipif(
 async def test_record_stopped(recording_temporal: str) -> None:
     async with _serving(recording_temporal) as (client, queue):
         handle = await client.start_workflow(
-            PrinterWatch.run, args=[PRINTER, None], id=watch_id(SERIAL), task_queue=queue
+            PrinterWatch.run, args=[PRINTER, None], id=watch_id(PRINTER), task_queue=queue
         )
         await _started(client)
-        await stop_watch(client, SERIAL)
+        await stop_watch(client, PRINTER)
         assert await handle.result() == "stopped"
         (HISTORIES / "stopped.json").write_text((await handle.fetch_history()).to_json())
 
@@ -136,12 +135,12 @@ async def test_record_stopped(recording_temporal: str) -> None:
 async def test_record_restarted(recording_temporal: str) -> None:
     async with _serving(recording_temporal) as (client, queue):
         handle = await client.start_workflow(
-            PrinterWatch.run, args=[PRINTER, None], id=watch_id(SERIAL), task_queue=queue
+            PrinterWatch.run, args=[PRINTER, None], id=watch_id(PRINTER), task_queue=queue
         )
         await _started(client)
-        await restart_watch(client, queue, PRINTER, SERIAL)
+        await restart_watch(client, queue, PRINTER)
         await _started(client, scheduled=2)
-        await stop_watch(client, SERIAL)
+        await stop_watch(client, PRINTER)
         assert await handle.result() == "stopped"
         (HISTORIES / "restarted.json").write_text((await handle.fetch_history()).to_json())
 
@@ -151,11 +150,11 @@ async def test_record_restarted(recording_temporal: str) -> None:
 async def test_record_continued(recording_temporal: str) -> None:
     async with _serving(recording_temporal) as (client, queue):
         handle = await client.start_workflow(
-            PrinterWatch.run, args=[PRINTER, 2.0], id=watch_id(SERIAL), task_queue=queue
+            PrinterWatch.run, args=[PRINTER, 2.0], id=watch_id(PRINTER), task_queue=queue
         )
-        first = client.get_workflow_handle(watch_id(SERIAL), run_id=handle.result_run_id)
+        first = client.get_workflow_handle(watch_id(PRINTER), run_id=handle.result_run_id)
         async with asyncio.timeout(30):
             while (await first.describe()).status != WorkflowExecutionStatus.CONTINUED_AS_NEW:
                 await asyncio.sleep(0.2)
         (HISTORIES / "continued.json").write_text((await first.fetch_history()).to_json())
-        await stop_watch(client, SERIAL)
+        await stop_watch(client, PRINTER)

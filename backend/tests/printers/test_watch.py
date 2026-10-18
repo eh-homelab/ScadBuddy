@@ -114,3 +114,30 @@ def test_a_new_hms_error_or_time_left_is_announced() -> None:
     assert {"hms", "mc_remaining_time"} <= set(SHOWN)
     assert shown({"hms": []}) != shown({"hms": [{"attr": 1, "code": 2}]})
     assert shown({"mc_remaining_time": 10}) != shown({"mc_remaining_time": 9})
+
+
+async def test_a_touch_claims_only_what_keepalive_proves(
+    linked: tuple[PrinterStore, PrinterReportStore, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4186 re-review N3: paho drops a link with no answer within `LINK_PROOF` (two
+    keepalives) of its last inbound packet, so a touch stamps ``now - LINK_PROOF``, never
+    ``now``: the card goes offline 90 s after the printer was last heard, as the rule says."""
+    printers, reports, pid = linked
+    monkeypatch.setattr(watch_module, "HEARD_EVERY", 0.05)
+    monkeypatch.setattr(watch_module, "LINK_PROOF", 0.5)
+    lan = Lan(subscribes=True)
+    watches = WatchActivities(printers, reports, None, connect=lambda *a: cast(LanPrinter, lan))
+    started = datetime.now(UTC)
+    await _run_for(ActivityEnvironment(), watches, pid, 1.0)
+    got = reports.get(pid)
+    assert got is not None
+    lag = datetime.now(UTC) - got[1]
+    assert timedelta(seconds=0.45) <= lag < timedelta(seconds=1.5)
+    assert got[1] >= started
+
+
+def test_the_proof_window_is_two_keepalives() -> None:
+    from scadbuddy.printers import lan
+
+    assert watch_module.LINK_PROOF == 2 * lan.KEEPALIVE
+    assert lan.KEEPALIVE <= 10

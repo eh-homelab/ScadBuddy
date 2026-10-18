@@ -239,8 +239,9 @@ async def printers_now(
     printer it has never seen, so the strip never loses one); then every other
     LAN-linked row, by name. Each card from the row's fresh LAN report, else Bambuddy's
     status, else offline. ``client`` is ``None`` when no Bambuddy is configured; a
-    Bambuddy that fails to list its printers leaves every Bambuddy-linked row a card
-    that says so, or its LAN report."""
+    Bambuddy that fails to list its printers leaves every row it last listed as active
+    a card that says so, or its LAN report (`PrinterRow.bambuddy_active`, recorded on
+    each answer), so the outage hides what Bambuddy hid (#4186 re-review N4)."""
     active: list[Printer] = []
     unreachable: str | None = None
     if client is not None:
@@ -250,6 +251,8 @@ async def printers_now(
             logger.info("Bambuddy's printers unreadable; the registry answers")
             unreachable = error.detail
     listed = frozenset(printer.id for printer in active)
+    if unreachable is None and client is not None:
+        await asyncio.to_thread(printers.mark_bambuddy_active, listed)
     rows = [
         await asyncio.to_thread(
             printers.ensure_bambuddy,
@@ -273,7 +276,9 @@ async def printers_now(
     for row in await asyncio.to_thread(printers.list):
         if row.id in shown:
             continue
-        bambuddy_down = unreachable is not None and row.bambuddy_printer_id is not None
+        bambuddy_down = (
+            unreachable is not None and row.bambuddy_printer_id is not None and row.bambuddy_active
+        )
         if bambuddy_down and not _fresh(row, latest, now):
             cards.append(_unreachable(row, unreachable or ""))
         elif row.lan_host is not None:

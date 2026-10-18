@@ -65,23 +65,23 @@ class Watches:
     def __init__(self, core: Core) -> None:
         self.core = core
 
-    async def ensure(self, printer_id: str, serial: str) -> None:
+    async def ensure(self, printer_id: str) -> None:
         def call() -> Awaitable[None]:
             commands = self.core.print_runs
-            return ensure_watch(commands.client, commands.task_queue, printer_id, serial)
+            return ensure_watch(commands.client, commands.task_queue, printer_id)
 
         await self._bounded("start", printer_id, call)
 
-    async def restart(self, printer_id: str, serial: str) -> None:
+    async def restart(self, printer_id: str) -> None:
         def call() -> Awaitable[None]:
             commands = self.core.print_runs
-            return restart_watch(commands.client, commands.task_queue, printer_id, serial)
+            return restart_watch(commands.client, commands.task_queue, printer_id)
 
         await self._bounded("restart", printer_id, call)
 
-    async def stop(self, printer_id: str, serial: str) -> None:
+    async def stop(self, printer_id: str) -> None:
         await self._bounded(
-            "stop", printer_id, lambda: stop_watch(self.core.print_runs.client, serial)
+            "stop", printer_id, lambda: stop_watch(self.core.print_runs.client, printer_id)
         )
 
     async def _bounded(

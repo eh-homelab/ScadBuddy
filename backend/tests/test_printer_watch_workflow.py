@@ -4,6 +4,7 @@ over a fake LAN connection, writing each LAN printer's latest report to Postgres
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -11,11 +12,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio.client import Client, WorkflowFailureError
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.core.events import Event, EventBus, PrinterEvent
+from scadbuddy.core.tracing import span
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate
@@ -145,8 +149,8 @@ async def test_watch_writes_reports_and_emits_on_change(
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     watches = WatchActivities(printers, reports, cast(EventBus, bus), write_every=0.0)
     async with serving(client, queue, watches):
-        await ensure_watch(client, queue, pid, SERIAL)
-        await ensure_watch(client, queue, pid, SERIAL)  # idempotent
+        await ensure_watch(client, queue, pid)
+        await ensure_watch(client, queue, pid)  # idempotent
 
         def latest() -> dict[str, Any] | None:
             got = reports.get(pid)
@@ -158,8 +162,8 @@ async def test_watch_writes_reports_and_emits_on_change(
         assert [(e.kind, e.printer_id) for e in announced] == [("printer.report", pid)] * 2
         assert lan.connects == 1 and lan.hosts == ["10.0.0.9"]
 
-        await stop_watch(client, SERIAL)
-        handle = client.get_workflow_handle(watch_id(SERIAL))
+        await stop_watch(client, pid)
+        handle = client.get_workflow_handle(watch_id(pid))
         assert await handle.result() == "stopped"
 
 
@@ -175,7 +179,7 @@ async def test_reports_are_throttled_but_changes_are_not(
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     watches = WatchActivities(printers, reports, cast(EventBus, RecordingBus()), write_every=3600.0)
     async with serving(client, queue, watches):
-        await ensure_watch(client, queue, pid, SERIAL)
+        await ensure_watch(client, queue, pid)
         await _until(lambda: reports.get(pid) is not None)
         await asyncio.sleep(0.5)
         got = reports.get(pid)
@@ -192,10 +196,10 @@ async def test_watch_stops_on_signal(
     pid = linked(printers)
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
-        await ensure_watch(client, queue, pid, SERIAL)
-        await stop_watch(client, SERIAL)
-        assert await client.get_workflow_handle(watch_id(SERIAL)).result() == "stopped"
-        await stop_watch(client, SERIAL)  # an ended watch: nothing to stop
+        await ensure_watch(client, queue, pid)
+        await stop_watch(client, pid)
+        assert await client.get_workflow_handle(watch_id(pid)).result() == "stopped"
+        await stop_watch(client, pid)  # an ended watch: nothing to stop
 
 
 async def test_a_watch_on_an_unlinked_printer_ends(
@@ -209,8 +213,8 @@ async def test_a_watch_on_an_unlinked_printer_ends(
     row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
-        await ensure_watch(client, queue, row.id, SERIAL)
-        assert await client.get_workflow_handle(watch_id(SERIAL)).result() == "unlinked"
+        await ensure_watch(client, queue, row.id)
+        assert await client.get_workflow_handle(watch_id(row.id)).result() == "unlinked"
     assert lan.connects == 0
 
 
@@ -226,9 +230,9 @@ async def test_a_watch_without_the_key_ends(
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     keyless = PrinterStore(pg_pool, None)
     async with serving(client, queue, WatchActivities(keyless, reports, None)):
-        await ensure_watch(client, queue, pid, SERIAL)
+        await ensure_watch(client, queue, pid)
         try:
-            result = await client.get_workflow_handle(watch_id(SERIAL)).result()
+            result = await client.get_workflow_handle(watch_id(pid)).result()
         except WorkflowFailureError:  # pragma: no cover - the answer is a result
             pytest.fail("a watch without the key must end, not fail")
         assert result == "no-key"
@@ -242,18 +246,18 @@ async def test_the_sweep_watches_every_lan_printer(
 ) -> None:
     FakeLan([]).install(monkeypatch)
     pid = linked(printers)
-    printers.create(PrinterCreate(serial="01P00A000000002", name="No LAN"))
+    other = printers.create(PrinterCreate(serial="01P00A000000002", name="No LAN"))
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
         assert await ensure_watches(printers, client, queue) == [pid]
-        described = await client.get_workflow_handle(watch_id(SERIAL)).describe()
+        described = await client.get_workflow_handle(watch_id(pid)).describe()
         assert described.status is not None and described.status.name == "RUNNING"
         with pytest.raises(RPCError):
-            await client.get_workflow_handle(watch_id("01P00A000000002")).describe()
+            await client.get_workflow_handle(watch_id(other.id)).describe()
 
 
-async def _running(client: Client, serial: str = SERIAL) -> bool:
-    described = await client.get_workflow_handle(watch_id(serial)).describe()
+async def _running(client: Client, printer_id: str) -> bool:
+    described = await client.get_workflow_handle(watch_id(printer_id)).describe()
     return described.status is not None and described.status.name == "RUNNING"
 
 
@@ -270,13 +274,13 @@ async def test_unlink_then_relink_watches_again(
     pid = linked(printers)
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
-        await ensure_watch(client, queue, pid, SERIAL)
+        await ensure_watch(client, queue, pid)
         await _until(lambda: lan.connects == 1)
-        await stop_watch(client, SERIAL)
-        await restart_watch(client, queue, pid, SERIAL)
+        await stop_watch(client, pid)
+        await restart_watch(client, queue, pid)
         await _until(lambda: lan.connects == 2)
         await asyncio.sleep(0.5)
-        assert await _running(client)
+        assert await _running(client, pid)
 
 
 async def test_a_restart_reads_the_new_link(
@@ -291,14 +295,14 @@ async def test_a_restart_reads_the_new_link(
     pid = linked(printers)
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
-        await ensure_watch(client, queue, pid, SERIAL)
+        await ensure_watch(client, queue, pid)
         await _until(lambda: lan.connects == 1)
         printers.link_lan(
             pid, LanLink(host="10.0.0.10", access_code="87654321"), cert_sha256="cd" * 32
         )
-        await restart_watch(client, queue, pid, SERIAL)
+        await restart_watch(client, queue, pid)
         await _until(lambda: lan.hosts == ["10.0.0.9", "10.0.0.10"])
-        await ensure_watch(client, queue, pid, SERIAL)  # the sweep's: no restart
+        await ensure_watch(client, queue, pid)  # the sweep's: no restart
         await asyncio.sleep(0.5)
         assert lan.connects == 2
 
@@ -314,14 +318,14 @@ async def test_a_restart_starts_a_watch_that_ended(
     row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
-        await ensure_watch(client, queue, row.id, SERIAL)
-        assert await client.get_workflow_handle(watch_id(SERIAL)).result() == "unlinked"
+        await ensure_watch(client, queue, row.id)
+        assert await client.get_workflow_handle(watch_id(row.id)).result() == "unlinked"
         printers.link_lan(
             row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
         )
-        await restart_watch(client, queue, row.id, SERIAL)
+        await restart_watch(client, queue, row.id)
         await _until(lambda: lan.connects == 1)
-        assert await _running(client)
+        assert await _running(client, row.id)
 
 
 async def test_the_watch_continues_as_new(
@@ -337,9 +341,63 @@ async def test_the_watch_continues_as_new(
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     async with serving(client, queue, WatchActivities(printers, reports, None)):
         first = await client.start_workflow(
-            PrinterWatch.run, args=[pid, 1.0], id=watch_id(SERIAL), task_queue=queue
+            PrinterWatch.run, args=[pid, 1.0], id=watch_id(pid), task_queue=queue
         )
         await _until(lambda: lan.connects >= 2, timeout=30)
-        described = await client.get_workflow_handle(watch_id(SERIAL)).describe()
+        described = await client.get_workflow_handle(watch_id(pid)).describe()
         assert described.run_id != first.result_run_id
-        assert await _running(client)
+        assert await _running(client, pid)
+
+
+async def test_no_span_or_log_record_of_a_watch_carries_the_serial(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+    spans: InMemorySpanExporter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4186 re-review N1: the watch is keyed by the registry id, so neither Temporal's
+    spans (``temporalWorkflowID``) nor the SDK's failed-attempt warning name the serial."""
+    attempts = 0
+
+    async def reports_once_failing(
+        printer: LanPrinter, connected: asyncio.Event | None = None
+    ) -> AsyncIterator[LanReport]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("refused")
+        if connected is not None:
+            connected.set()
+        yield LanReport(serial=printer.serial, received_at=datetime.now(UTC), print={"x": 1})
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(LanPrinter, "reports", reports_once_failing)
+    config = client.config()
+    config["interceptors"] = [TracingInterceptor()]
+    traced = Client(**config)
+    pid = linked(printers)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    spans.clear()
+    with caplog.at_level(logging.DEBUG):
+        async with serving(traced, queue, WatchActivities(printers, reports, None)):
+            # A parent, as a route's request is: the sampler drops parentless CLIENT spans.
+            with span("test.printer_link"):
+                await restart_watch(traced, queue, pid)
+            await _until(lambda: reports.get(pid) is not None, timeout=30)
+            with span("test.printer_unlink"):
+                await stop_watch(traced, pid)
+            await traced.get_workflow_handle(watch_id(pid)).result()
+    assert attempts >= 2
+    finished = spans.get_finished_spans()
+    assert any(
+        (done.attributes or {}).get("temporalWorkflowID") == watch_id(pid) for done in finished
+    )
+    for done in finished:
+        assert SERIAL not in done.name
+        assert SERIAL not in repr(dict(done.attributes or {}))
+    assert any("failed" in record.getMessage() for record in caplog.records)
+    for record in caplog.records:
+        assert SERIAL not in record.getMessage()
+        assert SERIAL not in repr(record.__dict__)

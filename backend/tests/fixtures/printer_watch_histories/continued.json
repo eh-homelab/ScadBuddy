@@ -2,7 +2,7 @@
   "events": [
     {
       "eventId": "1",
-      "eventTime": "2026-10-18T19:26:15.851279495Z",
+      "eventTime": "2026-10-18T20:01:34.959615160Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
       "taskId": "1048587",
       "workflowExecutionStartedEventAttributes": {
@@ -10,7 +10,7 @@
           "name": "PrinterWatch"
         },
         "taskQueue": {
-          "name": "bambuddy-395d433a",
+          "name": "bambuddy-fbd641b6",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "input": {
@@ -30,23 +30,23 @@
           ]
         },
         "workflowTaskTimeout": "10s",
-        "originalExecutionRunId": "01a1507a-9f2b-743b-b673-b4b2e6854c14",
-        "identity": "68488@newoldboy",
-        "firstExecutionRunId": "01a1507a-9f2b-743b-b673-b4b2e6854c14",
+        "originalExecutionRunId": "01a1509a-f4ef-795b-b3dd-d3bf65c28c9e",
+        "identity": "2732@newoldboy",
+        "firstExecutionRunId": "01a1509a-f4ef-795b-b3dd-d3bf65c28c9e",
         "attempt": 1,
         "firstWorkflowTaskBackoff": "0s",
-        "workflowId": "printer-01P00A000000001",
+        "workflowId": "printer-6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b",
         "priority": {}
       }
     },
     {
       "eventId": "2",
-      "eventTime": "2026-10-18T19:26:15.851458529Z",
+      "eventTime": "2026-10-18T20:01:34.959788263Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "taskId": "1048588",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "bambuddy-395d433a",
+          "name": "bambuddy-fbd641b6",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "startToCloseTimeout": "10s",
@@ -55,14 +55,14 @@
     },
     {
       "eventId": "3",
-      "eventTime": "2026-10-18T19:26:15.884531794Z",
+      "eventTime": "2026-10-18T20:01:34.984622673Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "taskId": "1048593",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "2",
-        "identity": "68488@newoldboy",
-        "requestId": "5861ace8-c339-42cb-8f86-384c5f2526c7",
-        "historySizeBytes": "354",
+        "identity": "2732@newoldboy",
+        "requestId": "e9024d8d-79fc-4dbd-b308-5a98aceb71e2",
+        "historySizeBytes": "374",
         "workerVersion": {
           "buildId": "2872d58f18d41ad0fe67df033437ae8e"
         }
@@ -70,21 +70,21 @@
     },
     {
       "eventId": "4",
-      "eventTime": "2026-10-18T19:26:15.940613109Z",
+      "eventTime": "2026-10-18T20:01:35.029911849Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "taskId": "1048597",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "2",
         "startedEventId": "3",
-        "identity": "68488@newoldboy",
+        "identity": "2732@newoldboy",
         "workerVersion": {
           "buildId": "2872d58f18d41ad0fe67df033437ae8e"
         },
         "sdkMetadata": {
           "coreUsedFlags": [
-            1,
+            3,
             2,
-            3
+            1
           ],
           "sdkName": "temporal-python",
           "sdkVersion": "1.34.0"
@@ -94,7 +94,7 @@
     },
     {
       "eventId": "5",
-      "eventTime": "2026-10-18T19:26:15.941042830Z",
+      "eventTime": "2026-10-18T20:01:35.030176918Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
       "taskId": "1048598",
       "activityTaskScheduledEventAttributes": {
@@ -103,7 +103,7 @@
           "name": "printer_watch"
         },
         "taskQueue": {
-          "name": "bambuddy-395d433a-follow",
+          "name": "bambuddy-fbd641b6-follow",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "header": {},
@@ -132,7 +132,7 @@
     },
     {
       "eventId": "6",
-      "eventTime": "2026-10-18T19:26:15.942107268Z",
+      "eventTime": "2026-10-18T20:01:35.030807617Z",
       "eventType": "EVENT_TYPE_TIMER_STARTED",
       "taskId": "1048599",
       "timerStartedEventAttributes": {
@@ -143,7 +143,7 @@
     },
     {
       "eventId": "7",
-      "eventTime": "2026-10-18T19:26:17.945135726Z",
+      "eventTime": "2026-10-18T20:01:37.032863762Z",
       "eventType": "EVENT_TYPE_TIMER_FIRED",
       "taskId": "1048606",
       "timerFiredEventAttributes": {
@@ -153,14 +153,14 @@
     },
     {
       "eventId": "8",
-      "eventTime": "2026-10-18T19:26:17.945148829Z",
+      "eventTime": "2026-10-18T20:01:37.032878311Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "taskId": "1048607",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "68488@newoldboy-a9cdb1729bc2493bafd0d741b7a23f1c",
+          "name": "2732@newoldboy-fbcbbbc98a134065b7ff0226b7c2f001",
           "kind": "TASK_QUEUE_KIND_STICKY",
-          "normalName": "bambuddy-395d433a"
+          "normalName": "bambuddy-fbd641b6"
         },
         "startToCloseTimeout": "10s",
         "attempt": 1
@@ -168,14 +168,14 @@
     },
     {
       "eventId": "9",
-      "eventTime": "2026-10-18T19:26:17.956553526Z",
+      "eventTime": "2026-10-18T20:01:37.041200366Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "taskId": "1048612",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "8",
-        "identity": "68488@newoldboy",
-        "requestId": "53b54d86-2335-4ceb-ac1c-bc9391ea78ac",
-        "historySizeBytes": "964",
+        "identity": "2732@newoldboy",
+        "requestId": "8f60f983-ee55-4dd4-ab97-998e14cfaede",
+        "historySizeBytes": "976",
         "workerVersion": {
           "buildId": "2872d58f18d41ad0fe67df033437ae8e"
         }
@@ -183,13 +183,13 @@
     },
     {
       "eventId": "10",
-      "eventTime": "2026-10-18T19:26:17.966370721Z",
+      "eventTime": "2026-10-18T20:01:37.051200512Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "taskId": "1048616",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "8",
         "startedEventId": "9",
-        "identity": "68488@newoldboy",
+        "identity": "2732@newoldboy",
         "workerVersion": {
           "buildId": "2872d58f18d41ad0fe67df033437ae8e"
         },
@@ -199,7 +199,7 @@
     },
     {
       "eventId": "11",
-      "eventTime": "2026-10-18T19:26:17.966537927Z",
+      "eventTime": "2026-10-18T20:01:37.051285482Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_CANCEL_REQUESTED",
       "taskId": "1048617",
       "activityTaskCancelRequestedEventAttributes": {
@@ -209,7 +209,7 @@
     },
     {
       "eventId": "12",
-      "eventTime": "2026-10-18T19:26:17.966612409Z",
+      "eventTime": "2026-10-18T20:01:37.051355096Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_CANCELED",
       "taskId": "1048618",
       "activityTaskCanceledEventAttributes": {
@@ -225,19 +225,19 @@
         },
         "latestCancelRequestedEventId": "11",
         "scheduledEventId": "5",
-        "identity": "68488@newoldboy"
+        "identity": "2732@newoldboy"
       }
     },
     {
       "eventId": "13",
-      "eventTime": "2026-10-18T19:26:17.966632063Z",
+      "eventTime": "2026-10-18T20:01:37.051370251Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
       "taskId": "1048619",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "68488@newoldboy-a9cdb1729bc2493bafd0d741b7a23f1c",
+          "name": "2732@newoldboy-fbcbbbc98a134065b7ff0226b7c2f001",
           "kind": "TASK_QUEUE_KIND_STICKY",
-          "normalName": "bambuddy-395d433a"
+          "normalName": "bambuddy-fbd641b6"
         },
         "startToCloseTimeout": "10s",
         "attempt": 1
@@ -245,14 +245,14 @@
     },
     {
       "eventId": "14",
-      "eventTime": "2026-10-18T19:26:17.966641839Z",
+      "eventTime": "2026-10-18T20:01:37.051378637Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
       "taskId": "1048620",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "13",
-        "identity": "68488@newoldboy",
+        "identity": "2732@newoldboy",
         "requestId": "request-from-RespondWorkflowTaskCompleted",
-        "historySizeBytes": "1086",
+        "historySizeBytes": "1096",
         "workerVersion": {
           "buildId": "2872d58f18d41ad0fe67df033437ae8e"
         }
@@ -260,13 +260,13 @@
     },
     {
       "eventId": "15",
-      "eventTime": "2026-10-18T19:26:17.980405465Z",
+      "eventTime": "2026-10-18T20:01:37.064695157Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
       "taskId": "1048623",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "13",
         "startedEventId": "14",
-        "identity": "68488@newoldboy",
+        "identity": "2732@newoldboy",
         "workerVersion": {
           "buildId": "2872d58f18d41ad0fe67df033437ae8e"
         },
@@ -276,16 +276,16 @@
     },
     {
       "eventId": "16",
-      "eventTime": "2026-10-18T19:26:17.981456879Z",
+      "eventTime": "2026-10-18T20:01:37.066633717Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW",
       "taskId": "1048624",
       "workflowExecutionContinuedAsNewEventAttributes": {
-        "newExecutionRunId": "245004c1-04a9-4eed-ad6b-dd6ea63e4532",
+        "newExecutionRunId": "3cc768a6-a6a5-4a20-bcce-0144bbc570c8",
         "workflowType": {
           "name": "PrinterWatch"
         },
         "taskQueue": {
-          "name": "bambuddy-395d433a",
+          "name": "bambuddy-fbd641b6",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "input": {

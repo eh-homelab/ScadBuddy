@@ -7,11 +7,14 @@ from __future__ import annotations
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import Any
 
+import psycopg
 import pytest
 from pydantic import ValidationError
 
 from scadbuddy.core.secrets import SealError
+from scadbuddy.printers import store as store_module
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import (
@@ -20,6 +23,7 @@ from scadbuddy.printers.store import (
     KekMissingError,
     NoAccessCodeError,
     PrinterNotFoundError,
+    PrinterReference,
     PrinterStore,
     SerialTakenError,
     SerialUnknownError,
@@ -241,7 +245,10 @@ def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
         ).fetchall()
     fks = {(row["t"], row["c"]) for row in rows}
     assert fks
-    assert fks <= {(ref.table, ref.column) for ref in PRINTER_REFERENCES}
+    listed = {
+        (ref.table, ref.column) for ref in PRINTER_REFERENCES if isinstance(ref, PrinterReference)
+    }
+    assert fks <= listed
 
 
 def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
@@ -310,3 +317,58 @@ def test_ensure_takes_no_lock_when_nothing_changes(printers: PrinterStore, pg_po
                 printers.ensure_bambuddy, 4, serial=SERIAL, name="H2C", model=None
             ).result(timeout=5)
     assert found.bambuddy_printer_id == 4
+
+
+# ── #4186 re-review ──────────────────────────────────────────────────────────────────
+
+
+def _two_rows(printers: PrinterStore) -> tuple[str, str]:
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    return synthetic.id, mine.id
+
+
+def test_a_repoint_hook_runs_inside_the_merge_transaction(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N2: a reference with a key of its own (#4180's ``tray_spool_links``) registers a
+    hook, called with the merge's connection while both rows still exist."""
+    gone, kept = _two_rows(printers)
+    calls: list[tuple[str, str, bool, bool]] = []
+
+    def hook(conn: Any, merged: str, into: str) -> None:
+        in_tx = conn.info.transaction_status == psycopg.pq.TransactionStatus.INTRANS
+        both = conn.execute(
+            "SELECT count(*) AS n FROM printers WHERE id IN (%s, %s)", (merged, into)
+        ).fetchone()["n"]
+        calls.append((merged, into, in_tx, both == 2))
+
+    monkeypatch.setattr(store_module, "PRINTER_REFERENCES", (*PRINTER_REFERENCES, hook))
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    assert calls == [(gone, kept, True, True)]
+
+
+def test_a_failing_repoint_hook_undoes_the_merge(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gone, kept = _two_rows(printers)
+
+    def hook(conn: Any, merged: str, into: str) -> None:
+        raise RuntimeError("conflict")
+
+    monkeypatch.setattr(store_module, "PRINTER_REFERENCES", (*PRINTER_REFERENCES, hook))
+    with pytest.raises(RuntimeError):
+        printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    assert printers.get(gone) is not None
+    assert printers.require(kept).bambuddy_printer_id is None
+
+
+def test_the_rows_remember_which_bambuddy_printers_were_active(printers: PrinterStore) -> None:
+    """N4: what Bambuddy last listed as active, for when it is down."""
+    a = printers.ensure_bambuddy(1, serial=None, name="A", model=None)
+    b = printers.ensure_bambuddy(2, serial=None, name="B", model=None)
+    printers.mark_bambuddy_active({1})
+    assert printers.require(a.id).bambuddy_active is True
+    assert printers.require(b.id).bambuddy_active is False
+    printers.mark_bambuddy_active({1, 2})
+    assert printers.require(b.id).bambuddy_active is True

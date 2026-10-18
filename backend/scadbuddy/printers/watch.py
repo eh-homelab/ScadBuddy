@@ -6,9 +6,9 @@ changes what a card shows (``gcode_state``, ``mc_percent``, ``layer_num`` or a t
 which is written at once and announced (``printer.report``). While the connection is
 up (the printer took the login and the subscription, and paho's keepalive,
 `lan.KEEPALIVE`, has not given up on it) and quiet, the row's ``seen_at`` is touched
-every `HEARD_EVERY`; a connect still pending is no evidence, so it touches nothing
-(#4186 review I3). The P1 series sends
-only what changed (OpenBambuAPI `mqtt.md`), so an idle printer may say nothing for
+every `HEARD_EVERY`, stamped with what the link proves (`LINK_PROOF`); a connect
+still pending is no evidence, so it touches nothing (#4186 review I3). The P1 series
+sends only what changed (OpenBambuAPI `mqtt.md`), so an idle printer may say nothing for
 minutes, and asking it for everything that often would lag it (`mqtt.md` cautions
 against ``pushall`` more than every 5 minutes). A dropped connection raises, the
 attempt fails, and `FOLLOW_RETRY` starts the next; ``seen_at`` then ages until
@@ -27,14 +27,14 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
-from scadbuddy.printers.lan import LanPrinter
+from scadbuddy.printers.lan import KEEPALIVE, LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 #: How often a quiet connection touches ``seen_at`` and heartbeats.
 HEARD_EVERY = 10.0
+#: How far back an open connection proves the printer was there: paho closes a link
+#: with no inbound traffic within two keepalives, so a touch stamps ``now`` less this
+#: (never before the connect), and the card goes offline `STALE_AFTER` after the last
+#: packet, not after the link was noticed down (#4186 re-review N3).
+LINK_PROOF = 2 * KEEPALIVE
 #: The fields a card shows, and so the ones whose change is announced.
 SHOWN = (
     "gcode_state",
@@ -126,7 +131,15 @@ class WatchActivities:
                 return
             await queue.put(None)
 
+        connected_at: datetime | None = None
+
+        async def mark() -> None:
+            nonlocal connected_at
+            await connected.wait()
+            connected_at = datetime.now(UTC)
+
         reader = asyncio.create_task(read())
+        marker = asyncio.create_task(mark())
         last_shown: tuple[Any, ...] | None = None
         last_write = float("-inf")
         pending: LanReport | None = None
@@ -139,8 +152,11 @@ class WatchActivities:
                     if pending is not None:
                         await self._write(printer_id, pending)
                         pending, last_write = None, self.clock()
-                    elif connected.is_set():
-                        await asyncio.to_thread(self.reports.touch, printer_id, datetime.now(UTC))
+                    elif connected_at is not None:
+                        proven = max(
+                            connected_at, datetime.now(UTC) - timedelta(seconds=LINK_PROOF)
+                        )
+                        await asyncio.to_thread(self.reports.touch, printer_id, proven)
                     continue
                 if item is None:
                     return
@@ -157,8 +173,11 @@ class WatchActivities:
                     emit(self.events, PrinterEvent(kind="printer.report", printer_id=printer_id))
         finally:
             reader.cancel()
+            marker.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await reader
+            with suppress(asyncio.CancelledError):
+                await marker
 
     async def _write(self, printer_id: str, report: LanReport) -> None:
         await asyncio.to_thread(self.reports.put, printer_id, report.print, report.received_at)

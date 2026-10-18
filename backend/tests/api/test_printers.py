@@ -38,16 +38,16 @@ class RecordedWatches:
     """`Printers.watches`, recorded: no route test dials a printer."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str]] = []
 
-    async def ensure(self, printer_id: str, serial: str) -> None:
-        self.calls.append(("ensure", printer_id, serial))
+    async def ensure(self, printer_id: str) -> None:
+        self.calls.append(("ensure", printer_id))
 
-    async def restart(self, printer_id: str, serial: str) -> None:
-        self.calls.append(("restart", printer_id, serial))
+    async def restart(self, printer_id: str) -> None:
+        self.calls.append(("restart", printer_id))
 
-    async def stop(self, printer_id: str, serial: str) -> None:
-        self.calls.append(("stop", printer_id, serial))
+    async def stop(self, printer_id: str) -> None:
+        self.calls.append(("stop", printer_id))
 
 
 @pytest.fixture(autouse=True)
@@ -231,7 +231,7 @@ def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatche
         assert CODE not in read.text
     unlinked = client.delete(f"/api/v1/printers/{pid}/lan")
     assert unlinked.status_code == 200 and unlinked.json()["has_access_code"] is False
-    assert watches.calls == [("restart", pid, SERIAL), ("stop", pid, SERIAL)]
+    assert watches.calls == [("restart", pid), ("stop", pid)]
 
 
 GENERIC = "the printer did not answer at that address"
@@ -392,5 +392,5 @@ async def test_a_watch_call_never_hangs_a_route(
     printers = registry(client)
     watches = component_module.Watches(printers.core)
     async with asyncio.timeout(5):
-        await watches.restart("p", SERIAL)
-        await watches.stop("p", SERIAL)
+        await watches.restart("p")
+        await watches.stop("p")

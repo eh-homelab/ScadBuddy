@@ -39,6 +39,9 @@ class PrinterRow(BaseModel):
     lan_cert_sha256: str | None = None
     has_access_code: bool = False
     preferred_path: PrintPath = "auto"
+    #: Whether Bambuddy listed its printer as active when it last answered: what the
+    #: strip shows while Bambuddy is down.
+    bambuddy_active: bool = True
     created_at: datetime
     updated_at: datetime
 
