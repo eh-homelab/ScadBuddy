@@ -31,7 +31,7 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.store.backends import build_backend
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.content import ContentBackend
-from scadbuddy.store.content_models import BlobScope, BlobStat
+from scadbuddy.store.content_models import BlobMissingError, BlobScope, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,9 @@ class MigrationBatch(BaseModel):
     remaining: int
     #: This batch's keys whose copy failed; each row says why (`migrated_error`).
     failed: list[str]
+    #: This batch's keys whose object the source no longer has: their rows are gone
+    #: (#4084), as a read that misses forgets its key, so they cannot hold a flip.
+    forgotten: list[str] = []
 
 
 class MigrateBatchInput(BaseModel):
@@ -80,18 +83,23 @@ async def migrate_batch(
 ) -> MigrationBatch:
     """Copy up to ``limit`` of ``source``'s rows not yet on ``target``, least recently
     touched first, but those whose copy failed since ``started``. A row whose object
-    cannot be read or is not its sha256, or whose copy the target refused, records the
-    error and is ``failed``; one that moved on meanwhile (its mark missed) is left for
-    the next batch. ``heartbeat`` is called with the key, from the event loop, while
-    each copy runs (`_beat_while`)."""
+    the source no longer has is dropped and ``forgotten`` (#4084): nothing can copy it,
+    and the store would only re-render it. One whose object cannot be read or is not
+    its sha256, or whose copy the target refused, records the error and is ``failed``;
+    one that moved on meanwhile (its mark missed) is left for the next batch.
+    ``heartbeat`` is called with the key, from the event loop, while each copy runs
+    (`_beat_while`)."""
     rows = await asyncio.to_thread(
         index.unmigrated, source.backend, target.backend, limit=limit, started=started
     )
-    moved, failed = 0, []
+    moved, failed, forgotten = 0, [], []
     for row in rows:
         error = await _copy(index, source, target, row, heartbeat)
         if error is None:
             moved += 1
+        elif error == MISSING:
+            if await asyncio.to_thread(index.forget_missing, row.key, row.ref):
+                forgotten.append(row.key)
         elif error:
             failed.append(row.key)
             await asyncio.to_thread(
@@ -100,7 +108,11 @@ async def migrate_batch(
     remaining, _, _ = await asyncio.to_thread(
         index.migration_counts, source.backend, target.backend, started=started
     )
-    return MigrationBatch(moved=moved, remaining=remaining, failed=failed)
+    return MigrationBatch(moved=moved, remaining=remaining, failed=failed, forgotten=forgotten)
+
+
+#: `_copy`'s answer for an object the source no longer has.
+MISSING = "missing"
 
 
 def _error(error: BaseException) -> str:
@@ -114,7 +126,8 @@ async def _copy(
     row: BlobStat,
     beat: Callable[[str], None],
 ) -> str | None:
-    """None once copied and recorded, "" when the row moved on, else the error."""
+    """None once copied and recorded, "" when the row moved on, `MISSING` when the
+    source has no such object, else the error."""
     spool = await asyncio.to_thread(tempfile.TemporaryFile, "w+b")
     with spool:
         beating = asyncio.create_task(_beat_while(row.key, beat))
@@ -139,8 +152,11 @@ async def _copy_through(
             async for chunk in chunks:
                 digest.update(chunk)
                 await asyncio.to_thread(spool.write, chunk)
+    except BlobMissingError:
+        logger.warning("a blob to copy is gone from its backend", extra={"key": row.key})
+        return MISSING
     except Exception as error:
-        # Missing, unreadable or refused: one bad object never fails the batch.
+        # Unreadable or refused: one bad object never fails the batch.
         logger.warning("could not read a blob to copy", extra={"key": row.key}, exc_info=True)
         return _error(error)
     if digest.hexdigest() != ref.sha256:

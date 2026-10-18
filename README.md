@@ -813,7 +813,9 @@ workers restart.
      `store_migrate_status`): `remaining`, `copied`, `failed` (up to 200 rows with the
      error), `failed_count` and `running`. A failed row is cleared by `POST`ing again:
      the new run retries the failed rows, and a copy that succeeds clears the row's
-     error.
+     error. A row whose object the source no longer has (a Bambuddy file deleted
+     behind ScadBuddy's back, #4084) is not failed: the copy forgets it, as a read
+     that misses does, and the piece re-renders when next wanted.
   4. Only when `GET` shows both `remaining` and `failed_count` at `0`, set **Blob
      store** to `s3` and restart every replica together: the API and every render
      worker at once. After that flip no retry is possible (`POST` answers 409), so a
