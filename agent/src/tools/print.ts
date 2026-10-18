@@ -5,7 +5,7 @@ import { ACCEPTING_MS, command, reattach, reattachFollowing, RESPOND_ASYNC } fro
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
+import { defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { errorName } from '../telemetry/scrub.js'
@@ -1022,8 +1022,10 @@ export const printTools: Tool[] = [
       }
       // One per call (#470): a call is a deliberate print, so the same choices again are
       // a new one rather than the last call's run. Every re-send below reuses it, so a
-      // POST whose answer was lost re-attaches to its run instead of printing twice.
-      const requestId = randomUUID()
+      // POST whose answer was lost re-attaches to its run instead of printing twice. A call
+      // with a callKey (a harness tool use, a released turn's decided call) keys it on that,
+      // so the same call run again (a re-placed continuation) re-attaches too (spec §7).
+      const requestId = ctx.callKey ? idempotencyKey(ctx) : randomUUID()
       const body = {
         printer_id: printerId ?? null,
         copies: args.copies ?? null,

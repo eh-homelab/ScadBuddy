@@ -55,6 +55,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the unified_sessions flag is not writable${
   })
 
   it('is refused by the settings store itself, which every route, tool and sweep writes through', async () => {
+    await expect(store.set(UNIFIED_SESSIONS_SETTING, true)).rejects.toMatchObject({ name: 'CredentialError', status: 409 })
     await expect(store.set(UNIFIED_SESSIONS_SETTING, true)).rejects.toThrow(/cannot be written yet/)
     await expect(store.setMany({ [UNIFIED_SESSIONS_SETTING]: true, model: 'x' })).rejects.toThrow(/cannot be written yet/)
     expect(await stored()).toHaveLength(0)

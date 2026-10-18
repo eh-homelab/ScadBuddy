@@ -630,7 +630,8 @@ export class CredentialStore implements CredentialRepo {
 /**
  * Keys no write through this store sets, until their phase lands: `unified_sessions` starts
  * new durable sessions on AgentSession (unified runtime spec 2026-10-13), whose fork is not
- * there yet (phase 6). It is set in the database directly, never by a route, tool or this store.
+ * there yet (phase 6). It is set in the database directly, never by a route, tool or this store;
+ * a write refused here is a CredentialError (409), which the routes answer as such.
  */
 const READ_ONLY_KEYS: ReadonlySet<string> = new Set([UNIFIED_SESSIONS_SETTING])
 
@@ -649,7 +650,7 @@ export class SettingsStore {
 
   /** `context` says who wrote it; ScadBuddy itself when omitted. */
   async set(key: string, value: unknown, context?: AuditContext): Promise<void> {
-    if (READ_ONLY_KEYS.has(key)) throw new Error(`the setting ${key} cannot be written yet`)
+    if (READ_ONLY_KEYS.has(key)) throw new CredentialError(`the setting ${key} cannot be written yet`, 409)
     const startedAt = new Date()
     let failure: unknown
     try {
@@ -697,7 +698,7 @@ export class SettingsStore {
     check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
     context?: AuditContext,
   ): Promise<boolean> {
-    for (const key of Object.keys(values)) if (READ_ONLY_KEYS.has(key)) throw new Error(`the setting ${key} cannot be written yet`)
+    for (const key of Object.keys(values)) if (READ_ONLY_KEYS.has(key)) throw new CredentialError(`the setting ${key} cannot be written yet`, 409)
     const startedAt = new Date()
     let written: boolean
     try {

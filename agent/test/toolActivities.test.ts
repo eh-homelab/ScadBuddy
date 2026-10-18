@@ -615,14 +615,16 @@ describe('answerResult', () => {
 describe("decidedCalls: a released turn's approved call (unified runtime spec §5.4 step 5)", () => {
   const OTHER = '9d1f2a3b-4c5d-4e6f-8a7b-0c1d2e3f4a5b'
   let ran = 0
+  const keys: (string | undefined)[] = []
   const ship = defineTool({
     name: 'ship',
     description: 'Ships something',
     input: z.object({ what: z.string() }),
     risk: 'outward',
     routes: ['POST /api/v1/workflows/{definition_id}/runs'],
-    handler: async () => {
+    handler: async (_input, ctx) => {
       ran++
+      keys.push(ctx.callKey)
       return json({ shipped: true })
     },
   })
@@ -652,6 +654,14 @@ describe("decidedCalls: a released turn's approved call (unified runtime spec §
     ran = 0
     expect(await run(call(`durable:${SESSION}:run-1:toolu_1`))).toMatchObject({ ran: true, ok: true })
     expect(ran).toBe(1)
+  })
+
+  it('keys every run of one call on its request id, so a re-placed continuation re-attaches to the first run (spec §7)', async () => {
+    keys.length = 0
+    const rid = `durable:${SESSION}:run-1:toolu_1`
+    await run(call(rid))
+    await run(call(rid))
+    expect(keys).toEqual([rid, rid])
   })
 
   it.each([

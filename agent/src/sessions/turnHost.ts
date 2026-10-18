@@ -188,6 +188,29 @@ const RELEASED_CALL = 'This call is still waiting for the user; the turn paused,
 /** A held call's default hold, when the workflow names none (park_hold_seconds' default). */
 const PARK_HOLD_S = 300
 
+/**
+ * Whether a user entry landed in `id`'s main transcript after row `mark`. A sealed row says so in
+ * its plaintext `entry_type`; a row from before sealing has none, so its own top-level `type` is
+ * read (a substring match would take an assistant entry that quotes one). An unparseable legacy
+ * row is no user entry.
+ */
+export async function userEntryLanded(sql: Sql, id: string, mark: number): Promise<boolean> {
+  const rows = await sql<{ typed: boolean; entry: string | null }[]>`
+    SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries
+    WHERE session_id = ${id} AND subpath = '' AND id > ${mark}
+      AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%"user"%'))
+    ORDER BY id`
+  return rows.some((row) => {
+    if (row.typed) return true
+    try {
+      const parsed: unknown = JSON.parse(row.entry ?? '')
+      return typeof parsed === 'object' && parsed !== null && (parsed as { type?: unknown }).type === 'user'
+    } catch {
+      return false
+    }
+  })
+}
+
 export class TurnHost {
   readonly #deps: TurnHostDeps
   #stopping = false
@@ -633,13 +656,7 @@ export class TurnHost {
 
   /** Whether a user entry (the turn's prompt, or a tool result after it) landed in the main transcript after the mark. */
   async #landed(id: string, mark: number): Promise<boolean> {
-    const [row] = await this.#deps.sql<{ landed: boolean }[]>`
-      SELECT EXISTS (
-        SELECT 1 FROM ai_session_entries
-        WHERE session_id = ${id} AND subpath = '' AND id > ${mark}
-          AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%"type":"user"%'))
-      ) AS landed`
-    return row?.landed === true
+    return userEntryLanded(this.#deps.sql, id, mark)
   }
 
   /**

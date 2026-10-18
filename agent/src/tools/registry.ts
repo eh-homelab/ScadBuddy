@@ -308,6 +308,12 @@ export type Tool = {
  */
 export const TOOL_DEADLINE_MS = 5 * 60_000
 
+/**
+ * A tool's commands all send the call's one Idempotency-Key (`idempotencyKey`): two commands of
+ * one call with the same kind, subject and body are one operation, and the second gets the
+ * first's record back. A tool that means to run the same command twice in a call sends
+ * something in its body that tells them apart.
+ */
 export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
   const readOnly = spec.readOnly ?? spec.risk === 'read'
   const gated = spec.risk === 'outward' && spec.approval !== 'none'
