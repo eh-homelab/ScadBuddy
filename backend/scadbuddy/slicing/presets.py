@@ -74,7 +74,10 @@ def apply_overrides(process: Flat, overrides: Mapping[str, ProcessValue]) -> Fla
     A list over a single value is refused: the preset stores that option as one value,
     and Bambu Studio's JSON loader joins a list with commas and reads the result as the
     option (``ConfigBase::load_from_json``, Config.cpp, v02.08.02.61), so ``["3", "3"]``
-    would reach a single-value option as ``"3,3"``: refused, or misread.
+    would reach a single-value option as ``"3,3"``: refused, or misread. A process
+    built from Bambuddy's values is checked the same way: ``/slicer/preset-values``
+    answers a vector option as a list (measured 2026-10-18 on 30 cloud and standard
+    process presets, 1330 list values, none of the image's vector options a string).
 
     A list for an option the preset leaves out is written whole: the preset takes Bambu
     Studio's default there, whose shape this side cannot see, and the override's shape

@@ -344,3 +344,60 @@ def test_a_corrupt_vendor_file_is_a_profile_error(tmp_path: Path) -> None:
     (root / "BBL.json").write_text("")
     with pytest.raises(ProfileError, match=r"BBL\.json"):
         Profiles(root).machine("GM_TEST")
+
+
+@respx.mock
+async def test_a_list_override_applies_over_bambuddys_vector_values(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    # The shape measured 2026-10-18: Bambuddy's preset-values answers a vector option as
+    # a list (0.20mm Standard @BBL H2C's outer_wall_speed, one value per variant).
+    respx.get(f"{API}/slicer/preset-values").respond(
+        200,
+        json={
+            "resolved": True,
+            "values": {
+                "type": "process",
+                "outer_wall_speed": ["200", "500", "500", "200", "500"],
+                "wall_loops": "2",
+            },
+        },
+    )
+    respx.get(f"{API}/slicer/presets").respond(200, json={})
+    respx.get(f"{API}/local-presets/").respond(200, json={})
+    user = plan.model_copy(
+        update={
+            "process_preset": PresetRef(source="cloud", id="PPUS1"),
+            "process_overrides": {
+                "outer_wall_speed": ["150", "500", "500", "150", "500"],
+                "wall_loops": "3",
+            },
+        }
+    )
+    process = json.loads((await build_presets(user, profiles, client)).process)
+    assert process["outer_wall_speed"] == ["150", "500", "500", "150", "500"]
+    assert process["wall_loops"] == "3"
+
+
+@pytest.mark.parametrize(
+    ("vendor", "where"),
+    [
+        ({"version": "1", "process_list": [{"sub_path": "process/leaf.json"}]}, "process_list"),
+        ({"version": "1", "process_list": [{"name": "leaf"}]}, "process_list"),
+        ({"version": "1", "process_list": "leaf"}, "process_list"),
+    ],
+)
+def test_a_malformed_vendor_entry_is_a_profile_error(
+    tmp_path: Path, vendor: dict[str, object], where: str
+) -> None:
+    root = _tree(tmp_path)
+    (root / "BBL.json").write_text(json.dumps(vendor))
+    with pytest.raises(ProfileError, match=rf"BBL\.json.*{where}"):
+        Profiles(root).process("leaf")
+
+
+def test_a_vendor_file_without_a_version_is_a_profile_error(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / "BBL.json").write_text(json.dumps({"process_list": []}))
+    with pytest.raises(ProfileError, match=r"BBL\.json.*version"):
+        assert Profiles(root).profile_version

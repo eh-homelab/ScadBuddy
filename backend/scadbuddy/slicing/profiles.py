@@ -269,7 +269,12 @@ class Profiles:
     def profile_version(self) -> str:
         """``BBL.json``'s own ``version`` (``02.08.00.05`` in v02.08.02.61): a check of
         the tree, never a key, since it need not move with the slicer."""
-        return str(self._vendor["version"])
+        try:
+            return str(self._vendor["version"])
+        except KeyError:
+            raise ProfileError(
+                f"the profile file {self.root / VENDOR}.json has no version"
+            ) from None
 
     @cached_property
     def _vendor(self) -> dict[str, Any]:
@@ -320,13 +325,20 @@ class Profiles:
     def _build(self, kind: Kind) -> _Index:
         paths: dict[str, Path] = {}
         names: dict[str, str] = {}
-        for entry in self._vendor.get(_LISTS[kind], []):
-            path = self.root / VENDOR / entry["sub_path"]
+        listed = _LISTS[kind]
+        for entry in self._vendor.get(listed, []):
+            try:
+                name, path = entry["name"], self.root / VENDOR / entry["sub_path"]
+            except (KeyError, TypeError) as error:
+                raise ProfileError(
+                    f"the profile file {self.root / VENDOR}.json has a malformed {listed}"
+                    f" entry {entry!r}: {error!r}"
+                ) from None
             doc = _read(path)
-            paths[entry["name"]] = path
+            paths[name] = path
             setting_id = doc.get("setting_id") if isinstance(doc, dict) else None
             if isinstance(setting_id, str) and setting_id:
-                names[setting_id] = entry["name"]
+                names[setting_id] = name
         return _Index(paths=paths, names=names)
 
 
