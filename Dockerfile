@@ -312,21 +312,30 @@ RUN uv sync --frozen --no-dev
 # --plugin-dir with `skills/` at its top as one plugin named after the directory
 # (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
 # plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
-COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
+#
+# These three copies are `--link` (#4140): a plain COPY re-ran whenever src/ changed
+# above it and recorded that moment as its parent directories' mtimes, a new layer
+# with the same files in it; a linked copy is reused whatever changed above it
+# (https://docs.docker.com/reference/dockerfile/#copy---link). The directories it
+# creates are root's, 0755, as WORKDIR made /app and /app/agent-durable.
+COPY --link plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
 # Its subagents (#2320, #2562), outside the plugin directory: the runner gives each the
 # agent's loopback MCP server inline, which a plugin's own subagents cannot carry
 # (https://code.claude.com/docs/en/sub-agents). SCADBUDDY_DURABLE_AGENTS_DIR below.
-COPY plugins/scadbuddy/agents /app/subagents
+COPY --link plugins/scadbuddy/agents /app/subagents
 # The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
 # becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
 # same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
-COPY --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
+COPY --link --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
 
 # Fails the build when the bundled Claude Code is missing for this platform or
 # is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin),
 # or when the tool manifest does not parse or is empty (rather than at the worker's start).
-RUN .venv/bin/python -m scadbuddy_durable.check_cli_version \
-    && .venv/bin/python -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
+# `-B` (#4140): without it these imports wrote ~1 MB of .pyc (the stdlib's, which the
+# python image ships none of, and src/'s) stamped with the build's time, a new layer
+# whenever this RUN re-ran. It applies to these two commands only, not the runtime.
+RUN .venv/bin/python -B -m scadbuddy_durable.check_cli_version \
+    && .venv/bin/python -B -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev
@@ -492,7 +501,7 @@ RUN case "$TARGETARCH" in \
     && printf '%s  openscad-lsp.tar.xz\n' "$sha" > openscad-lsp.sha256 \
     && sha256sum --check --strict openscad-lsp.sha256 \
     && tar -xJf openscad-lsp.tar.xz --strip-components=1 \
-    && install -m 0755 openscad-lsp /usr/local/bin/openscad-lsp \
+    && install -p -m 0755 openscad-lsp /usr/local/bin/openscad-lsp \
     && openscad-lsp --version
 
 # ── libraries: the catalogue's common libraries, baked in (#169) ──────────────
@@ -514,12 +523,19 @@ RUN case "$TARGETARCH" in \
 # (/usr/local/share/openscad/libraries) and its catalogue ref is a branch, which
 # would fail this check on every upstream commit. Each seeded library costs its
 # size twice: once in the image, once on each volume.
+#
+# The stage lays out the image's /app as the `app` stage's one linked copy writes it
+# (#4140): `app/libraries/` and `app/THIRD_PARTY_NOTICES.md`, under /opt/seed. That
+# copy carries /opt/seed/app's owner and mode onto /app, so it is the base's
+# (scadbuddy, 0755). Every mtime is set to the pinned commit's time, so a re-run of
+# this stage (a cold cache) produces the same files, and the same layer, as the last.
 FROM base AS libraries
 
 ARG BOSL2_REF
 ARG BOSL2_COMMIT
 
-WORKDIR /opt/scadbuddy-libraries
+WORKDIR /opt/seed/app/libraries
+COPY THIRD_PARTY_NOTICES.md /opt/seed/app/THIRD_PARTY_NOTICES.md
 RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_REF" \
         https://github.com/BelfrySCAD/BOSL2.git "BOSL2/${BOSL2_COMMIT}/BOSL2" \
     && actual="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" rev-parse HEAD)" \
@@ -528,7 +544,11 @@ RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_RE
          echo "       Check what moved the tag upstream, then bump BOSL2_COMMIT." >&2; \
          exit 1; \
        fi \
-    && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git"
+    && committed="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" log -1 --format=%ct)" \
+    && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git" \
+    && chown scadbuddy:scadbuddy /opt/seed/app \
+    && chmod 0755 /opt/seed/app \
+    && find /opt/seed -exec touch -h -d "@${committed}" {} +
 
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
@@ -641,7 +661,15 @@ COPY --chown=scadbuddy:scadbuddy --from=frontend /src/frontend/dist /app/fronten
 # ARGs then rebuilds this one copy and nothing above it. Root-owned (a COPY
 # without --chown is, whatever the USER), outside /app; `test` and `runtime`
 # both inherit it from here.
-COPY --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
+#
+# `--link` (#4140): the frontend bundle above changes on every build (it carries
+# SCADBUDDY_VERSION), so a plain COPY here re-ran on every build and recorded that
+# moment as /usr/local/bin's mtime: a new 2 MB layer on each publish. A linked copy
+# is made on an empty directory and reused whatever changed above it
+# (https://docs.docker.com/reference/dockerfile/#copy---link); `install -p` in the
+# stage keeps the binary's mtime the release tarball's, so a cold cache makes the
+# same layer too.
+COPY --link --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
 
 ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \
@@ -649,13 +677,16 @@ ENV SCADBUDDY_DATA_DIR=/data \
     HOME=/home/scadbuddy
 
 # The baked-in libraries (see the `libraries` stage), after everything above so a
-# bump rebuilds only these two layers. Root-owned and read-only: the boot copies
+# bump rebuilds only this layer. Root-owned and read-only: the boot copies
 # them onto the volume and never writes here. The check fails the build when a
 # seeded ref is not the catalogue's, the seed holds anything not listed, or
 # THIRD_PARTY_NOTICES.md does not name each seeded library's ref and commit.
+# `--link` for the reason the openscad-lsp copy has it (#4140). It copies to `/`,
+# not to /app/libraries: a linked copy writes every parent directory into its layer,
+# and one it creates itself is root's, which would take /app from scadbuddy. Copied
+# from the stage, /app keeps the owner, mode and mtime the stage gave /opt/seed/app.
 ARG BOSL2_REF
-COPY --from=libraries /opt/scadbuddy-libraries /app/libraries
-COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+COPY --link --from=libraries /opt/seed/ /
 RUN python -m scadbuddy.library.library_seed verify /app/libraries \
         /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}"
 
