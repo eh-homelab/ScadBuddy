@@ -1,5 +1,7 @@
 import base64
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -178,79 +180,29 @@ def test_an_unknown_kind_is_refused_not_treated_as_a_gateway(vectors: dict[str, 
 NOW = datetime(2026, 10, 17, 22, 16, 5, tzinfo=UTC)
 
 
-@pytest.mark.parametrize(
-    ("text", "at"),
-    [
-        # #4088: the four results measured in prod on 2026-10-17 at 22:16 UTC.
-        ("You've hit your weekly limit · resets 1pm (UTC)", datetime(2026, 10, 18, 13, 0)),
-        ("You've hit your session limit · resets 10:30pm (UTC)", datetime(2026, 10, 17, 22, 30)),
-        ("You've hit your weekly limit · resets 11pm (UTC)", datetime(2026, 10, 17, 23, 0)),
-        (
-            "You've hit your weekly limit · resets Oct 21, 4am (UTC)",
-            datetime(2026, 10, 21, 4, 0),
-        ),
-        ("API Error: 429 · resets 12am (UTC)", datetime(2026, 10, 18, 0, 0)),
-        ("resets 12pm (UTC)", datetime(2026, 10, 18, 12, 0)),
-        ("resets 9:30PM (utc)", datetime(2026, 10, 18, 21, 30)),
-    ],
-)
-def test_a_rate_limit_reset_is_read_from_the_result_text(text: str, at: datetime) -> None:
-    """#4088: the reset Claude Code's result names, the next such time in UTC."""
-    assert rate_limit_reset(text, NOW) == at.replace(tzinfo=UTC)
+RESET_VECTORS = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "agent"
+        / "test"
+        / "fixtures"
+        / "rate-limit-reset-vectors.json"
+    ).read_text()
+)["cases"]
 
 
-def test_a_time_only_reset_rolls_past_midnight_and_a_dated_one_past_year_end() -> None:
-    late = datetime(2026, 12, 31, 23, 50, tzinfo=UTC)
-    assert rate_limit_reset("resets 1:05am (UTC)", late) == datetime(2027, 1, 1, 1, 5, tzinfo=UTC)
-    assert rate_limit_reset("resets Jan 2, 4am (UTC)", late) == datetime(
-        2027, 1, 2, 4, 0, tzinfo=UTC
-    )
-    assert rate_limit_reset("resets Dec 31, 11:55pm (UTC)", late) == datetime(
-        2026, 12, 31, 23, 55, tzinfo=UTC
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        # The text names the minute only: one just passed is passing now, not
-        # tomorrow's or next year's (#4093 review).
-        "resets 10:16pm (UTC)",
-        "resets 10:15pm (UTC)",
-        "resets 10:02pm (UTC)",
-        "resets Oct 17, 10:15pm (UTC)",
-        "resets Oct 17, 10pm (UTC)",
-        # A date earlier this year has passed; it is not next year's.
-        "resets Sep 3, 4am (UTC)",
-        "resets Jan 2, 4am (UTC)",
-    ],
-)
-def test_a_reset_that_has_just_passed_keeps_the_default_cooldown(text: str) -> None:
-    assert rate_limit_reset(text, NOW) is None
-    assert cooldown_until(NOW, rate_limit_reset(text, NOW)) == NOW + timedelta(seconds=60)
-
-
-def test_a_time_only_reset_past_the_grace_is_tomorrows() -> None:
-    assert rate_limit_reset("resets 10pm (UTC)", NOW) == datetime(2026, 10, 18, 22, 0, tzinfo=UTC)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "",
-        "API Error: 429 rate limited",
-        "resets soon",
-        "resets 1pm (PST)",
-        "resets 13pm (UTC)",
-        "resets 0am (UTC)",
-        "resets 10:75pm (UTC)",
-        "resets Foo 21, 4am (UTC)",
-        "resets Feb 30, 4am (UTC)",
-    ],
-)
-def test_text_naming_no_reset_keeps_the_default_cooldown(text: str) -> None:
-    assert rate_limit_reset(text, NOW) is None
-    assert cooldown_until(NOW, rate_limit_reset(text, NOW)) == NOW + timedelta(seconds=60)
+@pytest.mark.parametrize("case", RESET_VECTORS, ids=lambda c: f"{c['text']!r}@{c['now']}")
+def test_a_rate_limit_reset_is_read_from_the_result_text(case: dict[str, Any]) -> None:
+    """#4088: the reset Claude Code's result names, the next such time in UTC; `at`
+    null keeps the default cooldown. credentialErrors.ts `rateLimitResetFromText` is
+    held to the same vectors (#4121 review)."""
+    now = datetime.fromisoformat(case["now"])
+    reset = rate_limit_reset(case["text"], now)
+    if case["at"] is None:
+        assert reset is None
+        assert cooldown_until(now, reset) == now + timedelta(seconds=60)
+    else:
+        assert reset == datetime.fromisoformat(case["at"])
 
 
 def test_a_named_reset_is_still_held_to_a_day() -> None:

@@ -4,7 +4,9 @@ import { CronExpressionParser } from 'cron-parser'
 // cron in the user's local timezone" and its recurring jobs "auto-expire after 7 days";
 // ScheduleWakeup's delay is "clamped to [60, 3600]" (the tools' descriptions, Claude
 // Code 2.1.296). The agent has no user timezone, so it uses its own (`TZ`, UTC unless
-// the deployment sets one), and every answer names it.
+// the deployment sets one), and every answer names it. Claude Code itself always runs
+// in UTC (harness/options.ts, #4107), so where a deployment sets another `TZ` the model's
+// own "today" is UTC while these answers name the agent's zone.
 
 /** A recurring cron job's life, as Claude Code's. */
 export const CRON_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000

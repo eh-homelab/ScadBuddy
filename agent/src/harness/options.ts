@@ -50,6 +50,10 @@ export function buildQueryOptions(paths: HarnessPaths): Options {
   const env: Record<string, string> = {
     CLAUDE_CONFIG_DIR: claudeConfigDir(paths),
     HOME: paths.stateDir,
+    // Claude Code names a subscription limit's reset in its own zone ("resets 6:35pm
+    // (UTC)", or "(America/New_York)" on a host in that zone; measured on 2.1.296,
+    // test/fallback.e2e.test.ts), and rateLimitResetFromText reads only UTC (#4107).
+    TZ: 'UTC',
   }
   // PATH only: the bundled binary is located by absolute path, but a
   // subprocess with no PATH at all cannot resolve anything it shells out to.

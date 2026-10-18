@@ -159,6 +159,62 @@ export function rateLimitResetFromHeaders(headers: Headers, now: number): number
   return undefined
 }
 
+// Claude Code's subscription-limit text names its reset, "resets 10:30pm (UTC)" or
+// "resets Oct 21, 4am (UTC)" (#4088, measured in prod `ai_credentials.last_error`).
+// The same parse as agent-durable's credentials.py `rate_limit_reset` (#4093).
+const RESET = /\bresets\s+(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i
+/** How long after a named minute it still counts as passing now (see rateLimitResetFromText). */
+export const RESET_GRACE_MS = 15 * 60_000
+/** How far ahead a dated reset may roll into next year (weekly limits name days ahead). */
+export const RESET_HORIZON_MS = 31 * 24 * 60 * 60_000
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** Epoch ms of that UTC date and time, or undefined when it is not one (Feb 30). */
+function utc(year: number, month: number, day: number, hour: number, minute: number): number | undefined {
+  const at = new Date(Date.UTC(year, month, day, hour, minute))
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.getTime() : undefined
+}
+
+/**
+ * The reset a rate-limited turn's text names (#4107), as the next such time after
+ * `now` (epoch ms): a time alone is today's or tomorrow's, a date this year's or,
+ * across the new year, next year's. Undefined when the text names none, or one that
+ * is not a time; the caller then keeps the default cooldown. A classic turn's text is
+ * Claude Code's, the same as a durable segment's result, so it names the reset an
+ * OAuth key's probe cannot ask for (`probeCredential`): measured on Claude Code 2.1.296,
+ * an OAuth key's 429 with `anthropic-ratelimit-unified-status: rejected` ends in
+ * "You've hit your session limit · resets 6:35pm (UTC)" (test/fallback.e2e.test.ts), in
+ * the zone Claude Code runs in, which options.ts pins to UTC.
+ *
+ * The text names the minute, never the second, so a reset within RESET_GRACE_MS
+ * before `now` is one that is passing now, not tomorrow's (or next year's):
+ * undefined, the default cooldown, rather than a day's lock-out.
+ */
+export function rateLimitResetFromText(text: string, now: number): number | undefined {
+  const m = RESET.exec(text)
+  if (!m) return undefined
+  const [, monthName, day, h, mm, half] = m
+  const hour12 = Number(h)
+  const minute = Number(mm ?? 0)
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return undefined
+  const hour = (hour12 % 12) + (half!.toLowerCase() === 'pm' ? 12 : 0)
+  const today = new Date(now)
+  if (monthName === undefined) {
+    const at = utc(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), hour, minute)!
+    if (at > now) return at
+    return at > now - RESET_GRACE_MS ? undefined : at + 24 * 60 * 60_000
+  }
+  const month = MONTHS.indexOf(monthName.toLowerCase())
+  if (month < 0) return undefined
+  const at = utc(today.getUTCFullYear(), month, Number(day), hour, minute)
+  if (at === undefined) return undefined
+  if (at > now) return at
+  // Only a date just across the new year is next year's ("Jan 2" on Dec 31); one
+  // earlier this year has passed, however recently.
+  const later = utc(today.getUTCFullYear() + 1, month, Number(day), hour, minute)
+  return later !== undefined && later - now <= RESET_HORIZON_MS ? later : undefined
+}
+
 /** `until` (epoch ms), or the default when undefined, held between one second and MAX_COOLDOWN_MS from now. */
 export function cooldownUntil(until: number | undefined, now: number): Date {
   const at = until ?? now + DEFAULT_COOLDOWN_MS

@@ -18,6 +18,14 @@ PRELUDE_PATCH = "op-prelude"
 #: Set in the request of an operation started with a prelude: its run knows the prelude's
 #: part is done. A request without it came from an API from before the prelude (#1060).
 PRELUDE_REQUESTED = "_prelude"
+#: Guard the deferral of a kind the build does not register (#4139), before its check
+#: and before its run: two, since the SDK answers one patch id once per run. Neither
+#: reaches a history: the task that would record it fails instead.
+DEFER_CHECK_PATCH = "op-defer-unregistered-check"
+DEFER_RUN_PATCH = "op-defer-unregistered-run"
+#: The extern function a worker gives its workflows (`client.RegisteredActivities`):
+#: the names of the activities it registers.
+REGISTERED_ACTIVITIES = "scadbuddy_registered_activities"
 
 
 def check_activity(kind: str) -> str:

@@ -11,9 +11,9 @@ native library; Ruling C1).
 3. ``slice_record`` holds the sliced blob and finishes the row, completed or failed.
 
 No bytes and no preset document cross the history: ``SlicePrepared`` carries URLs and
-the record carries keys. The ``library`` worker is unversioned: a change to the
-commands ``run`` issues goes behind ``workflow.patched``
-(``tests/test_slice_replay.py``).
+the record carries keys. On the versioned ``library`` worker it runs as
+``VersionedSliceWorkflow``, AUTO_UPGRADE, so a change to the commands ``run`` issues goes
+behind ``workflow.patched`` (``tests/test_slice_replay.py``).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, VersioningBehavior
 from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
@@ -151,3 +151,17 @@ class SliceWorkflow:
         except ActivityError as error:
             return None, prepare_failure(error.cause)
         return prepared, None
+
+
+@workflow.defn(name=SLICE_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedSliceWorkflow(SliceWorkflow):
+    """``SliceWorkflow`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE: a
+    slice may wait in the slicer queue and run four attempts of `SLICE_TIMEOUT`, longer
+    than a rollout; Pinned, the old build's last replica would strand its record. Its own
+    class because an unversioned worker cannot complete a workflow that declares a
+    behavior (the tests' workers). Changes still go behind ``workflow.patched``, in
+    ``SliceWorkflow``."""
+
+    @workflow.run
+    async def run(self, input: SliceWorkflowInput) -> SliceWorkflowResult:
+        return await super().run(input)

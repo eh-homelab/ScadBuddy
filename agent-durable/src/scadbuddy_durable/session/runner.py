@@ -154,6 +154,9 @@ NOT_DURABLE = "this workflow is no durable ScadBuddy session"
 ENGINE_ENV = {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    # Claude Code names a subscription limit's reset in its own zone, and
+    # rate_limit_reset reads only "(UTC)" (#4107; agent/src/harness/options.ts).
+    "TZ": "UTC",
 }
 _SESSION_WORKFLOW = re.compile(
     r"^session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"

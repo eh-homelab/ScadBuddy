@@ -288,7 +288,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   periodic sweeps as Temporal Schedules (every sweep, and `PRUNE_SWEEPS` on its own
   300 s one: the render prune, claims, lost slice starts and activity) on the `library`
   queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
-  process (it holds the data volume). Sweeps off (`asset_sweep_interval` 0) deletes the
+  process (it holds the data volume). That worker is versioned (#4090): deployment
+  `scadbuddy-library` (`client.library_deployment`, no default behavior), each API build
+  made current at start (`main._make_library_current`, which also waits for the queue to
+  route to it before the Schedules are set up), never drained. Every workflow on it is
+  AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
+  worker cannot complete a workflow that declares a behavior), so each stays
+  replay-compatible behind `patched`; a new one needs its own behavior or the worker
+  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -296,7 +303,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   default-render previews, on its own hourly Schedule on the same queue; the per-change
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
-  finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+  finish; a kind its worker does not register fails the workflow task until a build that
+  has it is current, #4139, told by `registered.py` `RegisteredActivities`), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
   Flows (#1057, plan `docs/superpowers/plans/2026-10-09-durable-phase-6-flows.md`):
   `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
   the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no

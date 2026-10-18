@@ -40,6 +40,7 @@ from tests.api.test_print_filaments import (
     inventory_routes,
     prepared,
     queue_route,
+    requirements_as_sliced,
     slice_routes,
     slots_from_bambuddy,
 )
@@ -627,39 +628,43 @@ def test_all_plates_pads_a_plate_that_uses_only_slot_2(
     )
     # Plate 1 uses both slots (the recording); plate 2 uses only slot 2, the padding
     # case this fix covers. `execute_run` reads plate 1 then plate 2, in order.
+    plate_reads = [
+        httpx.Response(200, json=recording("filament-requirements.json")),
+        httpx.Response(
+            200,
+            json={
+                "file_id": 41,
+                "filename": "plate.3mf",
+                "plate_id": 2,
+                "filaments": [
+                    {
+                        "slot_id": 1,
+                        "type": "",
+                        "color": "#0047BB",
+                        "used_grams": 0,
+                        "used_meters": 0,
+                        "used_in_plate": False,
+                    },
+                    {
+                        "slot_id": 2,
+                        "type": "",
+                        "color": "#FF1493",
+                        "used_grams": 0,
+                        "used_meters": 0,
+                        "used_in_plate": True,
+                    },
+                ],
+            },
+        ),
+    ]
+
+    def requirements(request: httpx.Request) -> httpx.Response:
+        # Then each sliced file's own read, for the slice check (#4013) and its rack
+        # groups (#836): in the colours that plate was sliced with.
+        return plate_reads.pop(0) if plate_reads else requirements_as_sliced(request)
+
     respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
-        side_effect=[
-            httpx.Response(200, json=recording("filament-requirements.json")),
-            httpx.Response(
-                200,
-                json={
-                    "file_id": 41,
-                    "filename": "plate.3mf",
-                    "plate_id": 2,
-                    "filaments": [
-                        {
-                            "slot_id": 1,
-                            "type": "",
-                            "color": "#0047BB",
-                            "used_grams": 0,
-                            "used_meters": 0,
-                            "used_in_plate": False,
-                        },
-                        {
-                            "slot_id": 2,
-                            "type": "",
-                            "color": "#FF1493",
-                            "used_grams": 0,
-                            "used_meters": 0,
-                            "used_in_plate": True,
-                        },
-                    ],
-                },
-            ),
-            # Then each sliced file's own read for its rack groups (#836), none here.
-            httpx.Response(200, json=recording("filament-requirements.json")),
-            httpx.Response(200, json=recording("filament-requirements.json")),
-        ]
+        side_effect=requirements
     )
     sliced = slice_routes()
     queue_route()
@@ -1085,8 +1090,9 @@ def test_an_all_plates_run_reads_the_assignments_and_printer_once(
     assert response.status_code == 200, response.text
     assert reads("/inventory/assignments") == 1
     assert reads("/printers/1/inventory-remain") == 1
-    # Each plate's slots once, then each sliced file once more for its rack groups
-    # (``choose_rack``, #836): that read is of the slice, which only exists per plate.
+    # Each plate's slots once, then each sliced file once more, for the slice check
+    # (#4013) and its rack groups (``choose_rack``, #836) both: that read is of the
+    # slice, which only exists per plate.
     assert reads("/filament-requirements") == 4
 
 

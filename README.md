@@ -206,32 +206,42 @@ on shutdown.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
-  - The `library` queue's worker is not versioned: any API replica may take any of
-    its tasks. A release that adds a sweep (a new activity) says so here and needs a
-    `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
-    old build takes the new sweep's task and fails it as unregistered, and since a
-    sweep is not retried, that sweep waits for the next tick (a day, by default).
+  - The `library` queue's worker is versioned (#4090): each API build is a version of
+    the Worker Deployment `scadbuddy-library`, and makes itself current at start, so
+    the API rolls out with `RollingUpdate`. Once a new replica's build is current, the
+    queue hands it every new task, a run's next sweep included; an old replica only
+    finishes the activity attempts it already holds, so it never takes a sweep (or a
+    library command) that only the new build registers. A new replica sets the
+    Schedules up only once the queue routes to its build. Every workflow on the queue
+    is auto-upgrade (Housekeeping, the preview backfill, library commands, flow trigger
+    fires, the store migration): an open run moves to the current build at its next
+    task and replays there, so a change to one goes behind `workflow.patched`, and
+    nothing is drained on stop. A request served by the new replica in the second or
+    two before its build is current may start a command of a kind only it has: the old
+    build defers it until the new one is current, rather than failing it as
+    unregistered (#4139, see "Rolling it" under the `bambuddy` queue). The sweep notes below
+    say what a `Recreate` rollout guarded against before #4090; none needs one now.
   - **This release adds a sweep**, `housekeeping_attach_backfills` (#902's backstop:
-    an output re-render whose `job.done` no API replica heard), so it needs that
-    `Recreate` rollout. Each replica attaches a finished re-render to its output when
-    it hears the job settle, and every API start runs one backstop pass whatever the
-    interval, so with 0 a re-render missed while every replica was down waits for the
-    next start.
+    an output re-render whose `job.done` no API replica heard), so it needed, before
+    #4090, a `Recreate` rollout. Each replica attaches a finished re-render to its
+    output when it hears the job settle, and every API start runs one backstop pass
+    whatever the interval, so with 0 a re-render missed while every replica was down
+    waits for the next start.
   - **This release adds a sweep**, `housekeeping_reap_output_holds` (#1007): it releases
     the Parts holds of an output whose `meta.json` is gone (a delete that raced a
-    write), once the hold is an hour old. It needs the same `Recreate` rollout. It
-    releases nothing when it finds no output at all, so an unmounted data volume
-    cannot hand every Part to the blob sweep.
+    write), once the hold is an hour old. Before #4090 it needed the same `Recreate`
+    rollout. It releases nothing when it finds no output at all, so an unmounted data
+    volume cannot hand every Part to the blob sweep.
   - **This release adds a sweep**, `housekeeping_maintain_models_git` (#2289): it runs
     `git gc` on `/data/models` once it holds 256 loose objects or 20 packs, since git's
-    own `gc --auto` waits for 6700 and every model listing walks the whole history. It
-    needs the same `Recreate` rollout. Its first run is the boot's.
+    own `gc --auto` waits for 6700 and every model listing walks the whole history.
+    Before #4090 it needed the same `Recreate` rollout. Its first run is the boot's.
   - **This release adds a sweep**, `housekeeping_sweep_lost_slices`: the files of print
     runs' lost slice starts (#2715), split out of `housekeeping_sweep_preview_slices`
-    so it stays on the prune Schedule while the background-slice sweep obeys 0. It
-    needs the same `Recreate` rollout: until it finishes, a prune run whose sweep an
-    old replica takes fails `housekeeping_sweep_lost_slices` as unregistered, and that
-    sweep waits for the next tick (300 s).
+    so it stays on the prune Schedule while the background-slice sweep obeys 0. Before
+    #4090 it needed the same `Recreate` rollout: until it finished, a prune run whose
+    sweep an old replica took failed `housekeeping_sweep_lost_slices` as unregistered,
+    and that sweep waited for the next tick (300 s).
   - **This release adds a sweep**, `housekeeping_sweep_print_attachments` (#3047): it
     forgets the attachment rows of a print whose archive was deleted in Bambuddy. The
     archive photos went with it; the copies in the project's `Media/` folder stay in
@@ -239,7 +249,7 @@ on shutdown.
     forgets an archive only on Bambuddy's own 404, `{"detail": "Archive not found"}`;
     any other 404 (a wrong URL, a proxy) or an outage forgets nothing for that archive,
     and the sweep goes on to the next and fails at the end. It runs on the first
-    Schedule, so 0 leaves the rows. It needs the same `Recreate` rollout.
+    Schedule, so 0 leaves the rows. Before #4090 it needed the same `Recreate` rollout.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
@@ -452,6 +462,45 @@ the pinned `revision` — the commit stamped into the image at build time by
 That is a stronger proof than "the image field changed": the ReplicaSet rolled
 and the new pod is serving that exact build.
 
+### The API's rollout and its `library` worker (#4090)
+
+The API rolls out with `RollingUpdate`. The `library` queue's worker inside it is
+the API build's version of the Worker Deployment `scadbuddy-library`, so old and new
+replicas may poll the queue side by side. At start each replica makes its build
+current (retrying, as the render worker does), then waits for the queue to route to
+it, up to 60 s, before it sets up the housekeeping and preview Schedules. From then on
+Temporal hands every new workflow task and every new activity of the queue to the
+current build: its workflows are all auto-upgrade, and an auto-upgrade run's activities
+start on its target version
+([Worker Versioning](https://docs.temporal.io/worker-versioning): "an Activity starts
+on the Target Worker Deployment Version of the Workflow"). An old replica keeps only
+the attempts it had already started. A replica does not drain on stop: an open run
+moves to the current build at its next task, and an attempt cut off by the stop is
+retried there. Nothing needs setting in the manifest: the deployment name is fixed and
+the build id is `SCADBUDDY_REVISION`, stamped into the image. Measured on the dev
+server (`tests/test_library_versioning.py`): the queue routes to a build 0.2-0.3 s after
+it is made current, and a sweep released before then went to the old build.
+
+The first rollout of #4090 itself goes from unversioned replicas to versioned ones.
+Once the new build is current, unversioned workers get no more tasks, and in-flight
+unversioned runs move to the versioned build at their next task
+([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)).
+Those are the replay-compatible runs an unversioned worker would have replayed anyway.
+
+A replica makes its build current once, when it first connects, not each time its
+worker restarts, so a replica of an older build that restarts its worker late in a
+rollout does not take the deployment back from a newer one.
+
+**Rolling back to an image from before #4090** stops the `library` queue. Unversioned
+workers get no tasks while `scadbuddy-library` has a current version, and the old
+image never clears it. Before the old pods start, run
+`temporal worker deployment set-current-version --deployment-name scadbuddy-library --unversioned`
+(or set it in the Temporal UI). Housekeeping, the preview backfill, library commands,
+flow trigger fires and a store migration wait until you do. clusters' PostSync promote
+hook (`temporal-promote-workers.yaml`) would also try to make the old revision current
+and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
+from #4090 on needs nothing: its pods make their own build current.
+
 ### Render worker (#424)
 
 Renders run on a separate worker. It is the
@@ -580,6 +629,36 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   stopped, it stopped without draining, and every run pinned to it waited forever.
   So every change to them goes behind `workflow.patched`, and `tests/test_print_replay.py`
   replays committed `PrintRun` histories to hold that.
+- **Rolling it (#4139):** `scadbuddy-print` may roll with `RollingUpdate`
+  (`maxSurge: 1`, `maxUnavailable: 0`) beside the API's own rolling update. The hazard
+  that kept it on `Recreate` (eh-homelab/clusters#2530) was the API's new pods starting
+  operations of a kind only the new build has while the old print build is still
+  current: the old build failed the kind's activities as unregistered, each failure an
+  attempt spent. Now an `Operation` defers a kind its build does not register: before
+  it schedules `op.<kind>.check`, and again before `op.<kind>.run`, it asks its worker
+  which activities it registers (`workflows/registered.py`), and for a kind it lacks it
+  fails its *workflow task* (`operation.UnregisteredKindError`), which schedules
+  nothing and spends no attempt. Temporal retries the task, and an auto-upgrade run's
+  retry goes to the current build, which the new build becomes as it starts.
+  Measured on the dev server (Temporal CLI 1.8.2, server 1.31.2;
+  `tests/test_operation_deferral.py`): the first failure is retried at once, then
+  about every 10 s (attempt 4 after 25 s), because the SDK lets a repeated failure time
+  out at the 10 s workflow task timeout rather than report it; the server logs it once.
+  While the task fails, Temporal refuses an Update on that execution ("Workflow Task in
+  failed state"); `start_command` answers that as still accepting (the route's 202 to
+  follow, or 503 to send again), not as a refusal, and the re-send attaches to the
+  execution, or answers from its record once it ran.
+  A new activity in `PrintRun` or `FollowPrint` (behind `patched`) needs nothing
+  either: its name comes from the workflow's own code, which the old build runs only
+  while it is current, and the new build schedules it only once it is. Not covered: a
+  new workflow type on the queue (the API starts it while the old build, which does not
+  register it, is current; the SDK fails that as a task, not a workflow, but this was
+  not measured, so such a release still rolls `scadbuddy-print` with `Recreate`), and a
+  prelude kind on another queue (`output_inbox_delete`, which a library `Operation`
+  runs on `bambuddy`). **Rolling back** to a build without a kind leaves that kind's
+  operations still in flight deferred (their record `running`) until a build with it is
+  current again; terminate them in the Temporal UI to end them, and the reconciler
+  records them lost.
 - **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
   still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
@@ -617,9 +696,11 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   execution would answer 409 "may have been done" instead of its outcome. Raising the
   namespace's retention after the save is not re-checked.
 - **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched` (see
-  "Versioning" above); a release that adds a workflow or activity type to the queue says
-  so here, and where the API still serves the queue itself (unversioned) needs the same
-  `Recreate` rollout.
+  "Versioning" above). A new operation kind or a new activity needs nothing more
+  ("Rolling it"); a release that adds a workflow type to the queue says so here and
+  needs a `Recreate` rollout of `scadbuddy-print`. Where the API still serves the queue
+  itself (unversioned), a new activity in `PrintRun` or `FollowPrint` needs the API
+  rolled out with `Recreate` too: there any replica takes any task.
 
 ### Flow runs on the `projects` queue (#1057)
 

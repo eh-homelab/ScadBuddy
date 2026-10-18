@@ -1,6 +1,7 @@
 import { MockActivityEnvironment } from '@temporalio/testing'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
+import { drainRetains } from '../src/memory/hindsight.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import { event, type Owner, type ServerEvent } from '../src/sessions/protocol.js'
@@ -119,10 +120,12 @@ describe('memory activities in a durable turn', () => {
     audits = []
   })
   afterEach(async () => {
+    // A retain the activity left in flight would land in the next test's records.
+    await drainRetains()
     await fake.close()
   })
 
-  function deps(overrides: Partial<MemoryActivityDeps> = {}): MemoryActivityDeps {
+  function deps(overrides: Partial<MemoryActivityDeps> = {}, release: () => void = () => {}): MemoryActivityDeps {
     const forwarded: PluginsForRun = {
       plugins: [],
       problems: [],
@@ -138,7 +141,7 @@ describe('memory activities in a durable turn', () => {
         address: '127.0.0.1',
       },
       terminate: async () => {},
-      release: () => {},
+      release,
     }
     return {
       sessions: { ownerOf: async (id) => (id === SESSION ? BROWSER : undefined) },
@@ -200,6 +203,7 @@ describe('memory activities in a durable turn', () => {
   it("retains the session's transcript as one document, redacted", async () => {
     const acts = memoryActivities(deps())
     await env(MEMORY_RETAIN_ACTIVITY).run(acts[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
+    await drainRetains()
     const [retain] = fake.retains()
     const item = (retain!.body as { items: { content: string; document_id: string }[] }).items[0]!
     expect(item.document_id).toBe(`conversation:${SESSION}`)
@@ -209,11 +213,27 @@ describe('memory activities in a durable turn', () => {
     expect(appended).toEqual([expect.objectContaining({ type: 'memory', action: 'retain', outcome: 'ok' })])
   })
 
+  it("returns once the retain is enqueued, as a classic turn's Stop hook does; the retain lands after", async () => {
+    fake.respond = (r) => (r.path.endsWith('/memories') ? { json: { success: true }, delayMs: 1000 } : undefined)
+    let released = false
+    const acts = memoryActivities(deps({}, () => void (released = true)))
+    await env(MEMORY_RETAIN_ACTIVITY).run(acts[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
+    // Back before Hindsight answered: nothing recorded yet, and the plugin's route still
+    // held for the retain in flight.
+    expect(appended).toEqual([])
+    expect(released).toBe(false)
+    await drainRetains()
+    expect(fake.retains()).toHaveLength(1)
+    expect(appended).toEqual([expect.objectContaining({ type: 'memory', action: 'retain', outcome: 'ok' })])
+    await vi.waitFor(() => expect(released).toBe(true))
+  })
+
   it('never fails the turn: a Hindsight that refuses is recorded, and no memories come back', async () => {
     fake.respond = () => ({ status: 500, text: `broken ${TOKEN}` })
     const acts = memoryActivities(deps())
     expect(await env(MEMORY_RECALL_ACTIVITY).run(acts[MEMORY_RECALL_ACTIVITY], { turn_id: TURN })).toEqual({ context: null })
     await env(MEMORY_RETAIN_ACTIVITY).run(acts[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
+    await drainRetains()
     expect(appended.map((e) => e.type === 'memory' && [e.action, e.outcome])).toEqual([
       ['recall', 'error'],
       ['retain', 'error'],

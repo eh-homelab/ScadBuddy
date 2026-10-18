@@ -123,7 +123,7 @@ HOST_WAIT = timedelta(seconds=5)
 MEMORY_RECALL = "memory_recall"
 MEMORY_RETAIN = "memory_retain"
 MEMORY_PATCH = "memory-2320"
-# Past the hooks' own limits (3 s recall, 15 s retain) and the plugin lookup.
+# Past the hooks' own limits (3 s recall; retain returns once enqueued) and the plugin lookup.
 MEMORY_RECALL_TIMEOUT = timedelta(seconds=30)
 MEMORY_RETAIN_TIMEOUT = timedelta(minutes=1)
 # Never retried, never failing the turn: the agent records a failure in the session.

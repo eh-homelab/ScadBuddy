@@ -163,6 +163,8 @@ async def test_a_segment_runs_with_the_credential_and_what_is_left_of_the_budget
     assert made["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"
     assert made["env"]["ANTHROPIC_AUTH_TOKEN"] == TOKEN
     assert made["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    # A limit's "resets 10:30pm (UTC)" is named in the engine's zone (#4107).
+    assert made["env"]["TZ"] == "UTC"
     assert made["max_budget_usd"] == pytest.approx(0.6)
     assert made["env"]["SCADBUDDY_TEST_DATABASE_URL"] == ""  # the worker's settings, emptied
     # No images, no skills: Claude Code's prompt with the session's append, and the

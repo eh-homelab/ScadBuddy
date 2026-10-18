@@ -67,6 +67,7 @@ describe('buildHarnessOptions', () => {
         'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
         'CLAUDE_CONFIG_DIR',
         'HOME',
+        'TZ',
         ...(process.env.PATH === undefined ? [] : ['PATH']),
       ].sort(),
     )
