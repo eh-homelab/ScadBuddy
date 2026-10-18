@@ -489,7 +489,7 @@ jobs:
       # The build runs `scadbuddy-slicer --check-cli` against the pinned CLI.
       #
       # `type=gha` on a hosted runner only, as above. Its own scope, which
-      # ci.yml's `image` job reads and writes too, at mode=min (the repo's
+      # ci.yml's `image` job only reads, written here at mode=min (the repo's
       # Actions cache is at its ceiling, #743).
       - name: Build and push
         id: build

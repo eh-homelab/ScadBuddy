@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, killpg};
 use nix::sys::stat::Mode;
-use nix::unistd::{Pid, mkfifo};
+use nix::unistd::{AccessFlags, Pid, access, mkfifo};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::unix::pipe;
 use tokio::process::Command;
@@ -28,6 +28,9 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
 /// How long stderr may stay open after the CLI exits (a straggler holding it).
 const STDERR_GRACE: Duration = Duration::from_secs(1);
+/// The worker's variables the CLI sees, when set, besides `HOME` ([`cli_env`]). AppRun
+/// sets `LD_LIBRARY_PATH` and `LC_ALL` itself; it needs nothing else.
+const PASSED_VARS: &[&str] = &["PATH", "LANG", "LC_ALL", "TZ", "LD_LIBRARY_PATH", "APPDIR"];
 
 pub struct RunRequest<'a> {
     pub cli: &'a Path,
@@ -113,6 +116,25 @@ pub fn command_line(req: &RunRequest<'_>, fifo: &Path) -> Vec<OsString> {
     argv
 }
 
+/// The CLI's whole environment: [`PASSED_VARS`] as `var` has them, and `HOME`, or
+/// `scratch` when `HOME` is unset or not writable. Nothing else of the worker's (a
+/// collector credential in `OTEL_EXPORTER_OTLP_HEADERS`, whatever a Deployment adds)
+/// reaches a third-party binary, as `template_process.py` allowlists a template's.
+pub fn cli_env(
+    var: impl Fn(&str) -> Option<OsString>,
+    scratch: &Path,
+) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = PASSED_VARS
+        .iter()
+        .filter_map(|name| var(name).map(|value| ((*name).into(), value)))
+        .collect();
+    let home = var("HOME")
+        .filter(|home| access(Path::new(home), AccessFlags::W_OK).is_ok())
+        .unwrap_or_else(|| scratch.into());
+    env.push(("HOME".into(), home));
+    env
+}
+
 fn joined<'p>(paths: impl IntoIterator<Item = &'p Path>) -> OsString {
     let mut out = OsString::new();
     for (i, p) in paths.into_iter().enumerate() {
@@ -146,6 +168,8 @@ pub async fn run(
     let started = Instant::now();
     let mut child = Command::new(req.cli)
         .args(command_line(&req, &fifo))
+        .env_clear()
+        .envs(cli_env(|name| std::env::var_os(name), dir.path()))
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -350,5 +374,71 @@ async fn keep_tail(stream: Option<impl AsyncRead + Unpin>, tail: Arc<Mutex<Vec<u
         tail.extend_from_slice(&buf[..n]);
         let excess = tail.len().saturating_sub(STDERR_TAIL);
         tail.drain(..excess);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    fn env_of(vars: &[(&str, &OsString)], scratch: &Path) -> HashMap<OsString, OsString> {
+        let vars: HashMap<&str, OsString> = vars.iter().map(|(k, v)| (*k, (*v).clone())).collect();
+        cli_env(|name| vars.get(name).cloned(), scratch)
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn only_the_allowlist_passes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().as_os_str().to_owned();
+        let path = OsString::from("/usr/bin:/bin");
+        let secret = OsString::from("authorization=Bearer s3cret");
+        let env = env_of(
+            &[
+                ("PATH", &path),
+                ("HOME", &home_path),
+                ("OTEL_EXPORTER_OTLP_HEADERS", &secret),
+            ],
+            scratch.path(),
+        );
+        let expected: HashMap<OsString, OsString> =
+            [("PATH".into(), path), ("HOME".into(), home_path)].into();
+        assert_eq!(env, expected);
+    }
+
+    #[test]
+    fn home_falls_back_to_scratch_when_unset_or_unwritable() {
+        let scratch = tempfile::tempdir().unwrap();
+        let fallback = Some(scratch.path().as_os_str());
+        let env = env_of(&[], scratch.path());
+        assert_eq!(
+            env.get(OsStr::new("HOME")).map(OsString::as_os_str),
+            fallback
+        );
+
+        let missing = OsString::from("/nonexistent/home");
+        let env = env_of(&[("HOME", &missing)], scratch.path());
+        assert_eq!(
+            env.get(OsStr::new("HOME")).map(OsString::as_os_str),
+            fallback
+        );
+
+        // Root may write anywhere, so a read-only directory means nothing to it.
+        let ro = tempfile::tempdir().unwrap();
+        if std::os::unix::fs::MetadataExt::uid(&ro.path().metadata().unwrap()) != 0 {
+            std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let ro_path = ro.path().as_os_str().to_owned();
+            let env = env_of(&[("HOME", &ro_path)], scratch.path());
+            assert_eq!(
+                env.get(OsStr::new("HOME")).map(OsString::as_os_str),
+                fallback
+            );
+        }
     }
 }

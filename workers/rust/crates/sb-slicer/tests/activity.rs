@@ -139,3 +139,60 @@ async fn a_cancelled_activity_is_cancelled() {
         ActivityEnvironmentError::Activity(ActivityError::Cancelled { .. })
     ));
 }
+
+/// The failure as a caller receives it: encoded the way the SDK completes an activity,
+/// its details decoded as JSON.
+fn details(err: ActivityEnvironmentError) -> (String, bool, Option<serde_json::Value>) {
+    use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+    use temporalio_common::error::{OutgoingActivityError, OutgoingError};
+    use temporalio_common::protos::temporal::api::failure::v1::failure::FailureInfo;
+    let ActivityEnvironmentError::Activity(ActivityError::Application(f)) = err else {
+        panic!("expected an application failure, got {err:?}");
+    };
+    let failure = DataConverter::default().to_failure(
+        &SerializationContextData::None,
+        OutgoingError::Activity(OutgoingActivityError::Application(f)),
+    );
+    let Some(FailureInfo::ApplicationFailureInfo(info)) = failure.failure_info else {
+        panic!("no application failure info");
+    };
+    let details = info
+        .details
+        .map(|d| serde_json::from_slice(&d.payloads[0].data).expect("JSON details"));
+    (info.r#type, info.non_retryable, details)
+}
+
+#[tokio::test]
+async fn an_exit_0_without_output_is_a_slicer_error_before_any_put() {
+    let (base, seen) = serve().await;
+    let env = ActivityEnvironment::builder()
+        .register_activities(activities("no-output"))
+        .build();
+    let err = env
+        .run(SlicerActivities::slice_plate, input(&base))
+        .await
+        .unwrap_err();
+    let (type_name, non_retryable, details) = details(err);
+    assert_eq!(type_name, SLICER_ERROR);
+    assert!(!non_retryable);
+    let details = details.expect("details");
+    assert_eq!(details["exit_code"], 0);
+    let tail = details["stderr_tail"].as_str().expect("a stderr tail");
+    assert!(tail.contains("fake stderr line"), "{tail}");
+    assert!(seen.lock().unwrap().puts.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_slice_still_records_its_stage_time() {
+    let (base, _seen) = serve().await;
+    let acts = activities("exit-1");
+    let stages = acts.stages.clone();
+    let env = ActivityEnvironment::builder()
+        .register_activities(acts)
+        .build();
+    env.run(SlicerActivities::slice_plate, input(&base))
+        .await
+        .unwrap_err();
+    let slice = stages.stage_seconds.with_label_values(&["slice"]);
+    assert_eq!(slice.get_sample_count(), 1);
+}

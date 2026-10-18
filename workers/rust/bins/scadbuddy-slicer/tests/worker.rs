@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use sb_slicer::activity::{SLICER_ERROR, SlicerActivities, VALIDATION_EXIT};
+use sb_slicer::activity::{SLICE_PLATE, SLICER_ERROR, VALIDATION_EXIT};
 use sb_slicer::models::{SlicePlateInput, SlicePlateOutput};
 use scadbuddy_slicer::WorkerSettings;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{Client, WorkflowGetResultOptions, WorkflowStartOptions};
-use temporalio_common::RetryPolicy;
+use temporalio_common::data_converters::RawValue;
+use temporalio_common::{RetryPolicy, UntypedActivity};
 use temporalio_sdk::testing::{EphemeralExe, LocalWorkflowEnvironmentOptions, WorkflowEnvironment};
 use temporalio_sdk::workflows::{workflow, workflow_methods};
 use temporalio_sdk::{
@@ -69,12 +70,15 @@ impl SliceCaller {
             .heartbeat_timeout(Duration::from_secs(30))
             .retry_policy(RetryPolicy::builder().maximum_attempts(1).build())
             .build();
+        // By the activity's type name, as the Python caller starts it: the typed
+        // reference would hide a registered name that differs.
+        let input = RawValue::from_value(&call.input, ctx.payload_converter());
         let result = ctx
-            .execute_activity(SlicerActivities::slice_plate, call.input, options)
+            .execute_activity(UntypedActivity::new(SLICE_PLATE), input, options)
             .await;
         Ok(match result {
             Ok(output) => Seen {
-                output: Some(output),
+                output: Some(output.to_value(ctx.payload_converter())),
                 failure: None,
             },
             Err(err) => Seen {
@@ -242,7 +246,9 @@ async fn the_worker_serves_slice_plate_and_its_failures() {
     let checks = async {
         let seen = slice(&client, OK_QUEUE, support::input(&base)).await;
         assert!(ready.load(Ordering::SeqCst), "ready while the worker runs");
-        let output = seen.output.expect("a sliced plate");
+        let output = seen
+            .output
+            .unwrap_or_else(|| panic!("a sliced plate, not {:?}", seen.failure));
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.warnings, vec!["thin wall".to_owned()]);
         assert_eq!(

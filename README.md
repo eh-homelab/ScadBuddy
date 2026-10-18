@@ -1214,8 +1214,8 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
 - On SIGTERM it stops taking slices and lets the running ones go on for
   `SCADBUDDY_SLICER_SHUTDOWN_GRACE_SECONDS` (default 20). Past that it cancels them:
   each CLI's process group is killed and the slice fails as a retryable
-  `WorkerShutdown`, so its retry starts on another pod at once instead of after the
-  heartbeat timeout. Keep the grace below the Deployment's
+  `WorkerShutdown`, so its retry starts at once on another pod instead of after the
+  heartbeat timeout (with a single replica, when the replacement pod is up). Keep the grace below the Deployment's
   `terminationGracePeriodSeconds` (Kubernetes' default is 30), with room for that
   report: if the pod is killed first, the slice is lost with it and its retry waits out
   the heartbeat timeout.
@@ -1225,6 +1225,18 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   URL (`SCADBUDDY_API_INTERNAL_URL`, the API's Service) and, when `store_backend` is
   `s3`, the bucket's endpoint.
 - It serves `/healthz` and `/metrics` on `9090`.
+- It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
+  of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
+  details are always one `{"exit_code", "stderr_tail"}` object, and exit 192, a
+  validation failure, is non-retryable), `SlicerWorkerError` (the worker's own failure,
+  such as its temp directory or starting the CLI: retryable, a message and no details),
+  `TransferRefused` (a transfer URL that will never work: non-retryable) and
+  `TransferError` (a transfer worth another attempt). Decode details only for a
+  `SlicerError`.
+- The CLI gets only `PATH`, `LANG`, `LC_ALL`, `TZ`, `LD_LIBRARY_PATH` and `APPDIR` (each
+  when set) and `HOME` (the slice's temp directory when `HOME` is unset or not
+  writable): nothing else in the pod's environment, such as `OTEL_EXPORTER_OTLP_HEADERS`,
+  reaches it.
 - It runs as uid 10001 with `HOME=/tmp` and writes only under `/tmp`, so mount an
   `emptyDir` there and keep the root filesystem read-only.
 - The new GHCR package needs the one-time **public** visibility step

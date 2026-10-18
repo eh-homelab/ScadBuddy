@@ -17,8 +17,14 @@ use crate::error;
 use crate::models::{SlicePlateInput, SlicePlateOutput, TransferUrl};
 use crate::runner::{self, RunError, RunRequest};
 
-/// The `ApplicationError` type of a slice the CLI failed.
+/// The activity's type name, what callers start it by (spec §5.2).
+pub const SLICE_PLATE: &str = "slice_plate";
+/// The `ApplicationError` type of a slice the CLI failed; its details are always
+/// `{exit_code, stderr_tail}`.
 pub const SLICER_ERROR: &str = "SlicerError";
+/// The `ApplicationError` type of the worker's own failure (a temp dir, starting the
+/// CLI): retryable, a message and no details.
+pub const SLICER_WORKER_ERROR: &str = "SlicerWorkerError";
 /// The CLI's exit code for a validation failure (spec §2).
 pub const VALIDATION_EXIT: i32 = 192;
 
@@ -30,7 +36,8 @@ pub struct SlicerActivities {
 
 #[activities]
 impl SlicerActivities {
-    #[activity]
+    // The macro would name it `SlicerActivities::slice_plate`.
+    #[activity(name = "slice_plate")]
     pub async fn slice_plate(
         self: Arc<Self>,
         ctx: ActivityContext,
@@ -131,9 +138,19 @@ async fn slice(
         Err(RunError::Cancelled { .. }) => return Err(ActivityError::cancelled()),
         Err(e @ RunError::Io(_)) => return Err(error::local(e)),
     };
+    // Every finished run, failed or not, as Python's `stage_duration` records them.
+    acts.stages.observe("slice", outcome.elapsed.as_secs_f64());
     span.record("exit_code", outcome.exit_code);
     if outcome.exit_code != 0 {
         return Err(error::slicer(outcome.exit_code, &outcome.stderr_tail));
+    }
+    // Bambu Studio can exit 0 without exporting a plate; that is the slicer's failure,
+    // with its stderr, not a transfer's.
+    if !tokio::fs::try_exists(&out_3mf)
+        .await
+        .map_err(error::local)?
+    {
+        return Err(error::slicer(0, &outcome.stderr_tail));
     }
 
     let sliced = unless_cancelled(cancel, acts.transfer.put(&input.sliced_3mf, &out_3mf)).await?;
@@ -150,7 +167,6 @@ async fn slice(
         _ => None,
     };
 
-    acts.stages.observe("slice", outcome.elapsed.as_secs_f64());
     Ok(SlicePlateOutput {
         sliced_sha256: sliced.sha256,
         sliced_size: sliced.size,

@@ -6,7 +6,7 @@ use serde_json::json;
 use temporalio_common::error::ApplicationFailure;
 use temporalio_sdk::activities::ActivityError;
 
-use crate::activity::{SLICER_ERROR, VALIDATION_EXIT};
+use crate::activity::{SLICER_ERROR, SLICER_WORKER_ERROR, VALIDATION_EXIT};
 
 /// A URL that will never work: the caller mints new ones on its next start.
 pub(crate) const TRANSFER_REFUSED: &str = "TransferRefused";
@@ -51,14 +51,38 @@ pub(crate) fn slicer(exit_code: i32, stderr_tail: &str) -> ActivityError {
     )
 }
 
-/// The worker's own failure (a temp dir, the fifo, starting the CLI): retryable.
+/// The worker's own failure (a temp dir, the fifo, starting the CLI): retryable, under a
+/// type of its own so a `SlicerError` always has its details.
 pub(crate) fn local(e: impl std::fmt::Display) -> ActivityError {
-    failure(e.to_string(), SLICER_ERROR, false, None)
+    failure(e.to_string(), SLICER_WORKER_ERROR, false, None)
 }
 
 #[cfg(test)]
 mod tests {
+    use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+    use temporalio_common::error::{OutgoingActivityError, OutgoingError};
+    use temporalio_common::protos::temporal::api::failure::v1::failure::FailureInfo;
+
     use super::*;
+
+    /// `e` as a caller receives it: its type, retryability and details decoded as JSON,
+    /// encoded the way the SDK completes an activity.
+    fn on_the_wire(e: ActivityError) -> (String, bool, Option<serde_json::Value>) {
+        let ActivityError::Application(f) = e else {
+            panic!("expected an application failure, got {e:?}");
+        };
+        let failure = DataConverter::default().to_failure(
+            &SerializationContextData::None,
+            OutgoingError::Activity(OutgoingActivityError::Application(f)),
+        );
+        let Some(FailureInfo::ApplicationFailureInfo(info)) = failure.failure_info else {
+            panic!("no application failure info");
+        };
+        let details = info
+            .details
+            .map(|d| serde_json::from_slice(&d.payloads[0].data).expect("JSON details"));
+        (info.r#type, info.non_retryable, details)
+    }
 
     fn kind(e: TransferError) -> (String, bool) {
         match transfer(e) {
@@ -75,6 +99,28 @@ mod tests {
 
     fn retryable() -> (String, bool) {
         (TRANSFER_ERROR.to_owned(), false)
+    }
+
+    #[test]
+    fn the_workers_own_failures_are_retried_without_details() {
+        assert_eq!(
+            on_the_wire(local("no space left on device")),
+            (SLICER_WORKER_ERROR.to_owned(), false, None)
+        );
+    }
+
+    #[test]
+    fn a_slicer_error_always_carries_its_exit_and_stderr() {
+        let details = json!({"exit_code": 1, "stderr_tail": "boom"});
+        assert_eq!(
+            on_the_wire(slicer(1, "boom")),
+            (SLICER_ERROR.to_owned(), false, Some(details))
+        );
+        let details = json!({"exit_code": 192, "stderr_tail": ""});
+        assert_eq!(
+            on_the_wire(slicer(VALIDATION_EXIT, "")),
+            (SLICER_ERROR.to_owned(), true, Some(details))
+        );
     }
 
     #[test]

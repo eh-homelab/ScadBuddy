@@ -6,7 +6,7 @@ ScadBuddy's Rust Temporal workers and tools (spec
 ```
 Cargo.toml                    # the workspace
 crates/sb-transfer/           # TransferUrl GET/PUT streaming with sha256
-crates/sb-temporal/           # worker bootstrap: connect, versioning, OTel, /healthz + /metrics (slicer only)
+crates/sb-temporal/           # worker bootstrap: connect, OTel, /healthz + /metrics (slicer only)
 crates/sb-slicer/             # slice_plate: its models (src/models.rs) and the activity
 bins/scadbuddy-slicer/        # the `slicer` queue's worker
 vectors/                      # payloads pinned against the pydantic models
