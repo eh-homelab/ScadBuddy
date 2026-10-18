@@ -103,6 +103,8 @@ from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
+from scadbuddy.spools.activities import spool_activities
+from scadbuddy.spools.component import SPOOLS
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
@@ -163,6 +165,7 @@ from scadbuddy.workflows.previews import (
     ensure_preview_schedule,
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
@@ -1110,6 +1113,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedOperationWorkflow,
     VersionedFlowTriggerFire,
     VersionedStoreMigration,
+    VersionedSpoolRefresh,
 )
 
 
@@ -1194,6 +1198,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.config.asset_sweep_interval,
             state.previews.timeout if state.previews is not None else None,
             stop,
+            spool_refresh=settings.spool_overlay_refresh_seconds,
         )
         if paused and state.store.content is not None:
             # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
@@ -1209,6 +1214,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     activities = [
         *_housekeeping_activities(state),
         *_preview_activities(state),
+        *spool_activities(state.components.get(SPOOLS)),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -1258,17 +1264,25 @@ def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
 
 
 async def _set_up_housekeeping(
-    client: Client, queue: str, interval: float, previews: float | None, stop: asyncio.Event
+    client: Client,
+    queue: str,
+    interval: float,
+    previews: float | None,
+    stop: asyncio.Event,
+    *,
+    spool_refresh: float,
 ) -> bool:
-    """The housekeeping Schedules and the preview backfill's (``previews``: the
-    scheduler's render bound; None, previews off: none), retried until Temporal takes
-    them: a frontend can answer the connect before it can create one. Each set-up
+    """The housekeeping Schedules, the spool providers' refresh (every
+    ``spool_refresh`` seconds; 0: none, #3818) and the preview backfill's (``previews``:
+    the scheduler's render bound; None, previews off: none), retried until Temporal
+    takes them: a frontend can answer the connect before it can create one. Each set-up
     triggers its Schedule, so the preview one comes last: a retry after the
-    housekeeping ones failed does not run the backfill twice. True when the sweeps'
-    one is paused."""
+    housekeeping ones failed does not run the backfill twice (a refresh run twice is
+    only a refresh). True when the sweeps' one is paused."""
     while not stop.is_set():
         try:
             paused = await ensure_schedules(client, queue, interval)
+            await ensure_spool_schedule(client, queue, spool_refresh)
             await ensure_preview_schedule(client, queue, previews)
             return paused
         except Exception:

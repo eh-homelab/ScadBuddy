@@ -176,6 +176,20 @@ def test_a_restart_field_is_listed_until_the_process_runs_with_it(settings: Sett
         assert client.get("/api/v1/settings").json()["restart_required"] == []
 
 
+def test_the_spool_refresh_interval_applies_at_the_next_start(client: TestClient) -> None:
+    """#3818 tier A, plan 2026-10-18 Task 6b: the spool providers' Schedule is set up at
+    start, as the sweeps' is, so its interval is a restart field; 0 turns it off."""
+    body = client.get("/api/v1/settings").json()
+    assert body["spool_overlay_refresh_seconds"] == 300
+    assert body["applies"]["spool_overlay_refresh_seconds"] == "restart"
+    saved = client.put("/api/v1/settings", json={"spool_overlay_refresh_seconds": 0}).json()
+    assert saved["spool_overlay_refresh_seconds"] == 0
+    assert saved["restart_required"] == ["spool_overlay_refresh_seconds"]
+    refused = client.put("/api/v1/settings", json={"spool_overlay_refresh_seconds": -1})
+    assert refused.status_code == 422
+    assert "SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS" in refused.json()["errors"][0]["msg"]
+
+
 def test_the_semaphores_are_sized_from_the_stored_values_at_start(settings: Settings) -> None:
     with TestClient(create_app(settings)) as client:
         client.put("/api/v1/settings", json={"lsp_sessions": 1, "realtime_sockets": 9})

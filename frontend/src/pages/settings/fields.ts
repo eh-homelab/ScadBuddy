@@ -66,6 +66,13 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: 'The Temporal web UI, where render workflows can be inspected. Empty shows no link.',
   },
   {
+    name: 'spool_overlay_refresh_seconds',
+    section: 'administration',
+    label: 'Refresh the spool providers\' records every',
+    kind: 'seconds',
+    help: "Bambuddy's spool records, copied on a schedule of their own so a print never waits on Bambuddy. 0 turns the refresh off.",
+  },
+  {
     name: 'media_upload_max_bytes',
     section: 'uploads',
     label: 'Largest media upload',
