@@ -699,8 +699,11 @@ async def get_library_objects(
     arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends
     the read budgets in effect, each overridable for this request (#2087)."""
     native = await library.serving_native()
-    async with client_for(store.load()) as client:
-        found = (await read_plain_files(client, [file_id], state, budget, native))[file_id]
+    if native is not None:
+        found = (await read_plain_files(None, [file_id], state, budget, native))[file_id]
+    else:
+        async with client_for(store.load()) as client:
+            found = (await read_plain_files(client, [file_id], state, budget))[file_id]
     return LibraryFileObjects(
         file_id=file_id,
         filename=found.filename,
@@ -738,21 +741,26 @@ async def get_library_preview(
     file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,
     damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404."""
     native = await library.serving_native()
-    async with client_for(store.load()) as client:
-        try:
+    try:
+        if native is not None:
             data = await library_preview(
-                client,
-                paths.cache,
-                file_id,
-                plate,
-                budget,
-                downloads,
-                files=reads_for(file_id, client, native),
+                None, paths.cache, file_id, plate, budget, downloads, files=native
             )
-        except NotViewableError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        except NoSuchPlateError as error:
-            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+        else:
+            async with client_for(store.load()) as client:
+                data = await library_preview(
+                    client,
+                    paths.cache,
+                    file_id,
+                    plate,
+                    budget,
+                    downloads,
+                    files=reads_for(file_id, client, None),
+                )
+    except NotViewableError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except NoSuchPlateError as error:
+        raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
     return Response(data, media_type=GLB_MEDIA_TYPE)
 
 

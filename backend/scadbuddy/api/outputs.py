@@ -107,7 +107,7 @@ from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.reads import LibraryReads, served_reads
 from scadbuddy.print_library.store import NativeFile
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
@@ -468,15 +468,16 @@ async def resolve_library_files(
 
 
 async def read_plain_files(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     file_ids: list[int],
     state: AppState,
     budget: ReadBudget,
     native: LibraryReads | None = None,
 ) -> dict[int, LibraryObjects]:
     """Each plain library file's objects, read from its 3MF (#1863) once per file hash
-    (#1973), their pieces stored; a native file's (#3827) from ``native``. Every file
-    that cannot be arranged is refused at once, each with why."""
+    (#1973), their pieces stored. On ``native``, the library served (#3827), every file
+    is read from it and needs no ``client`` (`served_reads`). Every file that cannot be
+    arranged is refused at once, each with why."""
     read: dict[int, LibraryObjects] = {}
     refused: list[NotArrangeableError] = []
     for file_id in file_ids:
@@ -488,7 +489,7 @@ async def read_plain_files(
                 cache=state.paths.cache,
                 budget=budget,
                 downloads=state.store.downloads,
-                files=native if is_native_id(file_id) else None,
+                files=served_reads(file_id, client, native),
             )
         except NotArrangeableError as error:
             refused.append(error)
@@ -709,14 +710,17 @@ async def arrange_outputs(
     # No printer: the plate the preview falls back to (Settings), else the default plate.
     plate_model = stored.default_plate
     library: dict[int, LibraryObjects] = {}
-    if printer_id is not None or plain:
+    budget = budget_of(state.settings, body.read_budget)
+    # On native the plain files are read from it (#3827): Bambuddy only names the plate.
+    if printer_id is not None or (plain and native is None):
         # `printer()` declares Scope.READ_STATUS, and the client's `_send` maps a refusal
         # through bambuddy/errors.py, so a key without it gets a 403 naming the scope.
         async with client_for(stored) as client:
             if printer_id is not None:
                 plate_model = (await client.printer(printer_id)).model
-            budget = budget_of(state.settings, body.read_budget)
             library = await read_plain_files(client, plain, state, budget, native)
+    elif plain:
+        library = await read_plain_files(None, plain, state, budget, native)
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )

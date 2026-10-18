@@ -731,7 +731,6 @@ def arranger(native_client: TestClient) -> Iterator[Arranger]:
 def test_arrange_reads_a_native_files_objects(
     native_client: TestClient, uploaded: NativeFile, model: str, arranger: Arranger
 ) -> None:
-    configure(native_client)
 
     listed = native_client.get(f"/api/v1/print/library/{uploaded.id}/objects")
     response = native_client.post(
@@ -757,7 +756,6 @@ def test_arrange_resolves_a_filed_files_output(
 ) -> None:
     """The file is the output's copy, so its objects come from the output's manifest:
     this one records none, which is the output's own 409, naming it."""
-    configure(native_client)
     assert uploaded_with_output.output_id is not None
     meta = paths.outputs / model / uploaded_with_output.output_id / "meta.json"
     meta.write_text(
@@ -784,7 +782,6 @@ def test_arrange_resolves_a_filed_files_output(
 def test_create_model_from_a_native_library_file(
     native_client: TestClient, uploaded: NativeFile
 ) -> None:
-    configure(native_client)
 
     created = native_client.post(
         "/api/v1/models/from-mesh",
@@ -822,3 +819,59 @@ def test_all_plates_analysis_of_a_native_file_reads_native_plates(
     assert inputs["geometry"]["available"], inputs["geometry"]
     assert inputs["inventory"]["available"], inputs["inventory"]
     assert _asked_bambuddy_for(uploaded.id) == []
+
+
+@respx.mock
+def test_a_native_files_geometry_is_judged_with_no_bambuddy(
+    native_client: TestClient, uploaded: NativeFile
+) -> None:
+    """With no Bambuddy at all, a native file's mesh is still read; only what Bambuddy
+    alone answers (printers, spools) is unavailable."""
+    response = native_client.post(
+        "/api/v1/analyzers/run", json={"target": {"library_file_id": uploaded.id}}
+    )
+
+    assert response.status_code == 200, response.text
+    inputs = {row["name"]: row for row in response.json()["inputs"]}
+    assert inputs["geometry"]["available"], inputs["geometry"]
+    assert not inputs["printer"]["available"]
+
+
+@respx.mock
+def test_a_native_files_preview_needs_no_bambuddy(
+    native_client: TestClient, uploaded: NativeFile
+) -> None:
+    response = native_client.get(f"/api/v1/print/library/{uploaded.id}/preview.glb")
+
+    assert response.status_code == 200, response.text
+    assert response.content[:4] == b"glTF"
+
+
+@respx.mock
+def test_a_bambuddy_range_id_is_404_to_the_readers_on_native(native_client: TestClient) -> None:
+    """One id space at a time: on native, Bambuddy's file 5 is no file, whatever reads it."""
+    configure(native_client)
+
+    objects = native_client.get("/api/v1/print/library/5/objects")
+    preview = native_client.get("/api/v1/print/library/5/preview.glb")
+    arrange = native_client.post(
+        "/api/v1/outputs/arrange", json={"objects": [{"library_file_id": 5}], "slug": "x"}
+    )
+
+    created = native_client.post(
+        "/api/v1/models/from-mesh", json={"name": "X", "library_file_id": 5}, headers=press()
+    )
+
+    assert (objects.status_code, preview.status_code, arrange.status_code) == (404, 404, 404)
+    assert created.status_code == 404, created.text
+    assert list(respx.calls) == []
+
+
+@respx.mock
+def test_a_native_id_is_404_to_arrange_on_bambuddy(client: TestClient) -> None:
+    configure(client)
+
+    response = client.get("/api/v1/print/library/1000000001/objects")
+
+    assert response.status_code == 404, response.text
+    assert list(respx.calls) == []

@@ -64,7 +64,7 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.ids import is_native_id
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.reads import LibraryReads, reads_of
 from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
 from scadbuddy.render.objects3mf import check_stl
 from scadbuddy.render.read_budget import ReadBudget
@@ -865,8 +865,8 @@ class LibrarySource(PrintPipeline):
         """``None`` for a native file (#3827): Bambuddy has no file of that id."""
         return None if is_native_id(self.file_id) else self.file_id
 
-    def _reads(self, client: BambuddyClient) -> LibraryReads:
-        return self.files or client
+    def _reads(self, client: BambuddyClient | None) -> LibraryReads:
+        return reads_of(self.files, client)
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         """A native file's slots read from the file itself need no copy in Bambuddy (as
@@ -948,7 +948,7 @@ class LibrarySource(PrintPipeline):
 
     async def write_3mf(
         self,
-        client: BambuddyClient,
+        client: BambuddyClient | None,
         out: BinaryIO,
         budget: ReadBudget,
         room: Callable[[], bool] = lambda: True,
@@ -993,9 +993,10 @@ class LibrarySource(PrintPipeline):
         out.truncate()
         out.write(wrapped)
 
-    async def download(self, client: BambuddyClient) -> bytes | None:
+    async def download(self, client: BambuddyClient | None) -> bytes | None:
         """The file's bytes, counted as they stream in; ``None`` past
-        :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept."""
+        :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept. ``client``
+        may be ``None`` for a source with ``files``."""
         data = bytearray()
         async with aclosing(self._reads(client).download_library_file(self.file_id)) as chunks:
             async for chunk in chunks:

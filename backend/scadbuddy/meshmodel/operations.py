@@ -190,9 +190,9 @@ def _answered(fn: Step) -> Step:
 
 
 def mesh_kinds(state: AppState, library: NativeReads = no_native) -> list[OperationKind]:
-    """The mesh model kinds; a library source that is a native file (#3827) is read from
-    ``library``, asked when the kind runs, since the kinds are built before the settings
-    say which library serves."""
+    """The mesh model kinds; a library source is read from ``library`` when it serves
+    (#3827), with no Bambuddy, asked when the kind runs, since the kinds are built before
+    the settings say which library serves."""
 
     def _record(record: Any) -> dict[str, Any]:
         dumped: dict[str, Any] = record.model_dump(mode="json")
@@ -227,18 +227,21 @@ def mesh_kinds(state: AppState, library: NativeReads = no_native) -> list[Operat
             # The check read the file's record; only its bytes are fetched here, as they
             # are, so an STL is budgeted below before anything loads it.
             filename, kind = checked["filename"], checked["file_type"]
-            file_id = source["file_id"]
-            settings = await asyncio.to_thread(state.settings_store.load)
-            async with client_for(settings) as client:
-                files = reads_for(file_id, client, await library())
-                payload = await LibrarySource(
-                    file_id=file_id,
-                    colours=[],
-                    plates=[],
-                    filename=filename,
-                    file_type=kind,
-                    files=files,
-                ).download(client)
+            native = await library()
+            file = LibrarySource(
+                file_id=source["file_id"],
+                colours=[],
+                plates=[],
+                filename=filename,
+                file_type=kind,
+                files=native,
+            )
+            if native is not None:
+                payload = await file.download(None)
+            else:
+                settings = await asyncio.to_thread(state.settings_store.load)
+                async with client_for(settings) as client:
+                    payload = await file.download(client)
             if payload is None:
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, f"{filename} is too large to read"
@@ -262,10 +265,13 @@ def mesh_kinds(state: AppState, library: NativeReads = no_native) -> list[Operat
             return {}
         settings = await asyncio.to_thread(state.settings_store.load)
         native = await library()
-        async with waiting_on_bambuddy(), client_for(settings) as client:
-            file = await reads_for(source["file_id"], client, native).library_file(
-                source["file_id"]
-            )
+        if native is not None:
+            file = await native.library_file(source["file_id"])
+        else:
+            async with waiting_on_bambuddy(), client_for(settings) as client:
+                file = await reads_for(source["file_id"], client, None).library_file(
+                    source["file_id"]
+                )
         kind = (file.file_type or "").lower()
         if kind == SLICED_TYPE or not printable(kind):
             what = "sliced" if kind == SLICED_TYPE else f"a {kind or 'file of unknown type'}"

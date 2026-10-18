@@ -45,7 +45,7 @@ from scadbuddy.bambuddy.print_source import (
     SpoolFullError,
     printable,
 )
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.reads import LibraryReads, reads_of
 from scadbuddy.render.glb import footprint_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import LAYOUT_NAME
@@ -153,7 +153,7 @@ async def _stored(blobs: BlobStore, key: str) -> bool:
 
 
 async def read_library_objects(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     file_id: int,
     *,
     blobs: BlobStore,
@@ -164,11 +164,12 @@ async def read_library_objects(
 ) -> LibraryObjects:
     """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
     hash, else downloaded and read within ``budget`` (the defaults when None). The file
-    is read from ``files`` (a native file, #3827), else from Bambuddy. A file deleted in
+    is read from ``files`` (a native file, #3827; ``client`` may then be ``None``), else
+    from Bambuddy. A file deleted in
     Bambuddy is the client's 404; one that cannot be arranged is
     :class:`NotArrangeableError`."""
     spend = budget or ReadBudget()
-    file = await (files or client).library_file(file_id)
+    file = await reads_of(files, client).library_file(file_id)
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
         raise NotArrangeableError(

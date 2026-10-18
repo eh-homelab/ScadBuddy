@@ -52,6 +52,29 @@ def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None)
     return native
 
 
+def served_reads(
+    file_id: int, client: BambuddyClient | None, native: LibraryReads | None
+) -> LibraryReads:
+    """Where the API reads file ``file_id``, ``native`` being the library it serves: all of
+    it on ``native``, where a Bambuddy-range id is its 404 (one id space at a time), and
+    :func:`reads_for` on ``bambuddy``. Not for the print worker, whose ``RemoteLibrary``
+    does not say which library the API serves: it takes :func:`reads_for`."""
+    if native is not None:
+        return native
+    if client is None:
+        raise TypeError(f"library file {file_id} is read from Bambuddy, which needs a client")
+    return reads_for(file_id, client, None)
+
+
+def reads_of(files: LibraryReads | None, client: BambuddyClient | None) -> LibraryReads:
+    """``files`` when given, else Bambuddy's ``client``, one of which a read needs."""
+    if files is not None:
+        return files
+    if client is None:
+        raise TypeError("a library read needs its file's library or a Bambuddy client")
+    return client
+
+
 #: The native library a kind reads a native file from (#3827), asked when the kind runs:
 #: the kinds are built before the settings say which library serves.
 NativeReads = Callable[[], Awaitable[LibraryReads | None]]

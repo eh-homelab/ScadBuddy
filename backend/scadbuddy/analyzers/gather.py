@@ -34,7 +34,7 @@ from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
-from scadbuddy.print_library.reads import LibraryReads, reads_for
+from scadbuddy.print_library.reads import LibraryReads, served_reads
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.plate import plate_for
@@ -91,7 +91,13 @@ async def gather_context(
     if not settings.bambuddy_url:
         for name in BAMBUDDY_INPUTS:
             context.unavailable[name] = NO_BAMBUDDY
-        if library_subject is not None:
+        if library_subject is not None and native is not None:
+            # The served native library needs no Bambuddy to read the file (#3827).
+            assert cache is not None, "a library file's mesh is cached"
+            await _read_library_geometry(
+                context, None, cache, library_subject, budget, downloads, native
+            )
+        elif library_subject is not None:
             context.unavailable["geometry"] = NO_BAMBUDDY
         _read_choices(context, settings, remembered, request.printer_id or settings.printer_id)
     else:
@@ -136,7 +142,7 @@ async def _read_geometry(context: AnalysisContext, outputs: OutputStore, meta: O
 
 async def _read_library_geometry(
     context: AnalysisContext,
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     cache: Path,
     file_id: int,
     budget: ReadBudget | None,
@@ -152,7 +158,7 @@ async def _read_library_geometry(
             context.request.plate_id,
             budget,
             downloads,
-            reads_for(file_id, client, native),
+            served_reads(file_id, client, native),
         )
     except NotViewableError as error:
         context.unavailable["geometry"] = f"the 3MF cannot be analysed: {error.reason}"
@@ -221,9 +227,13 @@ async def _read_bambuddy(
         request.plate_id
     ]
     try:
+        if native is not None and context.library_file_id is not None:
+            # On native a Bambuddy-range file is no file (#3827): its 404, before any
+            # plate's slots are asked of Bambuddy.
+            await native.library_file(context.library_file_id)
         if request.all_plates and context.library_file_id is not None:
             # As the library file's filament step reads them: Bambuddy's plates.
-            listed = await reads_for(context.library_file_id, client, native).library_plates(
+            listed = await served_reads(context.library_file_id, client, native).library_plates(
                 context.library_file_id
             )
             plate_ids = sorted(plate.index for plate in listed.plates) or [1]

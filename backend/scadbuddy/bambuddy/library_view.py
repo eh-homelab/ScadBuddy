@@ -48,7 +48,7 @@ from scadbuddy.bambuddy.print_source import (
     is_sliced,
     printable,
 )
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.reads import LibraryReads, reads_of
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.objects3mf import PlateRead, UnreadableObjectsError, read_plate_parts
@@ -104,7 +104,7 @@ def _room(spool: Path) -> Callable[[], bool]:
 
 @contextlib.asynccontextmanager
 async def spooled_3mf(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     source: LibrarySource,
     cache: Path,
     budget: ReadBudget,
@@ -161,7 +161,7 @@ async def spooled_3mf(
 
 
 async def _read(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     cache: Path,
     file: LibraryFile,
     plate: int,
@@ -347,7 +347,7 @@ def _analysis(read: PlateRead, plate: int) -> GeometryAnalysis:
 
 
 async def library_preview(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     cache: Path,
     file_id: int,
     plate: int = 1,
@@ -359,7 +359,7 @@ async def library_preview(
     colours. A file deleted in Bambuddy is the client's 404; one that cannot be read is
     :class:`NotViewableError`; a plate it lacks is
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
-    file = await (files or client).library_file(file_id)
+    file = await reads_of(files, client).library_file(file_id)
     path = _cached(cache, file, f"plate-{plate}.glb")
     if path is not None:
         try:
@@ -377,7 +377,7 @@ async def library_preview(
 
 
 async def library_geometry(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     cache: Path,
     file_id: int,
     plate: int = 1,
@@ -387,7 +387,7 @@ async def library_geometry(
 ) -> GeometryAnalysis:
     """The mesh analysis of plate ``plate`` of library file ``file_id``, as
     ``OutputStore.geometry`` measures an output's; refused as :func:`library_preview`."""
-    file = await (files or client).library_file(file_id)
+    file = await reads_of(files, client).library_file(file_id)
     path = _cached(cache, file, f"plate-{plate}.geometry.json")
     if path is not None:
         try:
