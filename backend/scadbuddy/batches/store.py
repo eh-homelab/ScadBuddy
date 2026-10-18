@@ -272,10 +272,11 @@ class PrintBatchStore:
             changed = conn.execute(
                 "UPDATE print_batch_items SET request = %s, skipped = %s, removed = %s,"
                 " summary = %s, problems = %s,"
-                # A refusal of other choices than these says so (#3798).
+                # A refusal of other choices than these says so (#3798), and one edited
+                # back to the choices it refused does not (#3932 review).
                 " outcome = CASE WHEN outcome->>'status' = 'refused'"
-                " AND request IS DISTINCT FROM %s"
-                " THEN outcome || '{\"stale\": true}'::jsonb ELSE outcome END"
+                " THEN jsonb_set(outcome, '{stale}',"
+                " to_jsonb(refused_request IS DISTINCT FROM %s::jsonb)) ELSE outcome END"
                 " WHERE batch_id = %s AND position = %s"
                 # Not while Queue all is sending it, or once it started (#2718 review).
                 " AND (outcome IS NULL OR outcome->>'status' NOT IN ('started', 'pending'))",
@@ -308,7 +309,12 @@ class PrintBatchStore:
         reopen: bool = False,
     ) -> bool:
         guard = ""
-        params: list[Any] = [Jsonb(outcome.model_dump(mode="json")), batch_id, position]
+        params: list[Any] = [
+            Jsonb(outcome.model_dump(mode="json")),
+            outcome.status == "refused",
+            batch_id,
+            position,
+        ]
         if if_unchanged is not None:
             guard = (
                 " AND request IS NOT DISTINCT FROM %s AND skipped = %s AND removed = %s"
@@ -323,7 +329,9 @@ class PrintBatchStore:
             ]
         with self._pool.connection() as conn, conn.transaction():
             updated = conn.execute(
-                "UPDATE print_batch_items SET outcome = %s"
+                # The choices a refusal is of, for _choose's stale (#3932 review).
+                "UPDATE print_batch_items SET outcome = %s,"
+                " refused_request = CASE WHEN %s THEN request END"
                 f" WHERE batch_id = %s AND position = %s{guard}",
                 params,
             ).rowcount
@@ -352,6 +360,9 @@ class PrintBatchStore:
     def _delete(self, batch_id: str) -> Deleted:
         with self._pool.connection() as conn:
             found = conn.execute(
+                # Every part reads the statement's one snapshot: `kept` sees the batch as
+                # it was before the DELETE, so it is true whenever the batch existed.
+                # Hence `deleted` is read first, and `kept` alone means held back.
                 "WITH gone AS (DELETE FROM print_batches b WHERE b.id = %s AND NOT EXISTS ("
                 f"SELECT 1 FROM print_batch_items i WHERE i.batch_id = b.id AND {_PENDING})"
                 " RETURNING b.id)"

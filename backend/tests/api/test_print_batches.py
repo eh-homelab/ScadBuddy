@@ -565,6 +565,23 @@ async def test_an_edited_refusal_says_it_is_of_other_choices(client: TestClient)
     assert (outcome["status"], outcome["attempt"], outcome["stale"]) == ("refused", 1, True)
 
 
+async def test_an_edit_back_to_the_refused_choices_is_not_stale(client: TestClient) -> None:
+    """#3932 review: once stale, a refusal stayed stale after the file was edited back
+    to the very choices refused, and the row said they were others. Stale compares
+    against the choices the refusal was of, not the last edit."""
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    store = _state(client).components.get(PRINT_BATCHES)
+    refusal = BatchOutcome(status="refused", detail="No spool for slot 2.", attempt=1)
+    await store.record_outcome(batch["id"], 0, refusal)
+
+    away = choose(client, batch["id"], 0, request={**SLICED_RUN, "copies": 2})
+    assert away["items"][0]["outcome"]["stale"] is True
+    back = choose(client, batch["id"], 0, request=SLICED_RUN)["items"][0]["outcome"]
+
+    assert (back["status"], back["attempt"], back["stale"]) == ("refused", 1, False)
+
+
 async def test_a_queued_batchs_step_holds_against_a_late_move(client: TestClient) -> None:
     """#3798: the step's write took the batch open on an earlier read, so a Queue all
     landing in between still moved a queued batch's step."""

@@ -401,9 +401,12 @@ async def _queue_one(
 
 
 NOT_STARTED = "ScadBuddy could not start this file's print. Queue all again to retry."
+# Refused, so the row can be acted on, but a print may be queued (#3932 review): an
+# edit gives the next Queue all a new request, which starts a second one.
 NOT_A_RUN = (
     "ScadBuddy started this file's print but could not read which run it is. Check"
-    " Bambuddy's queue before you queue it again."
+    " Bambuddy's queue first: if the print is there, remove this file rather than edit"
+    " or queue it again, or a second print starts."
 )
 NOT_STARTED_AGAIN = (
     "ScadBuddy could not start this file's print, twice. Check Bambuddy's queue, then"
