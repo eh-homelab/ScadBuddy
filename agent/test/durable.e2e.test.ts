@@ -19,7 +19,7 @@ import { turnServers } from '../src/temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { createServer as createHttpServer, type Server } from 'node:http'
-import { durableHealthPort } from './support/durableHealth.js'
+import { durableHealthPort, notStarted } from './support/durableHealth.js'
 import { expectPanelAccepts, frontendClientMessages } from './support/frontendProtocol.js'
 import { type LiveAgent, openPanelSocket, type PanelSocket, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -118,7 +118,7 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
             .catch(() => undefined)
       if (status?.worker === 'running') break
       if (status?.worker && status.worker !== 'starting') throw new Error(`the durable worker is ${status.worker}: ${workerLog}`)
-      if (Date.now() > deadline) throw new Error(`the durable worker did not start: ${workerLog}`)
+      if (Date.now() > deadline) throw notStarted('the durable worker', port, workerLog)
       await new Promise((r) => setTimeout(r, 500))
     }
 

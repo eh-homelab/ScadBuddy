@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { durableHealthPort } from './support/durableHealth.js'
+import { durableHealthPort, notStarted } from './support/durableHealth.js'
 
 describe('durableHealthPort (#3655)', () => {
   it("reads the sidecar's own line, not a stray one that mentions a port", () => {
@@ -17,5 +17,15 @@ describe('durableHealthPort (#3655)', () => {
     // A chunk that ends inside the number.
     expect(durableHealthPort('INFO:scadbuddy_durable:health on port 412')).toBeUndefined()
     expect(durableHealthPort('INFO:scadbuddy_durable:health on port 41234\n')).toBe(41234)
+  })
+})
+
+describe('notStarted (#4086 review)', () => {
+  it('names the port helper when the port line was never read', () => {
+    expect(notStarted('the durable worker', undefined, 'log').message).toMatch(/durableHealthPort/)
+  })
+
+  it('says only what it was told once the port was read', () => {
+    expect(notStarted('the durable worker', 41234, 'log').message).toBe('the durable worker did not start: log')
   })
 })

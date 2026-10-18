@@ -9,3 +9,16 @@ export function durableHealthPort(log: string): number | undefined {
   const match = /^INFO:scadbuddy_durable:health on port (\d+)\r?\n/m.exec(log)
   return match ? Number(match[1]) : undefined
 }
+
+/**
+ * The error for a sidecar that did not start in time. When its port line was never read,
+ * it says so: a `format=` given to `basicConfig` in agent-durable's `__main__.py` stops
+ * durableHealthPort matching, and the start would otherwise only look slow.
+ */
+export function notStarted(what: string, port: number | undefined, log: string): Error {
+  const unread =
+    port === undefined
+      ? ' (its health port line was never read: durableHealthPort in agent/test/support/durableHealth.ts matches `INFO:scadbuddy_durable:health on port N`)'
+      : ''
+  return new Error(`${what} did not start${unread}: ${log}`)
+}
