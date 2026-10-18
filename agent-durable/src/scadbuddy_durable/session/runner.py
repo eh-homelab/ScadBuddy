@@ -51,6 +51,7 @@ of the segment's declared tools (#2088), so Claude is never offered them.
 from __future__ import annotations
 
 import base64
+import fnmatch
 import json
 import logging
 import os
@@ -63,7 +64,13 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, TypeGuard
 
 import psycopg
-from claude_agent_sdk import AgentDefinition, ResultError, create_sdk_mcp_server, tool
+from claude_agent_sdk import (
+    AgentDefinition,
+    HookMatcher,
+    ResultError,
+    create_sdk_mcp_server,
+    tool,
+)
 from temporalio import activity
 from temporalio.claude_agent_sdk import (
     ClaudeAgentSdkRunner,
@@ -77,7 +84,7 @@ from temporalio.claude_agent_sdk import (
 # HeldText stops holding anything, with no error. Guarded by the tests
 # test_the_plugins_runner_publishes_text_through_the_held_contextvar and
 # test_a_refused_credentials_scripted_notice_never_reaches_the_transcript (#3383).
-from temporalio.claude_agent_sdk._events import _EMIT
+from temporalio.claude_agent_sdk._events import _EMIT, emit
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.credentials import (
@@ -549,6 +556,76 @@ class HeldText:
         self._held = [{**event, "notice": True} for event in self._held]
 
 
+#: The plugin's own server (its ``_runner.PREFIX``): calls the workflow runs and publishes.
+DURABLE_PREFIX = "mcp__durable__"
+#: Claude Code's subagent tool, under its current and older names (agent harness/ownPlugin.ts).
+AGENT_TOOLS = frozenset({"Agent", "Task"})
+
+
+class SegmentCalls:
+    """The calls Claude Code runs inside a segment, published as they start and end, as
+    a classic turn's feed shows them (sdkEvents.ts): ``Skill``, ``Agent``, a subagent's
+    own calls and the images tools. The plugin publishes only the calls the workflow runs
+    (its own server's and ``tool_activities``), and of the segment itself only the main
+    agent's text, so a turn spent in a skill or a subagent showed nothing until it ended.
+
+    A subagent's call names the ``Agent`` call that runs it as ``parent`` when only one
+    is open; the hooks are not told which, so of several at once none is named."""
+
+    def __init__(self, activities: list[str]) -> None:
+        self._activities = activities
+        self._agents: set[str] = set()
+
+    def _workflows(self, name: str) -> bool:
+        """The plugin's ``decides_alone``: a call the workflow runs and publishes itself."""
+        tool = name.split("(", 1)[0].strip()
+        return name.startswith(DURABLE_PREFIX) or any(
+            fnmatch.fnmatchcase(tool, p) for p in self._activities if p
+        )
+
+    async def _started(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
+        name = str(data.get("tool_name") or "")
+        call = str(data.get("tool_use_id") or tool_use_id or "")
+        if not call or self._workflows(name):
+            return {}
+        event: dict[str, Any] = {
+            "type": "tool_call",
+            "id": call,
+            "name": name,
+            "input": data.get("tool_input") or {},
+        }
+        if data.get("agent_id") and len(self._agents) == 1:
+            event["parent"] = next(iter(self._agents))
+        elif not data.get("agent_id") and name in AGENT_TOOLS:
+            self._agents.add(call)
+        emit(event)
+        return {}
+
+    async def _ended(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
+        name = str(data.get("tool_name") or "")
+        call = str(data.get("tool_use_id") or tool_use_id or "")
+        if not call or self._workflows(name):
+            return {}
+        self._agents.discard(call)
+        failed = data.get("hook_event_name") == "PostToolUseFailure"
+        emit(
+            {
+                "type": "tool_result",
+                "id": call,
+                "name": name,
+                "status": "failed" if failed else "done",
+            }
+        )
+        return {}
+
+    def hooks(self) -> dict[str, list[HookMatcher]]:
+        return {
+            "PreToolUse": [HookMatcher(hooks=[self._started])],
+            "PostToolUse": [HookMatcher(hooks=[self._ended])],
+            "PostToolUseFailure": [HookMatcher(hooks=[self._ended])],
+        }
+
+
 class ScadBuddyRunner:
     def __init__(
         self,
@@ -914,6 +991,7 @@ class ScadBuddyRunner:
         plugins += [{"type": "local", "path": d} for d in self._packages(workflow_id, context)]
         if plugins:
             extra["plugins"] = plugins
+        extra["hooks"] = SegmentCalls(list(inp.tool_activities)).hooks()
         out = await self._on_credentials(
             session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
         )
