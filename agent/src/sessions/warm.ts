@@ -502,11 +502,12 @@ export class WarmSessions {
   }
 
   /**
-   * Once every append of the session's closed processes has landed: the closing results a
+   * Once the session's closed process has ended and every append of it has landed: the closing results a
    * process writes as it ends (a released turn's synthetic tool results), which the next
    * placement's transcript mark must come after. A spawn waits for the same (acquireNow).
    */
   async landed(sessionId: string): Promise<void> {
+    await this.closing.get(sessionId)
     for (;;) {
       const mirror = this.draining.get(sessionId)
       if (!mirror) return

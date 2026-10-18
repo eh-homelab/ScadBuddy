@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { ApplicationFailure } from '@temporalio/common'
 import { WorkflowNotFoundError } from '@temporalio/client'
@@ -23,7 +23,7 @@ import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manag
 import type { InputEntry } from '../src/sessions/protocol.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
-import { TurnHost } from '../src/sessions/turnHost.js'
+import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
@@ -86,12 +86,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
   let schema: string
   let url: string
   let drop: () => Promise<void>
+  /** The first replica's manager: what starts each session, and what the panel's routes read. */
   let m: SessionManager
-  let pool: Database
-  let listener: PgEventListener
-  let tools: AgentWorker
-  let hosts: HostWorkers
-  let turnHost: TurnHost
   let spawned: number
   /** Claude Code processes that have exited. */
   let exited: number
@@ -101,6 +97,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
   let effects: string[]
   /** How many of the next released calls' placements die right after the call ran (a worker lost mid-continuation). */
   let diesAfterRun: number
+  /** park_hold_seconds, as the workflow reads it for each turn. */
+  let holdSeconds: number
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -109,7 +107,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
       taskQueue: SESSION_QUEUE,
       workflowBundle: await bundleWorkflowCode({ workflowsPath: WORKFLOWS }),
       // Below the routes' floor of 30 s: the workflow reads what the activity gives it.
-      activities: { [SESSION_SETTINGS_ACTIVITY]: async () => ({ ...RUNTIME_DEFAULTS, park_hold_seconds: 1 }) },
+      activities: { [SESSION_SETTINGS_ACTIVITY]: async () => ({ ...RUNTIME_DEFAULTS, park_hold_seconds: holdSeconds }) },
     })
     workflowRun = workflowWorker.run()
   }, 180_000)
@@ -133,26 +131,36 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     },
   })
 
-  beforeEach(async () => {
-    fake = await startFakeAnthropic((r) => script(r))
-    ;({ db, schema, url, drop } = await throwawayDatabase())
-    expect(await db.ready()).toBe(true)
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
-    spawned = 0
-    exited = 0
-    sends = []
-    effects = []
-    diesAfterRun = 0
-    script = () => ({ text: 'ok' })
+  /** One replica of the agent: its manager, TurnHost, agent-tools worker and session host workers, on the shared database. */
+  type Replica = {
+    name: string
+    hostQueue: string
+    m: SessionManager
+    turnHost: TurnHost
+    tools: AgentWorker
+    hosts: HostWorkers
+    listener: PgEventListener
+    pool: Database
+    /** Its session_turn stops heartbeating (the replica alive, its worker cut off). */
+    frozen: boolean
+    stopped: boolean
+  }
+  let replicas: Replica[]
+  /** The session host queues acquire_worker may refer a turn to: the replicas up now. */
+  let live: Set<string>
+  let tag: string
+  /** The approvals' HMAC key, as every replica derives it from the one KEK (main.ts `approvalHashKey`). */
+  let hashKey: Buffer
+
+  async function replica(name: string): Promise<Replica> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    pool = connectDatabase(url, { searchPath: schema })
-    const tag = randomUUID().slice(0, 8)
-    const identity = `release-${tag}`
+    const pool = connectDatabase(url, { searchPath: schema })
+    const identity = `release-${name}-${tag}`
     const hostQueue = sessionHostQueue(identity)
-    const audit = new AuditLog({ sql: pool.sql })
+    const audit = new AuditLog({ sql: pool.sql, hashKey })
     const principal = { id: browser.id, kind: 'browser' as const, tiers: tiersUpTo('outward') }
-    m = manager({
+    const m = manager({
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-release-test-token' }),
@@ -174,7 +182,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     })
     m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, sessionHostQueue: hostQueue })
     m.durable = new DurableGate(env.client, { timeoutMs: 30_000 })
-    listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
+    const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     listener.start()
     const runCall = decidedCalls([ship], {
       services: services(),
@@ -182,7 +190,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
       approvals: new PgApprovalRecords(pool.sql),
       audit,
     })
-    turnHost = new TurnHost({
+    const turnHost = new TurnHost({
       core: m.turnCore,
       sql: pool.sql,
       images: new SessionBlobs(pool.sql),
@@ -198,8 +206,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
         return run
       },
     })
-    const acquire = acquireActivities({ warm: m.warm, hostQueue, identity, liveHosts: async () => new Set([hostQueue]) })
-    tools = AgentWorker.start({
+    const acquire = acquireActivities({ warm: m.warm, hostQueue, identity, liveHosts: async () => new Set(live) })
+    const tools = AgentWorker.start({
       address: env.address,
       namespace: 'default',
       taskQueue: TASK_QUEUE,
@@ -213,21 +221,62 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
       shutdownGraceMs: 1_000,
       log: () => {},
     })
-    hosts = startHostWorkers({
+    const r = { name, hostQueue, m, turnHost, tools, listener, pool, frozen: false, stopped: false } as Replica
+    r.hosts = startHostWorkers({
       address: env.address,
       namespace: 'default',
       identity,
       pinned: { pinned_probe: async () => 'pinned' },
       sessions: {
-        activities: { ...sessionTurnActivity(turnHost, { client: env.client }), ...releaseActivities(m.warm), [ACQUIRE_WORKER_ACTIVITY]: acquire[ACQUIRE_WORKER_ACTIVITY] },
+        activities: {
+          ...sessionTurnActivity(turnHost, {
+            client: env.client,
+            beat: (context, beat) => {
+              if (!r.frozen) context.heartbeat(beat)
+            },
+          }),
+          ...releaseActivities(m.warm),
+          [ACQUIRE_WORKER_ACTIVITY]: acquire[ACQUIRE_WORKER_ACTIVITY],
+        },
         slots: 10,
         shutdownGraceMs: 2_000,
         shutdownForceMs: 3_000,
       },
       shutdownGraceMs: 1_000,
     })
-    await Promise.all([tools.running(), hosts.pinned.running(), hosts.sessions!.running()])
+    await Promise.all([tools.running(), r.hosts.pinned.running(), r.hosts.sessions!.running()])
     await pollUntil(async () => (await polled(SESSION_QUEUE, 1)) && (await polled(TASK_QUEUE, 2)) && (await polled(hostQueue, 2)), true)
+    live.add(hostQueue)
+    replicas.push(r)
+    return r
+  }
+
+  /** What SIGTERM does to a replica (main.ts): its turns get their grace, then every worker stops. */
+  async function stopReplica(r: Replica): Promise<void> {
+    if (r.stopped) return
+    r.stopped = true
+    live.delete(r.hostQueue)
+    const hosted = r.turnHost.stop({ graceMs: 1_000, abortWaitMs: 1_000 })
+    await Promise.all([r.tools.stop(), r.hosts.stop(), r.m.stopTurns({ graceMs: 1_000, abortWaitMs: 1_000, others: hosted })])
+  }
+
+  beforeEach(async () => {
+    fake = await startFakeAnthropic((r) => script(r))
+    ;({ db, schema, url, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
+    spawned = 0
+    exited = 0
+    sends = []
+    effects = []
+    diesAfterRun = 0
+    holdSeconds = 1
+    replicas = []
+    live = new Set()
+    tag = randomUUID().slice(0, 8)
+    hashKey = randomBytes(32)
+    script = () => ({ text: 'ok' })
+    m = (await replica('a')).m
   }, 90_000)
   afterEach(async () => {
     for (const { id } of await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions`) {
@@ -238,11 +287,12 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
           if (!(err instanceof WorkflowNotFoundError)) throw err
         })
     }
-    const hosted = turnHost.stop({ graceMs: 1_000, abortWaitMs: 1_000 })
-    await Promise.all([tools.stop(), hosts.stop(), m.stopTurns({ graceMs: 1_000, abortWaitMs: 1_000, others: hosted })])
-    await listener.close()
+    for (const r of replicas) await stopReplica(r)
+    for (const r of replicas) {
+      await r.listener.close()
+      await r.pool.close()
+    }
     await fake.close()
-    await pool.close()
     await drop()
   }, 60_000)
 
@@ -281,7 +331,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
 
   /** The parked call's results in the session's transcript (ai_session_entries). */
   async function resultsOf(id: string, toolUseId: string) {
-    const store = new PostgresSessionStore(pool.sql, { keys: testPayloadKeys(pool.sql) })
+    const store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
     return ((await store.load({ projectKey: '', sessionId: id })) ?? []).flatMap((e) => {
       const content = (e as { message?: { content?: unknown } }).message?.content
       return Array.isArray(content) ? content.filter((b: { type?: string; tool_use_id?: string }) => b.type === 'tool_result' && b.tool_use_id === toolUseId) : []
@@ -319,6 +369,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     const told = lastMessage(fake.messageCalls().at(-1)!)
     expect(told).toContain(`Your call \`${SHIP}\` (id ${entry.id.split(':').at(-1)}) was paused waiting for approval. It was approved and ScadBuddy ran it once.`)
     expect(told).toContain('shipped box')
+    // The released call's result interrupted the turn: no request answered it.
+    expect(fake.messageCalls().map(lastMessage).filter((last) => last.includes('the turn paused, and you will be told how it ended'))).toEqual([])
     expect(await listed()).toEqual([])
   })
 
@@ -378,5 +430,63 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     ])
     expect(effects).toEqual(['box'])
     expect(lastMessage(fake.messageCalls().at(-1)!)).toContain('It was approved and ScadBuddy ran it once.')
+  })
+
+  it('a shutdown while a call is held releases the turn: once approved, the call runs once on the replica still up', async () => {
+    // A hold the test never outlasts: only the shutdown ends it.
+    holdSeconds = 600
+    script = shipsTheBox('shipped from b')
+    const [a] = replicas
+    const started = await m.start(browser, { origin: 'chat', prompt: 'ship the box' })
+    await pollUntil(async () => (await listed()).length, 1)
+    const [entry] = await listed()
+    const b = await replica('b')
+    await stopReplica(a!)
+    // Released by the shutdown, not cut: its process ended, the entry still waits.
+    await pollUntil(() => exited, 1)
+    expect((await listed()).map((e) => e.id)).toEqual([entry!.id])
+    expect(effects).toEqual([])
+    expect((await respond(entry!.id, { kind: 'approval', decision: 'approve' })).status).toBe(200)
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(effects).toEqual(['box'])
+    expect(sends).toEqual([{ key: sha(entry!.id), what: 'box' }])
+    expect(b.m.warm.size()).toBe(1)
+    expect(lastMessage(fake.messageCalls().at(-1)!)).toContain('It was approved and ScadBuddy ran it once.')
+    // A's process was gone before it could read its held request as failed and ask the model again:
+    // no request answers that closing result (it is only replayed, by B's).
+    expect(fake.messageCalls().map(lastMessage).filter((last) => last.includes('Tool permission stream closed'))).toEqual([])
+  })
+
+  it('a continuation lost after its outcome message landed resumes with the restart message, and its call is not run again', async () => {
+    const [a] = replicas
+    let first = true
+    let hung: () => void = () => {}
+    const hang = new Promise<void>((resolve) => {
+      hung = resolve
+    })
+    script = async (r) => {
+      const last = lastMessage(r)
+      if (last.includes(RESTARTED_PROMPT)) return { text: 'carried on' }
+      if (last.includes('was paused waiting for approval') && first) {
+        // A's model call for the outcome: A stalls here, its message in the transcript.
+        first = false
+        a!.frozen = true
+        await hang
+        return { text: 'too late' }
+      }
+      return shipsTheBox('unreached')(r)
+    }
+    const { started, entry } = await released()
+    const b = await replica('b')
+    expect((await respond(entry.id, { kind: 'approval', decision: 'approve' })).status).toBe(200)
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    hung()
+    // A ran the call once; B found the outcome message in the transcript and ran nothing.
+    expect(sends).toEqual([{ key: sha(entry.id), what: 'box' }])
+    expect(effects).toEqual(['box'])
+    const resumed = fake.messageCalls().at(-1)!
+    expect(lastMessage(resumed)).toContain(RESTARTED_PROMPT)
+    expect(JSON.stringify(resumed.body?.messages ?? [])).toContain('It was approved and ScadBuddy ran it once.')
+    expect(b.m.warm.size()).toBe(1)
   })
 })

@@ -572,6 +572,14 @@ export function decidedCalls(tools: readonly Tool[], deps: ToolActivityDeps): (c
     if (!tool || DURABLE_ONLY_NAMES.has(tool.name)) {
       return { ran: false, text: `${call.tool} cannot be run outside the conversation, so it was not run` }
     }
+    // The approval is looked up by request id, so the id must be this session's entry for this
+    // call (gate/ids.ts durableRequestId), as runAsActivity derives it: another session's approval
+    // of the same tool and input authorises nothing here.
+    const prefix = `durable:${call.sessionId.toLowerCase()}:`
+    const runId = call.requestId.startsWith(prefix) ? call.requestId.slice(prefix.length, -(call.toolUseId.length + 1)) : ''
+    if (!runId || runId.includes(':') || call.requestId !== durableRequestId(call.sessionId, runId, call.toolUseId)) {
+      return { ran: false, text: `request ${call.requestId} is not session ${call.sessionId}'s entry for call ${call.toolUseId}, so ${call.tool} was not run` }
+    }
     const owner = await deps.sessions.ownerOf(call.sessionId)
     if (owner === undefined) return { ran: false, text: `session ${call.sessionId} is no durable session, so ${call.tool} was not run` }
     const { turnTiers: sent, turnId, ...who } = owner

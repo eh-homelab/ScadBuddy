@@ -13,7 +13,7 @@ import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -609,5 +609,61 @@ describe('answerResult', () => {
       text: 'The user did not answer: a new turn.',
     })
     expect(answerResult({ outcome: 'answered', response: { answers: [] }, reason: null }, 'ask_user', {}).ok).toBe(false)
+  })
+})
+
+describe("decidedCalls: a released turn's approved call (unified runtime spec §5.4 step 5)", () => {
+  const OTHER = '9d1f2a3b-4c5d-4e6f-8a7b-0c1d2e3f4a5b'
+  let ran = 0
+  const ship = defineTool({
+    name: 'ship',
+    description: 'Ships something',
+    input: z.object({ what: z.string() }),
+    risk: 'outward',
+    routes: ['POST /api/v1/workflows/{definition_id}/runs'],
+    handler: async () => {
+      ran++
+      return json({ shipped: true })
+    },
+  })
+  const asked: string[] = []
+  const run = decidedCalls([ship], {
+    services: services(),
+    sessions: { ownerOf: async () => BROWSER },
+    // Every request id is approved: what decides is whose it is.
+    approvals: {
+      approved: async (requestId) => {
+        asked.push(requestId)
+        return true
+      },
+    },
+  })
+  const call = (requestId: string, toolUseId = 'toolu_1') => ({
+    sessionId: SESSION,
+    requestId,
+    toolUseId,
+    tool: 'mcp__scadbuddy__ship',
+    input: { what: 'box' },
+    signal: new AbortController().signal,
+    heartbeat: () => {},
+  })
+
+  it("runs a call whose request id is this session's entry for it", async () => {
+    ran = 0
+    expect(await run(call(`durable:${SESSION}:run-1:toolu_1`))).toMatchObject({ ran: true, ok: true })
+    expect(ran).toBe(1)
+  })
+
+  it.each([
+    ["another session's entry", `durable:${OTHER}:run-1:toolu_1`, 'toolu_1'],
+    ['an entry for another call', `durable:${SESSION}:run-1:toolu_2`, 'toolu_1'],
+    ['no durable entry at all', `flow:${SESSION}:run-1:toolu_1`, 'toolu_1'],
+    ['an id with no run', `durable:${SESSION}::toolu_1`, 'toolu_1'],
+  ])('refuses %s before any approval is read, and runs nothing', async (_what, requestId, toolUseId) => {
+    ran = 0
+    asked.length = 0
+    expect(await run(call(requestId, toolUseId))).toMatchObject({ ran: false, text: expect.stringContaining('is not session') })
+    expect(ran).toBe(0)
+    expect(asked).toEqual([])
   })
 })

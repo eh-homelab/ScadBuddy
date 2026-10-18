@@ -61,10 +61,14 @@ import type { WarmEntry } from './warm.js'
 // call's tab wait still read NO_PARKS.
 //
 // Release (§5.4 "Release"). A hold lasts `park_hold_seconds` (the input's parkHoldSeconds);
-// past it, or at a shutdown, the turn lets its process go: the warm entry is closed (not cut:
-// its mirror keeps the results Claude Code writes as it ends, a synthetic one for each call
-// it was asked about), its spend is written as a stopped placement's, and the activity returns
-// `released` with the entries it held, which stay open in the workflow. Once each is decided
+// past it, or at a shutdown, the turn lets its process go. Each held call is answered with a
+// refusal that interrupts the turn (`interrupt`, as a Stop does): Claude Code records it as the
+// call's error result and asks the model nothing more. Closing the process instead, with the
+// call still held, makes Claude Code read the closed permission stream as a failed call and
+// ask the model again before it dies. Once the turn has ended the warm entry is closed (not
+// cut: its mirror lands what Claude Code wrote), its spend is written as a stopped
+// placement's, and the activity returns `released` with the entries it held, which stay open
+// in the workflow. Once each is decided
 // the workflow places the turn again with a `parked` continuation: each approved call is run
 // once, outside the model, through the tool layer (deps.runCall, toolActivities.ts
 // `decidedCalls`, its Idempotency-Key the request id), and the model is told in one message
@@ -179,22 +183,10 @@ const within = (ms: number, work: Promise<unknown>) => Promise.race([work, new P
 
 /** Why a released placement stopped: what its process is closed with, and its tally's stop. */
 const RELEASED_TEXT = 'a call waited longer than the turn holds its process; the turn goes on once it is decided'
-/** How long a released call's gate waits for its process to go before it answers (the answer reaches nobody). */
-const RELEASED_ANSWER_MS = 10_000
+/** What a released call's result says until the continuation tells the model how it ended. */
+const RELEASED_CALL = 'This call is still waiting for the user; the turn paused, and you will be told how it ended.'
 /** A held call's default hold, when the workflow names none (park_hold_seconds' default). */
 const PARK_HOLD_S = 300
-
-/** Until `signal` aborts or `ms` passes. */
-const until = (signal: AbortSignal, ms: number) =>
-  new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve()
-    const timer = setTimeout(resolve, ms)
-    timer.unref()
-    signal.addEventListener('abort', () => {
-      clearTimeout(timer)
-      resolve()
-    }, { once: true })
-  })
 
 export class TurnHost {
   readonly #deps: TurnHostDeps
@@ -266,7 +258,6 @@ export class TurnHost {
       if (why !== 'shutdown') for (const entry of entries) void this.#deps.core.warm.cut(entry, CUT_TEXT[why])
     }
     const releasing = new AbortController()
-    const closing: Promise<void>[] = []
     const holds: Holds = {
       held: new Set(),
       holdMs: (input.parkHoldSeconds ?? PARK_HOLD_S) * 1000,
@@ -275,16 +266,15 @@ export class TurnHost {
       release: () => {
         if (releasing.signal.aborted || cut !== undefined || holds.held.size === 0) return false
         holds.taken = [...holds.held]
+        // Each held call is answered (an interrupting refusal), which ends the turn; the process is closed after.
         releasing.abort(new Error(RELEASED_TEXT))
-        // Closed, not cut: its mirror keeps what Claude Code writes as it ends.
-        for (const entry of entries) closing.push(this.#deps.core.warm.abandon(entry, RELEASED_TEXT, 'close'))
         return true
       },
     }
     const self: Running = { attempt, cut: cutOff, release: holds.release, done }
     this.#running.set(id, self)
     try {
-      return await this.#run(input, attempt, control, controller, () => cut, cutOff, entries, holds, closing)
+      return await this.#run(input, attempt, control, controller, () => cut, cutOff, entries, holds)
     } finally {
       if (this.#running.get(id) === self) this.#running.delete(id)
       finished()
@@ -300,7 +290,6 @@ export class TurnHost {
     cutOff: (why: Cut) => void,
     entries: WarmEntry[],
     parks: Holds,
-    closing: Promise<void>[],
   ): Promise<SessionTurnResult> {
     const { sessionId: id, turnId } = input
     const sql = this.#deps.sql
@@ -416,9 +405,10 @@ export class TurnHost {
       outcome = tally.outcome
       await this.#write(session, turnId, tally, end, spend, core.runningUsd())
       const why = cutBy()
-      // Released, and not since moved or ended: the process is gone once its last results have landed.
+      // Released, and not since moved or ended: the process is closed (not cut: its mirror lands
+      // what Claude Code wrote), and gone once its appends have; its plugin sessions go after, unwaited.
       if (released && (why === undefined || why === 'shutdown')) {
-        await Promise.all(closing)
+        for (const entry of entries) void this.#deps.core.warm.abandon(entry, RELEASED_TEXT, 'close')
         await this.#deps.core.warm.landed(id)
         return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
       }
@@ -480,11 +470,8 @@ export class TurnHost {
       try {
         return { requestId: rid, row: await this.#hold(rid, AbortSignal.any([signal, holds.released])) }
       } catch (err) {
-        if (holds.released.aborted) {
-          // Its answer reaches nobody once the process is gone: it is not given before then, so the
-          // transcript keeps the closing result, not a refusal.
-          await until(AbortSignal.any([stop, signal]), RELEASED_ANSWER_MS)
-        } else if (!stop.aborted) withdraw(call.id, 'the call stopped waiting')
+        // Released: the entry stays open, and the gate answers with the interrupting refusal.
+        if (!holds.released.aborted && !stop.aborted) withdraw(call.id, 'the call stopped waiting')
         throw err
       } finally {
         clearTimeout(timer)
@@ -500,6 +487,7 @@ export class TurnHost {
       try {
         parked = await park({ id: request.toolUseId, name: request.toolName, input }, AbortSignal.any([stop, request.signal]))
       } catch (err) {
+        if (holds.released.aborted) return { approved: false, message: RELEASED_CALL, interrupt: true }
         if (stop.aborted || request.signal.aborted) return { approved: false, message: 'The turn is stopping; nothing was run.' }
         return { approved: false, message: `${request.toolName} could not be put to the user for approval (${describe(err)}), so it was not run.` }
       }
@@ -521,6 +509,7 @@ export class TurnHost {
       try {
         parked = await park({ id: request.toolUseId, name: GATE_ASK, input: { questions: card } }, AbortSignal.any([stop, request.signal]))
       } catch (err) {
+        if (holds.released.aborted) return { answered: false, message: RELEASED_CALL, interrupt: true }
         if (stop.aborted || request.signal.aborted) return { answered: false, message: 'The user did not answer: the turn is stopping.' }
         return { answered: false, message: `The user did not answer: the question could not be asked (${describe(err)}).` }
       }
