@@ -28,22 +28,26 @@ from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.operations import answered_as_routes
-from scadbuddy.library.outputs import hold_parts, release_parts, require_output
+from scadbuddy.library.outputs import MODEL_NAME, hold_parts, release_parts, require_output
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.filing import file_output, trash_filed
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.content import template_title
 from scadbuddy.workflows.models import ArrangeInputs
 from scadbuddy.workflows.operation_models import PRELUDE_REQUESTED
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
+    from scadbuddy.core.components import Components
 
 logger = logging.getLogger(__name__)
 
 
-def output_kinds(state: AppState) -> list[OperationKind]:
+def output_kinds(state: AppState, components: Components) -> list[OperationKind]:
     """The output kinds, bound to this process's state; ``library/operations.py``
     exports them with the pins."""
 
@@ -171,6 +175,17 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 raise _gone(job) from None
             raise
         emit(state.events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
+        # Ruling 8: the save is the output; filing is logged and retried by nothing.
+        try:
+            native = await components.get(PRINT_LIBRARY).serving_native()
+            if native is not None:
+                title = await asyncio.to_thread(
+                    template_title, state.paths.model_source(meta.slug).parent, meta.slug
+                )
+                model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
+                await file_output(native, meta, model_3mf, title)
+        except Exception:
+            logger.exception("could not file a saved output in the library", extra={"id": meta.id})
         # A new output has no uploads yet: no read to make.
         detail = outputs_api.detail(state.outputs, meta, [])
         dumped: dict[str, Any] = detail.model_dump(mode="json")
@@ -214,6 +229,13 @@ def output_kinds(state: AppState) -> list[OperationKind]:
             settings = await asyncio.to_thread(state.settings_store.load)
             async with client_for(settings) as client:
                 await remove_inbox_copies(client, state.uploads, meta, settings)
+        # A native library's copies still `filed` go to its trash with the inbox copies they
+        # stand for; whatever was moved stays, no longer naming the deleted output.
+        native = await components.get(PRINT_LIBRARY).serving_native()
+        if native is not None:
+            if request["delete_inbox_copies"]:
+                await trash_filed(native, output_id)
+            await asyncio.to_thread(native.rows.forget_output, output_id)
         await asyncio.to_thread(state.outputs.delete, output_id)
         # After the files: a failed delete keeps the output, and so must keep its records.
         # Best effort once the files are gone, as for a deleted model: the output is. Each

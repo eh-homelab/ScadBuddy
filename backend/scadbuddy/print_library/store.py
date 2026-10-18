@@ -221,6 +221,14 @@ class NativeLibraryStore:
             (output_id,),
         )
 
+    def forget_output(self, output_id: str) -> None:
+        """A deleted output is named by no row: a file moved out of its folder stays, with
+        no ``output_id`` to point at nothing."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE library_files SET output_id = NULL WHERE output_id = %s", (output_id,)
+            )
+
     def live_file_keys(self) -> set[str]:
         """Every `blob_key`, trashed rows included."""
         with self._pool.connection() as conn:

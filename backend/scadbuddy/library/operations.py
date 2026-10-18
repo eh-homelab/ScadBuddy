@@ -327,7 +327,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         *library_kinds(core, components),
         *model_kinds(core),
         *media_kinds(core),
-        *output_kinds(core),
+        *output_kinds(core, components),
         *asset_kinds(core),
         *font_kinds(core),
         *preset_kinds(core),

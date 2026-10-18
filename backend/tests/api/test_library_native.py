@@ -37,7 +37,8 @@ from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import ReuseLostError
+from scadbuddy.store.content_models import ReuseLostError, StoreFullError
+from tests.api.conftest import wait_for_job
 from tests.api.test_analyzers import SILK_REQUEST
 from tests.api.test_analyzers import bambuddy_routes as analysis_routes
 from tests.api.test_analyzers import library_routes as analysis_library_routes
@@ -875,3 +876,88 @@ def test_a_native_id_is_404_to_arrange_on_bambuddy(client: TestClient) -> None:
 
     assert response.status_code == 404, response.text
     assert list(respx.calls) == []
+
+
+# --- Task 8: filing saved outputs ----------------------------------------------------------
+
+
+@pytest.fixture
+def widget(native_client: TestClient) -> str:
+    """A committed template (the S3 store renders from a git snapshot) titled `Widget`."""
+    created = native_client.post(
+        "/api/v1/models",
+        json={"name": "Widget", "source": "width = 10;\n"},
+        headers=press(),
+    )
+    assert created.status_code == 201, created.text
+    slug: str = created.json()["slug"]
+    return slug
+
+
+def _save(client: TestClient, slug: str, name: str) -> Any:
+    job_id = client.post(f"/api/v1/models/{slug}/render", json={"params": {"width": 12}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+    return client.post(
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id, "name": name}, headers=press()
+    )
+
+
+def _all_files(client: TestClient) -> list[dict[str, Any]]:
+    """Every live file in every folder, as the rows hold them."""
+    rows = _native(client).rows.files(None, every_folder=True)
+    return [{"id": f.id, "output_id": f.output_id, "folder_id": f.folder_id} for f in rows]
+
+
+@pytest.mark.requires_git
+def test_a_saved_output_is_filed_under_its_template_title(
+    native_client: TestClient, widget: str
+) -> None:
+    saved = _save(native_client, widget, "First").json()
+    listing = native_client.get("/api/v1/print/library").json()
+    folder = next(f for f in listing["folders"] if f["name"] == "Widget")
+    files = native_client.get("/api/v1/print/library", params={"folder_id": folder["id"]}).json()[
+        "files"
+    ]
+    assert [(f["filename"], f["output_id"]) for f in files] == [
+        (f"{widget}-first.3mf", saved["id"])
+    ]
+
+
+@pytest.mark.requires_git
+def test_two_saves_share_one_folder(native_client: TestClient, widget: str) -> None:
+    _save(native_client, widget, "One")
+    _save(native_client, widget, "Two")
+    folders = native_client.get("/api/v1/print/library").json()["folders"]
+    assert [f["name"] for f in folders] == ["Widget"]
+    assert len(_all_files(native_client)) == 2
+
+
+@pytest.mark.requires_git
+def test_output_delete_trashes_only_unmoved_copies(native_client: TestClient, widget: str) -> None:
+    out = _save(native_client, widget, "One").json()
+    kept = _save(native_client, widget, "Two").json()
+    (kept_file,) = [f for f in _all_files(native_client) if f["output_id"] == kept["id"]]
+    native_client.post(
+        "/api/v1/print/library/move", json={"file_ids": [kept_file["id"]]}, headers=press()
+    )
+    for output in (out, kept):
+        r = native_client.delete(
+            f"/api/v1/outputs/{output['id']}?delete_inbox_copies=true", headers=press()
+        )
+        assert r.status_code == 204, r.text
+    # The moved file stays, with no live output to name.
+    assert [f["output_id"] for f in _all_files(native_client)] == [None]
+
+
+@pytest.mark.requires_git
+def test_a_failed_filing_does_not_fail_the_save(
+    native_client: TestClient, widget: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def full(*_: Any, **__: Any) -> NativeFile:
+        raise StoreFullError("the store is full")
+
+    monkeypatch.setattr(NativeLibrary, "upload", full)
+    assert _save(native_client, widget, "One").status_code == 201
+    assert _all_files(native_client) == []
