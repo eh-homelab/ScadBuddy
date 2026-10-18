@@ -879,6 +879,21 @@ The `browser_*` tools act in the user's own tab. How they are built is
 - **Limitation.** A tab id is a random 128-bit value, but anything already on the UI's
   origin could open a socket claiming one it learned; the tab id is not a secret
   against script in the page, which can drive the page anyway.
+- **Accepted risk: the server cannot tell a person's click from the bridge's** (#2653).
+  The bridge acts in the user's own tab with their cookies. So an approval, a
+  pending-input answer, a grant or a delete confirmation that it triggers reaches the
+  backend exactly as the person's own would. Those are the controls the user-only
+  marker already covers (the Tiers bullet above). That marker, `USER_ONLY` in
+  [`frontend/src/agent/dom.ts`](../../frontend/src/agent/dom.ts), which the bridge
+  honours (pinned by
+  [`userOnly.test.tsx`](../../frontend/src/agent/userOnly.test.tsx)), is the only
+  barrier. No server-side human-gesture check is planned. Two
+  callers accept this risk:
+  - deploying the agent sidecar, whose `browser_*` tools reach the user's tab whenever
+    the assistant is available;
+  - turning on WebMCP (opt-in per browser), for the browser's own agent.
+
+  Leaving WebMCP off does not avoid it.
 
 ## Event-log scrubbing (#377)
 
