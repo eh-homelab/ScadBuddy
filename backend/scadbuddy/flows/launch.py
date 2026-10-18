@@ -17,6 +17,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.flows.component import Flows
 from scadbuddy.flows.models import Definition
+from scadbuddy.workflows.flow_tools import HOST_FUNCTION_NAMES
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 
 _STATUS_SECONDS = 2.0
@@ -85,6 +86,7 @@ async def start_execution(
             tool_tiers=tool_tiers,
             search_attributes=flows.search_attributes,
             commit=definition.commit or "",
+            host_functions=sorted(HOST_FUNCTION_NAMES),
         ),
         update_id=update_id,
     )

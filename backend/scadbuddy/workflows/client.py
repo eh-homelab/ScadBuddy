@@ -55,6 +55,8 @@ PRINT_DEPLOYMENT_NAME = "scadbuddy-print"
 #: The API's ``library`` worker's deployment (#4090): housekeeping, the preview
 #: backfill, the library commands, flow trigger fires and the store migration.
 LIBRARY_DEPLOYMENT_NAME = "scadbuddy-library"
+#: The flow runs' worker's deployment (#4146): `--queue projects`.
+PROJECTS_DEPLOYMENT_NAME = "scadbuddy-projects"
 RPC_TIMEOUT = timedelta(seconds=10)
 
 logger = logging.getLogger(__name__)
@@ -219,6 +221,22 @@ def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
     )
 
 
+def projects_deployment(build_id: str) -> WorkerDeploymentConfig:
+    """``scadbuddy-projects`` at ``build_id`` (#4146), workflows AUTO_UPGRADE by default,
+    as ``scadbuddy-print``'s. Never pinned (plan 2026-10-09 Ruling 13): a flow may run for
+    weeks, and its build would have to drain that long. A default rather than a behavior
+    on each class, as the library's: ``ProjectWorkflow`` is the harness's ``agent.defn``,
+    and the in-process worker, unversioned, could not complete a workflow that declares
+    one."""
+    return WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion(
+            deployment_name=PROJECTS_DEPLOYMENT_NAME, build_id=build_id
+        ),
+        use_worker_versioning=True,
+        default_versioning_behavior=VersioningBehavior.AUTO_UPGRADE,
+    )
+
+
 def library_deployment(build_id: str) -> WorkerDeploymentConfig:
     """``scadbuddy-library`` at ``build_id`` (#4090), with no default behavior: the SDK
     then refuses to build the worker unless every workflow on it names its own
@@ -322,6 +340,7 @@ __all__ = [
     "DEPLOYMENT_NAME",
     "LIBRARY_DEPLOYMENT_NAME",
     "PRINT_DEPLOYMENT_NAME",
+    "PROJECTS_DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
     "connect",
@@ -331,6 +350,7 @@ __all__ = [
     "is_current",
     "library_deployment",
     "make_current",
+    "projects_deployment",
     "pydantic_data_converter",
     "render_worker",
     "routes_to",
