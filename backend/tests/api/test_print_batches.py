@@ -594,6 +594,28 @@ async def test_a_queued_batchs_step_holds_against_a_late_move(client: TestClient
     assert (await store.get(batch["id"])).step == 0  # type: ignore[union-attr]
 
 
+async def test_a_step_move_racing_a_queue_all_is_a_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3932 review: the route read the batch open, a Queue all queued it, then the step's
+    write found it queued. The route answers 409 and the step holds."""
+    batch = new_batch(client, 104)
+    store = _state(client).components.get(PRINT_BATCHES)
+    real = store.set_step
+
+    async def queued_first(batch_id: str, step: int) -> object:
+        with store._pool.connection() as conn:
+            conn.execute("UPDATE print_batches SET status = 'queued' WHERE id = %s", (batch_id,))
+        return await real(batch_id, step)
+
+    monkeypatch.setattr(store, "set_step", queued_first)
+    response = client.put(f"{BATCHES}/{batch['id']}/step", json={"step": 1})
+
+    assert response.status_code == 409
+    assert "queued already" in response.json()["detail"]
+    assert (await store.get(batch["id"])).step == 0  # type: ignore[union-attr]
+
+
 def _fail_run(client: TestClient, run_id: str, *, may_have_queued: bool) -> None:
     """The run failed after the 202 (a slice or an upload), as the workflow records it."""
     store = _state(client).components.get(PRINT_BATCHES)

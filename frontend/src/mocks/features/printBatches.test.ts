@@ -21,6 +21,9 @@ describe('batch print mock', () => {
     expect(away.items[0]?.outcome?.stale).toBe(true)
     const back = await api.putPrintBatchItem(batch.id, 0, choice(RUN))
     expect(back.items[0]?.outcome?.stale).toBe(false)
+    // As jsonb compares them: the same choices in another key order are the same (#3932 review).
+    const reordered = await api.putPrintBatchItem(batch.id, 0, choice({ copies: 1, plate: 1 } as unknown as PrintRunRequest))
+    expect(reordered.items[0]?.outcome?.stale).toBe(false)
   })
 
   it('refuses to delete a batch that follows a file still being checked, 409', async () => {

@@ -143,7 +143,8 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
   function close() {
     // A file still being checked may yet print: the batch is kept, so Queue all can
     // follow that run rather than a new batch queueing the file twice (#2718 review).
-    if (!batch?.items.some((item) => item.outcome?.status === 'pending')) {
+    // A removed one is not followed, as the backend's own check leaves it out (#3932 review).
+    if (!batch?.items.some((item) => !item.removed && item.outcome?.status === 'pending')) {
       void api.deletePrintBatch(batchId).catch(() => undefined)
     }
     onClose()
