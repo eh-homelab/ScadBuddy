@@ -141,6 +141,39 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   thumbnails below 1.5.9, keep old params below 2.0.0, disable wrapping
   detection below 2.2.0, reset `skirt_per_object` below 2.7.0), and low enough
   that a CLI older than the one measured still accepts the file.
+  **With no profiles loaded, two more per-filament options are required
+  (#4089).** The five above were measured with `--load-settings`. Bambuddy's
+  preview slice runs the CLI with no profiles at all (`AppRun --slice 1
+  --allow-newer-file --outputdir <dir> <file>.3mf`, the 0-profile path of the
+  image's `/app/dist/routes/slicing/slicing.service.js`), and then the file's
+  own `project_settings.config` is the whole config. `Preset::normalize`
+  (`Preset.cpp` 445-470) sizes the per-filament vectors only when
+  `filament_diameter` is present, so without it the CLI dereferences a null
+  vector and exits 139 (SIGSEGV). With it, a file of more than one colour
+  stops with exit 251, `filament_is_support's count 1 not equal to
+  filament_colour's size 3`. So the writer states `filament_diameter` (`"1.75"`)
+  and `filament_is_support` (`"0"`), one entry per colour, and `replate_3mf`
+  adds them to an older file that has neither. Diagnosed 2026-10-17 (#4089:
+  gdb, and a ddmin over a real Bambu project's 368 keys). Re-measured
+  2026-10-18 on a workstation against
+  `ghcr.io/maziggy/bambu-studio-api:daily@sha256:b867252fa949e707f05d027a2753ff6f318eafff824506a3fca89a4e0eab5ba1`
+  (BambuStudio 02.08.02.61), two runs of each file, with
+  `docker run --rm --entrypoint sh <image> -c '/app/squashfs-root/AppRun
+  --slice 1 --allow-newer-file --outputdir /tmp/out /in/model.3mf'`. The files
+  were boxes written by `write_plates_3mf`, some re-placed by `replate_3mf`:
+  - Fixed writer, 1 colour and 3 colours, on the fallback plate and re-placed
+    for the A1: exit 0 and `plate_1.gcode`. That G-code is the CLI's defaults
+    (`printable_area` 200x200; no tool change in the 3-colour file), so it is a
+    preview, not a print.
+  - Fixed writer, 1 colour re-placed for the H2C: exit 0 and G-code. 3 colours
+    re-placed for the H2C: exit 206, `Nothing to be sliced … no object is fully
+    inside the print volume`. That is a clean error, because the H2C's
+    placement lies outside the default 200x200 bed.
+  - The same files with the two keys removed: exit 139 every time.
+  - Pre-fix outputs (tomato 2026-10-04, and Bambuddy library file 4394): exit
+    139 as they are. Once `replate_3mf` re-places them for the A1, tomato slices
+    to G-code. File 4394 exits 204 cleanly, `Found Object … partly inside`.
+  `--load-settings` slices are not re-measured here.
 - MakerWorld-only annotations (`// color`, `// font`) are **not** typed by
   OpenSCAD — they come through as plain `string`. ScadBuddy overlays them by
   scanning the source for `<name> = ...; // color` and `// font`.
