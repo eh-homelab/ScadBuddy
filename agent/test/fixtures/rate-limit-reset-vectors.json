@@ -1,0 +1,140 @@
+{
+  "_comment": "The reset a rate limit's text names: agent/src/harness/credentialErrors.ts rateLimitResetFromText and agent-durable credentials.py rate_limit_reset are both held to these (#4121 review). `at` null means none, so the default cooldown.",
+  "cases": [
+    {
+      "text": "You've hit your weekly limit · resets 1pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T13:00:00Z"
+    },
+    {
+      "text": "You've hit your session limit · resets 10:30pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-17T22:30:00Z"
+    },
+    {
+      "text": "You've hit your weekly limit · resets 11pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-17T23:00:00Z"
+    },
+    {
+      "text": "You've hit your weekly limit · resets Oct 21, 4am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-21T04:00:00Z"
+    },
+    {
+      "text": "API Error: 429 · resets 12am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T00:00:00Z"
+    },
+    {
+      "text": "resets 12pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T12:00:00Z"
+    },
+    {
+      "text": "resets 9:30PM (utc)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T21:30:00Z"
+    },
+    {
+      "text": "resets 10pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T22:00:00Z"
+    },
+    {
+      "text": "resets 1:05am (UTC)",
+      "now": "2026-12-31T23:50:00Z",
+      "at": "2027-01-01T01:05:00Z"
+    },
+    {
+      "text": "resets Jan 2, 4am (UTC)",
+      "now": "2026-12-31T23:50:00Z",
+      "at": "2027-01-02T04:00:00Z"
+    },
+    {
+      "text": "resets Dec 31, 11:55pm (UTC)",
+      "now": "2026-12-31T23:50:00Z",
+      "at": "2026-12-31T23:55:00Z"
+    },
+    {
+      "text": "resets 10:16pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets 10:15pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets 10:02pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets Oct 17, 10:15pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets Oct 17, 10pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets Sep 3, 4am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets Jan 2, 4am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "API Error: 429 rate limited",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets soon",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets 1pm (PST)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets 13pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets 0am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets 10:75pm (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets Foo 21, 4am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    },
+    {
+      "text": "resets Feb 30, 4am (UTC)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null
+    }
+  ]
+}
