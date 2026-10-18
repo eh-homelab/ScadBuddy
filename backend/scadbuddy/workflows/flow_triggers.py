@@ -6,9 +6,9 @@ the same workflow from the event bus (``flow_triggers/events.py``). The fire's o
 activity (``flow_triggers/fire.py``) reads everything it acts on from the trigger's row,
 so nothing a Schedule or an event carries can say who a run is or what it may do.
 
-The ``library`` worker is unversioned: ``FlowTriggerFire.run`` must stay
-replay-compatible, and a change to its command sequence goes behind
-``workflow.patched``.
+On the versioned ``library`` worker (#4090) it is AUTO_UPGRADE
+(`VersionedFlowTriggerFire`): ``FlowTriggerFire.run`` must stay replay-compatible, and
+a change to its command sequence goes behind ``workflow.patched``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from temporalio.client import (
     ScheduleUpdate,
     ScheduleUpdateInput,
 )
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, VersioningBehavior
 from temporalio.service import RPCError, RPCStatusCode
 
 with workflow.unsafe.imports_passed_through():
@@ -70,6 +70,21 @@ class FlowTriggerFire:
             retry_policy=RetryPolicy(maximum_attempts=FIRE_ATTEMPTS),
         )
         return outcome
+
+
+@workflow.defn(name=FIRE_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedFlowTriggerFire(FlowTriggerFire):
+    """``FlowTriggerFire`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE,
+    though a fire is short: its activity retries for up to `FIRE_TIMEOUT` (15 min),
+    longer than an API pod's termination grace, and Pinned, a fire whose attempt ran on
+    the old build's last replica would wait, unserved, until that timeout ended it and
+    the event went unfired. Its one activity is the same in every build, so moving
+    builds costs nothing. Its own class because an unversioned worker cannot complete a
+    workflow that declares a behavior."""
+
+    @workflow.run
+    async def run(self, trigger_id: str, event: dict[str, Any] | None = None) -> str:
+        return await super().run(trigger_id, event)
 
 
 def _overlap(trigger: Trigger) -> ScheduleOverlapPolicy:

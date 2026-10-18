@@ -39,6 +39,7 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
     FilamentMap,
+    hint_painted_slots,
     layout_of,
     plate_origin,
     replate_3mf,
@@ -155,11 +156,26 @@ class Printable:
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
 _RECOLORED = "~"
+#: Ends the :attr:`Target.key` of a copy of two or more filaments that names its
+#: painted slots (:func:`~scadbuddy.render.bambu3mf.hint_painted_slots`, #4013), so a
+#: copy uploaded before that, which slices a painted slot with another's preset, is
+#: not reused for one.
+_SLOT_HINTS = ";slots"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
 #: the slicer's default.
 _STANDARD = VOLUME_TYPE["standard"]
+
+
+def _hinted(key: str, filaments: int) -> str:
+    """``key`` as a copy of a model of ``filaments`` filaments is recorded under: with
+    :data:`_SLOT_HINTS` from two filaments up, in the model's own colours too, so the
+    uncoloured copy Generate filed before #4013 is not reused either (claude-review on
+    #4056). A recoloured key of two or more colours carries it already."""
+    if filaments > 1 and not key.endswith(_SLOT_HINTS):
+        return f"{key}{_SLOT_HINTS}"
+    return key
 
 
 @dataclass(frozen=True)
@@ -211,6 +227,8 @@ class Target:
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
+            if len(self.colours) > 1:
+                key = f"{key}{_SLOT_HINTS}"
         return key
 
     @property
@@ -283,7 +301,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
     keeps its placement and every plate it lays out; only the nozzles and colours are
-    stated (:func:`state_nozzles`). Anything else comes back unchanged.
+    stated (:func:`state_nozzles`). Either way each painted filament is named on a part
+    that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
+    unchanged.
     """
     layout = layout_of(payload)
     if layout == "as_is":
@@ -291,15 +311,17 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     colours = _colours_for(payload, target.colours)
     if layout == "author":
         try:
-            return towers_within_reach(
-                state_nozzles(
-                    payload,
-                    nozzle_stats=target.nozzle_stats,
-                    nozzle_volume_type=target.nozzle_volume_type,
-                    filament_colour=colours,
-                    filament_map=target.filament_map,
-                ),
-                target.plate,
+            return hint_painted_slots(
+                towers_within_reach(
+                    state_nozzles(
+                        payload,
+                        nozzle_stats=target.nozzle_stats,
+                        nozzle_volume_type=target.nozzle_volume_type,
+                        filament_colour=colours,
+                        filament_map=target.filament_map,
+                    ),
+                    target.plate,
+                )
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -318,7 +340,11 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
-    return recolour_3mf(payload, colours) if colours is not None else payload
+    payload = recolour_3mf(payload, colours) if colours is not None else payload
+    # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
+    # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
+    # which hint_painted_slots answers with the payload unchanged.
+    return hint_painted_slots(payload)
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
@@ -553,13 +579,14 @@ async def upload_copy(
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
 
+    target_key = _hinted(target.key, len(printable.colours))
     content = (
         await asyncio.to_thread(content_key, payload)
         if project_stem is not None and folder is not None
         else None
     )
     if content is not None:
-        same = await _same_content(client, uploads, printable.key, folder, target.key, content)
+        same = await _same_content(client, uploads, printable.key, folder, target_key, content)
         if same is not None:
             return same.id, same.filename, False
     listed = await _listing(client, folder)
@@ -577,7 +604,7 @@ async def upload_copy(
         uploaded = await upload_into(client, filename, payload, folder_id=folder)
     await uploads.record(
         printable.key,
-        LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key, content_key=content),
+        LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target_key, content_key=content),
     )
     if is_inbox(folder, settings):
         for copy in await uploads.for_output(printable.key):
@@ -912,21 +939,27 @@ async def _reusable(
     colours (a print whose spools matched the model), so a later filing with no spools
     reuses it rather than uploading a duplicate.
     """
-    keys = [target.key]
     own = [normalise_colour(colour) for colour in printable.colours]
+    uncoloured = _hinted(target.uncoloured_key, len(own))
+    keys = [_hinted(target.key, len(own))]
     own_colours = (
         target.colours is None or [normalise_colour(colour) for colour in target.colours] == own
     )
     recoloured = f"{target.uncoloured_key}{_RECOLORED}"
     extended = not is_inbox(folder, settings) and own_colours
-    if extended and target.uncoloured_key != target.key:
-        keys.append(target.uncoloured_key)
+    if extended and uncoloured != keys[0]:
+        keys.append(uncoloured)
 
     def rank(copy: LibraryCopy) -> int | None:
         if copy.target_key in keys:
             return keys.index(copy.target_key)
         if extended and copy.target_key.startswith(recoloured):
-            suffix = copy.target_key.removeprefix(recoloured).split(",")
+            colours = copy.target_key.removeprefix(recoloured)
+            if len(own) > 1:
+                if not colours.endswith(_SLOT_HINTS):
+                    return None
+                colours = colours.removesuffix(_SLOT_HINTS)
+            suffix = colours.split(",")
             if [normalise_colour(colour) for colour in suffix] == own:
                 return len(keys)
         return None

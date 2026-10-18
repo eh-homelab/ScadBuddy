@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from array import array
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import MAX_CODE_DIGITS, states
+from scadbuddy.render.paint import MAX_CODE_DIGITS, PaintCodeError, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -1748,6 +1748,152 @@ def state_nozzles(
                         )
                     target.write(chunk)
     return buffer.getvalue()
+
+
+#: A paint code anywhere in a model file, captured: what :func:`hint_painted_slots`
+#: decodes. Read in windows overlapping by more than a code's length, so a code that a
+#: window boundary splits is read whole from the next window.
+_ANY_PAINT_CODE = re.compile(rb'\s%s="(%s)"' % (PAINT_ATTRIBUTE.encode(), _CODE))
+_CODE_OVERLAP = MAX_CODE_DIGITS + 64
+#: The name a slot hint's part carries in the 3MF, so a person reading it knows it.
+SLOT_HINT_NAME = "ScadBuddy slot hint"
+_SETTINGS_OBJECT = re.compile(rb'(<object\s+id="(\d+)"[^>]*>)(.*?)(</object>)', re.S)
+_ANY_ID = re.compile(rb'\sid="(\d+)"')
+
+
+#: The most digits of distinct paint codes :func:`hint_painted_slots` decodes in one
+#: file. Each distinct code is held and decoded once, so this bounds both; a file past
+#: it is left without hints (the slice is still checked, ``sliced_as_planned``). A real
+#: two-colour project's codes are a few thousand digits.
+MAX_HINT_PAINT_DIGITS = 4_000_000
+
+
+class _TooMuchPaintError(ValueError):
+    """More distinct painting than :data:`MAX_HINT_PAINT_DIGITS`."""
+
+
+class _Codes:
+    """Distinct paint codes, counted against :data:`MAX_HINT_PAINT_DIGITS` as they are
+    added, each decoded once."""
+
+    def __init__(self) -> None:
+        self.seen: dict[bytes, frozenset[int]] = {}
+        self.digits = 0
+
+    def states(self, codes: Iterable[bytes]) -> set[int]:
+        found: set[int] = set()
+        for code in codes:
+            known = self.seen.get(code)
+            if known is None:
+                self.digits += len(code)
+                if self.digits > MAX_HINT_PAINT_DIGITS:
+                    raise _TooMuchPaintError("the painting is past what is decoded for hints")
+                try:
+                    known = frozenset(states(code.decode("ascii")))
+                except PaintCodeError:
+                    known = frozenset()  # left out, never guessed at
+                self.seen[code] = known
+            found |= known
+        return found
+
+
+def _painted_states(archive: zipfile.ZipFile, name: str, codes: _Codes) -> set[int]:
+    """The extruders ``name``'s triangles are painted with, read as Bambu Studio reads
+    a code (:func:`~scadbuddy.render.paint.states`), in windows overlapping by more
+    than a code, so a code a window boundary splits is read whole from the next."""
+    found: set[int] = set()
+    tail = b""
+    with archive.open(name) as entry:
+        while chunk := entry.read(_CHUNK):
+            window = tail + chunk
+            found |= codes.states(set(_ANY_PAINT_CODE.findall(window)))
+            tail = window[-_CODE_OVERLAP:]
+    return found
+
+
+def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[int]]:
+    """Each root object's id and the extruders its painting prints with: its own mesh's,
+    and each component's, whether in another model file or in the root. The root is
+    read by :func:`parse_model`, its meshes as arrays."""
+    model = parse_model(archive, ROOT_MODEL_NAME)
+    codes = _Codes()
+    objects = list(model.root.iter(f"{{{CORE_NS}}}object"))
+    own: dict[str, set[int]] = {}
+    for obj in objects:
+        found: set[int] = set()
+        for mesh in obj.iter(f"{{{CORE_NS}}}mesh"):
+            arrays = model.meshes.get(mesh)
+            if arrays is not None and arrays.paint:
+                found |= codes.states({code.encode("ascii") for code in arrays.paint if code})
+        own[obj.get("id", "")] = found
+    files: dict[str, set[int]] = {}
+    slots: dict[str, set[int]] = {}
+    for obj in objects:
+        found = set(own[obj.get("id", "")])
+        for component in obj.iter(f"{{{CORE_NS}}}component"):
+            path = (component.get(f"{{{PRODUCTION_NS}}}path") or "").lstrip("/")
+            if not path or path == ROOT_MODEL_NAME:
+                found |= own.get(component.get("objectid", ""), set())
+            elif path in names:
+                if path not in files:
+                    files[path] = _painted_states(archive, path, codes)
+                found |= files[path]
+        if found:
+            slots[obj.get("id", "")] = found
+    return slots
+
+
+def hint_painted_slots(payload: bytes) -> bytes:
+    """``payload`` with every filament an object's painting prints with named on a part
+    of that object that prints nothing (#4013), else unchanged.
+
+    Bambuddy, slicing one plate, gives each filament slot it thinks the plate leaves
+    unused the preset of one it uses (``substitute_unused_plate_filaments``). It finds
+    the used slots from each object's and part's ``extruder`` and from the painting, but
+    reads the painting as one slot per hex digit, which is not Bambu Studio's encoding:
+    a triangle painted with filament 2 is ``8``, read as slot 8. Slot 2 is then
+    "unused", and the black spool slices with the glow preset and colour. Each hint is
+    a ``negative_part`` with no geometry, carrying an ``extruder`` Bambuddy does read.
+    Bambu Studio loads a part with no component and cuts nothing with it, so the plate
+    slices as before (library 5065 against 4962: the same toolchanges, 1 s apart). A
+    part id past every id in the settings keeps a hint from naming a real part or
+    object file.
+
+    Only for a file :func:`nozzles_statable` accepts, which has bounded it."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        names = set(archive.namelist())
+        if MODEL_SETTINGS_NAME not in names or ROOT_MODEL_NAME not in names:
+            return payload
+        try:
+            settings = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_SETTINGS_BYTES)
+            hints = _object_slots(archive, names)
+        except (ET.ParseError, ValueError):
+            # Unreadable, or past a cap: no hint, and the slice is still checked.
+            return payload
+    if not hints:
+        return payload
+    next_id = max((int(found) for found in _ANY_ID.findall(settings)), default=0) + 1
+
+    def hinted(match: re.Match[bytes]) -> bytes:
+        nonlocal next_id
+        slots = hints.get(match.group(2).decode("ascii"))
+        if not slots:
+            return match.group(0)
+        parts = b""
+        for slot in sorted(slots):
+            parts += (
+                b'    <part id="%d" subtype="negative_part">\n'
+                b'      <metadata key="name" value="%s"/>\n'
+                b'      <metadata key="extruder" value="%d"/>\n'
+                b"    </part>\n  " % (next_id, SLOT_HINT_NAME.encode(), slot)
+            )
+            next_id += 1
+        return match.group(1) + match.group(3) + parts + match.group(4)
+
+    changed = _SETTINGS_OBJECT.sub(hinted, settings)
+    if changed == settings:
+        return payload
+    return rezipped(payload, {MODEL_SETTINGS_NAME: changed})
 
 
 #: Who laid a 3MF out, which decides how a print lays it out for the printer (#1752):

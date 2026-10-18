@@ -13,10 +13,11 @@ rest would only wait out the same timeout. After the first pass a run renders no
 a current preview is skipped. The per-change requests stay the scheduler's own,
 in-process.
 
-The ``library`` worker is unversioned, so a run left open across a deploy replays on
-the new code: ``PreviewBackfill.run`` must stay replay-compatible. A change to its
-command sequence goes behind ``workflow.patched``. A run that fails on replay anyway
-ends at `BACKFILL_TIMEOUT`.
+On the versioned ``library`` worker (#4090) it is AUTO_UPGRADE
+(`VersionedPreviewBackfill`), so a run left open across a deploy replays on the new
+code: ``PreviewBackfill.run`` must stay replay-compatible. A change to its command
+sequence goes behind ``workflow.patched``. A run that fails on replay anyway ends at
+`BACKFILL_TIMEOUT`.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.client import Client, ScheduleActionStartWorkflow
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, VersioningBehavior
 from temporalio.exceptions import ActivityError, ApplicationError
 
 from scadbuddy.workflows.housekeeping import HEARTBEAT_TIMEOUT, ensure_workflow_schedule
@@ -119,6 +120,20 @@ class PreviewBackfill:
             if rendered:
                 await workflow.sleep(PAUSE)
         return failed
+
+
+@workflow.defn(name=PREVIEW_BACKFILL_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedPreviewBackfill(PreviewBackfill):
+    """``PreviewBackfill`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE: a
+    chain may run for `BACKFILL_TIMEOUT` (12 h), longer than any rollout, and its
+    continue-as-new runs start on the current build anyway. Its own class because an
+    unversioned worker cannot complete a workflow that declares a behavior."""
+
+    @workflow.run
+    async def run(
+        self, slugs: list[str] | None = None, refresh_timeout: float | None = None
+    ) -> list[str]:
+        return await super().run(slugs, refresh_timeout)
 
 
 async def ensure_preview_schedule(

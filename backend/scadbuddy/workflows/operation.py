@@ -11,6 +11,10 @@
 
 Every kind is ``done`` (§4.2 step 4), the Update answering once the effect ended, except
 one whose kind ``answers_running``: it answers with the record once it is written (#2462).
+
+A kind the build running the workflow task does not register is deferred, not attempted
+(#4139): the task fails (`UnregisteredKindError`), which schedules nothing and fails no
+attempt, and Temporal retries it, on the current build once a newer one is current.
 """
 
 from __future__ import annotations
@@ -20,7 +24,12 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
+from temporalio.common import (
+    RetryPolicy,
+    SearchAttributeKey,
+    SearchAttributeUpdate,
+    VersioningBehavior,
+)
 from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
@@ -28,10 +37,13 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRunError
     from scadbuddy.operations.store import Operation
     from scadbuddy.workflows.operation_models import (
+        DEFER_CHECK_PATCH,
+        DEFER_RUN_PATCH,
         FINISH_ACTIVITY,
         INSERT_ACTIVITY,
         OPERATION_WORKFLOW,
         PRELUDE_PATCH,
+        REGISTERED_ACTIVITIES,
         FinishOp,
         InsertOp,
         OperationAnswer,
@@ -79,6 +91,33 @@ SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
 STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 
 
+class UnregisteredKindError(Exception):
+    """A kind's activity this build does not register (#4139). Not an
+    ``ApplicationError``, so raised from the workflow it fails the workflow task, not
+    the workflow: nothing is scheduled and no attempt is spent. Temporal retries the
+    task (after the first retry, once per workflow task timeout, 10 s: the SDK lets a
+    repeated failure time out rather than report it), and an AUTO_UPGRADE run's retry
+    goes to the current build, which a newer build with the kind becomes as it starts."""
+
+
+def defer_unregistered(activity_name: str, patch: str) -> None:
+    """Fail this workflow task when its worker does not register ``activity_name``
+    (#4139). A rolling update runs two builds at once: the API's new pods start an
+    operation of a kind only they have while the old print build is still current, and
+    that build would fail the kind's activities as unregistered, each failure an
+    attempt spent (a run-once effect recorded ``failed`` with nothing done, a check's
+    three answering 500). A worker built without `client.RegisteredActivities` (the
+    ``Replayer``) defers nothing. ``patched``: a history from before the deferral
+    replays as it ran, and the patch is never recorded, since its task always fails."""
+    registered = workflow.extern_functions().get(REGISTERED_ACTIVITIES)
+    if registered is None or activity_name in registered():
+        return
+    if workflow.patched(patch):
+        raise UnregisteredKindError(
+            f"this build does not register {activity_name!r}; retrying on the current build"
+        )
+
+
 @workflow.defn(name=OPERATION_WORKFLOW)
 class OperationWorkflow:
     def __init__(self) -> None:
@@ -108,6 +147,7 @@ class OperationWorkflow:
             SUBJECT.value_set(input.subject),
             STATUS.value_set("accepting"),
         )
+        defer_unregistered(check_activity(input.kind), DEFER_CHECK_PATCH)
         try:
             checked: dict[str, Any] = await workflow.execute_activity(
                 check_activity(input.kind),
@@ -185,6 +225,9 @@ class OperationWorkflow:
         # Whose effect a cancel or failure may have left half done: the prelude's while it
         # runs, then the kind's own. A local, so replay is unchanged.
         where = input.where
+        # Again here: a build without the kind may have become current since the check
+        # (a rollback). Before the prelude, which must not run without its kind's run.
+        defer_unregistered(run_activity(input.kind), DEFER_RUN_PATCH)
         try:
             prelude = input.prelude
             if prelude is not None and workflow.patched(PRELUDE_PATCH):
@@ -233,3 +276,22 @@ class OperationWorkflow:
         """§4.2's attributes: identifiers and states only, never content."""
         if self.search_attributes:
             workflow.upsert_search_attributes(list(pairs))
+
+
+@workflow.defn(name=OPERATION_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class VersionedOperationWorkflow(OperationWorkflow):
+    """``Operation`` on the versioned ``library`` worker (#4090). AUTO_UPGRADE, as it is
+    on ``scadbuddy-print`` (`client.print_deployment`, #2066), although a command is
+    short. A Kubernetes rollout stops each old replica within its termination grace
+    (30 s), and a library kind runs for up to its ``run_timeout`` (minutes: a pin's
+    clone, a copy, a font install): Pinned, a run whose attempt the old build's last
+    replica was holding would retry on a version nothing polls any more, and its record
+    would stay ``running`` until someone moved it by hand. AUTO_UPGRADE moves it to the
+    current build at its next task, which replays it; the committed histories
+    (``tests/test_operation_replay.py``) hold that, as they do for the print worker's.
+    Its own class because an unversioned worker cannot complete a workflow that
+    declares a behavior (the API's in-process ``bambuddy`` worker)."""
+
+    @workflow.run
+    async def run(self, input: OperationInput) -> Operation:
+        return await super().run(input)

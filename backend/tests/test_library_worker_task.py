@@ -32,6 +32,16 @@ from scadbuddy.workflows.housekeeping import (
 from tests.test_print_worker_task import StubWorker
 
 
+@pytest.fixture(autouse=True)
+def _routed_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These states have no Temporal: the build counts as routed at once (#4090)."""
+
+    async def routed(client: object, build_id: str, queue: str, done: asyncio.Event) -> None:
+        done.set()
+
+    monkeypatch.setattr(main, "_make_library_current", routed)
+
+
 async def test_a_library_worker_that_fails_while_running_is_started_again(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -58,7 +68,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
@@ -166,7 +176,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
         previews=None,
