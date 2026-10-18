@@ -364,6 +364,8 @@ FROM rust:1.99.1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf6
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
+# The whole workspace at once, so any source edit rebuilds every dependency; caching
+# them in a layer of their own (cargo-chef) is follow-up #4059.
 COPY workers/rust /src
 WORKDIR /src
 RUN cargo build --release --locked -p scadbuddy-slicer
