@@ -46,7 +46,7 @@ from scadbuddy.bambuddy.print_source import (
 )
 from scadbuddy.bambuddy.send import Target
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import ProjectTarget, SlicedCopy
+from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
@@ -1037,3 +1037,76 @@ def test_reads_for_a_bambuddy_id_is_the_client() -> None:
 async def test_a_raw_copy_is_only_of_a_native_file() -> None:
     with pytest.raises(AssertionError):
         await _library(_Copies()).raw_copy(cast(BambuddyClient, _NativeBambuddy()), None)
+
+
+class _RecordFailsOnce(_Copies):
+    """The first record fails, as an attempt that died after its upload did."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("the worker died")
+        await super().record(output_id, copy)
+
+
+async def test_a_raw_copy_an_attempt_left_unrecorded_is_taken(tmp_path: Path) -> None:
+    """#1145: the retry finds the first attempt's upload in the folder (same name, size
+    and hash, recorded by nothing) and records it rather than uploading twice."""
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _RecordFailsOnce()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    client = cast(BambuddyClient, bambuddy)
+    with pytest.raises(RuntimeError):
+        await source.raw_copy(client, None)
+
+    taken = await source.raw_copy(client, None)
+
+    assert taken == 101 and len(bambuddy.uploaded) == 1
+    assert [copy.id for copy in uploads.copies[f"library:{NATIVE_SLICED_ID}"]] == [101]
+
+
+async def test_a_raw_copy_takes_no_file_of_other_bytes(tmp_path: Path) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    payload = native.bytes_of(NATIVE_SLICED_ID)
+    bambuddy.files.append(
+        LibraryFile(
+            id=90,
+            filename="critter (ScadBuddy).gcode.3mf",
+            folder_id=INBOX,
+            file_size=len(payload),
+            file_hash="0" * 64,
+        )
+    )
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+
+    assert await source.raw_copy(cast(BambuddyClient, bambuddy), None) == 101
+
+
+async def test_a_native_sliced_files_slots_unread_are_read_from_its_raw_copy(
+    tmp_path: Path,
+) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    source = await _load_native(NATIVE_SLICED_ID, native, bambuddy, uploads)
+    assert source.local is None
+
+    read = await source.file_to_read(cast(BambuddyClient, bambuddy))
+
+    [(filename, _, folder)] = bambuddy.uploaded
+    assert (read.id, folder, filename) == (101, INBOX, "critter (ScadBuddy).gcode.3mf")
+
+
+async def test_a_native_3mf_past_the_download_cap_goes_raw_as_a_3mf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, bambuddy, uploads = _native_reads(tmp_path), _NativeBambuddy(), _Copies()
+    monkeypatch.setattr(print_source, "MAX_DOWNLOAD_BYTES", 10)
+    source = await _load_native(NATIVE_ID, native, bambuddy, uploads)
+
+    printed = await _print(source, bambuddy)
+
+    [(filename, content, _)] = bambuddy.uploaded
+    assert (filename, content) == ("critter (ScadBuddy).3mf", native.bytes_of(NATIVE_ID))
+    assert bambuddy.media_types == ["model/3mf"] and printed.id == 101

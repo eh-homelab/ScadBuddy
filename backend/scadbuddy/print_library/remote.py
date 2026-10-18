@@ -60,6 +60,9 @@ class RemoteLibrary:
         return LibraryPlates.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 
     async def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]:
+        """The file's bytes, streamed. Unlike the other reads it is not retried on a
+        transport error (a stream cut part-way cannot resume): the error is the
+        activity's, whose retry policy reads the file again."""
         async with self.http.stream("GET", self._url(file_id, "/file")) as response:
             if not response.is_success:
                 await response.aread()

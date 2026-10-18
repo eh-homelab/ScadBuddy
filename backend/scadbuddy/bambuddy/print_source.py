@@ -44,6 +44,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
     Printable,
+    Sink,
     copy_to_read,
     ensure_raw_copy,
     ensure_uploaded,
@@ -896,7 +897,7 @@ class LibrarySource(PrintPipeline):
             stem = stem[: -len(ending)]
         reads = self._reads(client)
 
-        async def write(out: BinaryIO) -> None:
+        async def write(out: Sink) -> None:
             async with aclosing(reads.download_library_file(self.file_id)) as chunks:
                 async for chunk in chunks:
                     await asyncio.to_thread(out.write, chunk)
