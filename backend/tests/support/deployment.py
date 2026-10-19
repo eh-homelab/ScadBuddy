@@ -5,15 +5,11 @@ inside the workflow sandbox, which refuses what `scadbuddy.workflows.client` imp
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 
-from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
-from temporalio.api.taskqueue.v1 import TaskQueue
-from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from scadbuddy.workflows.client import DEPLOYMENT_NAME
+from scadbuddy.workflows.client import DEPLOYMENT_NAME, routes_to
 
 #: How long a test's app may take to have its render build serve its queue: what a
 #: healthy worker start takes to make its build current, with room for the describe.
@@ -28,25 +24,18 @@ BUILD_SERVES_MAX_POLL = 2.0
 async def build_serves(
     client: Client, task_queue: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
 ) -> bool:
-    """Whether ``task_queue`` routes its new workflows to ``build_id``, as the queue
-    itself sees it (`DescribeTaskQueue`'s versioning info: the routing matching uses).
-    Neither the deployment's current version nor the version's list of queues says
-    so: a queue registering with a version already current was listed, and current,
-    well before its renders were routed. Until then a render started on the queue
-    waits unrouted. Any `RPCError` is a no, asked again later."""
+    """Whether ``task_queue`` routes its new workflows and activities to ``build_id``,
+    as the queue itself sees it: `routes_to`, the routing matching uses. Neither the
+    deployment's current version nor the version's list of queues says so: a queue
+    registering with a version already current was listed, and current, well before
+    its renders were routed. Until then a render started on the queue waits unrouted.
+    Any `RPCError` is a no, asked again later."""
     try:
-        described = await client.workflow_service.describe_task_queue(
-            DescribeTaskQueueRequest(
-                namespace=client.namespace,
-                task_queue=TaskQueue(name=task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL),
-                task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-            ),
-            timeout=timedelta(seconds=5),
+        return await routes_to(
+            client, task_queue, deployment_name=deployment_name, build_id=build_id
         )
     except RPCError:
         return False
-    current = described.versioning_info.current_deployment_version
-    return current.deployment_name == deployment_name and current.build_id == build_id
 
 
 async def wait_until_build_serves(
