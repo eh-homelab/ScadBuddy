@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, read_once
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -155,6 +155,7 @@ from scadbuddy.rack.usage import (
 )
 from scadbuddy.render.bambu3mf import FilamentMap
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
+from scadbuddy.slicing.values import values_for
 
 if TYPE_CHECKING:
     # `slicing.start` imports the slice workflow, whose models import this module.
@@ -870,7 +871,7 @@ async def check_print(
         if prepared.catalogue is not None
         else None
     )
-    read = read_once(client)
+    read = values_for(client, native=None)
     return PrintCheck(
         errors=errors,
         objects=objects,
@@ -1631,7 +1632,7 @@ async def plan_run(
     process = process_preset_for(choices, catalogue)
     # #717: a profile that cannot apply is skipped with a warning, never refused.
     # One read of the preset's values for the profiles and the supports (#2804 review).
-    read = read_once(client)
+    read = values_for(client, native=None)
     from_profiles, profile_warnings = await profile_overrides(
         client, process, request.filament_profiles, read=read
     )
@@ -1655,7 +1656,7 @@ async def plan_run(
         client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
     # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
-    # No second round trip: `read` (read_once) answers again what supports just read.
+    # No second round trip: `read` (values_for) answers again what supports just read.
     tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
     tower_dropped = template_keys_dropped(request.prime_tower)
     # A side chosen by hand is kept only in a file of one plate (#3955 review): the map
