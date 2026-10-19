@@ -299,6 +299,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tini libpq5 git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/
+# The stdlib's bytecode (#4161). The python image ships none, and the worker (user
+# 10001) cannot write it, so every start compiled what it imported (~0.6 s). A
+# checked-hash .pyc names its source's hash, not its mtime, and every file and
+# directory this writes gets a fixed mtime: the layer is the same on each rebuild of
+# the same base (#4140).
+RUN python -m compileall -q -j 0 --invalidation-mode checked-hash /usr/local/lib/python3.14 \
+    && find /usr/local/lib/python3.14 \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
 RUN groupadd --gid 10001 scadbuddy \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/agent --shell /usr/sbin/nologin scadbuddy \
@@ -312,7 +319,11 @@ ENV UV_PROJECT_ENVIRONMENT=/app/agent-durable/.venv \
 COPY agent-durable/pyproject.toml agent-durable/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY agent-durable/src ./src
-RUN uv sync --frozen --no-dev
+# src/'s bytecode, checked-hash for the reason the stdlib's is (#4161): uv compiles the
+# venv's packages (UV_COMPILE_BYTECODE), not the project installed from src/.
+RUN uv sync --frozen --no-dev \
+    && .venv/bin/python -m compileall -q --invalidation-mode checked-hash src \
+    && find src \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
 # ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
 # A directory with no .claude-plugin/plugin.json: the bundled Claude Code takes a
