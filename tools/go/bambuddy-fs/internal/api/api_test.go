@@ -363,7 +363,10 @@ func TestAStillCheckingAnswerIsFollowedOnlyWithinTheContext(t *testing.T) {
 		t.Fatalf("err %v, want the deadline", err)
 	}
 	// An upload whose reader cannot be read again is answered with the 503, not sent again.
+	// Under the fake's lock: the mkdir the deadline cut may still be in its handler.
+	f.mu.Lock()
 	f.checking["upload"] = 1
+	f.mu.Unlock()
 	_, err := f.client(t).Upload(context.Background(), 0, "a.3mf", "", struct{ io.Reader }{strings.NewReader("abc")})
 	var e *Error
 	if !errors.As(err, &e) || e.Status != 503 {
