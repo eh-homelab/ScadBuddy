@@ -1282,6 +1282,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(SLICING),
             state.components.get(PRINT_LIBRARY),
             lambda: state.settings_store,
+            lambda: state.uploads,
         ),
     ]
     try:

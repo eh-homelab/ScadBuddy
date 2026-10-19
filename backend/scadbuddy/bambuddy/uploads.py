@@ -185,6 +185,11 @@ class BambuddyUploadStore:
         """Those of ``library_file_ids`` that any output records as a copy (#1145)."""
         return await asyncio.to_thread(self._recorded, list(library_file_ids))
 
+    async def recorded_files(self, library_file_ids: Iterable[int]) -> set[int]:
+        """Those of ``library_file_ids`` that any output records, as a copy or as a sliced
+        file: what an earlier attempt's upload, left unrecorded, is not (Task 13 review I1)."""
+        return await asyncio.to_thread(self._recorded_files, list(library_file_ids))
+
     async def outputs_for_files(self, library_file_ids: Iterable[int]) -> dict[int, str]:
         """The output each of ``library_file_ids`` is a copy of, for those any output
         records (#1864): Arrange reads such a file's objects through that output. A file
@@ -691,6 +696,19 @@ class BambuddyUploadStore:
                 (ids,),
             ).fetchall()
         return {row["library_file_id"] for row in rows}
+
+    def _recorded_files(self, ids: list[int]) -> set[int]:
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT library_file_id AS id FROM output_bambuddy_uploads"
+                " WHERE library_file_id = ANY(%s)"
+                " UNION SELECT sliced_library_file_id FROM output_bambuddy_slices"
+                " WHERE sliced_library_file_id = ANY(%s)",
+                (ids, ids),
+            ).fetchall()
+        return {row["id"] for row in rows}
 
     def _outputs_for_files(self, ids: list[int]) -> dict[int, str]:
         if not ids:

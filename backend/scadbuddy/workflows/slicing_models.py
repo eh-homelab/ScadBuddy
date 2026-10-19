@@ -66,6 +66,9 @@ class SliceRecordInput(BaseModel):
     #: ``failure`` is a refusal of the plate or its input, not a fault: a run reports
     #: it as the plan's 422, not a 502 (Task 13).
     refused: bool = False
+    #: The status a run reports ``failure`` with (`slicing.failure_status`, Task 13
+    #: review M3); None in a history from before it, read by ``refused``.
+    failure_status: int | None = None
 
 
 class SliceWorkflowResult(BaseModel):
@@ -73,5 +76,6 @@ class SliceWorkflowResult(BaseModel):
     sliced_blob_key: str | None
     failure: str | None
     warnings: list[str]
-    #: As `SliceRecordInput.refused`.
+    #: As `SliceRecordInput.refused` and `SliceRecordInput.failure_status`.
     refused: bool = False
+    failure_status: int | None = None

@@ -23,6 +23,7 @@ from temporalio.client import WorkflowHistory
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.workflows.slicing_activities import WAITING
 from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared
 from tests.api.test_print_preview_native import (
@@ -64,6 +65,14 @@ class FakeLibrary:
         #: Answer the next ``POST /queue/`` as Bambuddy does a deleted library file.
         self.refuse_next_queue = False
         self.queued: list[int] = []
+        #: Each sliced upload stored: its id, name, size and sha256.
+        self.stored: dict[int, tuple[str, int, str]] = {}
+        #: Store the next sliced upload, then drop its answer (review I1).
+        self.drop_next_answer = False
+        # Before `upload_route`'s empty listing, which this then wins over.
+        router.route(method="GET", path__regex=r"/api/v1/library/files/?$").mock(
+            side_effect=self._listing
+        )
         upload_route(COPY)
         router.post(f"{API}/library/files").mock(side_effect=self._upload)
         router.route(method="GET", path__regex=r"/api/v1/library/files/\d+$").mock(
@@ -95,6 +104,11 @@ class FakeLibrary:
         file_id = self.next_id
         self.next_id += 1
         self.sliced_names.append(name)
+        payload = _uploaded_bytes(request.content)
+        self.stored[file_id] = (name, len(payload), _sha(payload))
+        if self.drop_next_answer:
+            self.drop_next_answer = False
+            raise httpx.ReadTimeout("the answer was lost", request=request)
         return httpx.Response(
             200, json={"id": file_id, "filename": name, "file_type": "3mf", "file_size": 9}
         )
@@ -113,14 +127,37 @@ class FakeLibrary:
             )
         if file_id in self.gone or file_id >= self.next_id:
             return httpx.Response(404, json={"detail": "File not found"})
+        name, size, sha = self.stored.get(file_id, (f"sliced-{file_id}.3mf", 9, f"{file_id:064x}"))
         return httpx.Response(
             200,
             json={
                 "id": file_id,
-                "filename": f"sliced-{file_id}.3mf",
+                "filename": name,
                 "file_type": "gcode.3mf",
-                "file_hash": f"{file_id:064x}",
+                "file_size": size,
+                "folder_id": None,
+                "file_hash": sha,
             },
+        )
+
+    def _listing(self, request: httpx.Request) -> httpx.Response:
+        """The library's root, where the run files its sliced uploads: those stored and
+        not gone."""
+        if "folder_id" in request.url.params:
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": file_id,
+                    "filename": name,
+                    "file_type": "gcode.3mf",
+                    "file_size": size,
+                    "folder_id": None,
+                }
+                for file_id, (name, size, _) in self.stored.items()
+                if file_id not in self.gone
+            ],
         )
 
     def _queue(self, request: httpx.Request) -> httpx.Response:
@@ -141,6 +178,13 @@ class FakeLibrary:
                 "plate_id": 1,
             },
         )
+
+
+def _uploaded_bytes(multipart: bytes) -> bytes:
+    """The file part's bytes of one upload's multipart body."""
+    boundary = multipart.split(b"\r\n", 1)[0]
+    part = multipart.split(b'filename="', 1)[1].split(b"\r\n\r\n", 1)[1]
+    return part.rsplit(b"\r\n" + boundary, 1)[0]
 
 
 def _sha(payload: bytes) -> str:
@@ -211,6 +255,26 @@ def _history(client: TestClient, run_id: str) -> WorkflowHistory:
     assert client.portal is not None
     history: WorkflowHistory = client.portal.call(fetch)
     return history
+
+
+def _waiting_on_the_slice(client: TestClient, run_id: str) -> bool:
+    """Whether the run's pending ``slice_run`` has beaten `WAITING`: it joined the slice."""
+    with _slicing(client).store._pool.connection() as conn:
+        row = conn.execute("SELECT workflow_id FROM print_runs WHERE id = %s", (run_id,)).fetchone()
+    assert row is not None
+    temporal = _slicing(client).temporal()
+
+    async def details() -> list[bytes]:
+        described = await temporal.get_workflow_handle(row["workflow_id"]).describe()
+        return [
+            payload.data
+            for pending in described.raw_description.pending_activities
+            if pending.activity_type.name == "slice_run"
+            for payload in pending.heartbeat_details.payloads
+        ]
+
+    assert client.portal is not None
+    return json.dumps(WAITING).encode() in client.portal.call(details)
 
 
 def _activities(history: WorkflowHistory) -> list[str]:
@@ -330,6 +394,13 @@ def test_the_dialog_and_the_run_share_one_slice(
     while slicer.calls == 0:
         assert time.monotonic() < deadline
         time.sleep(0.1)
+    # Review M5: the run's `slice_run` waits on the running slice before it may end, so
+    # the run joins the execution rather than finding the row completed.
+    while not _waiting_on_the_slice(native_client, run_id):
+        assert time.monotonic() < deadline, "the run never joined the running slice"
+        time.sleep(0.2)
+    (row,) = _native_rows(native_client)
+    assert row["status"] == "running"
     native_client.portal.call(slicer.hold.set)
 
     run = follow_run(native_client, run_id, timeout=120)
@@ -340,6 +411,22 @@ def test_the_dialog_and_the_run_share_one_slice(
     assert row["id"] == op["result"]["job_id"]
     (record,) = _inputs(_history(native_client, run_id), "print_record")
     assert record["outcome"]["native_slice_id"] == row["id"]
+
+
+def test_a_lost_upload_answer_is_taken_on_the_retry(
+    native_client: TestClient, model: str, slicer: FakeSlicer, library: FakeLibrary
+) -> None:
+    """Review I1: Bambuddy stored the sliced file and its answer was lost; the retry
+    finds it by its bytes and queues it, leaving no spare file."""
+    library.drop_next_answer = True
+    output_id = prepared(native_client, model)
+
+    run = _run(native_client, output_id)
+
+    assert run["status"] == "succeeded", run
+    assert library.sliced_names == ["demo-elan.plate1.sliced.3mf"]
+    assert list(library.stored) == [SLICED]
+    assert library.queued == [SLICED]
 
 
 def test_a_reprint_reuses_the_native_upload(

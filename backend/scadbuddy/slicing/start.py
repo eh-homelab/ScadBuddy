@@ -5,6 +5,7 @@ C2)."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -124,6 +125,30 @@ async def native_slice_key(
     profiles = starter.profiles
     files = await build_presets(plan, profiles, client)
     return native_preset_key(plan, plate_id, profiles.version, files.bambuddy_process)
+
+
+class NativeSliceKeys:
+    """`native_slice_key` for each plate of one run's plan (Task 13 review M4): the
+    presets are built once per plan, which most plates share, however many plates ask
+    at once. A `ProfileError` propagates to each that asked."""
+
+    def __init__(self, starter: NativeSliceStarter, client: BambuddyClient | None) -> None:
+        self.starter = starter
+        self.client = client
+        self._processes: dict[str, asyncio.Task[str | None]] = {}
+
+    async def key(self, plan: SlicePlan, plate_id: int) -> str:
+        built = plan.model_dump_json()
+        task = self._processes.get(built)
+        if task is None:
+            task = asyncio.ensure_future(self._process(plan))
+            self._processes[built] = task
+        process = await asyncio.shield(task)
+        return native_preset_key(plan, plate_id, self.starter.profiles.version, process)
+
+    async def _process(self, plan: SlicePlan) -> str | None:
+        files = await build_presets(plan, self.starter.profiles, self.client)
+        return files.bambuddy_process
 
 
 async def _has_execution(temporal: Client, workflow_id: str) -> bool:

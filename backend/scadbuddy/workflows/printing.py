@@ -38,9 +38,11 @@ from temporalio.exceptions import (
     ActivityError,
     ApplicationError,
     FailureError,
+    TimeoutType,
     WorkflowAlreadyStartedError,
     is_cancelled_exception,
 )
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
@@ -51,6 +53,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
+        FAILED,
         PRINT_RUN_WORKFLOW,
         REFUSED,
         SLICE_GONE,
@@ -75,7 +78,7 @@ with workflow.unsafe.imports_passed_through():
         SucceedInput,
     )
     from scadbuddy.workflows.problems import problem_of
-    from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_TIMEOUT
+    from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_TIMEOUT, SLICE_WORST_CASE
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
 READ_RETRY = RetryPolicy(
@@ -115,9 +118,42 @@ SLICE_BACKOFF = timedelta(seconds=60)
 #: The upload and the slice wait beat while they run, so a worker that died is noticed
 #: within this rather than at the activity's whole budget.
 HEARTBEAT = timedelta(seconds=30)
-#: ``slice_run`` waits out every attempt the shared `SliceWorkflow` makes, and a margin
-#: for its prepare and record.
+#: One ``slice_run`` attempt: every attempt the shared `SliceWorkflow` makes, and a
+#: margin for its prepare and record. It beats, so a worker that died is retried at
+#: `HEARTBEAT`; an attempt that ran out joins the same slice again.
 SLICE_RUN_TIMEOUT = SLICE_RETRY.maximum_attempts * SLICE_TIMEOUT + timedelta(minutes=10)
+#: Every ``slice_run`` attempt together (Task 13 review M2): past the slice's own worst
+#: case, so a run gives up only on a slice that has outlived it, and says so
+#: (`outlived_slice`).
+SLICE_RUN_BOUND = SLICE_WORST_CASE + timedelta(minutes=10)
+#: Rejoining is idempotent, so anything but the run's own failure retries until
+#: `SLICE_RUN_BOUND`.
+SLICE_RUN_RETRY = RetryPolicy(
+    maximum_attempts=0,
+    initial_interval=timedelta(seconds=1),
+    maximum_interval=timedelta(minutes=1),
+    backoff_coefficient=2.0,
+    non_retryable_error_types=[FAILED],
+)
+
+
+def outlived_slice(error: ActivityError) -> ApplicationError | None:
+    """The run's failure for a ``slice_run`` that ran out of `SLICE_RUN_BOUND` (Task 13
+    review M2): a named 504, since printing again joins the slice if it still runs; None
+    for any other failure."""
+    cause = error.cause
+    if not (
+        isinstance(cause, TemporalTimeoutError) and cause.type == TimeoutType.SCHEDULE_TO_CLOSE
+    ):
+        return None
+    detail = "The slice is still running after the run's wait: print again to wait for it."
+    return ApplicationError(
+        detail,
+        PrintRunError(status=504, title="The slice is taking too long", detail=detail),
+        type=FAILED,
+        non_retryable=True,
+    )
+
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
 SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
@@ -409,26 +445,35 @@ class PrintRunWorkflow:
         """The shared `SliceWorkflow`, started or joined and waited for by ``slice_run``
         (re-attaching is idempotent), then its file uploaded beside the copy."""
         assert plate.plan is not None
-        native = await workflow.execute_activity(
-            SLICE_RUN_ACTIVITY,
-            SliceRunInput(
-                library_file_id=planned.library_file_id,
-                plan=plate.plan,
-                plate_id=plate.plate_id,
-                subject=subject,
-            ),
-            result_type=NativeSliced,
-            task_queue=planned.library_queue,
-            start_to_close_timeout=SLICE_RUN_TIMEOUT,
-            heartbeat_timeout=HEARTBEAT,
-            retry_policy=READ_RETRY,
-        )
+        try:
+            native = await workflow.execute_activity(
+                SLICE_RUN_ACTIVITY,
+                SliceRunInput(
+                    library_file_id=planned.library_file_id,
+                    plan=plate.plan,
+                    plate_id=plate.plate_id,
+                    subject=subject,
+                ),
+                result_type=NativeSliced,
+                task_queue=planned.library_queue,
+                schedule_to_close_timeout=SLICE_RUN_BOUND,
+                start_to_close_timeout=SLICE_RUN_TIMEOUT,
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=SLICE_RUN_RETRY,
+            )
+        except ActivityError as error:
+            outlived = outlived_slice(error)
+            if outlived is None:
+                raise
+            raise outlived from None
+        # An upload's budget, beating (review I1): a sliced 3MF carries its G-code.
         uploaded = await workflow.execute_activity(
             SLICED_UPLOAD_ACTIVITY,
             SlicedUploadInput(planned=planned, plate_id=plate.plate_id, sliced=native),
             result_type=int,
             task_queue=planned.library_queue,
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=PLAN_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=READ_RETRY,
         )
         return native, uploaded

@@ -1753,14 +1753,16 @@ async def plan_run(
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
 
-    async def reuse_key(plan: SlicePlan, plate_id: int) -> str:
-        if native is None or not native_slicing:
-            return slice_request(plan, plate_id).preset_key
-        # Here, not at the top: see the `TYPE_CHECKING` import.
-        from scadbuddy.slicing.start import native_slice_key
+    # Here, not at the top: see the `TYPE_CHECKING` import.
+    from scadbuddy.slicing.start import NativeSliceKeys
 
+    native_keys = NativeSliceKeys(native, client) if native is not None else None
+
+    async def reuse_key(plan: SlicePlan, plate_id: int) -> str:
+        if native_keys is None or not native_slicing:
+            return slice_request(plan, plate_id).preset_key
         try:
-            return await native_slice_key(native, plan, plate_id, client)
+            return await native_keys.key(plan, plate_id)
         except ProfileImageError as error:
             raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
         except ProfileError as error:
