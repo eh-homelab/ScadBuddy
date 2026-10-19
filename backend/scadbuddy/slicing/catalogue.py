@@ -127,8 +127,16 @@ def warm_catalogue(
 
 async def _warm(profiles: Profiles, native: Callable[[], bool]) -> None:
     try:
-        if not await asyncio.to_thread(native):
-            return
+        wanted = await asyncio.to_thread(native)
+    except Exception as error:
+        logger.warning(
+            "could not read slicer_backend to warm the native preset catalogue",
+            extra={"error": type(error).__name__},
+        )
+        return
+    if not wanted:
+        return
+    try:
         await asyncio.to_thread(native_catalogue, profiles)
     except Exception as error:
         # By type only: the message names files under the image's tree.

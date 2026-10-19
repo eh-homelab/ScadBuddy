@@ -150,9 +150,12 @@ def test_a_trays_filament_id_resolves_only_a_preset_that_fits_the_printer(
     assert resolved.filament_presets == []
 
 
-def test_a_spools_cloud_preset_resolves_to_its_standard_ref(profiles: Profiles) -> None:
-    """A spool's own preset is a Bambu Cloud ``setting_id``; on the native catalogue it is
-    the preset of that id, not a name fallback (#4349)."""
+@pytest.mark.parametrize("preset_id", ["GFSA00_99", "GFA00"])
+def test_a_spools_own_preset_resolves_to_its_standard_ref(
+    profiles: Profiles, preset_id: str
+) -> None:
+    """A spool's own preset is a Bambu Cloud ``setting_id`` or a BBL ``filament_id``; on
+    the native catalogue it is the preset that id names, not a name fallback (#4349)."""
     options = FilamentOptions(
         library_file_id=None,
         slots=[SlotNeed(slot_id=1, colour="#FFFFFF")],
@@ -162,7 +165,7 @@ def test_a_spools_cloud_preset_resolves_to_its_standard_ref(profiles: Profiles) 
     own = {
         7: [
             SpoolFilamentPreset(
-                printer_model="H2C", nozzle_diameter="0.4", slicer_filament="GFSA00_99"
+                printer_model="H2C", nozzle_diameter="0.4", slicer_filament=preset_id
             )
         ]
     }
@@ -332,14 +335,34 @@ async def test_warming_builds_nothing_while_slices_go_through_bambuddy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nothing reads the catalogue unless ``slicer_backend`` is ``native`` (#4348)."""
+    built: list[Path] = []
 
     def build(profiles: Profiles) -> Any:
-        raise AssertionError("built")
+        built.append(profiles.root)
+        raise ProfileImageError("built")
 
     monkeypatch.setattr(native, "_build", build)
     task = warm_catalogue(Profiles(_tree(tmp_path)), lambda: False)
     assert task is not None
     await asyncio.wait_for(task, 10)
+    assert built == []
+
+
+async def test_a_failed_settings_read_is_logged_as_that(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A warm whose ``slicer_backend`` read fails says so, not that the tree failed."""
+
+    def unread() -> bool:
+        raise RuntimeError("the database is down")
+
+    task = warm_catalogue(Profiles(_tree(tmp_path)), unread)
+    assert task is not None
+    with caplog.at_level(logging.WARNING, logger=native.__name__):
+        await asyncio.wait_for(task, 10)
+    assert [r.message for r in caplog.records] == [
+        "could not read slicer_backend to warm the native preset catalogue"
+    ]
 
 
 async def test_a_failed_warm_is_logged_once_and_never_raised(
