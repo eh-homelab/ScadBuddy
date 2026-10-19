@@ -15,6 +15,9 @@ type Error struct {
 	Status int
 	Detail string
 	Op     string
+	// Upstream is the status Bambuddy answered when ScadBuddy relays its refusal
+	// (`bambuddy_status`, bambuddy/errors.py); 0 when the error is ScadBuddy's own.
+	Upstream int
 }
 
 func (e *Error) Error() string {
@@ -51,10 +54,12 @@ func Errno(err error) syscall.Errno {
 func errorFrom(op string, status int, body []byte) *Error {
 	e := &Error{Op: op, Status: status}
 	var problem struct {
-		Detail        json.RawMessage `json:"detail"`
-		RequiredScope string          `json:"required_scope"`
-		Extensions    struct {
-			RequiredScope string `json:"required_scope"`
+		Detail         json.RawMessage `json:"detail"`
+		RequiredScope  string          `json:"required_scope"`
+		BambuddyStatus int             `json:"bambuddy_status"`
+		Extensions     struct {
+			RequiredScope  string `json:"required_scope"`
+			BambuddyStatus int    `json:"bambuddy_status"`
 		} `json:"extensions"`
 	}
 	if json.Unmarshal(body, &problem) != nil {
@@ -63,6 +68,10 @@ func errorFrom(op string, status int, body []byte) *Error {
 	}
 	if json.Unmarshal(problem.Detail, &e.Detail) != nil {
 		e.Detail = string(problem.Detail)
+	}
+	e.Upstream = problem.BambuddyStatus
+	if e.Upstream == 0 {
+		e.Upstream = problem.Extensions.BambuddyStatus
 	}
 	if status == http.StatusConflict && (problem.RequiredScope != "" || problem.Extensions.RequiredScope != "") {
 		e.Status = http.StatusForbidden
