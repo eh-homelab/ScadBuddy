@@ -354,15 +354,24 @@ def test_high_flow_names_bambus_own_preset_with_no_warning() -> None:
     resolved = resolve(
         options(BASIC),
         plan(1),
-        PrintChoices(
-            nozzles=[NozzleChoice(size="0.4", flow="high_flow"), NozzleChoice(size="0.4")]
-        ),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4", flow="high_flow")]),
         recorded(),
         {},
     )
     assert resolved.printer_preset == PresetRef(source="cloud", id="GM041")
     assert resolved.warnings == []
     assert resolved.errors == []
+
+
+@pytest.mark.parametrize("high_flow_side", [0, 1])
+def test_high_flow_on_one_side_and_standard_on_the_other_is_refused(high_flow_side: int) -> None:
+    """#4272: print #355 stalled on the H2C with the left High Flow and the right
+    Standard. Either way round, the choice is refused with the reason."""
+    nozzles = [NozzleChoice(size="0.4"), NozzleChoice(size="0.4")]
+    nozzles[high_flow_side] = NozzleChoice(size="0.4", flow="high_flow")
+    resolved = resolve(options(BASIC), plan(1), PrintChoices(nozzles=nozzles), recorded(), {})
+    assert [error.kind for error in resolved.errors] == ["mixed-flows"]
+    assert "choose one flow for both" in resolved.errors[0].message
 
 
 def test_an_advanced_process_name_wins_over_the_tier() -> None:

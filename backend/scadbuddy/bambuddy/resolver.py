@@ -191,6 +191,16 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
                 "mixed nozzle sizes yet.",
             )
         )
+    if len({nozzle.flow for nozzle in choices.nozzles}) > 1:
+        # Print #355 stalled on the H2C with the left High Flow and the right Standard,
+        # which the owner rules undefined on this printer (#4272).
+        errors.append(
+            FilamentWarning(
+                kind="mixed-flows",
+                message="One nozzle is High Flow and the other Standard. The H2C can't "
+                "print High Flow and Standard in one print: choose one flow for both.",
+            )
+        )
 
     name = printer_preset_name(choices.nozzles)
     printer_ref = _named(catalogue.printer, name)

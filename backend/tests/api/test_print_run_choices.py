@@ -445,9 +445,13 @@ def test_the_spools_read_together_fail_as_the_serial_reads_did(
     ("choices", "detail"),
     [
         ({"nozzles": [{"size": "0.2"}, {"size": "0.4"}]}, "different sizes"),
+        (
+            {"nozzles": [{"size": "0.4", "flow": "high_flow"}, {"size": "0.4"}]},
+            "choose one flow for both",
+        ),
         ({"process_name": "No Such Process @BBL H2C"}, "is not a process"),
     ],
-    ids=["mixed-sizes", "unknown-process"],
+    ids=["mixed-sizes", "mixed-flows", "unknown-process"],
 )
 def test_a_choice_the_resolver_refuses_uploads_nothing(
     client: TestClient, model: str, choices: dict[str, Any], detail: str
@@ -495,8 +499,8 @@ def test_high_flow_slices_as_high_flow_with_bambus_own_preset(
 ) -> None:
     """#484: Bambuddy refuses a ScadBuddy-made printer preset (spec §4.1), so High Flow
     still names Bambu's own 0.4 preset; the flow goes in the uploaded 3MF, per extruder
-    in the slicer's order (the dialog's left first), as Bambu Studio writes it. Nothing
-    says it slices as Standard any more."""
+    in the slicer's order, as Bambu Studio writes it. Nothing says it slices as Standard
+    any more."""
     output_id = prepared(client, model)
     upload = upload_route()
     run_routes()
@@ -506,7 +510,7 @@ def test_high_flow_slices_as_high_flow_with_bambus_own_preset(
     response = run_print(
         client,
         output_id,
-        json=on_spool(10, nozzles=[{"size": "0.4", "flow": "high_flow"}, {"size": "0.4"}]),
+        json=on_spool(10, nozzles=[{"size": "0.4", "flow": "high_flow"}]),
     )
 
     assert response.status_code == 200, response.text
@@ -514,7 +518,7 @@ def test_high_flow_slices_as_high_flow_with_bambus_own_preset(
         "source": "cloud",
         "id": "GM041",
     }
-    assert _uploaded_settings(upload)["nozzle_volume_type"] == ["High Flow", "Standard"]
+    assert _uploaded_settings(upload)["nozzle_volume_type"] == ["High Flow", "High Flow"]
     assert not NOZZLE_KINDS & {warning["kind"] for warning in response.json()["warnings"]}
 
 
@@ -1501,23 +1505,19 @@ def test_a_mounted_high_flow_nozzle_the_slice_is_not_offered_is_not_warned_about
 def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#484 on queue item 149's printer: High Flow for the left, whose HH01 0.4 is the
-    flow chosen, and Standard for the right, whose HS01 and rack spares are. Both sides
-    can print as chosen, so the High Flow left is the side offered: left to choose, the
-    slicer put the print on the Standard right (live slices, 2026-10-06). The file says
-    which flow each side is."""
+    """#484 on queue item 149's printer: High Flow chosen, which only the left's HH01 0.4
+    is (the right's HS01 and rack spares are Standard). One flow for both sides (#4272),
+    so the High Flow left is the side offered: left to choose, the slicer put the print
+    on the Standard right (live slices, 2026-10-06). Nothing is warned of, since the
+    Standard right is not offered."""
     response, upload = _run_on(
-        client,
-        model,
-        paths,
-        BOTH_04_LEFT_HF,
-        nozzles=[{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}],
+        client, model, paths, BOTH_04_LEFT_HF, nozzles=[{"size": "0.4", "flow": "high_flow"}]
     )
 
     assert response.status_code == 200, response.text
     assert not NOZZLE_KINDS & _kinds(response)
     settings = _uploaded_settings(upload)
-    assert settings["nozzle_volume_type"] == ["High Flow", "Standard"]
+    assert settings["nozzle_volume_type"] == ["High Flow", "High Flow"]
     assert settings["extruder_nozzle_stats"] == ["High Flow#1", "Standard#0"]
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         assert "Metadata/slice_info.config" not in archive.namelist()
@@ -1628,9 +1628,9 @@ def _mounted(right: tuple[str, str], left: tuple[str, str]) -> dict[str, Any]:
 
 
 #: The review of #1582: (a) Standard chosen, and the one side with a 0.2 has it High
-#: Flow, so that side is offered (#834); (b) High Flow chosen for the left and Standard
-#: for the right, with the 0.2s mounted the other way round, so neither side has its
-#: flow and the slicer may use either. Each: the status, the nozzles chosen, the sides
+#: Flow, so that side is offered (#834); (b) Standard chosen for both sides (one flow,
+#: #4272) with a High Flow 0.2 mounted on each, so neither side has its flow and the
+#: slicer may use either. Each: the status, the nozzles chosen, the sides
 #: warned of with the flow sliced there, and the file's nozzle stats and flows.
 FLOW_MISMATCHES = [
     pytest.param(
@@ -1642,11 +1642,11 @@ FLOW_MISMATCHES = [
         id="the-one-side-of-the-size",
     ),
     pytest.param(
-        _mounted(("HH01", "0.2"), ("HS00", "0.2")),
-        [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "standard"}],
-        [(RIGHT, "standard"), (LEFT, "high_flow")],
+        _mounted(("HH01", "0.2"), ("HH01", "0.2")),
+        [{"size": "0.2"}],
+        [(RIGHT, "standard"), (LEFT, "standard")],
         None,
-        ["High Flow", "Standard"],
+        ["Standard", "Standard"],
         id="neither-side-of-its-flow",
     ),
 ]

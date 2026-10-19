@@ -12,6 +12,7 @@ const (
 	NOPRESET_FILAMENTWARNING_KIND
 	NOFANOUT_FILAMENTWARNING_KIND
 	MIXEDSIZES_FILAMENTWARNING_KIND
+	MIXEDFLOWS_FILAMENTWARNING_KIND
 	NOPROCESS_FILAMENTWARNING_KIND
 	NOTINSTALLED_FILAMENTWARNING_KIND
 	PLATEDIFFERS_FILAMENTWARNING_KIND
@@ -33,10 +34,11 @@ const (
 	SLICEDSAMEFAMILY_FILAMENTWARNING_KIND
 	SLICEREUSED_FILAMENTWARNING_KIND
 	MIXEDMATERIALS_FILAMENTWARNING_KIND
+	INLETSHARED_FILAMENTWARNING_KIND
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -54,6 +56,8 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = NOFANOUT_FILAMENTWARNING_KIND
 	case "mixed-sizes":
 		result = MIXEDSIZES_FILAMENTWARNING_KIND
+	case "mixed-flows":
+		result = MIXEDFLOWS_FILAMENTWARNING_KIND
 	case "no-process":
 		result = NOPROCESS_FILAMENTWARNING_KIND
 	case "not-installed":
@@ -96,6 +100,8 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = SLICEREUSED_FILAMENTWARNING_KIND
 	case "mixed-materials":
 		result = MIXEDMATERIALS_FILAMENTWARNING_KIND
+	case "inlet-shared":
+		result = INLETSHARED_FILAMENTWARNING_KIND
 	default:
 		return nil, nil
 	}

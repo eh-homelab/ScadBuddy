@@ -9,9 +9,13 @@ The plan, for the sides that have a nozzle of the chosen size
 (:func:`~scadbuddy.bambuddy.extruders._offered_sides`):
 
 * A filament chosen for a side by hand (Advanced) prints there.
-* Without the Filament Track Switch an AMS is wired to one extruder, so a loaded spool
-  prints on the side it feeds. With the switch any AMS reaches either nozzle, and the
-  side a spool rests on only breaks ties.
+* A loaded spool prints on the side it feeds or rests on. Without the Filament Track
+  Switch an AMS is wired to one extruder. With the switch any AMS reaches either nozzle,
+  but one inlet feeding both in one print stalled print #355: the switch flipped inlet A
+  between the extruders at every colour change (#4272). So each inlet feeds the side it
+  rests on (inlet A the left, B the right), and two spools on one inlet share a nozzle.
+  A side chosen by hand can still split an inlet; Checks warns of it
+  (``print_run.inlet_warnings``).
 * The rest are grouped by what can share a hotend: one material family (PLA, PETG, ABS,
   TPU …), which is also one temperature window. Two or more families go to the side
   with fewer filaments so far, a family at a time, so no hotend runs two families. One
@@ -226,7 +230,7 @@ def plan_nozzles(
             chosen.add(filament.slot_id)
         elif len(allowed) == 1:
             placed[filament.slot_id] = next(iter(allowed))
-        elif not switch and filament.rests is not None and filament.rests in allowed:
+        elif filament.rests is not None and filament.rests in allowed:
             placed[filament.slot_id] = filament.rests
     load = {side: sum(1 for value in placed.values() if value == side) for side in allowed}
 

@@ -3,12 +3,14 @@ plan that mixes material families."""
 
 from __future__ import annotations
 
+from scadbuddy.bambuddy.extruders import LEFT, RIGHT
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import PrinterStatus, SlotChoice, Spool, SpoolAssignment
-from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
-from scadbuddy.bambuddy.print_run import plan_warnings
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, PlannedSlot
+from scadbuddy.bambuddy.print_run import inlet_warnings, plan_warnings
 from scadbuddy.bambuddy.trays import tray_spool_id
 from tests.bambuddy.conftest import recording
+from tests.bambuddy.test_extruders import fts_status
 
 
 def spool(spool_id: int, material: str = "PLA", colour: str = "Black") -> Spool:
@@ -199,3 +201,69 @@ def test_an_offline_printers_tray_adds_no_material_to_the_mix() -> None:
         status=None,
     )
     assert found == []
+
+
+def _sides(*sides: str, switch: bool = True) -> NozzlePlan:
+    """A plan putting slot 1, 2, … on these sides, named "Glow", "Black", …."""
+    names = ["Glow", "Black", "Green"]
+    return NozzlePlan(
+        slots=[
+            PlannedSlot(slot_id=slot, side=side, name=names[slot - 1], by_hand=True)  # type: ignore[arg-type]
+            for slot, side in enumerate(sides, start=1)
+        ],
+        size="0.4",
+        left_flow="high_flow",
+        right_flow="high_flow",
+        track_switch=switch,
+        summary="",
+    )
+
+
+def _resting(*rests: int | None) -> list[PlanInput]:
+    return [PlanInput(slot, rests=rest) for slot, rest in enumerate(rests, start=1)]
+
+
+def test_an_inlet_split_across_the_extruders_names_the_spool_to_move() -> None:
+    """#4272, print #355: glow and black both on inlet A (the left's), glow put on the
+    right by hand. Glow is named, with inlet B to move it to."""
+    [warning] = inlet_warnings(_sides("R", "L"), _resting(LEFT, LEFT))
+
+    assert warning.kind == "inlet-shared"
+    assert warning.message.startswith(
+        "Glow prints on the right but is fed through Track Switch inlet A, which also "
+        "feeds Black on the left."
+    )
+    assert "move Glow to an AMS on inlet B, or print it on the left" in warning.message
+
+
+def test_each_inlet_on_its_own_side_says_nothing() -> None:
+    assert inlet_warnings(_sides("L", "R"), _resting(LEFT, RIGHT)) == []
+
+
+def test_a_whole_inlet_moved_to_the_other_side_says_nothing() -> None:
+    """Both of inlet A's spools on the right, inlet B's on the left: no inlet feeds both."""
+    assert inlet_warnings(_sides("R", "R", "L"), _resting(LEFT, LEFT, RIGHT)) == []
+
+
+def test_no_switch_one_side_or_an_unknown_rest_says_nothing() -> None:
+    assert inlet_warnings(_sides("R", "L", switch=False), _resting(LEFT, LEFT)) == []
+    assert inlet_warnings(_sides("L", "L"), _resting(LEFT, LEFT)) == []
+    assert inlet_warnings(_sides("R", "L"), _resting(None, LEFT)) == []
+
+
+def test_checks_reads_each_spools_inlet_from_the_printer() -> None:
+    """The wiring: both spools loaded in AMS 2, which the switch's inlet A feeds."""
+    shelf = [spool(1, colour="Glow"), spool(2)]
+    on_inlet_a = [
+        loaded(1, 0).model_copy(update={"ams_id": 2}),
+        loaded(2, 1).model_copy(update={"ams_id": 2}),
+    ]
+    found = plan_warnings(
+        plan(1, 2),
+        (shelf, on_inlet_a),
+        printer_id=1,
+        printer_name=None,
+        status=fts_status(),
+        nozzle_plan=_sides("R", "L"),
+    )
+    assert [warning.kind for warning in found] == ["inlet-shared"]

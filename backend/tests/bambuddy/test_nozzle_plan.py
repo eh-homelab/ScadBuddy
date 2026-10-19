@@ -1,11 +1,13 @@
-"""#2166 — ScadBuddy plans which nozzle each filament prints from, by material, and
-ignores where a spool rests when the Filament Track Switch is fitted."""
+"""#2166 — ScadBuddy plans which nozzle each filament prints from, by material. A loaded
+spool prints on the side it feeds or, with the Filament Track Switch, the side its inlet
+rests on, so no inlet feeds both extruders (#4272)."""
 
 from __future__ import annotations
 
 import io
 import json
 import zipfile
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -46,9 +48,9 @@ BLACK = PlanInput(2, "PLA", "#27272C", "Inland Black", rests=RIGHT)
 
 
 def test_two_colours_of_one_material_go_one_to_each_nozzle() -> None:
-    """Queue item 268's file, both spools resting on the right: with the switch the
-    rest is ignored, and green and black each get a nozzle of their own."""
-    plan = plan_nozzles(h2c(), HF, [GREEN, BLACK])
+    """Queue item 268's file, green resting on inlet B (right) and black on inlet A
+    (left): each gets a nozzle of its own, the one its inlet feeds."""
+    plan = plan_nozzles(h2c(), HF, [GREEN, replace(BLACK, rests=LEFT)])
 
     assert plan is not None
     assert [(slot.slot_id, slot.side) for slot in plan.slots] == [(1, "R"), (2, "L")]
@@ -57,6 +59,27 @@ def test_two_colours_of_one_material_go_one_to_each_nozzle() -> None:
     assert plan.nozzle_stats(HF) == ["High Flow#1", "High Flow#1"]
     assert plan.filament_map(2) == ["2", "1"]
     assert plan.volume_map(2) == ["1", "1"]
+
+
+@pytest.mark.parametrize("inlet_side", [LEFT, RIGHT])
+def test_with_the_switch_two_spools_on_one_inlet_share_its_side(inlet_side: int) -> None:
+    """#4272: print #355's glow and black both rested on inlet A and were split across
+    the extruders, so the switch moved inlet A between them at every colour change and
+    stalled. Two spools on one inlet now print on the side it rests on."""
+    on_one_inlet = [replace(GREEN, rests=inlet_side), replace(BLACK, rests=inlet_side)]
+    plan = plan_nozzles(h2c(), HF, on_one_inlet)
+
+    assert plan is not None
+    side = "L" if inlet_side == LEFT else "R"
+    assert [slot.side for slot in plan.slots] == [side, side]
+
+
+def test_with_the_switch_a_spool_of_unknown_rest_is_still_spread() -> None:
+    """A spool whose side cannot be told (not loaded) is planned by material, as before."""
+    plan = plan_nozzles(h2c(), HF, [replace(GREEN, rests=None), replace(BLACK, rests=None)])
+
+    assert plan is not None
+    assert {slot.side for slot in plan.slots} == {"L", "R"}
 
 
 def test_without_the_switch_a_spool_prints_on_the_side_it_feeds() -> None:

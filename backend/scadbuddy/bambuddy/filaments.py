@@ -79,6 +79,8 @@ WarningKind = Literal[
     "no-preset",
     "no-fan-out",
     "mixed-sizes",
+    # #4272 — High Flow on one side and Standard on the other: refused.
+    "mixed-flows",
     "no-process",
     "not-installed",
     "plate-differs",
@@ -113,6 +115,8 @@ WarningKind = Literal[
     "slice-reused",
     # #2722 — the chosen spools mix material families.
     "mixed-materials",
+    # #4272 — a Track Switch inlet feeds both extruders, by a side chosen by hand.
+    "inlet-shared",
 ]
 
 
