@@ -417,7 +417,11 @@ async def _action_changed(
     client: Client, previous: Any, action: ScheduleActionStartWorkflow
 ) -> bool:
     """Whether ``action`` starts another workflow, or passes it other arguments, than
-    the ``previous`` action the Schedule held (described, so its arguments encoded)."""
+    the ``previous`` action the Schedule held (described, so its arguments encoded).
+    Deliberately ignores ``execution_timeout`` and ``task_queue``: every caller's
+    timeout is either fixed or a deterministic function of the ``args`` already
+    compared, so it never changes without ``args`` changing too, and a queue rename
+    is not new work for the sweeps to converge."""
     if not isinstance(previous, ScheduleActionStartWorkflow):
         return True
     if previous.workflow != action.workflow:

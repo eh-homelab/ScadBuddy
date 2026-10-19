@@ -569,13 +569,17 @@ async def plate_layout(
                 missing_files=skipped.missing_files if skipped is not None else (),
             )
         if len(alike) > 1 and len(set(alike)) == 1:
-            # The same parts in the same place for every object: a template that never
-            # reads $object draws the whole model each time, so the copies would sit on
-            # top of each other (#3218).
+            # The same parts in the same place for every object that drew something: a
+            # template that never reads $object draws the whole model each time, so the
+            # copies would sit on top of each other (#3218). Only objects that drew
+            # anything are compared, so this counts them rather than naming every
+            # declared object: with 2 of 3 drawing and identical, it would be
+            # misleading to say "every object" draws alike when one drew nothing.
             where = f"plate {plate_number}: " if plate_number is not None else ""
             warnings.append(
-                f"{where}every object draws the same geometry in the same place; the"
-                f" template declares echo(objects = {objects}), but does it read $object?"
+                f"{where}the {len(alike)} objects that drew something all drew the same"
+                f" geometry in the same place; the template declares"
+                f" echo(objects = {objects}), but does it read $object?"
             )
         drawn.append(
             (plate_parts, [colours.index(part.colour) + 1 for part in plate_parts], plate_objects)

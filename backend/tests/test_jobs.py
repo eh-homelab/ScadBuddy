@@ -1569,8 +1569,8 @@ async def test_objects_that_all_draw_the_same_are_warned_about(tmp_path: Path) -
     )
 
     assert layout.warnings == [
-        "every object draws the same geometry in the same place; the template declares"
-        " echo(objects = 2), but does it read $object?"
+        "the 2 objects that drew something all drew the same geometry in the same"
+        " place; the template declares echo(objects = 2), but does it read $object?"
     ]
 
 
@@ -1583,6 +1583,31 @@ async def test_objects_of_one_box_but_other_shapes_are_not_warned_about(tmp_path
     )
 
     assert layout.warnings == []
+
+
+async def test_two_of_three_objects_drawing_alike_names_the_two_not_all_three(
+    tmp_path: Path,
+) -> None:
+    """#4417 review: on a plate where only 2 of 3 declared objects drew anything, the
+    warning must count those 2, not claim every declared object draws alike. The third
+    object draws on the other plate, so it is not an undrawn object either."""
+    every = [TRAY, LID]
+    layout, _, _ = await _object_layout(
+        tmp_path,
+        {
+            (None, None): every,
+            (1, 1): every,
+            (1, 2): every,
+            (2, 3): [TRAY],
+        },
+        plates=2,
+        objects=3,
+    )
+
+    assert layout.warnings == [
+        "plate 1: the 2 objects that drew something all drew the same geometry in the"
+        " same place; the template declares echo(objects = 3), but does it read $object?"
+    ]
 
 
 async def test_too_many_objects_fails_the_job(tmp_path: Path) -> None:
