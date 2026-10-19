@@ -34,10 +34,11 @@ from scadbuddy.library.settings_store import (
     SettingsStore,
     StoredSettings,
     StoreNotReadyError,
+    _solid_concurrency,
     load_render_store_settings,
 )
 from scadbuddy.render.pg_store import MIGRATIONS
-from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 #: Threads per race, and how many times a race is run.
 WRITERS = 8
@@ -914,3 +915,18 @@ def test_a_negative_store_cap_is_refused_naming_its_field(name: str) -> None:
     with pytest.raises(ValueError, match=f"SCADBUDDY_{name.upper()} must be at least 0"):
         SettingsPatch.model_validate({name: -1})
     assert getattr(SettingsPatch.model_validate({name: 0}), name) == 0
+
+
+def test_a_missing_or_refused_solid_concurrency_is_the_environments(tmp_path: Path) -> None:
+    """#4203: the worker's fallback holds for a key the read did not return, as for one
+    the bounds refuse."""
+    defaults = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        solid_concurrency=4,
+    )
+    assert _solid_concurrency({}, defaults) == 4
+    assert _solid_concurrency({"solid_concurrency": -1}, defaults) == 4
+    assert _solid_concurrency({"solid_concurrency": None}, defaults) == 4
+    assert _solid_concurrency({"solid_concurrency": 2}, defaults) == 2
