@@ -221,8 +221,8 @@ importers:
         specifier: 1.24.0
         version: 1.24.0
       cron-parser:
-        specifier: 5.10.1
-        version: 5.10.1
+        specifier: 5.10.2
+        version: 5.10.2
       hono:
         specifier: ^4.13.13
         version: 4.13.13
@@ -1459,8 +1459,8 @@ packages:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
     engines: {node: '>= 0.10'}
 
-  cron-parser@5.10.1:
-    resolution: {integrity: sha512-pKRrRagItwk9rGIStcUyMxFX34x56zoX3KDf9HJ4ttwkXIK1qxK63EvXvEDmlxI9AdPJ+Y7TEKRftRlW5eSS7A==}
+  cron-parser@5.10.2:
+    resolution: {integrity: sha512-JfAYMY0LZaWQTuict8PhtF/ksSnq8xefSDmQUnnoqvkPYkU/y3UP0DTWzJKFBz0P1IXsDG8q0vY3zHkoFZOhvw==}
     engines: {node: '>=18'}
 
   cross-spawn@7.0.6:
@@ -3927,7 +3927,7 @@ snapshots:
       object-assign: 4.1.1
       vary: 1.1.2
 
-  cron-parser@5.10.1:
+  cron-parser@5.10.2:
     dependencies:
       luxon: 3.7.2
 
