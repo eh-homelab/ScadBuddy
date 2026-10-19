@@ -189,16 +189,22 @@ async def test_another_failure_is_no_deferral_and_says_what_it_was(
             cause=cast(WorkflowTaskFailedCause.ValueType, 999),
         ),
     )
+    empty = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(failure=Failure()),
+    )
     caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
-    for event in (timed_out, newer):
+    for event in (timed_out, newer, empty):
         client = SimpleNamespace(namespace="default", workflow_service=_Pages([event]))
         assert not await deferred_kind(cast(Client, client), "op-x")
     messages = [record.getMessage() for record in caplog.records]
     assert messages == [
-        "command op-x: its newest workflow task failure is timeout_failure_info '', cause"
+        "command op-x: its newest workflow task failure is timeout_failure_info, cause"
         " WORKFLOW_TASK_FAILED_CAUSE_RESET_STICKY_TASK_QUEUE, not a deferral",
         "command op-x: its newest workflow task failure is application_failure_info"
         " 'Other', cause 999, not a deferral",
+        "command op-x: its newest workflow task failure is a failure with no info, cause"
+        " WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
     ]
 
 
