@@ -204,9 +204,14 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
       taskQueue,
       activities: {
         slow: async () => (await sleep(4_000), 'done'),
-        // Cut short once the control has failed, so stop() does not wait out its sleep:
-        // without beats the worker is never told of the timeout.
-        [SESSION_TURN_ACTIVITY]: () => sleep(60_000, 'done', { signal: release.signal }).catch(() => 'released'),
+        // 6 s outlives the 2 s timeout three times over, so a regression that stops enforcing
+        // it fails soon. Cut short once the control has failed, so stop() does not wait out
+        // its sleep: without beats the worker is never told of the timeout.
+        [SESSION_TURN_ACTIVITY]: () =>
+          sleep(6_000, 'done', { signal: release.signal }).catch((error: unknown) => {
+            if (error instanceof Error && error.name === 'AbortError') return 'released'
+            throw error
+          }),
       },
       activityHeartbeatMs: 200,
     })
