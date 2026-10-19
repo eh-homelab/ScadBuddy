@@ -29,7 +29,7 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { fixedCredentials } from '../test/support/fixedCredentials.js'
 import { ensureTemplate, TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from '../test/support/postgres.js'
-import { durableHealthPort } from '../test/support/durableHealth.js'
+import { durableHealthPort, notStarted } from '../test/support/durableHealth.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/temporal.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
 import { collectRenders, type CollectOptions, type ScenarioBackend } from './render.js'
@@ -447,7 +447,7 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
     }
     if (Date.now() > deadline) {
       await stopProcess(worker)
-      throw new Error(`the durable worker did not start: ${log}`)
+      throw notStarted('the durable worker', port, log)
     }
     await new Promise((r) => setTimeout(r, 500))
   }

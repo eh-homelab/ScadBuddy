@@ -57,19 +57,26 @@ type fake struct {
 	nextID         int
 	lastKey        string
 	lastBody       map[string]any
+	// checking answers that many of a write kind's requests with ScadBuddy's 503
+	// still-checking problem (#4141), recording each key; mayHaveStarted answers them
+	// with a 503 that says only `may_have_started`.
+	checking       map[string]int
+	mayHaveStarted bool
+	checkedKeys    []string
 }
 
 func newFake(t *testing.T) *fake {
 	f := &fake{
-		t:       t,
-		folders: map[int]*fakeFolder{},
-		files:   map[int]*fakeFile{},
-		queued:  map[int]bool{},
-		skip:    map[int]string{},
-		slow:    map[string]bool{},
-		keep:    map[int]bool{},
-		ops:     map[string]*fakeOp{},
-		nextID:  100,
+		t:        t,
+		folders:  map[int]*fakeFolder{},
+		files:    map[int]*fakeFile{},
+		queued:   map[int]bool{},
+		skip:     map[int]string{},
+		slow:     map[string]bool{},
+		keep:     map[int]bool{},
+		ops:      map[string]*fakeOp{},
+		checking: map[string]int{},
+		nextID:   100,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/print/library", f.list)
@@ -134,6 +141,20 @@ func (f *fake) write(kind string, handle func(*http.Request) (int, any)) http.Ha
 			return
 		}
 		f.lastKey = key
+		if f.checking[kind] > 0 {
+			f.checking[kind]--
+			f.checkedKeys = append(f.checkedKeys, key)
+			// As the route does, the request is read before it is answered.
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Retry-After", "0")
+			body := map[string]any{"type": "https://scadbuddy.dev/problems/command-still-accepting", "status": 503,
+				"detail": "ScadBuddy is still checking this request. Send it again to follow it."}
+			if f.mayHaveStarted {
+				body = map[string]any{"type": "https://scadbuddy.dev/problems/temporal-unavailable", "status": 503, "detail": "Temporal is down", "may_have_started": true}
+			}
+			writeJSON(w, http.StatusServiceUnavailable, body)
+			return
+		}
 		status, body := handle(r)
 		if !f.slow[kind] {
 			writeJSON(w, status, body)

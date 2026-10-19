@@ -11,6 +11,7 @@ that owns the route's behaviour.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import time
@@ -352,6 +353,91 @@ def test_a_resolver_error_is_a_422_before_anything_is_sliced(
     assert response.status_code == 422
     assert "different sizes" in response.json()["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_the_check_reads_every_spools_presets_together(client: TestClient, model: str) -> None:
+    """#4196: spool 5's presets answer only once spool 9's read has started, so a check
+    that read them one after the other would time out here."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    asked = asyncio.Event()
+
+    async def presets(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/spools/9/filament-presets"):
+            asked.set()
+        else:
+            await asyncio.wait_for(asked.wait(), timeout=1)
+        return httpx.Response(200, json=[])
+
+    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
+        side_effect=presets
+    )
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+
+
+@respx.mock
+def test_the_spools_read_together_are_capped(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4198 review: a body's plan is not capped, so no more than
+    ``SPOOL_PRESET_READS`` spools' presets are read at once."""
+    monkeypatch.setattr(print_run, "SPOOL_PRESET_READS", 1)
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    open_reads = 0
+    most = 0
+
+    async def presets(request: httpx.Request) -> httpx.Response:
+        nonlocal open_reads, most
+        open_reads += 1
+        most = max(most, open_reads)
+        await asyncio.sleep(0.05)
+        open_reads -= 1
+        return httpx.Response(200, json=[])
+
+    route = respx.route(
+        method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets"
+    ).mock(side_effect=presets)
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert route.call_count == 2  # spools 5 and 9, once each
+    assert most == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(("first", "second"), [(404, 403), (403, 404)])
+def test_the_spools_read_together_fail_as_the_serial_reads_did(
+    client: TestClient, model: str, first: int, second: int
+) -> None:
+    """#4196 review: with both spools' presets failing, the check answers with spool 5's
+    failure, the first the serial reads made, whichever way round the two fail."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    failing = {5: first, 9: second}
+
+    def presets(request: httpx.Request) -> httpx.Response:
+        spool_id = int(request.url.path.split("/")[-2])
+        return httpx.Response(failing.get(spool_id, 200), json=[])
+
+    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
+        side_effect=presets
+    )
+
+    both = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    failing.pop(9)
+    spool_5_alone = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert spool_5_alone.status_code >= 400, spool_5_alone.text
+    assert (both.status_code, both.json()) == (spool_5_alone.status_code, spool_5_alone.json())
 
 
 @respx.mock

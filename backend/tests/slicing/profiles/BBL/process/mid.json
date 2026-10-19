@@ -1,0 +1,8 @@
+{
+    "type": "process",
+    "name": "mid",
+    "inherits": "fdm_process_root",
+    "from": "system",
+    "instantiation": "false",
+    "wall_loops": "3"
+}

@@ -31,7 +31,7 @@ import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
-import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
+import { loadPackagesForRun, PackageInstaller, warmPackages } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
@@ -87,6 +87,7 @@ import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
+import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -298,6 +299,22 @@ const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
 // Each session turn loads the enabled ones (`packagePlugins` below).
 const pluginPackages = database ? new PackageStore(database.sql) : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+// The cache is this pod's scratch, empty after every deploy: filled at start, so a
+// turn does not wait on a whole repository's fetch (#4217).
+if (database && pluginPackages) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (!ok) {
+        console.warn('plugin package warm-up skipped: the database is not ready; the first turn fetches instead')
+        return
+      }
+      for (const problem of await warmPackages(pluginPackages, packageInstaller)) {
+        console.warn('plugin package warm-up:', problem)
+      }
+    })
+    .catch((err: unknown) => console.error('plugin package warm-up failed:', (err as Error).message))
+}
 
 // One store for Settings (routes/mcpTokens.ts) and /mcp. Mint and revoke are
 // recorded in the audit log (#258), whichever of the two makes them.
@@ -511,6 +528,17 @@ if (database) {
     void sweepTurnDirs(sweepRoot, database.sql).catch((err: unknown) =>
       console.error('durable http body sweep failed:', (err as Error).message),
     )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
+// The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
+// start. Every hour, once the database is ready.
+if (database) {
+  const sweep = () =>
+    void database
+      .ready()
+      .then((ok) => (ok ? sweepOrphanedSessionKeys(database.sql) : 0))
+      .catch((err: unknown) => console.error('orphaned payload key sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()
 }
@@ -784,6 +812,7 @@ if (sessions && temporalClient && payloadKeys && database) {
     client: temporalClient,
     sql: database.sql,
     events: sessions.events,
+    audit,
     // This replica's host for AgentSession turns, which a unified session's readiness checks (§5.2).
     ...(hostWorkers?.sessions ? { sessionHostQueue: SESSION_HOST_QUEUE } : {}),
   })

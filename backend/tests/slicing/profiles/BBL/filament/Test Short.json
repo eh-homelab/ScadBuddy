@@ -1,0 +1,19 @@
+{
+    "type": "filament",
+    "name": "Test Short",
+    "inherits": "fdm_filament_root",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GF_SHORT",
+    "filament_diameter": [
+        "1.75",
+        "1.75"
+    ],
+    "nozzle_temperature_range_low": [
+        "260"
+    ],
+    "filament_type": [
+        "PLA",
+        "PLA"
+    ]
+}

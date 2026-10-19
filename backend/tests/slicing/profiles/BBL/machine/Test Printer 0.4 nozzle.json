@@ -1,0 +1,9 @@
+{
+    "type": "machine",
+    "name": "Test Printer 0.4 nozzle",
+    "inherits": "fdm_machine_root",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GM_TEST",
+    "printer_model": "Test Printer"
+}

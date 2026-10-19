@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"syscall"
 	"testing"
@@ -212,6 +214,16 @@ func TestUpdatesSendOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
+func TestAnInterruptedCallIsEINTR(t *testing.T) {
+	if got := Errno(fmt.Errorf("list: %w", context.Canceled)); got != syscall.EINTR {
+		t.Fatalf("a cancelled call: %v, want EINTR", got)
+	}
+	// A deadline is a timeout, not an interrupt: it fails as before.
+	if got := Errno(fmt.Errorf("list: %w", context.DeadlineExceeded)); got != syscall.EIO {
+		t.Fatalf("a call past its deadline: %v, want EIO", got)
+	}
+}
+
 func TestErrnoMapping(t *testing.T) {
 	cases := map[int]syscall.Errno{404: syscall.ENOENT, 409: syscall.EBUSY, 413: syscall.EFBIG, 401: syscall.EACCES, 403: syscall.EACCES, 500: syscall.EIO, 502: syscall.EIO}
 	for status, want := range cases {
@@ -237,6 +249,14 @@ func TestErrnoMapping(t *testing.T) {
 	invalid := errorFrom("list", 422, []byte(`{"detail":[{"msg":"bad"}]}`))
 	if invalid.Detail != `[{"msg":"bad"}]` {
 		t.Errorf("invalid: %+v", invalid)
+	}
+	// A refusal ScadBuddy relays (#4142): Bambuddy's own status, at the top or in a failed operation's extensions.
+	relayed := errorFrom("upload", 502, []byte(`{"status":502,"detail":"Bambuddy answered 400 when asked to upload a:b","bambuddy_status":400}`))
+	// A failed operation's `error`, as GET /operations/{id} carries it.
+	inOperation := errorFrom("upload", 502, []byte(`{"type":"https://scadbuddy.dev/problems/bambuddy-unavailable","title":"Bad Gateway","status":502,"detail":"Bambuddy answered 400","extensions":{"bambuddy_status":400}}`))
+	own := errorFrom("upload", 502, []byte(`{"status":502,"detail":"Bambuddy could not be reached"}`))
+	if relayed.Upstream != 400 || inOperation.Upstream != 400 || own.Upstream != 0 || relayed.Status != 502 {
+		t.Errorf("upstream: %+v %+v %+v", relayed, inOperation, own)
 	}
 }
 
@@ -289,5 +309,77 @@ func TestEveryWriteSendsItsOwnKey(t *testing.T) {
 	}
 	if len(first) != 32 || f.lastKey == first {
 		t.Fatalf("keys %q then %q", first, f.lastKey)
+	}
+}
+
+// ScadBuddy's still-checking 503 (#4141) is followed by sending the same request under the
+// same key again, for every write: the delete of a replaced file and an upload included.
+func TestAStillCheckingAnswerIsFollowedForEveryWrite(t *testing.T) {
+	for _, c := range []struct {
+		kind string
+		run  func(*Client) error
+	}{
+		{"upload", func(c *Client) error {
+			_, err := c.Upload(context.Background(), 0, "a.3mf", "", bytes.NewReader(bytes.Repeat([]byte("ab"), 1<<16)))
+			return err
+		}},
+		{"delete", func(c *Client) error { return c.DeleteFiles(context.Background(), 10) }},
+		{"update_file", func(c *Client) error {
+			name := "b.3mf"
+			_, err := c.UpdateFile(context.Background(), 10, &name, nil)
+			return err
+		}},
+		{"mkdir", func(c *Client) error { _, err := c.Mkdir(context.Background(), 0, "New"); return err }},
+		{"update_folder", func(c *Client) error {
+			name := "Moved"
+			_, err := c.UpdateFolder(context.Background(), 4, &name, nil)
+			return err
+		}},
+		{"delete_folder", func(c *Client) error { return c.DeleteFolder(context.Background(), 4) }},
+	} {
+		for _, mayHaveStarted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s may_have_started=%v", c.kind, mayHaveStarted), func(t *testing.T) {
+				f := newFake(t)
+				f.folder(4, "Top", 0)
+				f.file(10, "a.3mf", 0, []byte("x"), false)
+				f.checking[c.kind] = 1
+				f.mayHaveStarted = mayHaveStarted
+				if err := c.run(f.client(t)); err != nil {
+					t.Fatal(err)
+				}
+				if len(f.checkedKeys) != 1 || f.lastKey != f.checkedKeys[0] {
+					t.Fatalf("keys: checked %v, then %q", f.checkedKeys, f.lastKey)
+				}
+				if c.kind == "upload" {
+					uploaded := false
+					for _, fl := range f.files {
+						uploaded = uploaded || (fl.name == "a.3mf" && len(fl.data) == 2<<16)
+					}
+					if !uploaded {
+						t.Fatal("the upload sent again did not carry the whole file")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestAStillCheckingAnswerIsFollowedOnlyWithinTheContext(t *testing.T) {
+	f := newFake(t)
+	f.checking["mkdir"] = 1 << 20
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := f.client(t).Mkdir(ctx, 0, "New"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want the deadline", err)
+	}
+	// An upload whose reader cannot be read again is answered with the 503, not sent again.
+	// Under the fake's lock: the mkdir the deadline cut may still be in its handler.
+	f.mu.Lock()
+	f.checking["upload"] = 1
+	f.mu.Unlock()
+	_, err := f.client(t).Upload(context.Background(), 0, "a.3mf", "", struct{ io.Reader }{strings.NewReader("abc")})
+	var e *Error
+	if !errors.As(err, &e) || e.Status != 503 {
+		t.Fatalf("err %v, want the 503", err)
 	}
 }

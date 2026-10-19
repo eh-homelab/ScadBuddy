@@ -79,6 +79,22 @@ export async function forkHistory(events: Pick<EventLog, 'read'>, id: string, up
 }
 
 /**
+ * The history through the last event of the calls `ids` (#4173): a child that resumes
+ * at its parent's paused calls, with their results, has the conversation up to them. What
+ * the parent streamed after them never committed, so the child's agent never had it.
+ */
+export function historyThroughCalls(history: readonly ServerEvent[], ids: readonly string[]): ServerEvent[] {
+  const calls = new Set(ids)
+  let end = history.length - 1
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i]!
+    if ((e.type === 'tool.call' || e.type === 'tool.result') && calls.has(e.id)) break
+    end = i - 1
+  }
+  return end < 0 ? [...history] : history.slice(0, end + 1)
+}
+
+/**
  * The blobs (blobs.ts) the events name: a tool result's images, and the images a user sent
  * with a turn and their previews (#2479). What a fork copies into the child (#2150), and nothing else.
  */
@@ -158,6 +174,24 @@ export function durableReplies(entries: readonly SessionStoreEntry[], events: re
  * which names whatever entry its runner committed last. Undefined when no main-chain
  * entry has it.
  */
+/**
+ * The tool calls a main-transcript prefix asks for and never answers: a call the engine paused
+ * on (#4173), whose result its workflow holds for the next segment. A fork resumed at such a
+ * prefix re-announces the call with no result to give it, and its first turn fails.
+ */
+export function unansweredCalls(entries: readonly SessionStoreEntry[]): string[] {
+  const asked: string[] = []
+  const answered = new Set<string>()
+  for (const e of entries) {
+    if (e.isSidechain === true) continue
+    for (const block of blocksOf(e) as { type?: unknown; id?: unknown; tool_use_id?: unknown }[]) {
+      if (e.type === 'assistant' && block.type === 'tool_use' && typeof block.id === 'string') asked.push(block.id)
+      if (e.type === 'user' && block.type === 'tool_result' && typeof block.tool_use_id === 'string') answered.add(block.tool_use_id)
+    }
+  }
+  return asked.filter((id) => !answered.has(id))
+}
+
 export function entriesThrough(entries: readonly SessionStoreEntry[], uuid: string): SessionStoreEntry[] | undefined {
   const at = entries.findIndex((e) => e.uuid === uuid && e.isSidechain !== true)
   return at < 0 ? undefined : entries.slice(0, at + 1)

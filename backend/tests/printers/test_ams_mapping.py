@@ -77,6 +77,12 @@ def test_a_slot_outside_the_plate_is_refused(slot_id: int) -> None:
         ams_mapping(_plan((slot_id, 0, 0)), 2, dual_nozzle=False, printer_has_ams=True)
 
 
+@pytest.mark.parametrize("count", [0, -1])
+def test_a_project_with_no_filament_slot_is_refused(count: int) -> None:
+    with pytest.raises(ValueError, match=f"not {count}"):
+        ams_mapping(_plan(), count, dual_nozzle=False, printer_has_ams=True)
+
+
 def test_a_slot_chosen_twice_is_refused() -> None:
     with pytest.raises(ValueError, match="slot 1"):
         ams_mapping(_plan((1, 0, 0), (1, 0, 1)), 1, dual_nozzle=False, printer_has_ams=True)

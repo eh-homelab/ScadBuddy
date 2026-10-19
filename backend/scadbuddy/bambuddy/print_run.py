@@ -84,6 +84,7 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
     Spool,
+    SpoolFilamentPreset,
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
@@ -164,6 +165,9 @@ RACK_USAGE_FALLBACK = "rack usage unreadable; ranked without it"
 RACK_FALLBACKS = frozenset({RACK_PICK_FALLBACK, RACK_PREVIEW_FALLBACK, RACK_USAGE_FALLBACK})
 
 QUEUE_PATH = "/queue"
+
+#: The most spools whose presets one check or run reads at once (#4196).
+SPOOL_PRESET_READS = 4
 
 
 class PrintRunRequest(BaseModel):
@@ -689,11 +693,27 @@ async def resolve_plates(
     are not read: Bambuddy would answer for a spool it does not have with an error."""
     inventory = {spool.spool_id for options in per_plate for spool in options.spools}
     # Read once for every plate: the plan's spools are the same on every plate.
-    spool_presets = {
-        spool_id: await client.spool_filament_presets(spool_id)
-        # A tray chosen for itself (#2164) has no spool, so no presets of its own.
+    # A tray chosen for itself (#2164) has no spool, so no presets of its own.
+    spool_ids = [
+        spool_id
         for spool_id in sorted({slot.spool_id for slot in plan.slots} & inventory)
         if spool_id > 0
+    ]
+    # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
+    # A body's plan is not capped, only matched to the inventory, so this call caps one
+    # plan's fan-out at SPOOL_PRESET_READS reads at a time. Not a bound on Bambuddy's
+    # load, which every API replica and the print worker share (#4213).
+    gate = asyncio.Semaphore(SPOOL_PRESET_READS)
+
+    async def presets(spool_id: int) -> list[SpoolFilamentPreset]:
+        async with gate:
+            return await client.spool_filament_presets(spool_id)
+
+    read = await asyncio.gather(
+        *(presets(spool_id) for spool_id in spool_ids), return_exceptions=True
+    )
+    spool_presets = {
+        spool_id: settled(result) for spool_id, result in zip(spool_ids, read, strict=True)
     }
     every: list[Resolved] = []
     errors: list[str] = []

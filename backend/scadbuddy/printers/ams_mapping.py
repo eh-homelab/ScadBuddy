@@ -103,9 +103,15 @@ def ams_mapping(
     unmapped. ``printer_has_ams`` is whether the printer's report has any AMS unit:
     without one, ``use_ams`` is false whatever is mapped (``SelectMachine.cpp:3358-3373``,
     the ``else`` at ``:3371-3373``; Bambuddy: "P1S/P1P with no AMS rejects use_ams=True",
-    ``bambu_mqtt.py:6056-6058``), and an AMS tray in the plan is refused. A positive
-    (inventory) spool id raises ``ValueError``: a native plan is trays only."""
+    ``bambu_mqtt.py:6056-6058``), and an AMS tray in the plan is refused. Otherwise
+    ``use_ams`` follows the printer unless the plan maps external spools and no AMS
+    tray, so a plan that maps nothing on an AMS printer has it true (the vector "an
+    AMS printer, nothing mapped", #4204). A positive (inventory) spool id raises
+    ``ValueError``: a native plan is trays only, and so does a ``project_filament_count``
+    below 1, since every project has a filament slot."""
     count = project_filament_count
+    if count < 1:
+        raise ValueError(f"a project has at least one filament slot, not {count}")
     flat = [-1] * count
     detail = [AmsSlot(ams_id=UNMAPPED, slot_id=UNMAPPED) for _ in range(count)]
     seen: set[int] = set()

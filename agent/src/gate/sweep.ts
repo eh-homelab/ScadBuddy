@@ -104,61 +104,77 @@ export class PendingInputSweep {
   }
 
   async #cancelRun(workflowId: string, runId: string): Promise<number> {
-    const { sql } = this.#deps
-    const ids = await sql<{ request_id: string }[]>`
-      SELECT request_id FROM ai_pending_input WHERE workflow_id = ${workflowId} AND workflow_run_id = ${runId}`
-    let removed = 0
-    for (const { request_id } of ids) {
-      const done = await sql.begin(async (tx) => {
-        const [row] = await tx<Row[]>`
-          DELETE FROM ai_pending_input WHERE request_id = ${request_id}
-          RETURNING request_id, session_id, kind, tool, summary, input_hash, requested_by, created_at`
-        if (!row) return undefined
-        await tx`
-          INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason)
-          VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON})`
-        const events: ServerEvent[] = [
-          row.kind === 'approval'
-            ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: ORPHAN_REASON })
-            : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason: ORPHAN_REASON }),
-          inputResolved(row.session_id, row.request_id, row.kind, 'cancelled', ORPHAN_REASON),
-        ]
-        const [idle] = await tx`
-          UPDATE ai_sessions SET status = 'idle', updated_at = now()
-          WHERE id = ${row.session_id} AND status IN ('waiting_approval', 'waiting_input')
-            AND NOT EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${row.session_id})
-          RETURNING id`
-        if (idle) events.push(event({ type: 'session.status', sessionId: row.session_id, status: 'idle' }))
-        const seqs = await this.#deps.events.append(row.session_id, events, tx)
-        return { row, events, seqs }
-      })
-      if (!done) continue
-      removed += 1
-      this.#deps.events.committed(done.row.session_id, done.events, done.seqs)
-      if (done.row.kind === 'approval') await this.#audit(done.row)
-    }
-    return removed
+    return cancelOrphanedEntries(this.#deps, { workflowId, runId })
   }
+}
 
-  async #audit(row: Row): Promise<void> {
-    const parsed = parseRequestId(row.request_id)
-    await this.#deps.audit?.record({
-      kind: 'approval',
-      action: 'cancelled',
-      surface: 'system',
-      actor: SYSTEM_ACTOR,
-      sessionId: row.session_id,
-      toolUseId: parsed?.store === 'durable' ? parsed.toolUseId : null,
-      tier: 'outward',
-      inputHash: row.input_hash ?? undefined,
-      inputSummary: row.summary,
-      requestId: row.request_id,
-      outcome: 'refused',
-      detail: `${row.tool}: ${ORPHAN_REASON} (requested by ${row.requested_by?.label ?? '?'})`,
-      startedAt: row.created_at,
-      finishedAt: new Date(),
+/**
+ * Resolves `cancelled` the entries no workflow run will resolve: one ended run's (the sweep), or
+ * every entry of a session whose workflow is gone (a Stop, #4018). The same guarded DELETE …
+ * RETURNING resolve_input uses, so an entry the workflow resolved first is not written twice; the
+ * session goes `idle` once it holds none. Returns the entries it resolved.
+ */
+export async function cancelOrphanedEntries(
+  deps: Pick<SweepDeps, 'sql' | 'events' | 'audit'>,
+  of: { workflowId: string; runId: string } | { sessionId: string },
+): Promise<number> {
+  const { sql } = deps
+  const ids =
+    'sessionId' in of
+      ? await sql<{ request_id: string }[]>`SELECT request_id FROM ai_pending_input WHERE session_id = ${of.sessionId}`
+      : await sql<{ request_id: string }[]>`
+          SELECT request_id FROM ai_pending_input WHERE workflow_id = ${of.workflowId} AND workflow_run_id = ${of.runId}`
+  let removed = 0
+  for (const { request_id } of ids) {
+    const done = await sql.begin(async (tx) => {
+      const [row] = await tx<Row[]>`
+        DELETE FROM ai_pending_input WHERE request_id = ${request_id}
+        RETURNING request_id, session_id, kind, tool, summary, input_hash, requested_by, created_at`
+      if (!row) return undefined
+      await tx`
+        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason)
+        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON})`
+      const events: ServerEvent[] = [
+        row.kind === 'approval'
+          ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: ORPHAN_REASON })
+          : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason: ORPHAN_REASON }),
+        inputResolved(row.session_id, row.request_id, row.kind, 'cancelled', ORPHAN_REASON),
+      ]
+      const [idle] = await tx`
+        UPDATE ai_sessions SET status = 'idle', updated_at = now()
+        WHERE id = ${row.session_id} AND status IN ('waiting_approval', 'waiting_input')
+          AND NOT EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${row.session_id})
+        RETURNING id`
+      if (idle) events.push(event({ type: 'session.status', sessionId: row.session_id, status: 'idle' }))
+      const seqs = await deps.events.append(row.session_id, events, tx)
+      return { row, events, seqs }
     })
+    if (!done) continue
+    removed += 1
+    deps.events.committed(done.row.session_id, done.events, done.seqs)
+    if (done.row.kind === 'approval') await auditCancelled(deps.audit, done.row)
   }
+  return removed
+}
+
+async function auditCancelled(audit: AuditSink | undefined, row: Row): Promise<void> {
+  const parsed = parseRequestId(row.request_id)
+  await audit?.record({
+    kind: 'approval',
+    action: 'cancelled',
+    surface: 'system',
+    actor: SYSTEM_ACTOR,
+    sessionId: row.session_id,
+    toolUseId: parsed?.store === 'durable' ? parsed.toolUseId : null,
+    tier: 'outward',
+    inputHash: row.input_hash ?? undefined,
+    inputSummary: row.summary,
+    requestId: row.request_id,
+    outcome: 'refused',
+    detail: `${row.tool}: ${ORPHAN_REASON} (requested by ${row.requested_by?.label ?? '?'})`,
+    startedAt: row.created_at,
+    finishedAt: new Date(),
+  })
 }
 
 /** DescribeRun over a Temporal client: closed unless the run's status is RUNNING. */

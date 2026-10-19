@@ -34,7 +34,9 @@ type fakeLibrary struct {
 	// succeed; while down is set every upload fails so.
 	failUploads int
 	failStatus  int
-	down        bool
+	// failUpstream is the Bambuddy status a failing upload's 502 relays, as ScadBuddy's does (#4142).
+	failUpstream int
+	down         bool
 	// listDown makes every List fail with a 503, as ScadBuddy does during a deploy.
 	listDown bool
 	// failUpdates is how many UpdateFile calls fail, with a 502; updating, if set, is
@@ -173,10 +175,11 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name, key string, 
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
-		return api.File{}, &api.Error{Op: "upload", Status: status}
+		return api.File{}, &api.Error{Op: "upload", Status: status, Upstream: l.failUpstream}
 	}
 	if folderID != 0 && !slices.ContainsFunc(l.folders, func(f api.Folder) bool { return f.ID == folderID }) {
-		return api.File{}, &api.Error{Op: "upload", Status: http.StatusNotFound, Detail: "folder not found"}
+		// As ScadBuddy relays it: Bambuddy's 404 named beside its own.
+		return api.File{}, &api.Error{Op: "upload", Status: http.StatusNotFound, Detail: "folder not found", Upstream: http.StatusNotFound}
 	}
 	l.uploads++
 	l.nextID++

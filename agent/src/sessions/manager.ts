@@ -58,7 +58,7 @@ import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
+import { blobNames, durableReplies, entriesThrough, forkHistory, historyThroughCalls, transcriptCut, unansweredCalls } from './forkPoint.js'
 import { scrubForLog, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { userPrompt, type UserImage } from './images.js'
@@ -2339,7 +2339,12 @@ export class SessionManager {
   /**
    * Where a durable session forks (#2688): its workflow's committed conversation through
    * `upTo`'s reply, or all of it. A parent whose turn is running forks at its last
-   * finished reply, as the conversation past it is not committed yet.
+   * finished reply, as the conversation past it is not committed yet. One whose committed
+   * state ends at a paused call (#4173: a stopped turn's last segment never committed)
+   * forks there when its workflow holds the call's result: the child takes it with the
+   * checkpoint and delivers it first, and its history runs through the call. Without the
+   * result (a worker from before it was sent) it forks at its last finished reply before
+   * the call, with its history through that reply. A cut never leaves a call unanswered.
    */
   private async durableForkPoint(
     parent: SessionRecord,
@@ -2353,13 +2358,30 @@ export class SessionManager {
       throw new SessionError('no_transcript', `session ${id} has no conversation to fork yet; send it a turn first`)
     }
     const replies = durableReplies(source.entries, all)
-    const at = upTo ?? (source.busy ? [...replies.keys()].at(-1) : undefined)
-    if (upTo === undefined && source.busy && at === undefined) {
-      throw new SessionError('no_transcript', `session ${id} has no finished reply to fork yet; wait for its turn to answer`)
+    const through = (uuid: string | undefined) => (uuid === undefined ? undefined : entriesThrough(source.entries, uuid))
+    // At the checkpoint, a call whose result the workflow holds is answered: the child delivers it.
+    const answered = (uuid: string | undefined, owed: Record<string, unknown> = {}) => {
+      const prefix = through(uuid)
+      return prefix && unansweredCalls(prefix).every((call) => call in owed) ? prefix : undefined
     }
-    const cut = at === undefined ? source.checkpoint : replies.get(at)
-    const entries = cut === undefined ? undefined : entriesThrough(source.entries, cut)
-    const history = at === undefined ? all : await forkHistory(this.events, id, at)
+    const paused = unansweredCalls(through(source.checkpoint) ?? [])
+    let at = upTo
+    if (at === undefined && (source.busy || !answered(source.checkpoint, source.owed.pending))) {
+      at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
+      if (at === undefined) {
+        throw new SessionError(
+          'no_transcript',
+          source.busy
+            ? `session ${id} has no finished reply to fork yet; wait for its turn to answer`
+            : `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`,
+        )
+      }
+    }
+    const entries = at === undefined ? answered(source.checkpoint, source.owed.pending) : answered(replies.get(at))
+    if (!entries && through(at === undefined ? source.checkpoint : replies.get(at))) {
+      throw new SessionError('invalid', `session ${id}'s conversation through reply ${at} leaves a call unanswered; fork from an earlier reply`)
+    }
+    const history = at === undefined ? historyThroughCalls(all, paused) : await forkHistory(this.events, id, at)
     if (!entries || !history) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
     }
