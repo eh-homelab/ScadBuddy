@@ -88,6 +88,15 @@ class OperationStore:
         (a claim's name, #1054)."""
         return await asyncio.to_thread(self._named_by_running, names)
 
+    def subjects_of(self, kind: str) -> list[str]:
+        """The subject of every operation of ``kind`` on record, oldest first (#4004).
+        Blocking, unlike the reads above."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT subject FROM operations WHERE kind = %s ORDER BY created_at", (kind,)
+            ).fetchall()
+        return [row["subject"] for row in rows]
+
     async def insert(
         self,
         op_id: str,

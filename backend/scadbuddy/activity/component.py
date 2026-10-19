@@ -9,10 +9,11 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.activity.kinds import KindRegistry, discover_kinds, load_agent_kinds
+from scadbuddy.activity.subject_labels import SubjectLabels
 from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.events import AgentOperationEvent, Event, EventBus
@@ -29,6 +30,8 @@ class ActivityComponent:
     #: The kinds, reloaded at most every ``KINDS_TTL`` seconds (the agent's are data).
     kinds: Callable[[], KindRegistry]
     bus: EventBus
+    #: The subjects' names `/activity/facets` found, kept a while (#4002).
+    subject_labels: SubjectLabels = field(default_factory=SubjectLabels)
 
 
 ACTIVITY: Key[ActivityComponent] = Key("activity")

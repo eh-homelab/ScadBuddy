@@ -17,7 +17,7 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store import migrate
 from scadbuddy.store.content import BlobMissingError, BlobScope, ContentBackend, ContentStore
-from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.index import COPIED_REFS_SQL, BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.migrate import SERVES_PROBES, UNPROVEN_MISS, MigrationBatch, migrate_batch
 from scadbuddy.store.s3 import S3ContentBackend
@@ -644,3 +644,15 @@ async def test_a_copy_recorded_only_beside_its_row_counts_as_recorded(
         assert not index.shares_backend_id("local", backend_id)
     finally:
         await target.aclose()
+
+
+def test_the_latest_copies_are_read_off_an_index_not_sorted(pool: Pool) -> None:
+    """#4117: `copied_refs` takes the latest copies; with only (backend, migrated_backend)
+    indexed, Postgres sorted every copied row to find them."""
+    with pool.connection() as conn, conn.transaction():
+        # A table this small is scanned whole; ask for the plan when it is not.
+        conn.execute("SET LOCAL enable_seqscan = off")
+        plan = conn.execute(f"EXPLAIN {COPIED_REFS_SQL}", ("local", "s3", 3)).fetchall()
+    lines = [next(iter(row.values())) for row in plan]
+    assert any("store_blobs_backend_migrated_touched" in line for line in lines), lines
+    assert not any("Sort" in line for line in lines), lines

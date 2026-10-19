@@ -304,7 +304,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
           >
             {shownSubjects.map((s) => (
               <ToggleGroupItem key={s.value} value={s.value} className={CHIP} title={s.value}>
-                {subjectLabel(s)}
+                {subjectLabel(s, facets?.subject_name_chars)}
                 <Count count={s.count} />
               </ToggleGroupItem>
             ))}
