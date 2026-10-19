@@ -238,7 +238,8 @@ const NO_ROWS: PrinterRow[] = []
 const NO_TOPICS: readonly string[] = []
 
 /**
- * #3222 — the sequence a template's `print_settings` sets, which no override prints with.
+ * #3222 — the sequence a template's `print_settings` sets: what Default prints with when
+ * this print sets none.
  * The backend accepts only these two spellings (`PrintSequence`, `library/catalogue.py`),
  * so any other value is unknown.
  */
