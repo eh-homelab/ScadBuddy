@@ -492,10 +492,10 @@ export async function* runWithFallback(
         probe(current.credential, model, base.signal)
           .then((answer) =>
             // An `unknown` answer, from any key (an OAuth key's probe never gives
-            // another), knows less than the reset the text named: that one stands. Any other answer replaces it, even
-            // an earlier one (a minute-level header reset under a weekly limit's text):
-            // the endpoint's own answer is the newer evidence, and a key let back too
-            // soon is only limited again.
+            // another), knows less than the reset the text named: that one stands.
+            // Any other answer replaces it, even an earlier one (a minute-level
+            // header reset under a weekly limit's text): the endpoint's own answer
+            // is the newer evidence, and a key let back too soon is only limited again.
             base.signal?.aborted || (answer.verdict === 'unknown' && named !== undefined)
               ? undefined
               : options.report(

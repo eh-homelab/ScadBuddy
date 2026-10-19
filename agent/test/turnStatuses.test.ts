@@ -13,7 +13,7 @@ it("sweeps exactly the statuses agent-durable's session holds a turn in", () => 
   expect([...TURN_STATUSES]).toEqual(doc.turn)
 })
 
-it('keeps the parked statuses a part of a turn\'s, on this side too', () => {
+it('keeps every parked status among the turn statuses', () => {
   expect(doc.waiting.length).toBeGreaterThan(0)
   expect(doc.waiting.filter((s) => !TURN_STATUSES.includes(s))).toEqual([])
 })

@@ -22,8 +22,9 @@ WORKFLOW = TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW
 ACTIVITY = TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY
 
 
-def _client(current: dict[int, str]) -> Client:
-    """A client whose queue reports ``current[type]`` as its current build, per type."""
+def _client(current: dict[int, str], deployment: str = "d") -> Client:
+    """A client whose queue reports ``current[type]`` as its current build of
+    ``deployment``, per type."""
 
     async def describe_task_queue(
         request: DescribeTaskQueueRequest, **kwargs: Any
@@ -31,7 +32,7 @@ def _client(current: dict[int, str]) -> Client:
         return DescribeTaskQueueResponse(
             versioning_info=TaskQueueVersioningInfo(
                 current_deployment_version=WorkerDeploymentVersion(
-                    deployment_name="d", build_id=current[request.task_queue_type]
+                    deployment_name=deployment, build_id=current[request.task_queue_type]
                 )
             )
         )
@@ -56,3 +57,9 @@ async def test_both_queue_types_must_route_to_the_build(
 ) -> None:
     client = _client({WORKFLOW: workflow_build, ACTIVITY: activity_build})
     assert await routes_to(client, "q", deployment_name="d", build_id="new") is routed
+
+
+async def test_the_build_of_another_deployment_is_not_routed() -> None:
+    """The same build id of another deployment is not this one's build."""
+    client = _client({WORKFLOW: "new", ACTIVITY: "new"}, deployment="other")
+    assert await routes_to(client, "q", deployment_name="d", build_id="new") is False
