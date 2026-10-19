@@ -7,6 +7,7 @@ import { diffFiles, hashTree, PackageContentError } from '../src/plugins/package
 import {
   loadPackagesForRun,
   marketplaceTarget,
+  warmPackages,
   BuiltInPluginError,
   PackageInstaller,
   PackageRefusedError,
@@ -546,6 +547,33 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(problems).toHaveLength(51)
     expect(problems[0]).toMatch(/MCP server "mem".*169\.254\.169\.254/)
     expect(problems.at(-1)).toMatch(/^and \d+ more$/)
+  })
+
+  it('warms a new replica`s cache with every enabled package, so its first turn fetches nothing (#4217)', async () => {
+    repos.greeter = gitRepo(GREETER)
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    const store = { enabledPins: () => Promise.resolve([pin]) }
+    // A replica just deployed: its cache is empty.
+    const fresh = () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
+      temps.push(root)
+      return new PackageInstaller({ fetcher, cacheRoot: root, resolve: resolver() })
+    }
+    const warmed = fresh()
+    const before = fetcher.checkouts.length
+    expect(await warmPackages(store, warmed)).toEqual([])
+    expect(fetcher.checkouts).toHaveLength(before + 1)
+    const run = await loadPackagesForRun(store, warmed)
+    expect(run.paths).toEqual([warmed.cacheDir(pin)])
+    expect(fetcher.checkouts).toHaveLength(before + 1)
+    run.release()
+
+    // A turn that loads while the warm-up is still fetching waits on that fetch.
+    const racing = fresh()
+    const [, during] = await Promise.all([warmPackages(store, racing), loadPackagesForRun(store, racing)])
+    expect(during.paths).toEqual([racing.cacheDir(pin)])
+    expect(fetcher.checkouts).toHaveLength(before + 2)
+    during.release()
   })
 
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {

@@ -31,7 +31,7 @@ import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
-import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
+import { loadPackagesForRun, PackageInstaller, warmPackages } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
@@ -299,6 +299,16 @@ const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
 // Each session turn loads the enabled ones (`packagePlugins` below).
 const pluginPackages = database ? new PackageStore(database.sql) : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+// The cache is this pod's scratch, empty after every deploy: filled at start, so a
+// turn does not wait on a whole repository's fetch (#4217).
+if (database && pluginPackages) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (ok) await warmPackages(pluginPackages, packageInstaller)
+    })
+    .catch((err: unknown) => console.error('plugin package warm-up failed:', (err as Error).message))
+}
 
 // One store for Settings (routes/mcpTokens.ts) and /mcp. Mint and revoke are
 // recorded in the audit log (#258), whichever of the two makes them.
