@@ -63,8 +63,8 @@ covers the same ground more briefly.
   `_agent_heartbeat`). An agent replica from before #4200 sends no beats, and
   `agent-tools` is unversioned, so while one still polls (during the API Deployment's
   rolling update, or after rolling the agent back past #4200) any attempt may land on
-  it. A `turn_tool_tier` whose three attempts all missed their beats is asked once more
-  with no heartbeat timeout (#4262), so it cannot fail the run's tier check for that;
+  it. A `turn_tool_tier` whose last attempt missed its beats is asked once more with
+  no heartbeat timeout (#4262), so it cannot fail the run's tier check for that;
   it only takes longer. A tier whose attempts are all lost (recorded as started but
   never delivered, or taken by a replica that died) now reaches the script after 450 s,
   about 7.5 min (3 × 30 s of missed beats, then up to 3 × 120 s), not 90 s. A flow's
