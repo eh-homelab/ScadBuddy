@@ -138,7 +138,8 @@ def printer_uuid(printer_id: str) -> uuid.UUID | None:
 
 
 def _row(data: dict[str, Any]) -> PrinterRow:
-    return PrinterRow.model_validate({**data, "id": str(data["id"])})
+    fields = {key: value for key, value in data.items() if key != "declined"}
+    return PrinterRow.model_validate({**fields, "id": str(data["id"])})
 
 
 class PrinterStore:
@@ -415,11 +416,17 @@ class PrinterStore:
         The known case (a row links this id and has nothing to adopt) is read without
         the lock, so a strip read waits on no writer."""
         with self.pool.connection() as conn:
-            linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
-            if linked is not None and self._adopts(linked, serial):
-                holder = self._one(conn, "serial", serial)
-                if holder is not None and holder.bambuddy_unlinked_id == bambuddy_printer_id:
-                    return linked  # the user unlinked the serial's row: nothing to adopt
+            # One read: the linking row, and whether the serial's row is one the user
+            # unlinked from this Bambuddy printer (then there is nothing to adopt).
+            data = conn.execute(
+                f"SELECT {_COLUMNS}, EXISTS (SELECT 1 FROM printers AS h WHERE h.serial = %s"
+                " AND h.bambuddy_unlinked_id = printers.bambuddy_printer_id) AS declined"
+                " FROM printers WHERE bambuddy_printer_id = %s",
+                (serial, bambuddy_printer_id),
+            ).fetchone()
+        linked = None if data is None else _row(data)
+        if linked is not None and (data is not None and data["declined"]):
+            return linked
         if linked is not None and not self._adopts(linked, serial):
             return linked
         merged: tuple[str, str] | None = None
