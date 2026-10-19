@@ -12,7 +12,11 @@ const base = '/api/v1'
 const operations = new Map<string, Operation>()
 let nextOperation = 0
 
-/** The 202 a start answers: the operation running, recorded as finished with `result`. */
+/**
+ * The 202 a start answers: the operation running, recorded as finished with `result`. Its
+ * id is `op` and 30 hex digits, one sequence shared by every feature: a test must not
+ * expect a feature's own prefix.
+ */
 export function acceptOperation(
   kind: Operation['kind'],
   subject: string,

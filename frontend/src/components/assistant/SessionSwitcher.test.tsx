@@ -1,4 +1,5 @@
 import { act, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionState } from '../../agent/chat/state'
 import { SessionSwitcher } from './SessionSwitcher'
@@ -17,7 +18,7 @@ function offered(untilMs: number): SessionState {
   }
 }
 
-function renderSwitcher(session: SessionState) {
+function renderSwitcher(session: SessionState, onDone: (id: string) => Promise<void> = () => Promise.resolve()) {
   const noop = () => Promise.resolve()
   render(
     <SessionSwitcher
@@ -25,7 +26,7 @@ function renderSwitcher(session: SessionState) {
       activeId={null}
       onOpen={() => {}}
       onRename={noop}
-      onDone={noop}
+      onDone={onDone}
       onArchive={noop}
       onCancelOffer={noop}
     />,
@@ -60,4 +61,15 @@ describe('a handoff offer lapsing (#1284)', () => {
     act(() => vi.advanceTimersByTime(5))
     expect(screen.queryByText('Offered to MCP token t1')).toBeNull()
   })
+})
+
+// #3983 — a Done the agent refuses from the row's menu says so on that row, as the
+// header's Done says so in the header.
+it('shows a refused Done from the menu on its row', async () => {
+  const user = userEvent.setup()
+  const session = { ...offered(Date.now() + 60_000), offer: undefined }
+  renderSwitcher(session, () => Promise.reject(new Error('This chat is still running.')))
+  await user.click(screen.getByRole('button', { name: 'Actions for Box' }))
+  await user.click(await screen.findByRole('menuitem', { name: 'Mark Box done' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('This chat is still running.')
 })
