@@ -33,6 +33,7 @@ from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import (
     INPUT_MAX,
+    READ_IMAGES,
     REDACTED,
     SessionEvents,
     append_from,
@@ -40,6 +41,7 @@ from scadbuddy_durable.session.events import (
     translate,
 )
 from scadbuddy_durable.session.models import FinishTurn, FollowArgs, FollowResult
+from scadbuddy_durable.session.runner import VIEW_IMAGES_TOOL, VIEW_TOOL_IMAGES_TOOL
 from scadbuddy_durable.worker import config_from_env
 
 SID = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
@@ -89,6 +91,9 @@ def test_a_segments_own_call_keeps_its_parent_and_takes_its_tools_tier() -> None
     assert call("mcp__scadbuddy__print_output")["risk"] == "outward"
     assert call("mcp__scadbuddy__unknown")["risk"] == "outward"
     assert [call(n)["risk"] for n in ("Skill", "Agent", "Task")] == ["read"] * 3
+    # The images tools read only what the session holds (#4185), under runner.py's names.
+    assert {VIEW_IMAGES_TOOL, VIEW_TOOL_IMAGES_TOOL} == READ_IMAGES
+    assert [call(n)["risk"] for n in sorted(READ_IMAGES)] == ["read"] * 2
     assert "parent" not in call("Skill", parent="")
 
 

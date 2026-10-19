@@ -153,6 +153,10 @@ def _check_wait(tool_input: dict[str, Any]) -> dict[str, Any]:
         )
         if len(set(options)) != len(options):
             raise MalformedAnswerInputError("each option must be different")
+    # Deliberately unlike a classic turn (#3236): `timeout_s` is honoured with
+    # `on_timeout: wait` too, since a workflow timer holds the wait; the agent's
+    # harness/attention.ts refuses that pair, because there the wait holds the turn's
+    # process and lease and parks to WAIT_CEILING_S whatever timeout_s says.
     timeout = tool_input.get("timeout_s", DEFAULT_TIMEOUT_S)
     if (
         isinstance(timeout, bool)

@@ -12,7 +12,8 @@ import type { NestedQueries, WebSearchInput } from './web.js'
 // them (`credentials`, runWithFallback, #3200); a classic turn's WebFetch on the turn's own
 // (`credential`). Claude Code makes these calls itself in a classic turn, on the same
 // credential, and counts them in the turn's cost; here each query's cost is added to the
-// session's (`spent`), which its budget reads.
+// session's (`spent`), which its budget reads, and none may spend more than the budget
+// has left (`remaining`, #3200).
 
 /** Claude Code's small fast model, which its WebFetch answers with. */
 export const SMALL_MODEL = 'haiku'
@@ -29,6 +30,8 @@ export type NestedDeps = {
   sessionId?: string | undefined
   /** Adds a query's cost to the session it ran for. */
   spent?: ((costUsd: number) => Promise<void>) | undefined
+  /** What the session's budget has left: each query's cap is at most that, and none runs at 0. */
+  remaining?: (() => Promise<number>) | undefined
   /** Tests: runs one query (runHarness), and asks about a refused credential (probeCredential). */
   run?: FallbackOptions['run']
   probe?: FallbackOptions['probe']
@@ -46,13 +49,25 @@ async function costOf(message: SDKMessage, deps: NestedDeps): Promise<void> {
   if (message.type === 'result' && message.total_cost_usd > 0) await deps.spent?.(message.total_cost_usd)
 }
 
-/** One query, on `credential` or on `credentials` in order; throws NoUsableCredentialError when none is usable. */
-async function query(deps: NestedDeps, base: Omit<HarnessRun, 'credential'>): Promise<AsyncIterable<SDKMessage>> {
+/** The session's budget is spent: a nested query would spend past it. */
+export class BudgetSpentError extends Error {
+  override name = 'BudgetSpentError'
+}
+
+/**
+ * One query, on `credential` or on `credentials` in order, capped at `cap` or what the
+ * session's budget has left if less; throws NoUsableCredentialError when no credential
+ * is usable, BudgetSpentError when nothing is left.
+ */
+async function query(deps: NestedDeps, cap: number, base: Omit<HarnessRun, 'credential' | 'maxBudgetUsd'>): Promise<AsyncIterable<SDKMessage>> {
+  const left = deps.remaining ? await deps.remaining() : cap
+  if (!(left > 0)) throw new BudgetSpentError("the session's budget is spent")
+  const capped = { ...base, maxBudgetUsd: Math.min(cap, left) }
   if (!deps.credentials) {
     if (!deps.credential) throw new NoUsableCredentialError('no Claude credential is given to this query', undefined)
-    return (deps.run ?? runHarness)({ ...base, credential: await deps.credential() })
+    return (deps.run ?? runHarness)({ ...capped, credential: await deps.credential() })
   }
-  return runWithFallback(base, {
+  return runWithFallback(capped, {
     candidates: await deps.credentials.candidates(),
     report: deps.credentials.reporter(deps.sessionId ? { sessionId: deps.sessionId } : {}),
     ...(deps.run ? { run: deps.run } : {}),
@@ -63,12 +78,11 @@ async function query(deps: NestedDeps, base: Omit<HarnessRun, 'credential'>): Pr
 export function nestedQueries(deps: NestedDeps): NestedQueries {
   return {
     async ask(prompt, signal) {
-      const run = await query(deps, {
+      const run = await query(deps, ASK_BUDGET_USD, {
         paths: deps.paths,
         prompt,
         model: SMALL_MODEL,
         maxTurns: 1,
-        maxBudgetUsd: ASK_BUDGET_USD,
         signal,
       })
       // Read to the end, past the result: the fallback records what the credential did after it (#3200).
@@ -90,21 +104,20 @@ export function nestedQueries(deps: NestedDeps): NestedQueries {
       const same = (given: unknown) => isDeepStrictEqual({ ...(given as object) }, { ...input })
       let run: AsyncIterable<SDKMessage>
       try {
-        run = await query(deps, {
+        run = await query(deps, SEARCH_BUDGET_USD, {
           paths: deps.paths,
           prompt:
             'Call the WebSearch tool exactly once, with exactly this input and nothing else, then stop:\n' +
             JSON.stringify(input),
           model: SMALL_MODEL,
           maxTurns: 2,
-          maxBudgetUsd: SEARCH_BUDGET_USD,
           signal: controller.signal,
           nestedTools: ['WebSearch'],
           tierOf: (name, given) => (name === 'WebSearch' && same(given) ? 'read' : undefined),
         })
       } catch (err) {
         signal.removeEventListener('abort', stop)
-        if (err instanceof NoUsableCredentialError) return { text: `WebSearch cannot run: ${err.message}`, isError: true }
+        if (err instanceof NoUsableCredentialError || err instanceof BudgetSpentError) return { text: `WebSearch cannot run: ${err.message}`, isError: true }
         throw err
       }
       let result: BuiltinResult | undefined

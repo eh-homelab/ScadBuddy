@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
-import { nestedQueries } from '../src/builtins/nested.js'
+import { BudgetSpentError, nestedQueries } from '../src/builtins/nested.js'
 import { webFetch } from '../src/builtins/web.js'
 import { type AttemptOutcome, type CredentialSource, NoUsableCredentialError, type PooledCredential } from '../src/harness/fallback.js'
 import type { HarnessRun } from '../src/harness/run.js'
@@ -38,8 +38,14 @@ const answered = (t: string, extra: SDKMessage[] = []): SDKMessage[] => [
 const searchResult = (t: string) =>
   ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: t }] } }) as unknown as SDKMessage
 
-function harness(script: (attempt: number) => SDKMessage[], candidates: () => Promise<PooledCredential[]> = async () => [A, B]) {
+function harness(
+  script: (attempt: number) => SDKMessage[],
+  candidates: () => Promise<PooledCredential[]> = async () => [A, B],
+  remaining?: () => Promise<number>,
+) {
   const secrets: string[] = []
+  /** Each query's maxBudgetUsd. */
+  const caps: (number | undefined)[] = []
   const reports: { id: string; outcome: AttemptOutcome['class']; next: string | undefined }[] = []
   const spent: number[] = []
   const credentials: CredentialSource = {
@@ -50,8 +56,10 @@ function harness(script: (attempt: number) => SDKMessage[], candidates: () => Pr
     paths: { stateDir: '/tmp/unused' },
     credentials,
     spent: async (cost) => void spent.push(cost),
+    ...(remaining ? { remaining } : {}),
     run: (r: HarnessRun) => {
       secrets.push(r.credential.secret)
+      caps.push(r.maxBudgetUsd)
       const out = script(secrets.length - 1)
       return (async function* () {
         yield* out
@@ -59,7 +67,7 @@ function harness(script: (attempt: number) => SDKMessage[], candidates: () => Pr
     },
     probe: async () => ({ verdict: 'refused', reason: 'HTTP 403 again' }),
   })
-  return { nested, secrets, reports, spent }
+  return { nested, secrets, reports, spent, caps }
 }
 
 describe('nested WebFetch and WebSearch queries (#3200)', () => {
@@ -78,6 +86,24 @@ describe('nested WebFetch and WebSearch queries (#3200)', () => {
     const h = harness((n) => (n === 0 ? refused() : answered('done', [searchResult('Web search results for query: "openscad"')])))
     expect(await h.nested.search({ query: 'openscad' }, new AbortController().signal)).toEqual({ text: 'Web search results for query: "openscad"' })
     expect(h.secrets).toEqual([A.credential.secret, B.credential.secret])
+  })
+
+  it("spends no more than the session's budget has left, and nothing once it is spent", async () => {
+    let left = 0.2
+    const h = harness(() => answered('done', [searchResult('results')]), undefined, async () => left)
+    expect(await h.nested.ask('p', new AbortController().signal)).toBe('done')
+    expect(await h.nested.search({ query: 'openscad' }, new AbortController().signal)).toEqual({ text: 'results' })
+    left = 5
+    expect(await h.nested.ask('p', new AbortController().signal)).toBe('done')
+    // Under the session's 0.2 left, each is capped at it; with more left, at its own cap.
+    expect(h.caps).toEqual([0.2, 0.2, 0.5])
+    left = 0
+    await expect(h.nested.ask('p', new AbortController().signal)).rejects.toBeInstanceOf(BudgetSpentError)
+    expect(await h.nested.search({ query: 'openscad' }, new AbortController().signal)).toEqual({
+      text: "WebSearch cannot run: the session's budget is spent",
+      isError: true,
+    })
+    expect(h.caps).toHaveLength(3)
   })
 
   it('says why when no credential is usable', async () => {

@@ -34,18 +34,11 @@ import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { SessionFiles } from '../workspace/store.js'
 import type { EventLog } from './eventLog.js'
-import {
-  type ClaimedSession,
-  recordMemoryActivity,
-  type SessionManagerDeps,
-  type SessionRecord,
-  SETTING_MODEL,
-  systemAppend,
-  type TurnPrincipal,
-} from './manager.js'
+import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
+import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
@@ -84,6 +77,12 @@ export type TurnRunnerDeps = Pick<
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */
 export type FingerprintParts = {
+  /**
+   * The pool's first candidate, id and epoch (#3451): enough, because the credential a
+   * process runs on is checked apart from the fingerprint. warm.ts compares the hash of
+   * the key it was spawned with (`mismatch`), so a fallback whose secret rotated is not
+   * reused, and `revalidate` looks its candidate's id and epoch up in the pool again.
+   */
   credentialId: string
   credentialUpdatedAt: string
   model: string | null
@@ -532,6 +531,8 @@ export class TurnRunner {
                               spent: async (cost) => {
                                 if (slot.current?.nested) slot.current.nested.usd += cost
                               },
+                              // The row's cost moves at the turn's end, so what this turn's own queries spent comes off too.
+                              remaining: async () => (await poolRemainingUsd(this.deps.sql, id)) - (slot.current?.nested?.usd ?? 0),
                             }),
                             secrets: () => secrets,
                             audit: this.deps.audit,

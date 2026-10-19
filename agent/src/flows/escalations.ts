@@ -425,19 +425,21 @@ export class Escalations {
     // call skipped, never a failed scan of every run.
     const hopLive = this.#deps.sql`CASE WHEN pg_input_is_valid(w->>'hop_until', 'timestamptz')
                                    THEN (w->>'hop_until')::timestamptz > now() ELSE false END`
+    // The calls this escalates, written once for the same reason (#3930): parent-hop approvals.
+    const parentApproval = this.#deps.sql`w->>'hop' = 'parent' AND w->>'kind' = 'approval'`
     try {
       rows = await this.#deps.sql`
         SELECT id, workflow_run_id, started_by, waiting_on, steps,
-               -- The parent-hop approvals whose hop is live (hopLive).
+               -- The parent-hop approvals whose hop is live (parentApproval, hopLive).
                (SELECT coalesce(jsonb_agg(w->>'call_id'), '[]'::jsonb) FROM jsonb_array_elements(r.waiting_on) w
-                 WHERE w->>'hop' = 'parent' AND w->>'kind' = 'approval' AND ${hopLive}) AS live
+                 WHERE ${parentApproval} AND ${hopLive}) AS live
         FROM workflow_runs r
         WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
           -- Before the limit: runs whose calls were all delivered already, still at hop
           -- parent, never keep a newer run's calls out of the 200.
           AND EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.waiting_on) w
-            WHERE w->>'hop' = 'parent' AND w->>'kind' = 'approval'
+            WHERE ${parentApproval}
               -- A call whose hop timed out, not moved on yet, yields nothing (#3411).
               AND ${hopLive}
               AND NOT EXISTS (
@@ -454,8 +456,9 @@ export class Escalations {
       const { session, principal } = run.started_by
       if (typeof session !== 'string' || !isUuid(session) || typeof principal !== 'string') continue
       for (const w of run.waiting_on) {
-        // A call in `live` always has a hop_until; the test stays for its type, a string.
-        if (w.kind !== 'approval' || w.hop !== 'parent' || !w.hop_until || !run.live.includes(w.call_id)) continue
+        // `live` is the filter (parentApproval, hopLive): a call in it is a parent-hop
+        // approval with a hop_until; the test of hop_until stays for its type, a string.
+        if (!run.live.includes(w.call_id) || !w.hop_until) continue
         out.push({
           session,
           principal,

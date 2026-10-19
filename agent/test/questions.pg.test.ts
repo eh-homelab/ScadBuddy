@@ -149,7 +149,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await expect.poll(async () => (await m.get(session.id, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
 
     // A spy, not a trigger: the two answers must meet between their own commits, and only
-    // a hook inside the transaction can hold the first there for the second.
+    // a JS hook inside the transaction can await the second answer's arrival while the
+    // first holds its uncommitted write; a trigger runs there too, but cannot wait on JS.
     const service = m.questions as unknown as { statusRefresh: (tx: unknown, sessionId: string) => Promise<ServerEvent[]> }
     const refresh = service.statusRefresh.bind(service)
     let arrived = 0

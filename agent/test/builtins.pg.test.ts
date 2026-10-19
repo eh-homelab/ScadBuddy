@@ -167,6 +167,26 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect((await call('TaskList', {})).text).toBe('#1 [pending] s\n#2 [pending] s')
   })
 
+  it('makes an Edit its activity retries once, by the call id in _meta (#3202)', async () => {
+    const editing = (callId: string, old_string: string, new_string: string) =>
+      client.callTool({ name: 'Edit', arguments: { file_path: '/workspace/e.txt', old_string, new_string }, _meta: { [CALL_ID_META]: callId } }) as Promise<{
+        content: Content[]
+        isError?: boolean
+      }>
+    const updated = 'The file /workspace/e.txt has been updated successfully.'
+    // Created by an empty old_string, then retried: not "file already exists".
+    expect(await editing('toolu_new', '', 'foo\n')).toMatchObject({ content: [{ text: updated }] })
+    expect(await editing('toolu_new', '', 'foo\n')).toMatchObject({ content: [{ text: updated }] })
+    // The new string holds the old one: a retry made again would edit twice.
+    expect(await editing('toolu_a', 'foo', 'foo bar')).toMatchObject({ content: [{ text: updated }] })
+    expect(await editing('toolu_a', 'foo', 'foo bar')).toMatchObject({ content: [{ text: updated }] })
+    expect((await files.read(ws, 'e.txt'))!.bytes.toString()).toBe('foo bar\n')
+    // Another call is judged on the file as it is.
+    expect(await editing('toolu_b', 'baz', 'qux')).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('String to replace not found') }] })
+    expect(await editing('toolu_c', 'foo', 'foo bar')).toMatchObject({ content: [{ text: updated }] })
+    expect((await files.read(ws, 'e.txt'))!.bytes.toString()).toBe('foo bar bar\n')
+  })
+
   it('answers the built-ins with nothing to act on as a classic turn does', async () => {
     expect((await call('ReportFindings', { findings: [] })).text).toBe('No findings reported.')
     expect((await call('ReportFindings', { findings: [{}, {}] })).text).toBe('2 findings reported.')
