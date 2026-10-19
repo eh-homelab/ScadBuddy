@@ -172,7 +172,9 @@ async def deferred_kind(client: Client, id: str) -> bool:
     """Whether the command ``id``, refused because its workflow task was failing, is still
     accepting: its newest workflow task outcome is either a failure of type
     `DEFERRED_KIND`, an ``Operation`` deferring a kind its build does not register
-    (#4139), or a completion. The deferred task goes on once a build with the kind is
+    (#4139), or a completion. A timeout above a failure is skipped (a deferred task left
+    with no worker to take it times out above its failure); one above a completion is
+    not, and answers no. The deferred task goes on once a build with the kind is
     current. A completion means the task recovered between the refusal and this read
     (#4320), as a deferred task does on the first build that has its kind: nothing is
     stuck, and the same request sent again is accepted. A task failing for any other
