@@ -63,11 +63,17 @@ covers the same ground more briefly.
   `_agent_heartbeat`). An agent replica from before #4200 sends no beats, and
   `agent-tools` is unversioned, so while one still polls (during the API Deployment's
   rolling update, or after rolling the agent back past #4200) any attempt may land on
-  it. A `turn_tool_tier` whose three attempts all missed their beats is asked once more
-  with no heartbeat timeout (#4262), so it cannot fail the run's tier check for that;
-  it only takes longer. A flow's tool calls have no such fallback: one slower than 30 s
-  that lands on an old replica times out, a read up to three times and a write at once,
-  and the script sees the error (`flow_session_check` retries without limit).
+  it. A `turn_tool_tier` whose last attempt missed its beats (the failure the call ends
+  with, whatever the earlier attempts did) is asked once more with no heartbeat timeout
+  (#4262), so it cannot fail the run's tier check for that; it only takes longer. A
+  tier whose attempts are all lost (recorded as started but never delivered, or taken
+  by a replica that died) now reaches the script, at the default 30 s heartbeat, after
+  450 s, about 7.5 min (3 × 30 s of missed beats, then up to 3 × 120 s, the
+  `_TOOL_TIMEOUT`, plus the retries' backoff), not 90 s; one whose last attempt ends on
+  its 120 s start-to-close instead takes no fallback and fails there. A flow's tool
+  calls have no such fallback: one slower than 30 s that lands on an old replica times
+  out, a read up to three times and a write at once, and the script sees the error
+  (`flow_session_check` retries without limit).
 
 ### 1.1 Routing the UI's origin to the agent
 

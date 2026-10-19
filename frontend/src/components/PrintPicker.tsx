@@ -406,7 +406,12 @@ export function PrintPicker({
    * applies the printer's remembered one, so one printer's can never go out for another
    * while the new printer's choices are read (claude-review on #1043).
    */
-  const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
+  const [chosen, setChosen] = useState<{ printerId: number | null; algorithm: RackAlgorithm } | null>(null)
+  // Read for the printer it was chosen for only, in the same render the printer changes
+  // in (#4347): reset by the effect below alone, the render before that reset built a
+  // check of the new printer with the old one's algorithm, sent whenever the reset came
+  // later than the check's debounce.
+  const chosenAlgorithm = chosen !== null && chosen.printerId === printerId ? chosen.algorithm : null
   /**
    * A printer's algorithm as an earlier session's save left it, when that save landed
    * after this dialog started reading the choices (#1086 review). Shown only, never sent,
@@ -426,7 +431,17 @@ export function PrintPicker({
       ? savedAlgorithm.algorithm
       : choices?.rack_algorithm
   const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? storedAlgorithm ?? 'least_used'
-  const [rackPosition, setRackPosition] = useState<number | null>(null)
+  const [picked, setPicked] = useState<{ printerId: number | null; size: typeof size; position: number } | null>(
+    null,
+  )
+  // Read for the printer and size it was picked for only, and in Advanced mode only, as
+  // `chosenAlgorithm` (#4347): Simple mode shows no rack step, and the render that
+  // leaves Advanced must not build a check with the pick (#4361 review).
+  const { advanced } = picker
+  const rackPosition =
+    picked !== null && advanced && picked.printerId === printerId && picked.size === size
+      ? picked.position
+      : null
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
   /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
@@ -441,25 +456,27 @@ export function PrintPicker({
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
     algorithmSession.current += 1
-    setChosenAlgorithm(null)
-    setRackPosition(null)
+    setChosen(null)
+    setPicked(null)
     setAlgorithmUnsaved(false)
   }, [printerId])
-  // Simple mode shows no rack step, so a hand pick would be sent unseen (as
-  // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
-  const { advanced } = picker
-  // The same for the prime tower (#3648 review): Simple mode sends none.
+  // Clears a rack pick left from Advanced, so going back to Advanced starts with none; it
+  // no longer decides what is sent, since `rackPosition` reads no pick outside Advanced.
+  // For the prime tower it still does (#3648 review): its read is not gated, as a batch
+  // step's own tower is seeded in Simple mode (#2718 review), so this reset is what makes
+  // leaving Advanced send none.
   useEffect(() => {
     if (!advanced) {
-      setRackPosition(null)
+      setPicked(null)
       setPrimeTower(null)
     }
   }, [advanced])
+  // State clean-up only: `rackPosition` already reads no pick of another size (#4347).
   useEffect(() => {
-    setRackPosition(null)
+    setPicked(null)
   }, [size])
   function changeRackAlgorithm(next: RackAlgorithm) {
-    setChosenAlgorithm(next)
+    setChosen({ printerId, algorithm: next })
     setAlgorithmUnsaved(false)
     const session = algorithmSession.current
     const save = ++algorithmSave.current
@@ -934,7 +951,7 @@ export function PrintPicker({
   const offered = check.current ? (check.verdict?.rack?.options ?? []) : null
   const pickOffered = rackPosition === null || offered === null || offered.some((o) => o.position === rackPosition)
   useEffect(() => {
-    if (!pickOffered) setRackPosition(null)
+    if (!pickOffered) setPicked(null)
   }, [pickOffered])
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
@@ -1106,10 +1123,10 @@ export function PrintPicker({
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
-    setRackPosition(null)
+    setPicked(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
-    setChosenAlgorithm(null)
+    setChosen(null)
     setAlgorithmUnsaved(false)
     runPrint.reset()
     picker.reset()
@@ -1555,7 +1572,7 @@ export function PrintPicker({
                               position={rackPosition}
                               algorithmUnsaved={algorithmUnsaved}
                               onAlgorithm={changeRackAlgorithm}
-                              onPosition={setRackPosition}
+                              onPosition={(position) => setPicked(position === null ? null : { printerId, size, position })}
                             />
                           )}
                           <QualityStep
