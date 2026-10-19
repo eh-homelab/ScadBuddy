@@ -363,6 +363,11 @@ async def test_a_project_file_naming_no_uploaded_file_fails(
         ("", "", None),
         ("ftp://", "", None),
         ("https://x/job.3mf", "", None),
+        # A `..` climbs off the card: nothing is named (#4205).
+        ("ftp:///cache/../../etc/passwd", "", None),
+        ("file:///mnt/sdcard/../job.3mf", "", None),
+        ("", "../job.3mf", None),
+        ("ftp:///a/./b//job.3mf", "", "/a/b/job.3mf"),
     ],
 )
 def test_resolve_url(url: str, file: str, path: str | None) -> None:
