@@ -182,6 +182,8 @@ async def deferred_kind(client: Client, id: str) -> bool:
     still accepting until it completes a task or is terminated."""
     token = b""
     try:
+        # The one bound on the whole read, every page within it: no per-page RPC timeout,
+        # which would only restart the clock on each page.
         async with asyncio.timeout(DESCRIBE_SECONDS):
             for _ in range(NOT_READY_PAGES):
                 page = await client.workflow_service.get_workflow_execution_history_reverse(
