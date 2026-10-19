@@ -213,10 +213,20 @@ async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it
                     for event in history.events
                     if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
                 ] == ["op.test.check", "op_insert"]
+                # Failed by the deferral, which only a build without the kind raises: the
+                # rollback path, not any retry.
+                assert [
+                    event.workflow_task_failed_event_attributes.failure.application_failure_info.type
+                    for event in history.events
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+                ] == ["UnregisteredKindError"]
                 assert not answering.done()
                 await _make(client, name, "new")
                 done = await asyncio.wait_for(answering, 60)
     finally:
+        # A failure before the rollback leaves the insert held: let it end, or the new
+        # worker's graceful shutdown waits out its 30 s on it.
+        new_fake.insert_gate.set()
         await terminate_open_workflows(client, queue)
     assert done.status == "succeeded"
     assert old_fake.calls == []
