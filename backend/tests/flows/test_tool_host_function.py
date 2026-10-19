@@ -798,8 +798,10 @@ async def test_a_pinned_read_whose_replica_goes_after_its_missed_beats_moves_to_
                 agent_heartbeat_s=1,
                 host_queue_start_s=2,
             )
-            while len(served.calls) < 3:
-                await asyncio.sleep(0.05)
+            # A deadline, so a regression that stops the third attempt fails here.
+            async with asyncio.timeout(30):
+                while len(served.calls) < 3:
+                    await asyncio.sleep(0.05)
         run = await outward.finished(run_id)
     assert run.result == "result: 'GET done'"
     assert len(served.calls) == 3
