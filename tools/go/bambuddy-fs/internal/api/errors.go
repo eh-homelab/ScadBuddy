@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,13 @@ func (e *Error) Error() string {
 func Errno(err error) syscall.Errno {
 	if err == nil {
 		return 0
+	}
+	// A call cut short by its operation's cancel: go-fuse cancels an operation's context
+	// when the kernel interrupts it (FUSE_INTERRUPT, a signal to the caller). EINTR lets
+	// the kernel restart a call whose signal handler asked for it, as Go's do; EIO
+	// would fail it (TestLiveMount's `ls` on 2026-10-19, under Go's preemption signal).
+	if errors.Is(err, context.Canceled) {
+		return syscall.EINTR
 	}
 	var e *Error
 	if errors.As(err, &e) {

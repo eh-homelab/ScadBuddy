@@ -214,6 +214,16 @@ func TestUpdatesSendOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
+func TestAnInterruptedCallIsEINTR(t *testing.T) {
+	if got := Errno(fmt.Errorf("list: %w", context.Canceled)); got != syscall.EINTR {
+		t.Fatalf("a cancelled call: %v, want EINTR", got)
+	}
+	// A deadline is a timeout, not an interrupt: it fails as before.
+	if got := Errno(fmt.Errorf("list: %w", context.DeadlineExceeded)); got != syscall.EIO {
+		t.Fatalf("a call past its deadline: %v, want EIO", got)
+	}
+}
+
 func TestErrnoMapping(t *testing.T) {
 	cases := map[int]syscall.Errno{404: syscall.ENOENT, 409: syscall.EBUSY, 413: syscall.EFBIG, 401: syscall.EACCES, 403: syscall.EACCES, 500: syscall.EIO, 502: syscall.EIO}
 	for status, want := range cases {
