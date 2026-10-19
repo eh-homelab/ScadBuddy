@@ -809,6 +809,11 @@ class PresetValues(BambuddyModel):
     reason: str | None = None
 
 
+#: :attr:`PresetValues.reason` for a preset the image's BBL tree does not offer, from a
+#: native run's reader (``slicing/values.py``, #3818 tier A); never Bambuddy's.
+NOT_IN_PROFILES = "not_in_profiles"
+
+
 class SliceJobAccepted(BambuddyModel):
     job_id: int
     status: str | None = None

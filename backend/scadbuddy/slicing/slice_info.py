@@ -6,6 +6,7 @@ import io
 import logging
 import re
 import zipfile
+from typing import BinaryIO
 
 from pydantic import BaseModel
 
@@ -21,11 +22,21 @@ MAX_GCODE_BYTES = 256 * 1024 * 1024
 _LOAD = re.compile(rb"^M620 S(\d+)A", re.MULTILINE)
 
 
-def plate_gcode(payload: bytes, plate_id: int) -> bytes | None:
+def _file(payload: bytes | BinaryIO) -> BinaryIO:
+    """A file over ``payload``, at its start; a file is read from its start, never
+    copied into memory (Task 12 review M4)."""
+    if isinstance(payload, bytes):
+        return io.BytesIO(payload)
+    payload.seek(0)
+    return payload
+
+
+def plate_gcode(payload: bytes | BinaryIO, plate_id: int) -> bytes | None:
     """The sliced plate's G-code (``Metadata/plate_N.gcode``, else the only plate's);
-    None when there is none, the file is not a zip, or it is past :data:`MAX_GCODE_BYTES`."""
+    None when there is none, the file is not a zip, or it is past :data:`MAX_GCODE_BYTES`.
+    ``payload`` is the file's bytes or the file itself."""
     try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        with zipfile.ZipFile(_file(payload)) as archive:
             names = [
                 name
                 for name in archive.namelist()
@@ -65,12 +76,12 @@ class NativeSliceRead(BaseModel):
     filament_changes: int | None = None
 
 
-def read_sliced(payload: bytes, plate_id: int) -> NativeSliceRead:
+def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
     """``plate_id``'s time, grams and filament changes. The only plate of a file of one
     is read whatever its number; a plate a file of several lacks is a 404; a file that
     cannot be read reads as every field unknown."""
     try:
-        read = read_filaments(io.BytesIO(payload), sliced=True)
+        read = read_filaments(_file(payload), sliced=True)
     except UnreadableFilamentsError:
         return NativeSliceRead(plate_id=plate_id)
     profile = read.profile

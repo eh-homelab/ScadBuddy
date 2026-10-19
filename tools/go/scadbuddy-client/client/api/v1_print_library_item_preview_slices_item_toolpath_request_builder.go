@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	ic29bf299eb19d3742eb5facb89108188952fb978d14a388f850d7167a2cca684 "github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client/client/api/v1/print/library/item/previewslices/item/toolpath"
 	i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942 "github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client/client/models"
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f "github.com/microsoft/kiota-abstractions-go"
 )
@@ -14,18 +15,29 @@ type V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
+// V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderGetQueryParameters as “/print/outputs/{id}/preview-slices/{job}/toolpath“, for a library file's.
+type V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderGetQueryParameters struct {
+	// Who sliced it: the `slicer` the start answered with.
+	// Deprecated: This property is deprecated, use SlicerAsGetSlicerQueryParameterType instead
+	Slicer *string "uriparametername:\"slicer\""
+	// Who sliced it: the `slicer` the start answered with.
+	SlicerAsGetSlicerQueryParameterType *ic29bf299eb19d3742eb5facb89108188952fb978d14a388f850d7167a2cca684.GetSlicerQueryParameterType "uriparametername:\"slicer\""
+}
+
 // V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
 type V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderGetRequestConfiguration struct {
 	// Request headers
 	Headers *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestHeaders
 	// Request options
 	Options []i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestOption
+	// Request query parameters
+	QueryParameters *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderGetQueryParameters
 }
 
 // NewV1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderInternal instantiates a new V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder {
 	m := &V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/preview-slices/{job_id}/toolpath", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/preview-slices/{job_id}/toolpath{?slicer*}", pathParameters),
 	}
 	return m
 }
@@ -63,6 +75,9 @@ func (m *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder) Get(ctx cont
 func (m *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
 	if requestConfiguration != nil {
+		if requestConfiguration.QueryParameters != nil {
+			requestInfo.AddQueryParameters(*(requestConfiguration.QueryParameters))
+		}
 		requestInfo.Headers.AddAll(requestConfiguration.Headers)
 		requestInfo.AddRequestOptions(requestConfiguration.Options)
 	}

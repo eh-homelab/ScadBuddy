@@ -139,6 +139,12 @@ async def _resolve(
     name = await names.of(ref) or ref.id
     if slot != "process":
         version = await asyncio.to_thread(lambda: profiles.version)
+        if client is None and ref.source in ("standard", "cloud"):
+            raise ProfileError(
+                f"the native slicer cannot find {ref.source} {slot} preset {name} among Bambu"
+                f" Studio {version}'s by its id: finding it by name needs Bambuddy, and none"
+                " is configured"
+            )
         raise ProfileError(
             f"the native slicer cannot read {ref.source} {slot} preset {name}: it is not"
             f" one of Bambu Studio {version}'s, and Bambuddy serves only process"
@@ -146,7 +152,8 @@ async def _resolve(
         )
     if client is None:
         raise ProfileError(
-            f"the native slicer cannot read {ref.source} process preset {name} without Bambuddy"
+            f"the native slicer cannot read {ref.source} process preset {name}: it needs"
+            " Bambuddy, and none is configured"
         )
     values = await client.preset_values(ref)
     if not values.resolved:
@@ -160,6 +167,27 @@ async def _resolve(
 
 def _document(flat: Flat) -> bytes:
     return json.dumps(flat, indent=4, ensure_ascii=False).encode()
+
+
+async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
+    """Whether building ``plan``'s presets reads Bambuddy: a ref the image's tree does
+    not hold by its id that Bambuddy could resolve (by name, or a process preset's
+    values). A ref refused either way (``orca_cloud``, a ``local`` printer or filament)
+    does not count."""
+    refs: list[tuple[Slot, PresetRef]] = [
+        ("printer", plan.printer_preset),
+        ("process", plan.process_preset),
+        *(("filament", ref) for ref in plan.filament_presets),
+    ]
+    for slot, ref in refs:
+        if ref.source == "orca_cloud":
+            continue
+        if ref.source in ("standard", "cloud"):
+            if await asyncio.to_thread(profiles.find, _KINDS[slot], ref.id) is None:
+                return True
+        elif slot == "process":
+            return True
+    return False
 
 
 async def build_presets(

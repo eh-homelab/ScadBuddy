@@ -125,6 +125,34 @@ class SliceStartInput(BaseModel):
     plate_id: int
 
 
+#: The native slicer's run activities, on the ``library`` queue (plan 2026-10-16 Task
+#: 13): the slice, started or joined, and its upload beside the copy.
+SLICE_RUN_ACTIVITY = "slice_run"
+SLICED_UPLOAD_ACTIVITY = "print_sliced_upload"
+
+
+class SliceRunInput(BaseModel):
+    library_file_id: int
+    plan: SlicePlan
+    plate_id: int
+    #: The run's subject, which the dialog's slice of the same copy shares (Ruling C2).
+    subject: str
+
+
+class NativeSliced(BaseModel):
+    """A completed native slice: its `native_slices` row and its blob."""
+
+    slice_id: int
+    preset_key: str
+    sliced_blob_key: str
+
+
+class SlicedUploadInput(BaseModel):
+    planned: PlannedRun
+    plate_id: int
+    sliced: NativeSliced
+
+
 class EnqueueInput(BaseModel):
     """One sliced plate to queue: the rack pick (#836) runs in the same activity, so a
     hotend's serial never enters the history (spec 2026-10-01 §7)."""

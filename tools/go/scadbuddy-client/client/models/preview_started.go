@@ -17,12 +17,16 @@ type PreviewStarted struct {
 	nozzle_plan NozzlePlanable
 	// The plate_id property
 	plate_id *int32
+	// The slicer property
+	slicer *PreviewStarted_slicer
 }
 
 // NewPreviewStarted instantiates a new PreviewStarted and sets the default values.
 func NewPreviewStarted() *PreviewStarted {
 	m := &PreviewStarted{}
 	m.SetAdditionalData(make(map[string]any))
+	slicerValue := BAMBUDDY_PREVIEWSTARTED_SLICER
+	m.SetSlicer(&slicerValue)
 	return m
 }
 
@@ -72,6 +76,16 @@ func (m *PreviewStarted) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		return nil
 	}
+	res["slicer"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetEnumValue(ParsePreviewStarted_slicer)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSlicer(val.(*PreviewStarted_slicer))
+		}
+		return nil
+	}
 	return res
 }
 
@@ -93,6 +107,12 @@ func (m *PreviewStarted) GetPlateId() *int32 {
 	return m.plate_id
 }
 
+// GetSlicer gets the slicer property value. The slicer property
+// returns a *PreviewStarted_slicer when successful
+func (m *PreviewStarted) GetSlicer() *PreviewStarted_slicer {
+	return m.slicer
+}
+
 // Serialize serializes information the current object
 func (m *PreviewStarted) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
@@ -109,6 +129,13 @@ func (m *PreviewStarted) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 	}
 	{
 		err := writer.WriteInt32Value("plate_id", m.GetPlateId())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetSlicer() != nil {
+		cast := (*m.GetSlicer()).String()
+		err := writer.WriteStringValue("slicer", &cast)
 		if err != nil {
 			return err
 		}
@@ -142,13 +169,20 @@ func (m *PreviewStarted) SetPlateId(value *int32) {
 	m.plate_id = value
 }
 
+// SetSlicer sets the slicer property value. The slicer property
+func (m *PreviewStarted) SetSlicer(value *PreviewStarted_slicer) {
+	m.slicer = value
+}
+
 type PreviewStartedable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetJobId() *int32
 	GetNozzlePlan() NozzlePlanable
 	GetPlateId() *int32
+	GetSlicer() *PreviewStarted_slicer
 	SetJobId(value *int32)
 	SetNozzlePlan(value NozzlePlanable)
 	SetPlateId(value *int32)
+	SetSlicer(value *PreviewStarted_slicer)
 }

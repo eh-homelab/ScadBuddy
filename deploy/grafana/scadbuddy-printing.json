@@ -462,6 +462,60 @@
           "legendFormat": "swept"
         }
       ]
+    },
+    {
+      "id": 23,
+      "type": "row",
+      "title": "Native slicer (slicer_backend native)",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 52, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Slice duration",
+      "description": "From a native slice's start to its record (the slicer queue's wait, the prepare, Bambu Studio and the upload of its 3MF): p50 and p95 of the slices that completed, and p95 of those that failed.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 53, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(scadbuddy_native_slice_seconds_bucket{namespace=\"$namespace\", outcome=\"completed\"}[$__rate_interval])))",
+          "legendFormat": "p50 completed"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(scadbuddy_native_slice_seconds_bucket{namespace=\"$namespace\", outcome=\"completed\"}[$__rate_interval])))",
+          "legendFormat": "p95 completed"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(scadbuddy_native_slice_seconds_bucket{namespace=\"$namespace\", outcome=\"failed\"}[$__rate_interval])))",
+          "legendFormat": "p95 failed"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Slices",
+      "description": "Native slices recorded, by outcome. A cancelled slice is one whose workflow was cancelled; a print run never cancels a slice the dialog shares.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 53, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (outcome) (increase(scadbuddy_native_slice_seconds_count{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
     }
   ]
 }

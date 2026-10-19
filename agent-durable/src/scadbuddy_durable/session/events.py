@@ -38,11 +38,12 @@ from scadbuddy_durable.session.models import FollowArgs, FollowResult
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 
-# agent/src/sessions/sdkEvents.ts INPUT_MAX, SENSITIVE_KEY, REDACTED.
+# agent/src/sessions/sdkEvents.ts INPUT_MAX, SENSITIVE_KEY, REDACTED. Both regexes are
+# pinned to agent/test/fixtures/sensitive-keys.json, so neither drifts alone (#4340).
 INPUT_MAX = 4096
 SENSITIVE_KEY = re.compile(
     r"secret|token|passw(or)?d|passphrase|api[-_]?key|authori[sz]ation|credential|cookie"
-    r"|private[-_]?key",
+    r"|private[-_]?key|access[-_]?code",
     re.IGNORECASE,
 )
 REDACTED = "[redacted]"

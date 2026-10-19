@@ -177,6 +177,12 @@ class ProfileError(ValueError):
     ``inherits`` loop, or one only Bambuddy holds. The message names it."""
 
 
+class ProfileImageError(ProfileError):
+    """The image's profile tree itself is unreadable (a file missing, not JSON, not an
+    object, or a malformed vendor entry): the image's defect, not the plan's, which no
+    other choice of presets can avoid (Task 12 review N-b)."""
+
+
 def flatten(name: str, load: Callable[[str], dict[str, Any] | None]) -> Flat:
     """Preset ``name`` with its ``inherits`` chain applied, child over parent, as Bambu
     Studio loads it (the module's docstring); ``load`` answers a preset's own JSON by
@@ -272,7 +278,7 @@ class Profiles:
         try:
             return str(self._vendor["version"])
         except KeyError:
-            raise ProfileError(
+            raise ProfileImageError(
                 f"the profile file {self.root / VENDOR}.json has no version"
             ) from None
 
@@ -280,7 +286,7 @@ class Profiles:
     def _vendor(self) -> dict[str, Any]:
         vendor = _read(self.root / f"{VENDOR}.json")
         if not isinstance(vendor, dict):
-            raise ProfileError(f"the profile file {self.root / VENDOR}.json is not an object")
+            raise ProfileImageError(f"the profile file {self.root / VENDOR}.json is not an object")
         return vendor
 
     def machine(self, ref_or_name: str) -> Flat:
@@ -300,6 +306,23 @@ class Profiles:
             return index.names[ref_or_name]
         return ref_or_name if ref_or_name in index.paths else None
 
+    def documents(self, kind: Kind) -> dict[str, dict[str, Any]]:
+        """Every ``kind`` preset ``BBL.json`` lists, by name, as its own file holds it
+        (``inherits`` not applied), for a caller that flattens the whole tree
+        (:func:`~scadbuddy.slicing.catalogue.native_catalogue`). Before the kind is
+        indexed, the one read of each file builds the index as well."""
+        if kind not in self._indexes:
+            index, docs = self._scan(kind)
+            self._indexes.setdefault(kind, index)
+        else:
+            docs = {name: _read(path) for name, path in self._index(kind).paths.items()}
+        for name, doc in docs.items():
+            if not isinstance(doc, dict):
+                raise ProfileImageError(
+                    f"the native slicer cannot read preset {name}: not an object"
+                )
+        return docs
+
     def _flat(self, kind: Kind, ref_or_name: str) -> Flat:
         name = self.find(kind, ref_or_name)
         if name is None:
@@ -312,7 +335,7 @@ class Profiles:
             return None
         doc = _read(path)
         if not isinstance(doc, dict):
-            raise ProfileError(f"the native slicer cannot read preset {name}: not an object")
+            raise ProfileImageError(f"the native slicer cannot read preset {name}: not an object")
         return doc
 
     def _index(self, kind: Kind) -> _Index:
@@ -323,23 +346,28 @@ class Profiles:
         return index
 
     def _build(self, kind: Kind) -> _Index:
+        return self._scan(kind)[0]
+
+    def _scan(self, kind: Kind) -> tuple[_Index, dict[str, Any]]:
+        """The ``kind`` index, and each listed file's JSON, every file read once."""
         paths: dict[str, Path] = {}
         names: dict[str, str] = {}
+        docs: dict[str, Any] = {}
         listed = _LISTS[kind]
         for entry in self._vendor.get(listed, []):
             try:
                 name, path = entry["name"], self.root / VENDOR / entry["sub_path"]
             except (KeyError, TypeError) as error:
-                raise ProfileError(
+                raise ProfileImageError(
                     f"the profile file {self.root / VENDOR}.json has a malformed {listed}"
                     f" entry {entry!r}: {error!r}"
                 ) from None
-            doc = _read(path)
+            doc = docs[name] = _read(path)
             paths[name] = path
             setting_id = doc.get("setting_id") if isinstance(doc, dict) else None
             if isinstance(setting_id, str) and setting_id:
                 names[setting_id] = name
-        return _Index(paths=paths, names=names)
+        return _Index(paths=paths, names=names), docs
 
 
 def _read(path: Path) -> Any:
@@ -348,4 +376,4 @@ def _read(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise ProfileError(f"the profile file {path} cannot be read: {error}") from error
+        raise ProfileImageError(f"the profile file {path} cannot be read: {error}") from error
