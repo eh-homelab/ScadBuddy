@@ -33,7 +33,8 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.print_library.ids import is_native_id
-from scadbuddy.print_library.reads import LibraryReads, NativeCopies
+from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads, NativeCopies
+from scadbuddy.store.bambuddy import folder_name
 
 logger = logging.getLogger(__name__)
 
@@ -150,3 +151,41 @@ async def ensure_native_copy(
             printable.key, LibraryCopy(id=uploaded, folder_id=folder_id, target_key=target_key)
         )
     return uploaded
+
+
+#: D6: what a native run answers a request naming a project (422, at ``print_check``).
+NATIVE_PROJECT_REFUSAL = (
+    "A project is Bambuddy's: a print on the native path is filed in ScadBuddy's library."
+    " Pick a folder, or print through Bambuddy."
+)
+
+
+async def require_native_folder(native: LibraryListingSource, folder_id: int) -> None:
+    """The 422 for a folder the native library does not have: a Bambuddy-range id, or a
+    native one that is gone (D6, as `projects.require_destination_folder` refuses one the
+    picker would not offer). Every live native folder is a destination: the native
+    library has no projects, inbox or external folders to leave out."""
+    known = is_native_id(folder_id) and any(
+        f.id == folder_id for top in await native.folders() for f in top.walk()
+    )
+    if not known:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"folder {folder_id} is not a folder of ScadBuddy's library a print can be"
+            " filed in: pick one from GET /api/v1/print/projects?native=true",
+        )
+
+
+async def native_destination(
+    native: NativeCopies, *, folder_id: int | None, title: str | None
+) -> int | None:
+    """Where a native run files its copy (D6): ``folder_id`` when the request names one
+    (checked), else the output's ``<Template title>/`` folder the filing uses
+    (`filing.file_output`, `folder_name`), found or made under its advisory lock, else
+    the top level (``None``) for a library file, which has no template."""
+    if folder_id is not None:
+        await require_native_folder(native, folder_id)
+        return folder_id
+    if title is None:
+        return None
+    return (await native.template_folder(folder_name(title))).id

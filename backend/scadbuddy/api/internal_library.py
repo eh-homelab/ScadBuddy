@@ -20,7 +20,7 @@ from fastapi import APIRouter, Query, Request, Response, status
 
 from scadbuddy.api.library_print import FileIdPath, _native_download
 from scadbuddy.api.limits import RouteLimit
-from scadbuddy.bambuddy.models import LibraryFile, LibraryListRow, LibraryPlates
+from scadbuddy.bambuddy.models import Folder, LibraryFile, LibraryListRow, LibraryPlates
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.core.problems import ApiError
 from scadbuddy.print_library.component import PrintLibraryDep
@@ -60,6 +60,21 @@ async def library_listing(
     return await (await _native(library)).library_listing(
         folder_id=folder_id, every_folder=every_folder
     )
+
+
+@router.get("/folders", response_model=list[Folder])
+async def library_folders(library: PrintLibraryDep) -> list[Folder]:
+    return await (await _native(library)).folders()
+
+
+@router.put("/folders/template", response_model=Folder)
+async def template_folder(
+    library: PrintLibraryDep, name: Annotated[str, Query(min_length=1, max_length=255)]
+) -> Folder:
+    """A native print's default destination (#3818 tier A Task 5): the template's
+    top-level folder, as the filing names it, found or made."""
+    folder = await (await _native(library)).template_folder(name)
+    return Folder(id=folder.id, name=folder.name, parent_id=folder.parent_id)
 
 
 @router.put("/files", response_model=LibraryFile, status_code=status.HTTP_201_CREATED)

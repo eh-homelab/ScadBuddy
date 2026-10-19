@@ -17,10 +17,11 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -40,6 +41,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PreparedPlates,
+    PrintRunRequest,
     PrintRunResult,
     QueuedPlate,
     ResolvedProject,
@@ -63,6 +65,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
 from scadbuddy.rack.usage import RackUsage
@@ -133,6 +136,12 @@ class PrintDeps:
     #: The native slicer's starter (plan 2026-10-16 Task 13): ``print_plan`` keys a
     #: reprint's reuse by it. ``None`` outside the image, where a native run is a 503.
     native: NativeSliceStarter | None = None
+    #: Whether a run is on the native path (#3818 tier A, D2): there its project is
+    #: refused, none is resolved, and its folder is ScadBuddy's own (Task 5, D6). Task 9
+    #: sets it from ``hot_path_native``; until then every run is Bambuddy's.
+    native_run: Callable[[StoredSettings, PrintRunRequest], bool] = field(
+        default=lambda settings, request: False
+    )
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -224,7 +233,17 @@ class PrintActivities:
             raise ApplicationError(UNWAITED.detail, UNWAITED, type=REFUSED, non_retryable=True)
         settings = self._settings()
         spec = input.source
+        native = self.d.native_run(settings, input.request)
         try:
+            if native:
+                # D6: refused before anything is read or recorded.
+                if input.request.project_id is not None:
+                    raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, NATIVE_PROJECT_REFUSAL)
+                if self.d.library is None:
+                    raise ApiError(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "a native print needs ScadBuddy's own library, which does not serve",
+                    )
             async with client_for(settings) as client:
                 # An output's naming, which names its copy below; none for a library file.
                 naming: OutputNaming | None = None
@@ -239,8 +258,11 @@ class PrintActivities:
                         raise invalid_meta(naming.invalid_meta)
                 # Resolved once, after the refusals that need no Bambuddy, and carried
                 # to the plan (#3790 review).
+                # A native run has no project: Settings' default is Bambuddy's (D6).
                 project = ResolvedProject(
-                    project_id=await resolve_project(client, input.request, settings)
+                    project_id=None
+                    if native
+                    else await resolve_project(client, input.request, settings)
                 )
                 if naming is not None:
                     spec = spec.model_copy(
@@ -251,7 +273,13 @@ class PrintActivities:
                     )
                 source = await self._source(client, spec, settings)
                 prepared = await prepare_run(
-                    client, source, settings, input.request, rack=self.d.rack, project=project
+                    client,
+                    source,
+                    settings,
+                    input.request,
+                    rack=self.d.rack,
+                    project=project,
+                    native=self.d.library if native else None,
                 )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None

@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
+    Folder,
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
@@ -31,6 +32,7 @@ INTERNAL_LIBRARY_FILES = f"{INTERNAL_LIBRARY}/files"
 UPLOAD_CHUNK = 1024 * 1024
 
 _ROWS = TypeAdapter(list[LibraryListRow])
+_FOLDERS = TypeAdapter(list[Folder])
 
 
 class RemoteLibrary:
@@ -75,6 +77,25 @@ class RemoteLibrary:
             params["folder_id"] = str(folder_id)
         response = await self._get(f"{self.base_url}{INTERNAL_LIBRARY}", params)
         return _ROWS.validate_json(_answer(response, JSON_MEDIA_TYPE).content)
+
+    async def folders(self) -> list[Folder]:
+        """The folder tree, as `NativeLibrary.folders` answers it."""
+        response = await self._get(f"{self.base_url}{INTERNAL_LIBRARY}/folders")
+        return _FOLDERS.validate_json(_answer(response, JSON_MEDIA_TYPE).content)
+
+    async def template_folder(self, name: str) -> Folder:
+        """The top-level folder ``name``, found or made (`NativeLibrary.template_folder`):
+        idempotent, so a transport error is retried as a read is."""
+        url = f"{self.base_url}{INTERNAL_LIBRARY}/folders/template"
+        for delay in RESTART_DELAYS:
+            try:
+                response = await self.http.put(url, params={"name": name})
+                break
+            except httpx.TransportError:
+                await self._sleep(delay)
+        else:
+            response = await self.http.put(url, params={"name": name})
+        return Folder.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 
     async def upload(
         self,

@@ -388,6 +388,11 @@ class NativeLibrary:
             raise _folder_not_found(folder_id)
         return found
 
+    async def template_folder(self, name: str) -> NativeFolder:
+        """The top-level folder ``name`` the filing uses (`filing.file_output`), found or
+        made once however many callers race (#3818 tier A Task 5)."""
+        return await asyncio.to_thread(self.rows.template_folder, name)
+
     async def create_folder(self, name: str, parent_id: int | None) -> NativeFolder:
         await self._folder_must_exist(parent_id)
         try:

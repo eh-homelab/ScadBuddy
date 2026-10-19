@@ -58,15 +58,14 @@ class LibraryWrites(Protocol):
     ) -> Uploaded: ...
 
 
-class NativeCopies(LibraryReads, LibraryWrites, Protocol):
-    """What a native run's per-print copy needs of the native library (#3818 tier A Task
-    4): its reads, a folder's files (an earlier attempt's upload, found by its bytes) and
-    the upload. `NativeLibrary` in the API's process, `RemoteLibrary` on the print
+class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
+    """What a native run's per-print copy needs of the native library (#3818 tier A Tasks
+    4, 5): its reads, its folders (the destination's check), a folder's files (an earlier
+    attempt's upload, found by its bytes), the upload, and the template's folder the
+    filing uses. `NativeLibrary` in the API's process, `RemoteLibrary` on the print
     worker."""
 
-    async def library_listing(
-        self, *, folder_id: int | None, every_folder: bool = False
-    ) -> list[LibraryListRow]: ...
+    async def template_folder(self, name: str) -> Uploaded: ...
 
 
 def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None) -> LibraryReads:
