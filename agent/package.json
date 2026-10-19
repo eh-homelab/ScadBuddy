@@ -39,7 +39,7 @@
     "@temporalio/common": "1.24.0",
     "@temporalio/worker": "1.24.0",
     "@temporalio/workflow": "1.24.0",
-    "cron-parser": "5.10.1",
+    "cron-parser": "5.10.2",
     "hono": "^4.13.13",
     "jose": "^6.2.12",
     "openapi-fetch": "^0.17.0",
@@ -63,6 +63,6 @@
     "openapi-typescript": "^7.13.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.1",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.5"
   }
 }

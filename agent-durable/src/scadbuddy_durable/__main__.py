@@ -3,6 +3,10 @@
 Serves /healthz and runs the ``agent`` queue's worker (``worker.py``). Without the
 worker's configuration it serves /healthz alone and says why the worker is not
 running, so the pod stays up for its operator to read.
+
+Keep this module's top level to imports and constants: the image build imports it to
+check every start-up module ships its bytecode (Dockerfile, #4316), so anything else
+here would run in the build.
 """
 
 from __future__ import annotations
