@@ -192,15 +192,15 @@ async def _workflow_tasks_reach(client: Client, queue: str, build_id: str) -> No
             )
             completed = None
             while completed is None:
-                completed = next(
-                    (
-                        event.workflow_task_completed_event_attributes
-                        for event in (await handle.fetch_history()).events
-                        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
-                    ),
-                    None,
-                )
                 await asyncio.sleep(0.05)
+                for event in (await handle.fetch_history()).events:
+                    # Both builds register the probe's kind, so its task never defers.
+                    assert event.event_type != EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED, (
+                        "a probe's workflow task failed"
+                    )
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+                        completed = event.workflow_task_completed_event_attributes
+                        break
             reached.append(completed.deployment_version.build_id)
 
 
