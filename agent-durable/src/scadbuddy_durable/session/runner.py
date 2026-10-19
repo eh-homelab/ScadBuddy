@@ -574,10 +574,12 @@ class SegmentCalls:
     A subagent's call names the ``Agent`` call that runs it as ``parent``. The hooks do
     not say which that is (#4184): a subagent's ``SubagentStart`` names its ``agent_id``
     and type, so it is the one open ``Agent`` call of that ``subagent_type``, or the one
-    open ``Agent`` call at all; of several alike none is named, never the wrong one.
+    open ``Agent`` call at all; of several alike none is named, never the wrong one. A
+    claimed subagent whose ``Agent`` call has ended names none either, not another one.
 
-    An attempt that fails leaves the calls it opened with no end: ``close_open`` ends
-    each as ``failed``, so the panel shows none of them running past it (#4184)."""
+    An attempt that fails or answers with an error leaves the calls it opened with no end:
+    ``close_open`` ends each as ``failed``, so the panel shows none of them running past it
+    (#4184)."""
 
     def __init__(self, activities: list[str]) -> None:
         self._activities = activities
