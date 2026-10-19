@@ -490,6 +490,11 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const other = (await m.start(agentA, { origin: 'mcp', prompt: 'hello' })).session
     await env.client.workflow.getHandle(sessionWorkflowId(other.id)).signal('hold_cancel')
     const handing = m.handoff(other.id, browser, browser)
+    let settled = false
+    void handing.then(
+      () => (settled = true),
+      () => (settled = true),
+    )
     // The owner change is committed before cancel_input is sent: while it waits (1 s,
     // unanswered), the row is the new owner's and the handoff holds no lock on it. NOWAIT
     // throws if locked; a probe may still meet the row's own turn appending an event for a
@@ -506,6 +511,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
         })
     }
     expect(row?.owner_id).toBe(browser.id)
+    // Taken inside the wait: a probe that only got through once the handoff ended, as on
+    // a slow runner, would pass even if the handoff held the lock through the wait.
+    expect(settled).toBe(false)
     // A cancel that goes unanswered neither fails nor undoes the handoff.
     expect((await handing).owner).toEqual(browser)
     expect((await recorded(other.id)).calls).toEqual([
