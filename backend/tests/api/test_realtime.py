@@ -30,6 +30,7 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OutputEvent,
+    PrinterEvent,
     PrintEvent,
     PrintRunEvent,
     SessionBusEvent,
@@ -89,6 +90,24 @@ def test_a_flow_run_reaches_a_socket_following_the_runs(client: TestClient, bus:
             "flow_run.changed",
             ["workflow-runs", f"workflow-run:{FLOW_RUN_ID}"],
         )
+
+
+PRINTER_ID = "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b"
+
+
+def test_a_printer_reaches_a_socket_following_the_printers(
+    client: TestClient, bus: EventBus
+) -> None:
+    """#3823: Now printing follows `printers`; a printer's own topic is `printer:<id>`."""
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "printers", f"printer:{PRINTER_ID}")
+        bus.publish(PrinterEvent(kind="printer.report", printer_id=PRINTER_ID))
+        event = ws.receive_json()
+        assert (event["kind"], event["topics"]) == (
+            "printer.report",
+            ["printers", f"printer:{PRINTER_ID}"],
+        )
+        assert event["data"] == {"printer_id": PRINTER_ID}
 
 
 def test_only_followed_topics_are_sent(client: TestClient, bus: EventBus) -> None:

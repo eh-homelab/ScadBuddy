@@ -43,7 +43,8 @@ export function NowPrinting() {
   const [cards, setCards] = useState<NowCard[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** #981 — the printer whose camera is open, by id, so its status stays current. */
-  const [watching, setWatching] = useState<number | null>(null)
+  // The registry printer whose camera is open (#3823): only a Bambuddy-linked one has one.
+  const [watching, setWatching] = useState<string | null>(null)
 
   useEffect(() => {
     let live = true
@@ -84,7 +85,7 @@ export function NowPrinting() {
     if (
       watching !== null &&
       cards !== null &&
-      !cards.some((card) => card.printer.printer_id === watching && card.stale === null)
+      !cards.some((card) => card.printer.id === watching && card.stale === null)
     ) {
       setWatching(null)
     }
@@ -118,12 +119,12 @@ export function NowPrinting() {
       {cards && cards.length > 0 && (
         <ul className="grid gap-3 sm:grid-cols-2" aria-label="Printers">
           {cards.map((card) => (
-            <PrinterCard key={card.printer.printer_id} card={card} onCamera={() => setWatching(card.printer.printer_id)} />
+            <PrinterCard key={card.printer.id} card={card} onCamera={() => setWatching(card.printer.id)} />
           ))}
         </ul>
       )}
       <CameraDialog
-        printer={cards?.find((card) => card.printer.printer_id === watching)?.printer ?? null}
+        printer={cards?.find((card) => card.printer.id === watching)?.printer ?? null}
         onClose={() => setWatching(null)}
       />
     </section>
@@ -134,7 +135,7 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
   const { printer, stale } = card
   const activity = ACTIVITY[printer.activity]
   return (
-    <li className="min-w-0" data-testid={`printer-now-${printer.printer_id}`}>
+    <li className="min-w-0" data-testid={`printer-now-${printer.printer_id ?? printer.id}`}>
       <Card
         size="sm"
         className={cn('h-full gap-0 px-3 text-[12.5px]', stale && 'border border-dashed ring-0')}
@@ -146,12 +147,12 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
           </Badge>
         </div>
         {stale && (
-          <p className="mt-0.5 text-[11.5px] text-muted-foreground" data-testid={`printer-now-stale-${printer.printer_id}`}>
+          <p className="mt-0.5 text-[11.5px] text-muted-foreground" data-testid={`printer-now-stale-${printer.printer_id ?? printer.id}`}>
             Last seen at {new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {stale}
           </p>
         )}
         <JobStatus printer={printer} />
-        {printer.activity !== 'offline' && !printer.error && !stale && (
+        {printer.printer_id !== null && printer.activity !== 'offline' && !printer.error && !stale && (
           <Button
             variant="outline"
             size="sm"
@@ -204,12 +205,12 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
           </p>
         </>
       )}
-      <PlateWarning printer={printer} testId={`printer-now-plate-${printer.printer_id}`} />
+      <PlateWarning printer={printer} testId={`printer-now-plate-${printer.printer_id ?? printer.id}`} />
       {hms.length > 0 && (
         <ul
           className={cn('mt-1.5 space-y-0.5 text-xs', printer.activity === 'paused' ? 'text-warn' : 'text-muted-foreground')}
           aria-label={`${printer.name} errors`}
-          data-testid={`printer-now-hms-${printer.printer_id}`}
+          data-testid={`printer-now-hms-${printer.printer_id ?? printer.id}`}
         >
           {hms.map((error, index) => (
             <li key={`${index}-${error.code}`}>
@@ -264,7 +265,9 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
         </DialogHeader>
         {/* Keyed per printer, so another printer's camera starts live, never in the last
             one's snapshot mode (which would fetch a snapshot first). */}
-        {printer && <CameraView key={printer.printer_id} printer={printer} />}
+        {printer && printer.printer_id !== null && (
+          <CameraView key={printer.id} printer={printer} bambuddyId={printer.printer_id} />
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Close
@@ -275,7 +278,7 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
   )
 }
 
-function CameraView({ printer }: { printer: PrinterNow }) {
+function CameraView({ printer, bambuddyId }: { printer: PrinterNow; bambuddyId: number }) {
   const [live, setLive] = useState(true)
   const [at, setAt] = useState(() => Date.now())
   const leaving = useRef(false)
@@ -298,7 +301,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
         {live ? (
           <img
             ref={dropStreamOnUnmount}
-            src={api.printerCameraStreamUrl(printer.printer_id)}
+            src={api.printerCameraStreamUrl(bambuddyId)}
             alt={`Live camera of ${printer.name}`}
             className="w-full rounded-lg border bg-muted"
             onError={() => {
@@ -311,7 +314,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
         ) : (
           <>
             <img
-              src={api.printerCameraUrl(printer.printer_id, at)}
+              src={api.printerCameraUrl(bambuddyId, at)}
               alt={`Camera snapshot of ${printer.name}`}
               className="w-full rounded-lg border bg-muted"
             />

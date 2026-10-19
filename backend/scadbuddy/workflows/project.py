@@ -76,6 +76,9 @@ class FlowStart(BaseModel):
     #: The same wait for a call a person already approved: longer, since failing it asks
     #: them to approve it again (#3420). Tests shorten it.
     approved_queue_start_s: int = 600
+    #: The heartbeat timeout of the run's calls to the agent, which beats every 10 s
+    #: (`flow_tools._agent_heartbeat`, #4199). Tests shorten it.
+    agent_heartbeat_s: int = 30
     #: The agent's tools and their tiers as the agent resolved them when the run started
     #: (#2704, `flows/agent_tools.py`); each call asks the agent again, whose answer only
     #: raises them. A run from before #2704 took them from a file and asks nothing.
@@ -155,6 +158,10 @@ class ProjectWorkflow:
     @property
     def approved_queue_start_s(self) -> int:
         return self._start.approved_queue_start_s
+
+    @property
+    def agent_heartbeat_s(self) -> int:
+        return self._start.agent_heartbeat_s
 
     def tool_tier(self, name: str) -> str | None:
         return self._start.tool_tiers.get(name)

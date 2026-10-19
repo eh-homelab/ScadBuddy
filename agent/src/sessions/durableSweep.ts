@@ -55,9 +55,9 @@ const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
 /**
  * A durable row's statuses while it holds a turn: running, or parked on one of its calls.
  * The same list as agent-durable's `_RUNNING` (session/activities.py), whose waiting half
- * is gate/store.py's `_WAITING`: change them together.
+ * is gate/store.py's `_WAITING`; test/fixtures/turn-statuses.json pins the three together.
  */
-const TURN_STATUSES = ['running', 'waiting_approval', 'waiting_input']
+export const TURN_STATUSES: readonly string[] = ['running', 'waiting_approval', 'waiting_input']
 
 /** A row in TURN_STATUSES as read: its claim (`event_seq`) and how far its workflow's output got. */
 export type RunningRow = { id: string; event_seq: string; durable_offset: string }
