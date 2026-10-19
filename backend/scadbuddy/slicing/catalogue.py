@@ -44,6 +44,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -56,6 +57,9 @@ from scadbuddy.slicing.profiles import (
     Profiles,
     flatten,
 )
+
+if TYPE_CHECKING:
+    from scadbuddy.library.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +101,12 @@ def native_catalogue(profiles: Profiles) -> Catalogue:
             raise
         _failed.pop(key, None)
     return built
+
+
+def slices_native(store: SettingsStore) -> Callable[[], bool]:
+    """Whether ``slicer_backend`` is ``native`` now, read from ``store`` (blocking): what
+    the API and the print worker give :func:`warm_catalogue`, so both read it alike."""
+    return lambda: store.load().slicer_backend == "native"
 
 
 def warm_catalogue(

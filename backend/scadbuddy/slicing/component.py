@@ -16,7 +16,7 @@ from temporalio.client import Client
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
-from scadbuddy.slicing.catalogue import warm_catalogue
+from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import NativeSliceStarter, native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -82,7 +82,7 @@ async def _run(slicing: Slicing) -> AsyncIterator[None]:
     the first dialog that needs it."""
     warming = warm_catalogue(
         slicing.profiles,
-        lambda: slicing.core.settings_store.load().slicer_backend == "native",
+        slices_native(slicing.core.settings_store),
     )
     try:
         yield

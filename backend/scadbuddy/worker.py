@@ -91,7 +91,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
-from scadbuddy.slicing.catalogue import warm_catalogue
+from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -1110,7 +1110,7 @@ async def run_print_worker(
     # (#3818 tier A); nothing waits on it.
     warming = warm_catalogue(
         await asyncio.to_thread(Profiles.installed, settings.slicer_profiles_dir),
-        lambda: deps.settings_store.load().slicer_backend == "native",
+        slices_native(deps.settings_store),
     )
     try:
         await deps.events.start()

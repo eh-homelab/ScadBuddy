@@ -19,6 +19,7 @@ print run states each side's flow in the 3MF, as Bambu Studio does (#484,
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -39,6 +40,8 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
     Tier,
 )
+
+logger = logging.getLogger(__name__)
 
 #: The nozzle types moved to ``models`` so the settings store can remember them; they
 #: are re-exported here, where every caller already imports them from.
@@ -379,16 +382,19 @@ def resolve(
             if catalogue.is_native:
                 # A spool's preset is a Bambu Cloud setting_id (or a Bambuddy local id,
                 # which the image lacks); native refs are preset names (#4349).
-                own = [
-                    native.id
-                    for preset_id in own
-                    if (
-                        native := catalogue.native_ref(
-                            PresetRef(source="cloud", id=preset_id), "filament"
-                        )
+                mapped = {
+                    preset_id: catalogue.native_ref(
+                        PresetRef(source="cloud", id=preset_id), "filament"
                     )
-                    is not None
-                ]
+                    for preset_id in own
+                }
+                if None in mapped.values():
+                    # Said, so a slot that falls back to a name is not a mystery.
+                    logger.debug(
+                        "a spool's own preset is not in the native catalogue",
+                        extra={"spool_id": option.spool_id},
+                    )
+                own = [native.id for native in mapped.values() if native is not None]
             ref = next(
                 (
                     choice.ref
