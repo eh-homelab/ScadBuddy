@@ -25,9 +25,9 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers import sources as src
 from scadbuddy.analyzers.model import Source
-from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
+from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
-from scadbuddy.bambuddy.models import PresetRef, ProcessValue
+from scadbuddy.bambuddy.models import NOT_IN_PROFILES, PresetRef, ProcessValue
 from scadbuddy.core.problems import ApiError
 
 
@@ -135,6 +135,7 @@ _REASONS = {
     "sidecar_unavailable": "Bambuddy's slicer is not reachable",
     "not_configured": "Bambuddy has no slicer configured",
     "preset_unresolved": "Bambuddy could not find the process preset",
+    NOT_IN_PROFILES: "it is not one of Bambu Studio's own presets, which a native print reads",
 }
 
 
@@ -149,7 +150,7 @@ def unknown_profiles(ids: list[str]) -> list[str]:
 
 
 async def previews(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     process: PresetRef | None,
     profiles: list[FilamentProfile],
     *,
@@ -174,7 +175,7 @@ async def previews(
         ]
     why: str | None
     try:
-        values = await (read or client.preset_values)(process)
+        values = await preset_reader(client, read)(process)
     except ApiError:
         # Unreachable or failing: skip the profiles, never refuse the print for them.
         # Not ``error.detail``, which repeats the operation the sentence already names;
@@ -256,7 +257,7 @@ def not_applied(preview: ProfilePreview) -> FilamentWarning:
 
 
 async def profile_overrides(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     process: PresetRef | None,
     profile_ids: list[str],
     *,

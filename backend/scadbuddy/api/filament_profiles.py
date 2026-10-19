@@ -12,7 +12,6 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.bambuddy.catalogue import read_catalogue
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filament_profiles import (
     BUILTIN,
@@ -22,6 +21,7 @@ from scadbuddy.bambuddy.filament_profiles import (
     unknown_profiles,
 )
 from scadbuddy.bambuddy.resolver import PrintChoices, process_preset_for
+from scadbuddy.slicing.catalogue import catalogue_for
 
 router = APIRouter(prefix="/print/filament-profiles", tags=["print"])
 
@@ -63,6 +63,6 @@ async def preview_profiles(
     profile that cannot be applied says why (``applicable: false``, ``reason``), and a
     print with it on goes ahead without it, saying so in its warnings."""
     async with client_for(store.load()) as client:
-        process = process_preset_for(body.choices, await read_catalogue(client))
+        process = process_preset_for(body.choices, await catalogue_for(client, native=None))
         ids = body.profiles if body.profiles is not None else list(BUILTIN)
         return await previews(client, process, [BUILTIN[i] for i in ids])

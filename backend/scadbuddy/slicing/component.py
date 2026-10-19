@@ -5,6 +5,9 @@ built on first use."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import cached_property
 from typing import Annotated
 
@@ -13,6 +16,7 @@ from temporalio.client import Client
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
+from scadbuddy.slicing.catalogue import warm_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import NativeSliceStarter, native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -70,6 +74,19 @@ def _build(core: Core, components: Components) -> Slicing:
     return Slicing(core)
 
 
-COMPONENT = Component(SLICING, build=_build)
+@asynccontextmanager
+async def _run(slicing: Slicing) -> AsyncIterator[None]:
+    """Build the image's preset catalogue in the background while the app runs, so the
+    first native print dialog does not wait on it (#3818 tier A); the start never does."""
+    warming = warm_catalogue(slicing.profiles)
+    try:
+        yield
+    finally:
+        if warming is not None:
+            warming.cancel()
+            await asyncio.gather(warming, return_exceptions=True)
+
+
+COMPONENT = Component(SLICING, build=_build, run=_run)
 
 SlicingDep = Annotated[Slicing, component_dep(SLICING)]

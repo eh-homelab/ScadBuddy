@@ -16,6 +16,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -49,6 +50,7 @@ class PresetChoice(BaseModel):
     filament_type: str | None = None
     filament_colour: str | None = None
     compatible_printers: list[str] = Field(default_factory=list)
+    filament_id: str | None = None
 
 
 def _local_list(raw: str | None) -> list[str]:
@@ -97,6 +99,55 @@ class _Catalogue:
     printer: list[PresetChoice]
     process: list[PresetChoice]
     filament: list[PresetChoice]
+    #: Set only on the image's own catalogue (``slicing/catalogue.py``
+    #: ``native_catalogue``, #3818): each field's ``setting_id -> name``, which is what
+    #: a ``cloud`` ref resolves by there. ``None`` on Bambuddy's, whose refs are its own.
+    native_setting_ids: dict[str, dict[str, str]] | None = None
+
+    @property
+    def is_native(self) -> bool:
+        return self.native_setting_ids is not None
+
+    @property
+    def owner(self) -> str:
+        """Whose presets these are, as the resolver's messages name them."""
+        return "Bambu Studio" if self.is_native else "Bambuddy"
+
+    @property
+    def slicer(self) -> str:
+        """What slices with them, as the resolver's messages name it."""
+        return "The native slicer" if self.is_native else "Bambuddy"
+
+    @property
+    def native_note(self) -> str:
+        """Said after a preset the image's catalogue lacks; empty on Bambuddy's."""
+        if not self.is_native:
+            return ""
+        return " A native print uses Bambu Studio's own presets: pick one under Advanced."
+
+    @cached_property
+    def _offered(self) -> dict[str, frozenset[str]]:
+        """Each field's preset names, built once per catalogue."""
+        return {
+            field: frozenset(row.name for row in getattr(self, field))
+            for field in ("printer", "process", "filament")
+        }
+
+    def native_ref(self, ref: PresetRef, field: str | None = None) -> PresetRef | None:
+        """On the image's own catalogue, the standard ref of the preset ``ref`` names in
+        ``field`` (``printer``, ``process``, ``filament``) or any of them: a ``standard``
+        ref as it is when offered, a ``cloud`` ref (a ``setting_id``) by the preset it
+        names; ``local``, ``orca_cloud`` and anything not offered is ``None``. On
+        Bambuddy's catalogue every ref is its own, so ``None``."""
+        ids = self.native_setting_ids
+        if ids is None:
+            return None
+        for name in [field] if field is not None else list(self._offered):
+            if ref.source == "standard" and ref.id in self._offered[name]:
+                return ref
+            if ref.source == "cloud" and ref.id in ids.get(name, {}):
+                return PresetRef(source="standard", id=ids[name][ref.id])
+        return None
 
     def names(self) -> dict[tuple[str, str], str]:
         """``(source, id) -> name``, for resolving the refs a pipeline carries."""
