@@ -333,8 +333,16 @@ async def test_each_upload_is_its_own_session(lan: _Lan) -> None:
         ("/x/job.3mf", "ftp://job.3mf", "never uploaded"),
         ("/x/job.3mf", "ftp:///x/job.3mf", "not in the upload directory"),
         (None, "https://elsewhere/job.3mf", "names no file"),
+        # Refused as naming nothing, not by the upload-dir check (#4205).
+        ("/x/job.3mf", "ftp:///x/../x/job.3mf", "names no file"),
     ],
-    ids=["nothing uploaded", "uploaded elsewhere", "outside the upload dir", "no file url"],
+    ids=[
+        "nothing uploaded",
+        "uploaded elsewhere",
+        "outside the upload dir",
+        "no file url",
+        "a path that climbs",
+    ],
 )
 async def test_a_project_file_naming_no_uploaded_file_fails(
     lan: _Lan, tmp_path: Path, upload: str | None, url: str, reason: str
@@ -363,6 +371,15 @@ async def test_a_project_file_naming_no_uploaded_file_fails(
         ("", "", None),
         ("ftp://", "", None),
         ("https://x/job.3mf", "", None),
+        # A `..` climbs off the card: nothing is named (#4205).
+        ("ftp:///cache/../../etc/passwd", "", None),
+        ("file:///mnt/sdcard/../job.3mf", "", None),
+        ("", "../job.3mf", None),
+        # A card root that only starts like one names nothing.
+        ("file:///mnt/sdcardX/job.3mf", "", None),
+        ("file:///sdcard2/job.3mf", "", None),
+        ("file:///mnt/sdcard", "", None),
+        ("ftp:///a/./b//job.3mf", "", "/a/b/job.3mf"),
     ],
 )
 def test_resolve_url(url: str, file: str, path: str | None) -> None:

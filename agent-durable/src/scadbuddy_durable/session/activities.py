@@ -33,6 +33,8 @@ DEFAULT_APPROVAL_EXPIRY_S = 600
 DEFAULT_QUESTION_EXPIRY_S = 3600
 EXPIRY_MIN_S = 10
 EXPIRY_MAX_S = 86_400
+# A turn's statuses; the agent's durable sweep reads the same list (agent/src/sessions/
+# durableSweep.ts TURN_STATUSES): change them together.
 _RUNNING = ("running", "waiting_approval", "waiting_input")
 
 

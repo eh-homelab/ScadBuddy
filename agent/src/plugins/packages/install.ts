@@ -526,3 +526,20 @@ export async function loadPackagesForRun(
     release: () => releases.forEach((r) => r()),
   }
 }
+
+/**
+ * Fetches every enabled package into this replica's cache (#4217), so its first turn finds
+ * them there instead of fetching. The cache is the pod's scratch, empty after every deploy,
+ * and a fetch is the pinned commit's whole repository (hindsight's is 183 MB for a 24 KB
+ * package): durable turns' listings waited 22-113 s on it. A turn that loads during the
+ * warm-up waits on the same fetch, since a package's steps run one at a time. Returns what
+ * a turn would report: a package refused here is refused there too.
+ */
+export async function warmPackages(
+  store: Pick<PackageRepo, 'enabledPins'>,
+  installer: Pick<PackageInstaller, 'acquire'>,
+): Promise<string[]> {
+  const run = await loadPackagesForRun(store, installer)
+  run.release()
+  return run.problems
+}

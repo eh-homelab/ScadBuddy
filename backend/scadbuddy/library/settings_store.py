@@ -552,6 +552,7 @@ class SettingsPatch(BaseModel):
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
     flow_approval_timeout_seconds: int | None = None
+    spool_overlay_refresh_seconds: int | None = None
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -1204,10 +1205,10 @@ def load_render_store_settings(
 
 
 def _solid_concurrency(values: Mapping[str, Any], defaults: Settings) -> int:
-    """`solid_concurrency` as the API's `snapshot` resolves it: a cleared or refused
-    value is the environment's."""
+    """`solid_concurrency` as the API's `snapshot` resolves it: a cleared, refused or
+    missing value is the environment's (#4203)."""
     try:
-        value = check_value("solid_concurrency", values["solid_concurrency"])
+        value = check_value("solid_concurrency", values.get("solid_concurrency"))
     except ValueError:
         return defaults.solid_concurrency
     return int(value)
