@@ -1253,7 +1253,7 @@ describe('the print detail mock', () => {
     const pull = (filename: string) =>
       fetch('/api/v1/prints/36/timelapse/pull', { method: 'POST', body: JSON.stringify({ filename }) })
     expect((await pull('nope.mp4')).status).toBe(404)
-    expect((await pull('video_2026-09-26_20-01-00.mp4')).status).toBe(204)
+    expect((await pull('video_2026-09-26_20-01-00.MP4')).status).toBe(204)
     const detail = (await (await fetch('/api/v1/prints/36')).json()) as { media: { timelapse: { url: string } } }
     expect(detail.media.timelapse.url).toBe('/api/v1/prints/36/timelapse')
   })

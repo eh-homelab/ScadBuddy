@@ -248,8 +248,8 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
         errors.append(
             FilamentWarning(
                 kind="mixed-flows",
-                message="One nozzle is High Flow and the other Standard. The H2C can't "
-                "print High Flow and Standard in one print: choose one flow for both.",
+                message="One nozzle is High Flow and the other Standard. A print can't "
+                "mix High Flow and Standard: choose one flow for both.",
             )
         )
 

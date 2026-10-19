@@ -32,6 +32,13 @@ export type DoneTouch = {
   resourceId: string | null
   action: string
   model: string | null
+  /**
+   * Whether it was made inside an away window, when the database said so at its
+   * microseconds (loadDoneSummary, #3235); otherwise `inAway` decides from `at`.
+   */
+  unattended?: boolean
+  /** Whether it was made before the first away window opened, likewise. */
+  beforeAsked?: boolean
 }
 
 /** The span in which nobody answered: from the timed-out request until the user's next reply, if any. */
@@ -131,10 +138,11 @@ export function doneSummary(
   if (touches.length === 0) return 'ScadBuddy recorded nothing created, changed or deleted in this turn.'
   const first = away[0]
   if (!first) return section('What this turn changed', touches)
-  const unattended = (t: DoneTouch) => inAway(t, away)
-  const before = touches.filter((t) => t.at < first.from)
+  const unattended = (t: DoneTouch) => t.unattended ?? inAway(t, away)
+  const asked = (t: DoneTouch) => !(t.beforeAsked ?? t.at < first.from)
+  const before = touches.filter((t) => !asked(t))
   const during = touches.filter(unattended)
-  const after = touches.filter((t) => t.at >= first.from && !unattended(t))
+  const after = touches.filter((t) => asked(t) && !unattended(t))
   const ids = away.map((w) => plain(w.requestId.slice(0, 8))).join(', ')
   const parts = [
     section(`While nobody answered (attention request${away.length > 1 ? 's' : ''} ${ids} timed out)`, during),
@@ -168,14 +176,16 @@ export async function loadDoneSummary(
   // Each window closes at the user's first reply in that request's own turn: an
   // answer there, or a browser decision on an approval that turn parked on.
   // Another turn's approval is not a reply to this request.
-  const away = await tx<{ id: string; away_from: Date; away_until: Date | null }[]>`
+  const away = await tx<{ id: string; away_from: Date; away_until: Date | null; from_text: string; until_text: string | null }[]>`
     WITH RECURSIVE turns (id) AS (
       SELECT ${turnId}::uuid
       UNION
       SELECT a.turn_id FROM ai_approvals a JOIN turns t ON a.resume_turn_id = t.id
       WHERE a.session_id = ${sessionId} AND a.turn_id IS NOT NULL
     )
-    SELECT q.id, q.created_at AS away_from, reply.at AS away_until FROM ai_questions q
+    SELECT q.id, q.created_at AS away_from, reply.at AS away_until,
+           q.created_at::text AS from_text, reply.at::text AS until_text
+    FROM ai_questions q
     CROSS JOIN LATERAL (
       SELECT min(at) AS at FROM (
         SELECT resolved_at AS at FROM ai_questions
@@ -189,15 +199,19 @@ export async function loadDoneSummary(
     WHERE q.session_id = ${sessionId} AND q.turn_id IN (SELECT id FROM turns) AND q.kind = 'attention' AND q.outcome = 'timed_out'
     ORDER BY q.created_at, q.id`
   const windows = away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until }))
-  // `since` is compared in SQL, at Postgres's microseconds: as a JS Date it is
-  // rounded down to the millisecond, which lets in a touch made in the last
-  // fraction of a millisecond before the claim (#1383). Cast through text:
+  // `since` and each window's edges are compared in SQL, at Postgres's microseconds:
+  // as a JS Date each is rounded down to the millisecond, which lets in a touch made
+  // in the last fraction of a millisecond before the claim (#1383) or a window's
+  // start, or leaves out one just before its end (#3235). Cast through text:
   // postgres.js serializes a timestamptz parameter through a Date too.
+  const bounds = away.map((w) => ({ f: w.from_text, u: w.until_text }))
   const earliest = windows.reduce<Date | null>((e, w) => (e === null || w.from < e ? w.from : e), null)
   const rows = await tx<
     {
       at: Date
       in_turn: boolean
+      in_away: boolean
+      before_asked: boolean
       tool: string
       resource_type: string
       resource_id: string | null
@@ -205,7 +219,12 @@ export async function loadDoneSummary(
       model_slug: string | null
     }[]
   >`
-    SELECT at, at >= ${since}::text::timestamptz AS in_turn, tool, resource_type, resource_id, action, model_slug
+    SELECT at, at >= ${since}::text::timestamptz AS in_turn,
+           EXISTS (SELECT 1 FROM jsonb_to_recordset(${tx.json(bounds)}) AS w(f timestamptz, u timestamptz)
+                   WHERE at >= w.f AND (w.u IS NULL OR at < w.u)) AS in_away,
+           -- bounds[0] is the earliest window: the query above orders them by q.created_at.
+           coalesce(at < ${bounds[0]?.f ?? null}::text::timestamptz, false) AS before_asked,
+           tool, resource_type, resource_id, action, model_slug
     FROM ai_session_resources
     WHERE session_id = ${sessionId} AND (at >= ${since}::text::timestamptz OR at >= ${earliest ?? null}::timestamptz)
     ORDER BY id`
@@ -213,7 +232,7 @@ export async function loadDoneSummary(
   // ones carry over: attended work before the approval is not this turn's to
   // report, nor sectioned by how its windows happen to fall.
   const touches = rows
-    .filter((r) => r.in_turn || inAway({ at: r.at }, windows))
+    .filter((r) => r.in_turn || r.in_away)
     .map((r) => ({
       at: r.at,
       tool: r.tool,
@@ -221,6 +240,8 @@ export async function loadDoneSummary(
       resourceId: r.resource_id,
       action: r.action,
       model: r.model_slug,
+      unattended: r.in_away,
+      beforeAsked: r.before_asked,
     }))
-  return { summary: doneSummary(touches, windows, secrets), unattended: touches.some((t) => inAway(t, windows)) }
+  return { summary: doneSummary(touches, windows, secrets), unattended: touches.some((t) => t.unattended) }
 }

@@ -90,7 +90,7 @@ describe('useMissingGlyphs', () => {
 
   // #3781: the answer belongs to its font, and a pause in asking forgets it.
   it("never shows one font's missing characters for another, nor after it stopped asking", async () => {
-    vi.spyOn(api, 'getGlyphs').mockImplementation((font, text) =>
+    const asked = vi.spyOn(api, 'getGlyphs').mockImplementation((font, text) =>
       font === 'Lobster Two' && text === 'Hi 😀'
         ? Promise.resolve({ font, missing: ['😀'] })
         : new Promise<GlyphCoverage>(() => {}),
@@ -110,5 +110,11 @@ describe('useMissingGlyphs', () => {
     rerender({ font: 'Lobster Two', enabled: true })
     // Asking again, the debounce not yet run: nothing carried over from before the pause.
     expect(result.current).toEqual([])
+    // Then asked again, the same font and text: the answer comes back, from the cache (#3903 review).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GLYPH_CHECK_DEBOUNCE_MS)
+    })
+    expect(result.current).toEqual(['😀'])
+    expect(asked.mock.calls.filter(([font, text]) => font === 'Lobster Two' && text === 'Hi 😀')).toHaveLength(1)
   })
 })

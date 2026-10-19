@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 from temporalio import activity
-from temporalio.api.enums.v1 import EventType
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
 from temporalio.client import Client
 from temporalio.common import RawValue, WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
@@ -192,15 +192,25 @@ async def _workflow_tasks_reach(client: Client, queue: str, build_id: str) -> No
             )
             completed = None
             while completed is None:
-                completed = next(
-                    (
-                        event.workflow_task_completed_event_attributes
-                        for event in (await handle.fetch_history()).events
-                        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
-                    ),
-                    None,
-                )
                 await asyncio.sleep(0.05)
+                for event in (await handle.fetch_history()).events:
+                    # Both builds register the probe's kind, so its task never defers.
+                    # A task that only times out is retried, and may still complete on a
+                    # loaded runner: that is left to the outer timeout, not failed here.
+                    failed = event.workflow_task_failed_event_attributes
+                    # A cause newer than these protos is named by its number.
+                    cause = (
+                        WorkflowTaskFailedCause.Name(failed.cause)
+                        if failed.cause in WorkflowTaskFailedCause.values()
+                        else failed.cause
+                    )
+                    assert event.event_type != EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED, (
+                        "a probe's workflow task failed:"
+                        f" {failed.failure.application_failure_info.type!r}, cause {cause}"
+                    )
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+                        completed = event.workflow_task_completed_event_attributes
+                        break
             reached.append(completed.deployment_version.build_id)
 
 

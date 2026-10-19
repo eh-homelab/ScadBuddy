@@ -17,8 +17,9 @@ export const DEFAULT_NOZZLES: NozzleChoice[] = [
 ]
 
 /**
- * What the dialog opens on with nothing remembered: the chosen printer's defaults,
- * High Flow on each side that has a High Flow nozzle of the size (#1895).
+ * What the dialog opens on with nothing remembered: the chosen printer's defaults, one
+ * flow for both sides, High Flow when either side has a High Flow nozzle of the size
+ * (#1895, #4272).
  */
 export function defaultsOf(choices: ChoicesView): NozzleChoice[] {
   const defaults = choices.default_nozzles ?? []

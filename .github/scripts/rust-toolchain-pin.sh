@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # rust-toolchain-pin.sh [--check] [workflow.yml...]: every dtolnay/rust-toolchain SHA the
-# workflows pin (default: every .github/workflows/*.yml) against the action's master. The
+# workflows pin (default: every .github/workflows/*.y*ml) against the action's master. The
 # action has no release tags, so Dependabot never moves these pins (#4099); the weekly
 # rust-toolchain-pin.yml is the reminder. Prints master and each pin; with --check, exits
-# 1 when any differs, naming each line to change (#4264). Needs gh.
+# 1 when any differs, naming each line to change (#4264). A comment line naming the
+# action is not a pin and is skipped. Needs gh.
 set -euo pipefail
 check=0
 if [ "${1:-}" = --check ]; then check=1; shift; fi
 if [ "$#" = 0 ]; then
   root="$(cd "$(dirname "$0")/../.." && pwd)"
-  set -- "$root"/.github/workflows/*.yml
+  set -- "$root"/.github/workflows/*.y*ml
 fi
 
-lines="$(grep -Hn 'dtolnay/rust-toolchain@' "$@")" || {
-  echo "no dtolnay/rust-toolchain@ pin in $*" >&2; exit 2
+lines="$(grep -Hn 'dtolnay/rust-toolchain@' "$@" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')" || {
+  echo "no dtolnay/rust-toolchain@ pin in $* (comment lines naming it are skipped)" >&2; exit 2
 }
 master="$(gh api repos/dtolnay/rust-toolchain/commits/master --jq .sha)"
 echo "master: $master"

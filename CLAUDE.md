@@ -447,12 +447,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
-  behavior), so an `Operation` moves to the current build, which #4139's deferral needs. The API serves `bambuddy` itself,
-  unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
-  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`. `--queue projects`
-  (`run_projects_worker`, #1057) serves flow runs, deployment `scadbuddy-projects`
-  (#4146; `/readyz` once the queue routes to it, as the print worker's): Postgres and the
-  KEK only, and it refuses to start without the KEK.
+  behavior), so an `Operation` moves to the current build, which #4139's deferral
+  needs. The API serves `bambuddy` itself, unversioned, only with
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
+  `--queue projects` (`run_projects_worker`, #1057) serves flow runs, deployment
+  `scadbuddy-projects` (#4146; `/readyz` once the queue routes to it, as the print
+  worker's): Postgres and the KEK only, and it refuses to start without the KEK.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -907,7 +907,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   references for Dependabot and `openscad-bump.yml` (BuildKit falls back to Docker Hub
   for an image the mirror lacks; the pinned digests matched on both on 2026-10-19,
   `docker buildx imagetools inspect`). `lint-buildx-mirror.sh` checks both. The
-  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`.
+  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`;
+  a service container has no such fallback, so a tag the mirror lacks fails the job.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a

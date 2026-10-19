@@ -43,7 +43,12 @@ function clock(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
-/** A video attachment's type, from the extension its bytes gave it (#309). */
+/**
+ * A video attachment's type, from the extension its bytes gave it (#309). The name is the
+ * server's, not the sender's: `api/print_attachments.py` `_filename` gives it the extension
+ * `sniff_kind` (`library/media.py`) read from the bytes, and a video is only ever `mp4` or
+ * `webm` there (#3116). A third video type there needs a case here.
+ */
 function videoType(filename: string): string {
   return filename.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4'
 }

@@ -7,7 +7,15 @@ type Props = {
   /** `null` leaves the sequence to the template's `print_settings` and the process. */
   value: PrintSequence | null
   onChange: (next: PrintSequence | null) => void
-  /** #956 — how many objects the plate holds, from the check; `null` while unknown. */
+  /**
+   * #3222 — the template's own sequence (its `print_settings`), which `null` prints with;
+   * `null` when it sets none, or the file is not a template's.
+   */
+  inherited?: PrintSequence | null
+  /**
+   * #956 — how many objects the plate holds, from the check; `null` while unknown. `0` is
+   * a file that lists none for the plate (#3222), as unknown as `null`.
+   */
   objects?: number | null
 }
 
@@ -23,7 +31,8 @@ const CHOICES: { value: PrintSequence; label: string }[] = [
  * #1862 — Bambu's print sequence for this print (#907): every object a layer at a time,
  * or each object finished before the next starts. Per print, never remembered.
  */
-export function PrintSequenceStep({ value, onChange, objects = null }: Props) {
+export function PrintSequenceStep({ value, onChange, inherited = null, objects = null }: Props) {
+  const count = objects !== null && objects > 0 ? objects : null
   return (
     <StepCard title="Print sequence">
       <div className="grid gap-1.5">
@@ -47,12 +56,12 @@ export function PrintSequenceStep({ value, onChange, objects = null }: Props) {
           </SelectContent>
         </Select>
       </div>
-      {value === 'by object' && (
+      {(value ?? inherited) === 'by object' && (
         <p className="text-xs text-muted-foreground">
-          {objects === 1
+          {count === 1
             ? 'This plate is one object, so by object prints it as by layer would.'
             : `Each object is finished before the next starts, so the toolhead has to clear the ones already printed: the objects need room between them.${
-                objects !== null ? ` This plate has ${objects} objects.` : ''
+                count !== null ? ` This plate has ${count} objects.` : ''
               }`}
         </p>
       )}

@@ -25,7 +25,9 @@ async function seeded() {
 
 /**
  * Moves the fake clock 20 ms at a time until `check` passes, at most half of SETTLE_MS
- * in all, so a timer due at SETTLE_MS cannot fire before the test means it to.
+ * per call, so a timer due at SETTLE_MS cannot fire before the test means it to. The
+ * budget is not shared between calls: only the steps taken after that timer is scheduled
+ * count towards it.
  */
 async function stepUntil(check: () => void): Promise<void> {
   for (let moved = 0; ; moved += 20) {
@@ -66,7 +68,7 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
    * each call), and the pane's scrolls are recorded. `scrollIntoView` must not be called:
    * it scrolls the window too.
    */
-  function stubLayout(tops: Record<string, number>) {
+  function stubLayout(tops: Record<string, number>, onScroll?: (top: number) => void) {
     const scrolls: number[] = []
     const intoView = vi.fn()
     const proto = Element.prototype as unknown as Record<string, unknown>
@@ -76,7 +78,9 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }
     }
     proto.scrollTo = function (this: Element, options: ScrollToOptions) {
-      if (this.classList.contains('sb-settings')) scrolls.push(options.top ?? 0)
+      if (!this.classList.contains('sb-settings')) return
+      scrolls.push(options.top ?? 0)
+      onScroll?.(options.top ?? 0)
     }
     proto.scrollIntoView = intoView
     const restore = () => {
@@ -159,8 +163,19 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
   )
 
   it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
-    const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
+    // The settle timer is scheduled right after the deep link's scroll, at the same
+    // instant, which `stepUntil` may step past. So the boundary is pinned from there
+    // (#3904 review): two timers set at the scroll look at that scroll's observer (made
+    // next) just before and just after SETTLE_MS.
+    const seen: (boolean | 'no observer')[] = []
+    const { scrolls, restore } = stubLayout({ libraries: 5000 }, (top) => {
+      if (top !== 4992) return
+      const at = observers.length
+      for (const delay of [SETTLE_MS - 1, SETTLE_MS + 1]) {
+        setTimeout(() => seen.push(observers[at]?.disconnected ?? 'no observer'), delay)
+      }
+    })
     // Time itself, not one timer picked out by its closure's text (#3247 review), and
     // only the time the test moves (#3804 review): a clock that also followed the wall
     // could pass SETTLE_MS on a loaded machine before the first check.
@@ -173,8 +188,10 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
         expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
       )
       await stepUntil(() => expect(scrolls).toContain(4992))
+      expect(scrolls.filter((top) => top === 4992)).toHaveLength(1)
       expect(observers[0]!.disconnected).toBe(false)
-      act(() => vi.advanceTimersByTime(SETTLE_MS))
+      act(() => vi.advanceTimersByTime(SETTLE_MS + 1))
+      expect(seen).toEqual([false, true])
       expect(observers[0]!.disconnected).toBe(true)
     } finally {
       vi.useRealTimers()

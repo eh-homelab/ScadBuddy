@@ -890,12 +890,14 @@ workers restart.
     `asyncio.to_thread`: an activity that starts with one waits for a free thread
     while the loop runs on. For a hang it does not catch,
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
-    The renders dashboard's "Worker event loops" panel charts the render and print
-    workers by `job="scadbuddy-render"` and `job="scadbuddy-print"`. Each `job` is
-    the name of the worker's Service, which its ServiceMonitor scrapes (eh-homelab/clusters
-    `applications/scadbuddy/scadbuddy-{render,print}.yaml`, no `jobLabel`), so renaming
-    either Service empties its series. `scadbuddy-projects` has no scrape target, so
-    its stalls show only in its log.
+    The renders dashboard's "Worker event loops" panel charts the render, print and
+    projects workers by `job=~"scadbuddy-(render|print|projects)"`. Each `job` is the
+    name of the worker's Service in eh-homelab/clusters
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-projects.yaml)),
+    which its ServiceMonitor scrapes with no `jobLabel`
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml)),
+    so renaming a Service empties its series. The projects worker's ServiceMonitor
+    arrived in clusters#2504.
   - Every worker's `/metrics` also carries the Temporal SDK's own series (#3788):
     `temporal_workflow_task_execution_latency`, `temporal_workflow_task_schedule_to_start_latency`,
     `temporal_activity_schedule_to_start_latency` and the rest, in seconds. The SDK exports
@@ -904,8 +906,11 @@ workers restart.
     `namespace` label is the Temporal namespace, which Prometheus keeps as
     `exported_namespace`. A port another process holds leaves a worker without them
     (logged once at start) rather than stopping it. The renders dashboard's "Worker
-    Temporal tasks" panel charts them for the render and print workers; the projects
-    worker exports them too, but with no scrape target nothing reads them.
+    Temporal tasks" panel charts them for the render, print and projects workers. Of the
+    SDK's `temporal_*` series, each worker's ServiceMonitor (linked above) keeps only the three
+    histograms that panel reads, and clusters'
+    [`check-scadbuddy-keep-lists.sh`](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/.github/scripts/check-scadbuddy-keep-lists.sh)
+    keeps their lists in step.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.

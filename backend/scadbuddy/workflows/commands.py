@@ -169,17 +169,17 @@ NOT_READY_PAGES = 5
 
 
 async def deferred_kind(client: Client, id: str) -> bool:
-    """Whether ``id``'s failing workflow task is an ``Operation`` deferring a kind its build
-    does not register (#4139): the newest workflow task failure since its last completed
-    task is `DEFERRED_KIND`. That task goes on once a build with the kind is current, so
-    the command is still accepting. A task failing for any other reason (nondeterminism,
-    a bug in workflow code) waits for nothing (#4156), nor does one whose history cannot
-    be read within `DESCRIBE_SECONDS`. Never raises.
-
-    A task completed since (its newest outcome, above any failure or timeout) is still
-    accepting too (#4320): Temporal refused while the task was failing, and it completed
-    before the read, as a deferred task does on the first build that has its kind. Nothing
-    is stuck, and the same request sent again is accepted.
+    """Whether the command ``id``, refused because its workflow task was failing, is still
+    accepting: its newest workflow task outcome is either a failure of type
+    `DEFERRED_KIND`, an ``Operation`` deferring a kind its build does not register
+    (#4139), or a completion. A timeout above a failure is skipped (a deferred task left
+    with no worker to take it times out above its failure); one above a completion is
+    not, and answers no. The deferred task goes on once a build with the kind is
+    current. A completion means the task recovered between the refusal and this read
+    (#4320), as a deferred task does on the first build that has its kind: nothing is
+    stuck, and the same request sent again is accepted. A task failing for any other
+    reason (nondeterminism, a bug in workflow code) waits for nothing (#4156), nor does
+    one whose history cannot be read within `DESCRIBE_SECONDS`. Never raises.
 
     The limit: Temporal records only a task's first failure, and the SDK lets later
     attempts time out rather than report them. An ``Operation`` that deferred and then
@@ -391,7 +391,8 @@ async def start_command[T](
                 # (#4139), or has since completed (#4320).
                 raise CommandStillAcceptingError(id) from error
             # Stuck, not waiting (#4156): refused as before, and said here, since only
-            # the execution's history says why.
+            # the execution's history says why. Two lines on purpose: `deferred_kind`
+            # logs its reason, this one the refusal it leads to.
             logger.warning("command %s: its workflow task is failing, and not to defer a kind", id)
         if (failure := temporal_failure(error, id)) is None:
             raise

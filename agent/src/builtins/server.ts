@@ -26,7 +26,7 @@ import { CALL_ID_META } from './callId.js'
 // these is outward, as every package built-in is in a classic turn, and parks first.
 //
 // Each tool takes Claude Code's own input (schemas.json, the bundled Claude Code's,
-// checked by test/builtinSchemas.sdk.test.ts) and answers in its words.
+// checked by test/builtins.sdk.test.ts) and answers in its words.
 
 export const BUILTIN_SERVER = 'builtin'
 
@@ -68,7 +68,7 @@ export const BUILTINS: Record<string, Builtin> = {
   Edit: {
     description: `Claude Code's Edit: replaces exact text in a file of the session workspace (${path}).`,
     input: z.object({ file_path: z.string(), old_string: z.string(), new_string: z.string(), replace_all: z.boolean().optional() }),
-    run: (ctx, input: Parameters<typeof edit>[1]) => edit(ctx.files, input),
+    run: (ctx, input: Parameters<typeof edit>[1]) => edit(ctx.files, input, ctx.callId),
   },
   Glob: {
     description: `Claude Code's Glob: lists the session workspace's files (under ${WORKSPACE_ROOT}) matching a glob pattern.`,

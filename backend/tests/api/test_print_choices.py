@@ -202,7 +202,7 @@ def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
     remembered = {
         "printer_id": 1,
         "filament_plan": [],
-        "nozzles": [{"size": "0.2", "flow": "standard"}, {"size": "0.2", "flow": "high_flow"}],
+        "nozzles": [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "high_flow"}],
         "tier": None,
         "process_name": "0.06mm Fine @BBL H2C 0.2 nozzle",
     }
@@ -220,6 +220,28 @@ def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
     body = client.get(f"/api/v1/print/outputs/{output_id}/choices").json()
 
     assert body["model_choices"] == remembered
+
+
+@respx.mock
+def test_a_remembered_pair_of_two_flows_is_served_as_one(client: TestClient, model: str) -> None:
+    """#4381 review of #4272: a model last printed with the old default (the left High
+    Flow, the right Standard) would be refused (`mixed-flows`) on every print until
+    someone chose again. The dialog and print_output get one flow, High Flow, as the
+    default would give; what is stored is left as it was."""
+    mixed = [{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}]
+    stored = client.put(f"/api/v1/print/models/{model}/choices", json={"nozzles": mixed})
+    assert stored.json()["nozzles"] == mixed
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=[]))
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices").json()
+
+    assert body["model_choices"]["nozzles"] == [{"size": "0.4", "flow": "high_flow"}] * 2
 
 
 def _store_choices_row(settings: Settings, model: str, choices: dict[str, Any]) -> None:

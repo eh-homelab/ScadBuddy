@@ -116,6 +116,16 @@ function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
 /** Where a file came from, for the audit log and the panel: a tool and its ids, or a URL. */
 export type WorkspaceSource = { [key: string]: string | number | boolean | null }
 
+/** The source key naming the builtin Edit call that last wrote a file (#3202): its retry is that call again. */
+export const EDIT_CALL = 'edit_call'
+
+/** A file's source kept by a write that is not that Edit call's: it names the call no longer. */
+export function withoutEditCall(source: WorkspaceSource | null | undefined): WorkspaceSource | undefined {
+  if (!source) return undefined
+  const { [EDIT_CALL]: _call, ...rest } = source
+  return rest
+}
+
 export type WorkspaceFileInfo = {
   path: string
   mediaType: string

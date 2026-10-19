@@ -994,8 +994,9 @@ export const printTools: Tool[] = [
         bedType ??= view.bed_type
         const last = view.model_choices
         const remembered = last?.nozzles ?? []
-        // With nothing remembered, the printer's defaults: High Flow on each side that has
-        // a High Flow nozzle of the size (#1895).
+        // With nothing remembered, the printer's defaults: one flow for both sides, High
+        // Flow when either side has a High Flow nozzle of the size (#1895, #4272). A
+        // remembered pair comes back with one flow too.
         const defaults = view.default_nozzles ?? []
         if (chosenNozzles === undefined)
           chosenNozzles = remembered.length > 0 ? remembered : defaults.length > 0 ? defaults : DEFAULT_NOZZLES

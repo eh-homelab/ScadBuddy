@@ -625,6 +625,7 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
         "url": "/api/v1/prints/35/timelapse",
         "poster_url": f"/api/v1/prints/35/timelapse/frames/0?v={still_version()}",
         "frames_url": "/api/v1/prints/35/timelapse/frames",
+        "filename": "print-35-timelapse.mp4",
     }
     assert not routes["info"].called
     assert not routes["thumbnails"].called
@@ -691,6 +692,20 @@ def test_a_failed_print_without_a_timelapse(client: TestClient, model: str) -> N
     assert body["media"]["finish_photo"]["name"] == "finish_20260927_015703_93372185.jpg"
     assert [photo["name"] for photo in body["media"]["photos"]] == ["a1b2c3d4.jpg"]
     assert "source" not in {file["kind"] for file in body["files"]}
+
+
+@respx.mock
+def test_a_timelapse_is_named_by_its_own_container(client: TestClient, model: str) -> None:
+    # #3107: Bambuddy keeps what the printer recorded, not always an MP4.
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 36)
+    mock_archive(36, timelapse_path="archive/1/print/video_2026-10-09_13-59-25.AVI")
+    mock_detail_reads(36)
+
+    body = client.get("/api/v1/prints/36").json()
+
+    assert body["media"]["timelapse"]["filename"] == "print-36-timelapse.avi"
 
 
 @respx.mock
