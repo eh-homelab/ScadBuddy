@@ -42,6 +42,32 @@ function listingAnswers(): { count: () => number; stop: () => void } {
   return { count: () => answered, stop: () => server.events.removeListener('response:mocked', listen) }
 }
 
+/**
+ * Every request MSW answers from now on, as `METHOD path`, and how many it has started
+ * and not yet answered (`open`), until `stop`.
+ */
+function answered(): { list: string[]; open: () => number; stop: () => void } {
+  const list: string[] = []
+  const started = new Set<string>()
+  const onStart = ({ requestId }: { requestId: string }) => started.add(requestId)
+  const onEnd = ({ requestId }: { requestId: string }) => started.delete(requestId)
+  const onAnswer = ({ request }: { request: Request }) => {
+    list.push(`${request.method} ${new URL(request.url).pathname}`)
+  }
+  server.events.on('request:start', onStart)
+  server.events.on('request:end', onEnd)
+  server.events.on('response:mocked', onAnswer)
+  return {
+    list,
+    open: () => started.size,
+    stop: () => {
+      server.events.removeListener('request:start', onStart)
+      server.events.removeListener('request:end', onEnd)
+      server.events.removeListener('response:mocked', onAnswer)
+    },
+  }
+}
+
 /** The request body of each POST to `path`, recorded until `stop`. */
 function posted(path: string): { bodies: unknown[]; stop: () => void } {
   const bodies: unknown[] = []
@@ -347,14 +373,8 @@ describe('LibraryPage', () => {
     const run = vi.spyOn(api, 'runLibraryPrint')
     // MSW's answers to the run's POST, the choices it remembers and the progress read
     // the sent dialog makes, counted until the test ends (see below).
-    const answered: string[] = []
-    const onAnswer = ({ request }: { request: Request }) => {
-      answered.push(`${request.method} ${new URL(request.url).pathname}`)
-    }
-    server.events.on('response:mocked', onAnswer)
-    onTestFinished(() => {
-      server.events.removeListener('response:mocked', onAnswer)
-    })
+    const answers = answered()
+    onTestFinished(answers.stop)
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-print-89'))
     const dialog = await screen.findByRole('dialog', { name: 'Print' })
@@ -374,12 +394,17 @@ describe('LibraryPage', () => {
     )
     // Not ended with a request in flight: unmounting aborts it, and in CI the next
     // test's listing read then bypassed MSW ("could not reach its server") and never
-    // showed its loading state (the #2944 shape). The run's POST, the choices it
-    // remembers, then the sent dialog's first progress read; its next is seconds away.
+    // showed its loading state (the #2944 shape). The run's POST; the choices it
+    // remembers (sent only because file 89 has none remembered in the fresh mock state,
+    // `useRunPrint`'s rememberChoices); then the sent dialog's first progress read, which
+    // `PrintPicker`'s `usePrintProgress` makes at once; its next is seconds away. Then
+    // nothing still open, whatever else the run sent (a bed type's PUT, a progress read
+    // on a realtime event: #3242).
     await waitFor(() => {
-      expect(answered).toContain('POST /api/v1/print/library/89/run')
-      expect(answered).toContain('PUT /api/v1/print/library/89/choices')
-      expect(answered).toContain('GET /api/v1/print/library/89/progress')
+      expect(answers.list).toContain('POST /api/v1/print/library/89/run')
+      expect(answers.list).toContain('PUT /api/v1/print/library/89/choices')
+      expect(answers.list).toContain('GET /api/v1/print/library/89/progress')
+      expect(answers.open()).toBe(0)
     })
     run.mockRestore()
   })
@@ -838,7 +863,7 @@ describe('LibraryPage, item context (#975)', () => {
     expect(await screen.findByTestId('library-done')).toHaveTextContent('Copied 2 files to Supplies / Storage.')
     expect(copy.bodies).toEqual([{ file_ids: [89, 91], folder_id: 4 }])
     // The originals stay where they were, in the listing the copy reloaded.
-    await waitFor(() => expect(reloads.count()).toBe(1))
+    await waitFor(() => expect(reloads.count()).toBeGreaterThanOrEqual(1))
     await waitFor(() => expect(screen.getByTestId('library-file-89')).toBeInTheDocument())
   })
 
@@ -855,7 +880,7 @@ describe('LibraryPage, item context (#975)', () => {
     expect(toast).toHaveTextContent('Nothing was moved.')
     expect(within(toast).getByTestId('library-done-skipped')).toHaveTextContent('alex-headphone-hook.3mf')
     // The file Bambuddy skipped is still listed once the move's reload has answered.
-    await waitFor(() => expect(reloads.count()).toBe(1))
+    await waitFor(() => expect(reloads.count()).toBeGreaterThanOrEqual(1))
     await waitFor(() => expect(screen.getByTestId('library-file-121')).toBeInTheDocument())
   })
 

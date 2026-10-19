@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import type { Param, ParamValue } from '../../api/types'
-import { paramLabel } from '../../lib/params'
 import { useFillable } from '../../agent/useFillable'
+import { paramLabel } from '../../lib/params'
 import { Field } from './Field'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 

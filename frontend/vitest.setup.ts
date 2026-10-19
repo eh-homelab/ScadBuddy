@@ -9,6 +9,7 @@ import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
 import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
 import { resending } from './src/test/resend'
+import { trackInFlight } from './src/test/inFlight'
 
 // A find*/waitFor re-runs its query on every DOM change, and by default each miss
 // builds its error with prettyDOM of the whole document: on a page of ~1000 elements
@@ -38,19 +39,24 @@ getComputedStyle(document.documentElement)
 
 /** `fetch` as MSW patched it, put back once the file is done. */
 let mswFetch: typeof fetch | undefined
+/** How long a test's requests still in flight are waited for once it ends (#3243). */
+const IN_FLIGHT_WAIT_MS = 500
+const inFlight = trackInFlight(server)
+
+/** `line` on stderr with the test it is about, as files run in parallel. */
+function report(line: string) {
+  // One refused in a file's own hooks has no test (`> -`); "outside a test" means not
+  // even a file. Neither is a fault.
+  const { testPath, currentTestName } = expect.getState()
+  const file = testPath ? path.relative(process.cwd(), testPath) : 'outside a test'
+  process.stderr.write(`${line} [${file} > ${currentTestName ?? '-'}]\n`)
+}
 beforeAll(() => {
   server.listen({ onUnhandledFrame: 'error' })
   // MSW lets some requests through to the real network; `resending` sends them again.
   const intercepted = globalThis.fetch
   mswFetch = intercepted
-  // The test in the line, as files run in parallel and their stderr interleaves. One
-  // refused in a file's own hooks has no test (`> -`); "outside a test" means not even
-  // a file. Neither is a fault.
-  globalThis.fetch = resending(intercepted, (line) => {
-    const { testPath, currentTestName } = expect.getState()
-    const file = testPath ? path.relative(process.cwd(), testPath) : 'outside a test'
-    process.stderr.write(`${line} [${file} > ${currentTestName ?? '-'}]\n`)
-  })
+  globalThis.fetch = resending(intercepted, report)
 })
 afterEach(async () => {
   // Unmounted here, before the tick below, rather than in Testing Library's own hook,
@@ -61,6 +67,12 @@ afterEach(async () => {
   // so there is nothing to wait for.
   cleanup()
   if (!vi.isFakeTimers()) await new Promise((resolve) => setTimeout(resolve, 0))
+  // #3243 — the next test starts with none of this one's requests still in flight; one
+  // that does not end in time is named here, against the test that left it, rather than
+  // turning up as a dropped connection in the next. Under fake timers a mocked delay
+  // would never end, so nothing is waited for.
+  const left = await inFlight.drained(vi.isFakeTimers() ? 0 : IN_FLIGHT_WAIT_MS)
+  if (left.length > 0) report(`vitest.setup: the test ended with ${left.length} request(s) in flight: ${left.join(', ')}`)
   server.resetHandlers()
   resetMockState()
   resetDisplayUnit()
