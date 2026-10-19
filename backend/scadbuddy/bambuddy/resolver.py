@@ -24,7 +24,13 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
-from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning, spool_label
+from scadbuddy.bambuddy.filaments import (
+    FilamentOptions,
+    FilamentPlan,
+    FilamentWarning,
+    SpoolOption,
+    spool_label,
+)
 from scadbuddy.bambuddy.models import (
     FlowType,
     NozzleChoice,
@@ -165,6 +171,30 @@ def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) ->
             if row.filament_id == filament_id and printer in row.compatible_printers
         ]
     )
+
+
+def _record_preset(catalogue: _Catalogue, option: SpoolOption, printer: str) -> PresetRef | None:
+    """An untagged tray's preset from the spool providers' records of its spool (#3818
+    D1), in their priority order: Bambuddy's ``slicer_filament`` is a ``filament_id``
+    (``GFA00``) or a cloud ``setting_id`` (``GFSL99_20``), as
+    ``tests/bambuddy/recordings/inventory-spools.json`` shows; anything else (a local
+    preset's id) is no native preset, and the slot falls back as any tray does."""
+    for record in option.records.values():
+        if not record.preset:
+            continue
+        ref = _by_filament_id(catalogue.filament, record.preset, printer)
+        if ref is None:
+            cloud = catalogue_native_ref(
+                catalogue, PresetRef(source="cloud", id=record.preset), "filament"
+            )
+            fits = cloud is not None and any(
+                row.name == cloud.id and printer in row.compatible_printers
+                for row in catalogue.filament
+            )
+            ref = cloud if fits else None
+        if ref is not None:
+            return ref
+    return None
 
 
 def _override_problem(
@@ -321,6 +351,8 @@ def resolve(
         elif option.spool_id < 0 and option.slicer_filament:
             # A tray chosen for itself: its tray_info_idx is the BBL preset's filament_id.
             ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
+        if ref is None and option.spool_id < 0 and catalogue.native_setting_ids is not None:
+            ref = _record_preset(catalogue, option, printer)
         if ref is None:
             own = [
                 row.slicer_filament

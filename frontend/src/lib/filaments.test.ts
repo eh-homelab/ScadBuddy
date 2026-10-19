@@ -240,6 +240,7 @@ describe('checkPlan', () => {
     return {
       library_file_id: 1,
       track_switch: false,
+      source: 'inventory',
       printer_id: 1,
       printer_name: 'Printer A',
       slots: [{ slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 100 }],
@@ -310,6 +311,7 @@ describe('seedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
     track_switch: false,
+    source: 'inventory',
     slots: [
       slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
       slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),
@@ -350,6 +352,7 @@ describe('carriedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
     track_switch: false,
+    source: 'inventory',
     slots: [
       slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
       slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),

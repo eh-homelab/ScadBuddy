@@ -334,6 +334,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
       "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
   },
+  ...(
+    [
+      'PUT /api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
+      'DELETE /api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The native path's manual tray link (#3818 tier A Task 6c): a person says which spool is physically " +
+      "in an untagged tray, as the Bambuddy path's question above does; an agent cannot see the tray. " +
+      'The overlay an agent reads is the print filaments answer, which carries each tray\'s records.',
+  })),
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/camera/stream',
     reason:

@@ -437,6 +437,11 @@ class AmsTray(BambuddyModel):
     nozzle_temp_max: int | None = None
     state: int | None = None
     exists: bool | None = None
+    #: The RFID tag's UID and the spool's UUID (#3818), all zeros for an untagged spool:
+    #: OpenBambuAPI ``mqtt.md`` at ``cc383a2c``, the ``pushing.pushall`` example, and
+    #: ``tests/bambuddy/recordings/printer-status-rack.json``. `spools.models` cleans them.
+    tag_uid: str | None = None
+    tray_uuid: str | None = None
 
 
 class AmsUnit(BambuddyModel):

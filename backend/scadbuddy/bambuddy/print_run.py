@@ -686,7 +686,7 @@ def _spools_by_slot(options: FilamentOptions, plan: FilamentPlan) -> dict[int, S
 
 
 async def resolve_plates(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     plate_ids: list[int],
     per_plate: list[FilamentOptions],
     plan: FilamentPlan,
@@ -696,7 +696,10 @@ async def resolve_plates(
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
     own words: what :func:`plan_run` refuses with, and what :func:`check_print` reports
     (#1050). A spool the inventory lacks resolves as no spool chosen, so its presets
-    are not read: Bambuddy would answer for a spool it does not have with an error."""
+    are not read: Bambuddy would answer for a spool it does not have with an error.
+    A native run's options are trays only (#3818 D1), so no spool presets are read and
+    ``client`` may be ``None``: a remembered Bambuddy spool there is a slot with no
+    choice."""
     inventory = {spool.spool_id for options in per_plate for spool in options.spools}
     # Read once for every plate: the plan's spools are the same on every plate.
     # A tray chosen for itself (#2164) has no spool, so no presets of its own.
@@ -712,6 +715,12 @@ async def resolve_plates(
     gate = asyncio.Semaphore(SPOOL_PRESET_READS)
 
     async def presets(spool_id: int) -> list[SpoolFilamentPreset]:
+        if client is None:
+            # Only an inventory spool has presets of its own, and only Bambuddy's
+            # inventory has spools: a client-less (native) run has trays alone.
+            raise TypeError(
+                f"spool {spool_id}'s presets are Bambuddy's: reading them needs a client"
+            )
         async with gate:
             return await client.spool_filament_presets(spool_id)
 
