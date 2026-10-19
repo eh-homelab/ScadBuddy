@@ -473,7 +473,7 @@ async def plate_layout(
         # The last object render that drew nothing: its log is the plate's when no
         # object drew anything, as a file it could not open is often why (#451, #3218).
         skipped: OpenSCADError | None = None
-        alike: list[tuple[tuple[str, tuple[float, ...]], ...]] = []
+        alike: list[tuple[_Drawn, ...]] = []
         for object_number in object_numbers:
             piece_dir = work_dir
             defines: list[str] = []
@@ -603,7 +603,12 @@ async def plate_layout(
     return PlateLayout(plates, [colours[old - 1] for old in used], warnings, box, sources)
 
 
-def _drawn_alike(parts: Sequence[ColourPart]) -> tuple[tuple[str, tuple[float, ...]], ...]:
+#: One part of an object's render as `_drawn_alike` compares it: its colour, its box,
+#: and its vertex and face counts.
+_Drawn = tuple[str, tuple[float, ...], tuple[int, int]]
+
+
+def _drawn_alike(parts: Sequence[ColourPart]) -> tuple[_Drawn, ...]:
     """What one object's render drew, to compare with another's: each colour, its box
     rounded to a micron, and its vertex and face counts, so two shapes of one colour in
     one box (a block and a hollowed one) differ."""
@@ -611,11 +616,8 @@ def _drawn_alike(parts: Sequence[ColourPart]) -> tuple[tuple[str, tuple[float, .
         sorted(
             (
                 part.colour,
-                (
-                    *(round(float(v), 3) for v in part.mesh.bounds.ravel()),
-                    float(len(part.mesh.vertices)),
-                    float(len(part.mesh.faces)),
-                ),
+                tuple(round(float(v), 3) for v in part.mesh.bounds.ravel()),
+                (len(part.mesh.vertices), len(part.mesh.faces)),
             )
             for part in parts
         )
