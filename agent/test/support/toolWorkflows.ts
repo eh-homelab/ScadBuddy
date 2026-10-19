@@ -13,10 +13,10 @@ export async function callTool(name: string, input: unknown, toolUseId: string):
   return tools[name]!(input)
 }
 
-/** Runs `name` on `agent-tools` with a heartbeat timeout of `heartbeatMs`, and no retry. */
-export async function callBeating(name: string, heartbeatMs: number): Promise<unknown> {
+/** Runs `name` on `taskQueue` with a heartbeat timeout of `heartbeatMs`, and no retry. */
+export async function callBeating(name: string, heartbeatMs: number, taskQueue: string): Promise<unknown> {
   const activities = proxyActivities<Record<string, () => Promise<unknown>>>({
-    taskQueue: 'agent-tools',
+    taskQueue,
     startToCloseTimeout: '1 minute',
     heartbeatTimeout: heartbeatMs,
     retry: { maximumAttempts: 1 },
