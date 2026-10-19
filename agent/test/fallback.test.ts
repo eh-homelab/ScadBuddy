@@ -67,6 +67,8 @@ function harness(script: Script) {
   const order: string[] = []
   /** How many messages the caller had seen when each fallback attempt started (`onAttempt`). */
   const attempts: number[] = []
+  /** Every `onAttempt` call, the first attempt's too: the credential's id and its index. */
+  const started: [string, number][] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -86,6 +88,7 @@ function harness(script: Script) {
     refusals,
     order,
     attempts,
+    started,
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
@@ -114,7 +117,8 @@ function harness(script: Script) {
               refusals.push({ failure, ...judged })
               order.push('onRefused')
             },
-            onAttempt: (_credential, index) => {
+            onAttempt: (credential, index) => {
+              started.push([credential.id, index])
               if (index > 0) attempts.push(messages.length)
             },
           },
@@ -319,6 +323,12 @@ describe('runWithFallback (#1093)', () => {
     expect(h.runs).toHaveLength(3)
     // The first attempt's init and text, then nothing more of the second's (its init is not passed on).
     expect(h.attempts).toEqual([2, 2])
+    // Every attempt is handed over, the first one too, each with its own credential (#3640).
+    expect(h.started).toEqual([
+      ['a', 0],
+      ['b', 1],
+      ['c', 2],
+    ])
   })
 
   it('does not fall back when the failure is not the credential’s: a bad request, or a turn limit', async () => {

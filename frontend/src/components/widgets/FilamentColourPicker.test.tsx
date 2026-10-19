@@ -137,8 +137,16 @@ describe('spoolColour', () => {
 // #3656: picking the swatch of the colour already set, however it was spelt, sends
 // nothing, as the hex box does not.
 describe('a filament of the colour already set', () => {
-  it('is not sent again', async () => {
-    const { onChange, user } = setup('#f5547c')
+  it.each([
+    ['in another letter case', '#f5547c', 'F5547CFF'],
+    ['as a colour name', 'hotpink', 'FF69B4FF'],
+  ])('is not sent again, the value spelt %s', async (_how, value, rgba) => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () =>
+        HttpResponse.json({ spools: [{ ...SPOOL_INVENTORY[0], rgba }], slots: [] }),
+      ),
+    )
+    const { onChange, user } = setup(value)
     await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
     const list = await screen.findByRole('listbox', { name: 'Filaments for Plate' })
     await user.click(within(list).getByRole('option', { name: /Hot Pink/ }))

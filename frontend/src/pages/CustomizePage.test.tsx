@@ -2200,9 +2200,11 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
       }),
     )
     const { user } = render(`/m/name-keychain?from=${outputId}`)
-    const generate = await screen.findByTestId('generate')
-    await waitFor(() => expect(generate).toBeEnabled(), { timeout: 5000 })
-    await user.click(generate)
+    // Looked up afresh on each try, never held (#3935): the page lays the action bar out
+    // in one of two places (under a template's own UI, or beside the generated form), so
+    // a Generate found before the page settles can be unmounted, and stays disabled.
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 5000 })
+    await user.click(screen.getByTestId('generate'))
     await waitFor(() =>
       expect(bodies[0]).toMatchObject({ inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 } }),
     )

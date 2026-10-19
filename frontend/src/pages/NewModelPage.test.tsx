@@ -77,15 +77,18 @@ describe('NewModelPage', () => {
     // The server checks under a small concurrency budget, so a check nobody is
     // waiting for any more must release its permit.
     let arrived = 0
+    const received: AbortSignal[] = []
     server.use(
-      http.post('*/api/v1/models/check', async () => {
+      http.post('*/api/v1/models/check', async ({ request }) => {
         arrived += 1
+        received.push(request.signal)
         await new Promise((resolve) => setTimeout(resolve, 10_000))
         return HttpResponse.json({ ok: true, checked: true, diagnostics: [], parameters: 0 })
       }),
     )
-    // The signal given to fetch: msw 3 rebuilds the handler's request from the wire, and
-    // does not abort it when the client drops a reused keep-alive connection.
+    // The signal given to fetch, and the one the handler's request carries: msw rebuilds
+    // that request from the wire, so its abort says the abort reached the wire too
+    // (@mswjs/interceptors 0.45.8, #2855).
     const sent = vi.spyOn(globalThis, 'fetch')
     onTestFinished(() => sent.mockRestore())
 
@@ -98,6 +101,7 @@ describe('NewModelPage', () => {
 
     unmount()
     await waitFor(() => expect(inflight?.aborted).toBe(true), { timeout: 3_000 })
+    await waitFor(() => expect(received[0]?.aborted).toBe(true), { timeout: 3_000 })
   })
 
   it('will not save without a name and some source', async () => {

@@ -32,25 +32,21 @@ function start(request: PrintRunRequest, h2c: boolean): PreviewStarted {
   }
 }
 
-/**
- * Since #2700 the backend answers a preview-slice start 202 with its running operation as
- * soon as it is recorded, and the dialog's `command()` follows it (#2824). Each start's
- * operation is recorded in `operations.ts`, finished with the slice's `PreviewStarted`.
- */
-function accepted(subject: string, result: PreviewStarted) {
-  return acceptOperation('preview_slice', subject, { ...result })
-}
-
 export const handlers = [
+  // Since #2700 the backend answers a preview-slice start 202 with its running operation
+  // as soon as it is recorded, and the dialog's `command()` follows it (#2824). Each
+  // start's operation is recorded in `operations.ts`, finished with the slice's
+  // `PreviewStarted`.
   http.post(`${base}/print/outputs/:id/preview-slice`, async ({ params, request }) =>
-    accepted(`output:${String(params['id'])}`, start((await request.json()) as PrintRunRequest, false)),
+    acceptOperation('preview_slice', `output:${String(params['id'])}`, {
+      ...start((await request.json()) as PrintRunRequest, false),
+    }),
   ),
 
   http.post(`${base}/print/library/:id/preview-slice`, async ({ params, request }) =>
-    accepted(
-      `library:${String(params['id'])}`,
-      start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE),
-    ),
+    acceptOperation('preview_slice', `library:${String(params['id'])}`, {
+      ...start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE),
+    }),
   ),
 
   // #2072 — a finished slice's toolpath.

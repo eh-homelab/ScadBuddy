@@ -237,7 +237,9 @@ async def test_a_task_completed_since_the_refusal_is_still_accepting() -> None:
     assert await deferred_kind(cast(Client, client), "op-x")
 
 
-async def test_a_task_timed_out_since_its_last_completion_is_no_deferral() -> None:
+async def test_a_task_timed_out_since_its_last_completion_is_no_deferral(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A task timing out (no failure of its own to read) above a completed one is not
     taken for the recovery #4320's is: nothing says it waits for a build."""
     timed_out = [
@@ -245,7 +247,11 @@ async def test_a_task_timed_out_since_its_last_completion_is_no_deferral() -> No
         _task(EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED),
     ]
     client = SimpleNamespace(namespace="default", workflow_service=_Pages(timed_out))
+    caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
     assert not await deferred_kind(cast(Client, client), "op-x")
+    assert [record.getMessage() for record in caplog.records] == [
+        "command op-x: its workflow task timed out since it last completed, not a deferral"
+    ]
 
 
 async def test_a_history_of_only_signals_is_no_deferral() -> None:

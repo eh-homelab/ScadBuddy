@@ -479,6 +479,45 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(done.summary).not.toContain('`before`')
   })
 
+  it('a window\'s edges are compared at microseconds too, not the millisecond (#3235)', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turn = '00000000-0000-4000-8000-0000000000c2'
+    const at = (s: string) => `2026-10-05T12:00:${s}Z`
+    const touch = (id: string, when: string) => db.sql`
+      INSERT INTO ai_session_resources (session_id, at, tool, resource_type, resource_id, action, model_slug)
+      VALUES (${session.id}, ${when}::text::timestamptz, 'mcp__scadbuddy__save_preset', 'preset', ${id}, 'created', 'sign')`
+    // A window from 10.000500 until the reply at 20.000500: as JS Dates both read .000.
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at,
+                                outcome, reason, resolved_at, created_at)
+      VALUES (gen_random_uuid(), ${session.id}, ${turn}, ${ATTENTION_TOOL}, 'toolu_tab', '[]', 'attention', 'tab_disconnected', 'proceed',
+              ${at('11')}::timestamptz, 'timed_out', 'nobody replied', ${at('11')}::timestamptz, ${at('10.000500')}::text::timestamptz)`
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, outcome, answers,
+                                answered_by_kind, answered_by_id, answered_by_label, resolved_at, created_at)
+      VALUES (gen_random_uuid(), ${session.id}, ${turn}, 'AskUserQuestion', 'toolu_ans', '[]', 'answered', '["yes"]',
+              'browser', 'browser', 'you', ${at('20.000500')}::text::timestamptz, ${at('19')}::timestamptz)`
+    await touch('asked-after', at('10.000200'))
+    await touch('nobody-there', at('10.000700'))
+    await touch('replied-to', at('20.000700'))
+    await touch('still-away', at('20.000200'))
+    // From the turn's start: every touch is its own, each in the section its microseconds give.
+    const all = await db.sql.begin((tx) => loadDoneSummary(tx, session.id, turn, at('00'), []))
+    expect(all.unattended).toBe(true)
+    const sections = Object.fromEntries(all.summary.split('\n\n').map((part) => [part.split('\n')[0]!.replace(/\*\*/g, '').replace(/ \(.*$/, ''), part]))
+    expect(sections['While nobody answered']).toContain('`nobody-there`')
+    expect(sections['While nobody answered']).toContain('`still-away`')
+    expect(sections['After you replied']).toContain('`replied-to`')
+    expect(sections['Before you were asked']).toContain('`asked-after`')
+    // Resumed past them: of the touches before `since` only the window's carry over.
+    const later = await db.sql.begin((tx) => loadDoneSummary(tx, session.id, turn, at('30'), []))
+    expect(later.summary).toContain('`nobody-there`')
+    expect(later.summary).toContain('`still-away`')
+    expect(later.summary).not.toContain('`asked-after`')
+    expect(later.summary).not.toContain('`replied-to`')
+  })
+
   it("another turn's approval decision does not close this turn's unattended window", async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
     const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
@@ -810,8 +849,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     // #1205: the refused post is audited as the rate limit's refusal is.
-    expect(await db.sql`SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'question' AND action = 'rate_limited'`).toEqual([
-      { action: 'rate_limited', outcome: 'refused', session_id: session.id },
+    expect(await db.sql`SELECT action, outcome, session_id, detail FROM ai_audit WHERE kind = 'question' AND action = 'rate_limited'`).toEqual([
+      {
+        action: 'rate_limited',
+        outcome: 'refused',
+        session_id: session.id,
+        detail: `${ATTENTION_TOOL} done summary refused: The summary was not posted: this turn already posted ${DONE_POSTS_PER_TURN}, the most a turn may.`,
+      },
     ])
     expect(verdicts.slice(0, DONE_POSTS_PER_TURN)).toEqual(Array(DONE_POSTS_PER_TURN).fill({ answered: false, posted: true, message: 'posted' }))
     expect(verdicts[DONE_POSTS_PER_TURN]).toEqual({

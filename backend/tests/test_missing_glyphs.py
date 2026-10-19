@@ -147,6 +147,7 @@ def test_every_font_shares_one_wait_on_fontconfig(caplog: pytest.LogCaptureFixtu
     schema = _schema(
         Parameter(name="word", type="string", initial="Zoë 😀"),
         *(Parameter(name=f"font{n}", type="font", initial="Lobster Two") for n in range(4)),
+        Parameter(name="plain", type="font", initial=""),
     )
     now = [100.0]
     given: list[float] = []
@@ -160,6 +161,8 @@ def test_every_font_shares_one_wait_on_fontconfig(caplog: pytest.LogCaptureFixtu
     # One ask, and the other three fonts skipped by the spent budget, which the log names.
     assert given == [5.0]
     assert "not checked: font1, font2, font3" in caplog.text
+    # The default font is never checked, budget or not, so it is not listed (#3938).
+    assert "plain" not in caplog.text
 
     now[0] = 100.0
     given.clear()
