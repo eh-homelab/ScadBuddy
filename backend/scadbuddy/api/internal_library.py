@@ -2,29 +2,84 @@
 2026-10-17-native-print-library, Task 7a), as it reads an output through
 ``api/internal.py`` (#1060): the ``scadbuddy-print`` worker holds neither the library's
 rows nor the content store. Not a client API: hidden from the schema. On
-``library_backend=bambuddy`` every file is the 404 of one not found."""
+``library_backend=bambuddy`` every file is the 404 of one not found.
+
+It writes a native run's per-print copy here too (#3818 tier A Task 4): ``PUT /files``,
+the body the file's bytes, streamed to the spool and stored as `NativeLibrary.upload`
+stores a person's. Bounded by `PUT_ROUTE_LIMIT`. Like the reads, internal by path only
+(README "Deploying": the API has no auth yet, so whoever reaches it reaches these)."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+import asyncio
+import re
+import tempfile
+from typing import Annotated
+
+from fastapi import APIRouter, Query, Request, Response, status
 
 from scadbuddy.api.library_print import FileIdPath, _native_download
-from scadbuddy.bambuddy.models import LibraryFile, LibraryPlates
+from scadbuddy.api.limits import RouteLimit
+from scadbuddy.bambuddy.models import LibraryFile, LibraryListRow, LibraryPlates
+from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.core.problems import ApiError
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.print_library.remote import INTERNAL_LIBRARY
+from scadbuddy.print_library.remote import INTERNAL_LIBRARY, INTERNAL_LIBRARY_FILES
 
 router = APIRouter(prefix=INTERNAL_LIBRARY.removeprefix("/api/v1"), include_in_schema=False)
 
+#: For ``main.py``'s `BodySizeGate`: a copy is a 3MF laid out from one ScadBuddy held
+#: whole, so the library download cap bounds it as it bounds a person's upload.
+PUT_ROUTE_LIMIT = RouteLimit(
+    "PUT",
+    re.compile(rf"^{re.escape(INTERNAL_LIBRARY_FILES)}$"),
+    MAX_DOWNLOAD_BYTES,
+    "a print's copy",
+    "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
+)
 
-async def _native(library: PrintLibraryDep, file_id: int) -> NativeLibrary:
+
+async def _native(library: PrintLibraryDep, file_id: int | None = None) -> NativeLibrary:
     native = await library.serving_native()
     if native is None:
+        if file_id is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "ScadBuddy's own library does not serve")
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"library file {file_id} not found", file_id=file_id
         )
     return native
+
+
+@router.get("", response_model=list[LibraryListRow])
+async def library_listing(
+    library: PrintLibraryDep,
+    folder_id: Annotated[int | None, Query(ge=1)] = None,
+    every_folder: bool = False,
+) -> list[LibraryListRow]:
+    return await (await _native(library)).library_listing(
+        folder_id=folder_id, every_folder=every_folder
+    )
+
+
+@router.put("/files", response_model=LibraryFile, status_code=status.HTTP_201_CREATED)
+async def upload_library_file(
+    request: Request,
+    library: PrintLibraryDep,
+    filename: Annotated[str, Query(min_length=1, max_length=255)],
+    folder_id: Annotated[int | None, Query(ge=1)] = None,
+    output_id: Annotated[str | None, Query(max_length=255)] = None,
+    filed: bool = False,
+) -> LibraryFile:
+    native = await _native(library)
+    await asyncio.to_thread(native.spool.mkdir, parents=True, exist_ok=True)
+    # Streamed to a file under the spool, never held whole.
+    with tempfile.TemporaryFile(dir=native.spool) as body:
+        async for chunk in request.stream():
+            await asyncio.to_thread(body.write, chunk)
+        await asyncio.to_thread(body.seek, 0)
+        row = await native.upload(filename, body, folder_id, output_id=output_id, filed=filed)
+    return await native.library_file(row.id)
 
 
 @router.get("/{file_id}", response_model=LibraryFile)

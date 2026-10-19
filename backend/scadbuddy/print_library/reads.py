@@ -5,7 +5,7 @@ satisfy these, structurally."""
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from fastapi import status
 
@@ -37,6 +37,36 @@ class LibraryReads(Protocol):
     async def filament_requirements(
         self, file_id: int, *, plate_id: int | None = None
     ) -> FilamentRequirements: ...
+
+
+class Uploaded(Protocol):
+    """What an upload answers: `NativeLibrary`'s row, or `RemoteLibrary`'s `LibraryFile`."""
+
+    @property
+    def id(self) -> int: ...
+
+
+class LibraryWrites(Protocol):
+    async def upload(
+        self,
+        filename: str,
+        data: BinaryIO,
+        folder_id: int | None,
+        *,
+        output_id: str | None = None,
+        filed: bool = False,
+    ) -> Uploaded: ...
+
+
+class NativeCopies(LibraryReads, LibraryWrites, Protocol):
+    """What a native run's per-print copy needs of the native library (#3818 tier A Task
+    4): its reads, a folder's files (an earlier attempt's upload, found by its bytes) and
+    the upload. `NativeLibrary` in the API's process, `RemoteLibrary` on the print
+    worker."""
+
+    async def library_listing(
+        self, *, folder_id: int | None, every_folder: bool = False
+    ) -> list[LibraryListRow]: ...
 
 
 def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None) -> LibraryReads:

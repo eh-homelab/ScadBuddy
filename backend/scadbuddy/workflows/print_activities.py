@@ -63,7 +63,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
-from scadbuddy.print_library.reads import LibraryReads, reads_for
+from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.reads import NativeCopies, reads_for
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.slicing.start import NativeSliceStarter
 from scadbuddy.workflows.print_models import (
@@ -125,9 +126,10 @@ class PrintDeps:
     rack: RackUsage | None = None
     #: Where every run's queue items are recorded by subject (#976, #1750).
     links: PrintLinkStore | None = None
-    #: The native library a native file is read from (#3827): the API's own in-process,
-    #: the API's internal routes on the print worker; ``None`` on ``bambuddy``.
-    library: LibraryReads | None = None
+    #: The native library a native file is read from (#3827), and a native run's copy
+    #: written to (#3818 tier A Task 4): the API's own in-process, the API's internal
+    #: routes on the print worker; ``None`` on ``bambuddy`` in-process.
+    library: NativeCopies | None = None
     #: The native slicer's starter (plan 2026-10-16 Task 13): ``print_plan`` keys a
     #: reprint's reuse by it. ``None`` outside the image, where a native run is a 503.
     native: NativeSliceStarter | None = None
@@ -183,6 +185,7 @@ class PrintActivities:
                 sends=self.d.links,
                 filaments=given_filaments(spec.filaments) if spec.filaments else None,
                 files=reads_for(spec.file_id, client, self.d.library),
+                native=self.d.library,
             )
         return await self._output_source(spec, settings)
 
@@ -197,6 +200,7 @@ class PrintActivities:
             print_settings=spec.print_settings,
             prints=self.d.prints,
             sends=self.d.links,
+            native=self.d.library,
         )
 
     async def _recording_source(self, spec: SourceSpec) -> PrintSource:
@@ -414,8 +418,14 @@ class PrintActivities:
             return  # nothing sliced: a sliced file queued as it is (#2671)
         sliced_id = outcome.sliced_library_file_id
         try:
-            async with client_for(self._settings()) as client:
-                file_hash = (await client.library_file(sliced_id)).file_hash
+            if is_native_id(sliced_id):
+                # A native copy's slice is a native file (Review Focus 2): read where it is.
+                if self.d.library is None:
+                    return
+                file_hash = (await self.d.library.library_file(sliced_id)).file_hash
+            else:
+                async with client_for(self._settings()) as client:
+                    file_hash = (await client.library_file(sliced_id)).file_hash
         except Exception:
             # Whatever went wrong, the plate is on Bambuddy's queue: its record stands.
             logger.warning(

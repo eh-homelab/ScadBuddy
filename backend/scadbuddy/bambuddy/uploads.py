@@ -23,6 +23,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from scadbuddy.print_library.ids import NATIVE_ID_BASE
+
 #: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
 COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 
@@ -64,7 +66,8 @@ class LibraryCopy(BaseModel):
     (Settings' ``library_folder_id``) is always replaced.
     """
 
-    #: Bambuddy library file id of the unsliced 3MF.
+    #: Library file id of the unsliced 3MF: Bambuddy's, or on a native run ScadBuddy's
+    #: own (`is_native_id`, #3818 tier A Task 4), never read in the other library.
     id: int
     #: ``None`` is the library root.
     folder_id: int | None
@@ -157,13 +160,18 @@ class BambuddyUploadStore:
         finally:
             await conn.close()
 
-    async def for_output(self, output_id: str) -> list[LibraryCopy]:
-        """The output's copies in upload order, each with its slices."""
-        return (await self.for_outputs([output_id]))[output_id]
+    async def for_output(self, output_id: str, *, native: bool = False) -> list[LibraryCopy]:
+        """The output's copies in upload order, each with its slices: Bambuddy's, or with
+        ``native`` ScadBuddy's own library's (#3818 tier A Task 4). One id space at a
+        time, by `is_native_id` (`print_library/ids.py`): a Bambuddy path never reads,
+        supersedes or deletes a native copy, nor a native run a Bambuddy one."""
+        return (await self.for_outputs([output_id], native=native))[output_id]
 
-    async def for_outputs(self, output_ids: Iterable[str]) -> dict[str, list[LibraryCopy]]:
+    async def for_outputs(
+        self, output_ids: Iterable[str], *, native: bool = False
+    ) -> dict[str, list[LibraryCopy]]:
         """:meth:`for_output` for several outputs in two queries, not two per output."""
-        return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)))
+        return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)), native)
 
     async def record(self, output_id: str, copy: LibraryCopy) -> None:
         """Record an upload, replacing the folder and target of one with the same id."""
@@ -603,14 +611,15 @@ class BambuddyUploadStore:
             ).fetchall()
         return {(row["kind"], int(row["target_id"])): row["touched_at"] for row in rows}
 
-    def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
+    def _for_outputs(self, ids: list[str], native: bool) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
+        space = "library_file_id >= %s" if native else "library_file_id < %s"
         with self._pool.connection() as conn:
             copies = conn.execute(
                 "SELECT output_id, library_file_id, folder_id, target_key, content_key"
-                " FROM output_bambuddy_uploads WHERE output_id = ANY(%s)"
-                " ORDER BY created_at, library_file_id",
-                (ids,),
+                f" FROM output_bambuddy_uploads WHERE output_id = ANY(%s) AND {space}"
+                " ORDER BY created_at, library_file_id".encode(),
+                (ids, NATIVE_ID_BASE),
             ).fetchall()
             slices = conn.execute(
                 "SELECT output_id, source_library_file_id, sliced_library_file_id, preset_key,"

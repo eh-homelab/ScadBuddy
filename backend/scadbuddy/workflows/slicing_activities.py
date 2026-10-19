@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.component import PrintLibrary
+from scadbuddy.print_library.copies import left_unrecorded
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.print_library.reads import reads_for
@@ -477,7 +478,9 @@ class RunActivities:
         """The sliced blob beside the copy, as ``<copy stem>.plate<N>.sliced.3mf``: in
         Bambuddy's library for a Bambuddy copy, whose queue then takes it, or the native
         library's for a native one. The library file id ``print_enqueue`` queues. It
-        beats (review I1): a sliced 3MF carries its G-code."""
+        beats (review I1): a sliced 3MF carries its G-code. In either library an earlier
+        attempt's upload that was never answered is taken by its bytes, not uploaded
+        twice (`_left_unrecorded`; natively `copies.left_unrecorded`, #3818 tier A)."""
         return await heartbeating(self._sliced_upload(input))
 
     async def _sliced_upload(self, input: SlicedUploadInput) -> int:
@@ -505,6 +508,21 @@ class RunActivities:
                     if native is None:
                         raise _run_failed(404, "Not Found", f"library file {copy_id} not found")
                     name = _sliced_name((await native.library_file(copy_id)).filename, input)
+                    earlier = (
+                        await left_unrecorded(
+                            native,
+                            self._uploads(),
+                            planned.folder_id,
+                            name,
+                            size,
+                            digest.hexdigest(),
+                            besides=copy_id,
+                        )
+                        if self._uploads is not None
+                        else None
+                    )
+                    if earlier is not None:
+                        return earlier.id
                     return (await native.upload(name, body, planned.folder_id)).id
                 settings = await asyncio.to_thread(lambda: self._settings_store().load())
                 async with client_for(settings) as client:

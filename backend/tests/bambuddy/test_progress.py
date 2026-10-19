@@ -560,7 +560,7 @@ class FakeUploads(BambuddyUploadStore):
     def __init__(self) -> None:
         super().__init__(None)  # type: ignore[arg-type]  # never reaches Postgres
 
-    async def for_output(self, output_id: str) -> list[LibraryCopy]:
+    async def for_output(self, output_id: str, *, native: bool = False) -> list[LibraryCopy]:
         return [
             LibraryCopy(
                 id=11, folder_id=2, target_key="H2C", sliced=[SlicedCopy(id=80, file_hash="ab")]
