@@ -6,6 +6,7 @@ reason waits for nothing, and is refused as before #4139 rather than followed fo
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.workflows.commands import (
@@ -202,4 +204,6 @@ async def test_a_history_that_cannot_be_read_is_refused(
                 await _start(client, id, queue)
         finally:
             monkeypatch.undo()
-            await client.get_workflow_handle(id).terminate()
+            # An execution already closed must not hide the assertion's own failure.
+            with contextlib.suppress(RPCError):
+                await client.get_workflow_handle(id).terminate()
