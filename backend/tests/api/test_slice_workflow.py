@@ -784,9 +784,11 @@ def test_a_cancel_from_the_worker_alone_is_a_failure(
     slice_client: TestClient, slicer: FakeSlicer
 ) -> None:
     """Re-review N4: no cancel was asked of the workflow, so the execution and the row
-    agree that the slice failed. The server does not take a cancel nothing asked for,
-    so each attempt ends at the heartbeat timeout: a short one here (#4403), where the
-    60 s default made this test 248 s."""
+    agree that the slice failed. The server does not take the fake's cancel, which nothing
+    asked for, so each attempt ends at the heartbeat timeout: a short one here (#4403),
+    where the 60 s default made this test 248 s. Started by hand, not through the route,
+    since only `SliceWorkflowInput` names the heartbeat; the route path is covered by the
+    tests that slice through it."""
     slicer.self_cancel = True
     slicing = _slicing(slice_client)
     starter = slicing.starter
