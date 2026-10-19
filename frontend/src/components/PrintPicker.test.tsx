@@ -1652,6 +1652,47 @@ describe('PrintPicker · Printer', () => {
     expect(bodies[0]).toMatchObject({ printer: garage.id, printer_id: 2 })
   })
 
+  it('keeps the registry printer when a re-read of the registry fails (#4391 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
+
+    server.use(http.get('/api/v1/printers', () => problem(503, 'Service Unavailable')))
+    const before = registry.answered
+    const linked = printersState()[0]!
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', `printer:${linked.id}`], { printer_id: linked.id })
+      expect(registry.answered).toBeGreaterThan(before)
+    })
+
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ printer: linked.id, printer_id: 1 })
+  })
+
+  it('inherits no template sequence for a library file (#4391 review)', async () => {
+    const checks = watch('POST', '/check')
+    server.use(
+      http.post('/api/v1/print/library/:id/check', () => HttpResponse.json({ errors: [], warnings: [], objects: 3 })),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+        // Only an output's template settings are a template's: a library file has none.
+        printSettings={{ print_sequence: 'by object' }}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(checks.answered).toBeGreaterThan(0))
+    expect(screen.queryByText(/objects need room between them/)).not.toBeInTheDocument()
+  })
+
   it('lists a printer reached only over the LAN, not yet choosable (#3823)', async () => {
     printersState()[1]!.lan_host = '10.0.0.9'
     await api.createPrinter({ serial: '01P00A0000000BB', name: 'Attic', preferred_path: 'auto' })

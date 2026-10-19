@@ -327,12 +327,13 @@ export function PrintPicker({
    * Bambuddy printer goes out as `printer` beside `printer_id` (plan 2026-10-16 Task 10;
    * the backend reads `printer` from Task 8, and ignores it before). A row no Bambuddy
    * printer backs, and the LAN reaches, is listed but not choosable until the run can print over the LAN
-   * (Tasks 8 and 9). Unreadable, the dialog works as before, on Bambuddy ids alone.
-   * Followed while open, as Settings → Printers follows it, so a link made in another tab
-   * is the `printer` sent (#4376).
+   * (Tasks 8 and 9). Unreadable when the dialog opens, it has no rows, and the dialog
+   * works as before, on Bambuddy ids alone. Followed while open, as Settings → Printers
+   * follows it, so a link made in another tab is the `printer` sent (#4376); a re-read
+   * that fails keeps the rows shown (`useAsync`), so it never drops `printer`.
    */
   const registry = useAsync(
-    async () => (open ? await api.listPrinters().catch(() => [] as PrinterRow[]) : ([] as PrinterRow[])),
+    async () => (open ? await api.listPrinters() : ([] as PrinterRow[])),
     [open],
     open ? PRINTER_TOPICS : NO_TOPICS,
     registryNews,

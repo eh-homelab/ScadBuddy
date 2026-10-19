@@ -2,11 +2,11 @@ import type { NozzlePlan, SlicePreview } from '../api/types'
 
 /**
  * #2703 — the plan with each filament on the side the slice actually put it, or `null`
- * when the slice agrees with the plan on every one of its slots (or says nothing). With every side on Automatic the
- * headless slicer groups filaments itself to cut purging and does not follow the plan's
- * project-level Manual `filament_map` (measured for #745); a side chosen by hand pins the
- * map on every plate, which it does follow (#3955). Either way, once a slice of these
- * choices has landed, it is what will print.
+ * when the slice agrees with the plan on every one of its slots (or says nothing). With
+ * every side on Automatic the headless slicer groups filaments itself to cut purging and
+ * does not follow the plan's project-level Manual `filament_map` (measured for #745); a
+ * side chosen by hand pins the map on every plate, which it does follow (#3955). Either
+ * way, once a slice of these choices has landed, it is what will print.
  */
 export function asSliced(plan: NozzlePlan | null | undefined, slice: SlicePreview | null): NozzlePlan | null {
   if (!plan || !slice) return null
