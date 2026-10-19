@@ -21,6 +21,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from typing import BinaryIO, Protocol
 
@@ -189,10 +190,13 @@ class PrintSource(Protocol):
         tray_colours: Mapping[int, str] | None = None,
         native_copy: bool = False,
         printer_model: str | None = None,
+        attempt_since: datetime | None = None,
     ) -> PrintFile:
         """The library file the run slices: laid out for the printer and copied into
         Bambuddy's library, or with ``native_copy`` into ScadBuddy's own (#3818 tier A
-        Task 4), which needs no ``client`` and lays out for ``printer_model``."""
+        Task 4), which needs no ``client`` and lays out for ``printer_model``.
+        ``attempt_since`` is when the run's first attempt was scheduled: only a native
+        upload made since then is an earlier attempt's (#4312 re-review N-a)."""
         ...
 
     async def record(
@@ -455,6 +459,7 @@ class PrintPipeline:
         tray_colours: Mapping[int, str] | None = None,
         native_copy: bool = False,
         printer_model: str | None = None,
+        attempt_since: datetime | None = None,
     ) -> PrintFile:
         uploads, settings = PrintPipeline._stores(self)
         if native_copy:
@@ -471,6 +476,7 @@ class PrintPipeline:
                 filament_map=filament_map,
                 tray_colours=tray_colours,
                 printer_model=printer_model,
+                attempt_since=attempt_since,
             )
         if client is None:
             raise _misuse("a copy in Bambuddy's library needs a Bambuddy client")
@@ -529,6 +535,7 @@ class PrintPipeline:
         filament_map: FilamentMap | None,
         tray_colours: Mapping[int, str] | None,
         printer_model: str | None,
+        attempt_since: datetime | None,
     ) -> PrintFile:
         """:meth:`file_to_print` on a native run (#3818 tier A Task 4): the copy is laid
         out as Bambuddy's is, for ``printer_model`` with no printer list read, and goes
@@ -570,6 +577,7 @@ class PrintPipeline:
             target=target,
             folder_id=folder_id,
             source_id=own_id,
+            attempt_since=attempt_since,
         )
         return PrintFile(file_id, folder_id)
 

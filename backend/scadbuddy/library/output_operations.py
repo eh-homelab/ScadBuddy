@@ -196,6 +196,31 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         await asyncio.to_thread(require_output, state.outputs, request["output_id"])
         return {}
 
+    async def open_runs(request: dict[str, Any]) -> list[str]:
+        """The output's print runs still open, when its delete would trash native copies
+        and slices one of them may still read (#4312 re-review I-a): ``delete_inbox_copies``
+        on the native library."""
+        if not request["delete_inbox_copies"]:
+            return []
+        if await components.get(PRINT_LIBRARY).serving_native() is None:
+            return []
+        if not await state.uploads.for_output(request["output_id"], native=True):
+            return []
+        return [run.id for run in await state.print_runs.store.running_for(request["output_id"])]
+
+    async def delete_check(request: dict[str, Any]) -> dict[str, Any]:
+        """Before Bambuddy's inbox prelude, so a refusal deletes nothing."""
+        await output_check(request)
+        running = await open_runs(request)
+        if running:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"print run {running[0]} of this output is still running, and its sliced"
+                " file is in ScadBuddy's library: delete the output once the run has ended",
+                run_id=running[0],
+            )
+        return {}
+
     async def thumbnail_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         output_id = request["output_id"]
         try:
@@ -238,7 +263,10 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             # Its native per-print copies and their slices too, the native run's inbox
             # copies: they name no output, so the upload rows forgotten below are all
             # that leads to them (#4312 review I1).
-            await trash_copies(native, state.uploads, output_id)
+            # A run opened since the check keeps its slices: never trash what it may read.
+            await trash_copies(
+                native, state.uploads, output_id, keep_slices=bool(await open_runs(request))
+            )
         await asyncio.to_thread(state.outputs.delete, output_id)
         if native is not None:
             await asyncio.to_thread(native.rows.forget_output, output_id)
@@ -288,7 +316,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         kind("output_rename", output_check, rename_run, "the output"),
         kind(
             "output_delete",
-            output_check,
+            delete_check,
             delete_run,
             "the output and Bambuddy's inbox folder",
             prelude="output_inbox_delete",

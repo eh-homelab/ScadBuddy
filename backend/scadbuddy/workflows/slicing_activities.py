@@ -516,6 +516,9 @@ class RunActivities:
                             name,
                             size,
                             digest.hexdigest(),
+                            # The first attempt's: only a file since then is one of
+                            # this activity's own unanswered uploads (#4312 re-review N-a).
+                            since=activity.info().scheduled_time,
                             besides=copy_id,
                         )
                         if self._uploads is not None

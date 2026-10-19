@@ -25,7 +25,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.print_library.copies import ensure_native_copy
+from scadbuddy.print_library.copies import ensure_native_copy, trash_copies
 from scadbuddy.print_library.ids import NATIVE_ID_BASE, is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.render.plate import plate_for
@@ -138,6 +138,8 @@ async def test_a_moved_native_copy_is_not_reused(
 
     assert second != first
     assert (await native.library_file(first)).folder_id == elsewhere
+    # #4312 re-review I-a: a moved copy is the person's, no longer this subject's.
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [second]
 
 
 async def test_an_earlier_attempts_unrecorded_copy_is_taken(
@@ -146,27 +148,50 @@ async def test_an_earlier_attempts_unrecorded_copy_is_taken(
     """An attempt that died after the upload and before the record (#1145): its retry
     takes that file rather than upload a second."""
     laid_out = _laid_out_for(fetches.payload, H2D)
+    since = datetime.now(UTC)
     left = await native.upload("bracket.3mf", io.BytesIO(laid_out), None)
     # Same name, other bytes: never taken.
     await native.upload("bracket.3mf", io.BytesIO(fetches.payload), None)
 
     taken = await ensure_native_copy(
-        native, uploads, fetches.printable(), target=H2D, folder_id=None
+        native, uploads, fetches.printable(), target=H2D, folder_id=None, attempt_since=since
     )
 
     assert taken == left.id
     assert len(await native.library_listing(folder_id=None)) == 2
 
 
+@pytest.mark.parametrize("since", ["after", "none"])
+async def test_a_file_older_than_the_attempt_is_never_taken(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, since: str
+) -> None:
+    """#4312 re-review N-a: a person's own upload of the same name and bytes, made before
+    this run's first attempt, is theirs; with no attempt start known, none is taken."""
+    laid_out = _laid_out_for(fetches.payload, H2D)
+    theirs = await native.upload("bracket.3mf", io.BytesIO(laid_out), None)
+
+    made = await ensure_native_copy(
+        native,
+        uploads,
+        fetches.printable(),
+        target=H2D,
+        folder_id=None,
+        attempt_since=datetime.now(UTC) if since == "after" else None,
+    )
+
+    assert made != theirs.id
+
+
 async def test_a_recorded_file_is_never_taken_as_an_earlier_attempts(
     native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
 ) -> None:
     laid_out = _laid_out_for(fetches.payload, H2D)
+    since = datetime.now(UTC)
     other = await native.upload("bracket.3mf", io.BytesIO(laid_out), None)
     await uploads.record("another-output", LibraryCopy(id=other.id, folder_id=None, target_key="x"))
 
     made = await ensure_native_copy(
-        native, uploads, fetches.printable(), target=H2D, folder_id=None
+        native, uploads, fetches.printable(), target=H2D, folder_id=None, attempt_since=since
     )
 
     assert made != other.id
@@ -437,12 +462,46 @@ async def test_an_outputs_or_persons_file_is_never_taken_as_an_earlier_attempts(
     attempt's upload: never the output's filed copy, nor a file a person's copy made
     named as an output (``output_id`` kept)."""
     laid_out = _laid_out_for(fetches.payload, H2D)
+    since = datetime.now(UTC)
     theirs = await native.upload(
         "bracket.3mf", io.BytesIO(laid_out), None, output_id="out-x", filed=kind == "filed"
     )
 
     made = await ensure_native_copy(
-        native, uploads, fetches.printable(), target=H2D, folder_id=None
+        native, uploads, fetches.printable(), target=H2D, folder_id=None, attempt_since=since
     )
 
     assert made != theirs.id
+
+
+async def test_trash_copies_keeps_a_moved_copy_and_forgets_it(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
+) -> None:
+    """#4312 re-review I-a: an output delete trashes only the copies still where they were
+    recorded, as Bambuddy's deletes only the inbox's; a moved one is the person's."""
+    kept_folder = (await native.create_folder("Keep", None)).id
+    moved, moved_slice, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+    await native.update_file(moved, folder_id=kept_folder)
+    in_place = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+
+    trashed = await trash_copies(native, uploads, KEY)
+
+    assert trashed == [in_place]
+    assert (await native.library_file(moved)).folder_id == kept_folder
+    assert (await native.library_file(moved_slice)).id == moved_slice
+    # The moved copy's record is forgotten; the trashed one's goes with the output's rows.
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [in_place]
+
+
+async def test_trash_copies_can_keep_the_slices(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
+) -> None:
+    """A slice a run may still read is kept (``keep_slices``); the copy goes."""
+    copy_id, sliced_id, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+
+    trashed = await trash_copies(native, uploads, KEY, keep_slices=True)
+
+    assert trashed == [copy_id]
+    assert (await native.library_file(sliced_id)).id == sliced_id

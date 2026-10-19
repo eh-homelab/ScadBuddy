@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import io
 import logging
+from datetime import UTC, datetime
 
 from fastapi import status
 
@@ -51,6 +52,7 @@ async def left_unrecorded(
     size: int,
     digest: str,
     *,
+    since: datetime | None,
     besides: int | None = None,
 ) -> LibraryFile | None:
     """The file an earlier attempt uploaded into ``folder_id`` and died before recording
@@ -59,8 +61,14 @@ async def left_unrecorded(
     output's filed copy or a person's copy of it, which can share the name and the bytes
     (#4312 review M2). Named ``filename``,
     of ``size`` bytes hashing to ``digest`` (a sha256), that no subject records as a
-    copy or a slice, and not ``besides`` (the file the upload is made from). Newest first;
-    ``None`` when there is none."""
+    copy or a slice, and not ``besides`` (the file the upload is made from). Only one
+    created since ``since``, when the run's first attempt was scheduled (#4312 re-review
+    N-a): a person's own file of that name and bytes is older than the run, and is
+    theirs. With no ``since`` none is taken. Newest first; ``None`` when there is none."""
+    if since is None:
+        return None
+    # The listing's times are naive UTC (`native._naive_utc`).
+    after = since.astimezone(UTC).replace(tzinfo=None)
     name = filename.casefold()
     rows = [
         row
@@ -69,6 +77,8 @@ async def left_unrecorded(
         and is_native_id(row.id)
         and row.file_size == size
         and row.filename.casefold() == name
+        and row.created_at is not None
+        and row.created_at >= after
     ]
     if not rows:
         return None
@@ -104,7 +114,10 @@ async def _still_there(
         await uploads.forget(key, copy.id)
         return False
     if found.folder_id != copy.folder_id:
-        await uploads.relocate([copy.id], found.folder_id)
+        # Moved by a person: theirs now, as Bambuddy's inbox copy is once moved
+        # (`forget_files`, #2670), so never reused, superseded or trashed (#4312 re-review
+        # I-a).
+        await uploads.forget_files([copy.id])
         return False
     return True
 
@@ -117,13 +130,15 @@ async def ensure_native_copy(
     target: Target,
     folder_id: int | None,
     source_id: int | None = None,
+    attempt_since: datetime | None = None,
 ) -> int:
     """The native library file a native run slices and prints: a recorded copy of
     ``printable`` laid out for ``target`` in ``folder_id`` (``None``, the top level),
     else a new one uploaded and recorded. Held under the copy's lock (in this process,
     then across replicas), as `send.ensure_uploaded` is, so two runs of one subject upload
     one copy. ``source_id`` is the native library file the 3MF came from, never taken
-    for an earlier attempt's copy."""
+    for an earlier attempt's copy. ``attempt_since`` is when the run's first attempt was
+    scheduled (`left_unrecorded`'s ``since``); without it no earlier upload is taken."""
     target_key = _hinted(target.key, len(printable.colours))
     lock = (f"{NATIVE_LOCK}{printable.key}", folder_id)
     async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{folder_id}"):
@@ -144,6 +159,7 @@ async def ensure_native_copy(
             printable.inbox_name,
             len(payload),
             digest,
+            since=attempt_since,
             besides=source_id,
         )
         uploaded = (
@@ -195,14 +211,25 @@ async def native_destination(
     return (await native.template_folder(folder_name(title))).id
 
 
-async def trash_copies(native: NativeLibrary, uploads: BambuddyUploadStore, key: str) -> list[int]:
-    """Trash ``key``'s native per-print copies and the slices recorded on them, before an
-    output delete forgets their rows (#4312 review I1): they name no output (Ruling 6),
-    so those rows are all that leads to them. A file already gone is passed over. Their
-    ids."""
-    ids = [
-        file_id
-        for copy in await uploads.for_output(key, native=True)
-        for file_id in (copy.id, *(s.id for s in copy.sliced))
-    ]
+async def trash_copies(
+    native: NativeLibrary, uploads: BambuddyUploadStore, key: str, *, keep_slices: bool = False
+) -> list[int]:
+    """Trash ``key``'s native per-print copies still in the folder they were recorded in,
+    with the slices recorded on them, before an output delete forgets their rows (#4312
+    review I1): they name no output (Ruling 6), so those rows are all that leads to them.
+    A copy a person moved is theirs (re-review I-a, as `trash_filed` and Bambuddy's inbox
+    delete leave one): its record is forgotten and the file kept, with its slices.
+    ``keep_slices`` keeps every slice, for a run that may still read one. A file already
+    gone is passed over. The ids trashed."""
+    ids: list[int] = []
+    for copy in await uploads.for_output(key, native=True):
+        row = await asyncio.to_thread(native.rows.file, copy.id)
+        if row is None:
+            continue
+        if row.folder_id != copy.folder_id:
+            await uploads.forget_files([copy.id])
+            continue
+        ids.append(copy.id)
+        if not keep_slices:
+            ids.extend(s.id for s in copy.sliced)
     return [f.id for f in await native.trash(ids)] if ids else []

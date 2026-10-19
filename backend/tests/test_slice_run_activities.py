@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, BinaryIO
@@ -229,19 +229,27 @@ async def test_a_native_sliced_upload_left_unanswered_is_taken(tmp_path: Path) -
     one any subject records, or of other bytes, is not."""
     digest = hashlib.sha256(b"sliced").hexdigest()
     name = "demo-elan.plate2.gcode.3mf"
-    left, recorded, other = COPY + 30, COPY + 20, COPY + 25
+    left, recorded, other, older = COPY + 30, COPY + 20, COPY + 25, COPY + 40
 
     class Listed(_Native):
         async def per_print_files(self, folder_id: int | None) -> list[Any]:
             assert folder_id == NATIVE_ID_BASE + 3
+            # Made after the attempt was scheduled (the environment's is the epoch), but
+            # `older`: newest by id, yet older than the run, so never taken (re-review N-a).
+            made = datetime(2026, 10, 19)
+            rows = [
+                SimpleNamespace(id=i, filename=name, file_size=6, created_at=made)
+                for i in (recorded, other, left)
+            ]
             return [
-                SimpleNamespace(id=i, filename=name, file_size=6) for i in (recorded, other, left)
+                *rows,
+                SimpleNamespace(id=older, filename=name, file_size=6, created_at=datetime(1, 1, 1)),
             ]
 
         async def library_file(self, file_id: int) -> Any:
             if file_id == COPY:
                 return await super().library_file(file_id)
-            hashes = {left: digest, recorded: digest, other: "f" * 64}
+            hashes = {left: digest, recorded: digest, other: "f" * 64, older: digest}
             return SimpleNamespace(id=file_id, filename=name, file_hash=hashes[file_id])
 
     class Uploads:

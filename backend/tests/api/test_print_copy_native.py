@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.internal_library import PUT_ROUTE_LIMIT
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -167,3 +168,47 @@ def test_an_output_delete_trashes_its_native_per_print_copies(
     trashed = {copy.id, sliced.id} - live
     assert trashed == ({copy.id, sliced.id} if delete_inbox_copies else set())
     assert portal.call(partial(state.uploads.for_output, saved["id"], native=True)) == []
+
+
+@pytest.mark.requires_git
+def test_an_output_delete_during_an_open_print_run_is_refused(
+    native_client: TestClient, widget: str, tmp_path: Path
+) -> None:
+    """#4312 re-review I-a: the delete would trash the slice an open run is about to
+    read, so while a run of the output is open it is refused, naming the run, before
+    anything is deleted (the check runs before Bambuddy's inbox prelude)."""
+    saved = _save(native_client, widget, "One").json()
+    native = _native(native_client)
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    portal = native_client.portal
+    assert portal is not None
+    copy = portal.call(native.upload, "copy.3mf", io.BytesIO(b"c"), None)
+    sliced = portal.call(native.upload, "copy.plate1.gcode.3mf", io.BytesIO(b"g"), None)
+    portal.call(
+        state.uploads.record, saved["id"], LibraryCopy(id=copy.id, folder_id=None, target_key="t")
+    )
+    portal.call(state.uploads.record_sliced, saved["id"], copy.id, SlicedCopy(id=sliced.id))
+    run = portal.call(
+        partial(
+            state.print_runs.store.insert_accepted,
+            "run-open-1",
+            subject=PrintSubject.output(saved["id"]),
+            key="k",
+            slug=widget,
+            workflow_id="print-k",
+            workflow_run_id="r",
+            retention=None,
+        )
+    )
+
+    deleted = native_client.delete(
+        f"/api/v1/outputs/{saved['id']}",
+        params={"delete_inbox_copies": "true"},
+        headers=press(),
+    )
+
+    assert deleted.status_code == 409, deleted.text
+    assert run.id in deleted.json()["detail"]
+    live = {f.id for f in native.rows.files(None, every_folder=True)}
+    assert {copy.id, sliced.id} <= live
+    assert native_client.get(f"/api/v1/outputs/{saved['id']}").status_code == 200
