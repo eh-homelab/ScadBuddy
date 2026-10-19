@@ -11,7 +11,16 @@ import { PrintPicker } from './PrintPicker'
 
 // #2072 — what the background slice came to, set per test.
 const slice = vi.hoisted(() => ({
-  state: { result: null, plateId: 1, plan: null, stale: false, slicing: false, error: null } satisfies PreviewSliceState as PreviewSliceState,
+  state: {
+    result: null,
+    plateId: 1,
+    plan: null,
+    stale: false,
+    slicing: false,
+    progress: null,
+    toolpathUrl: null,
+    error: null,
+  } satisfies PreviewSliceState as PreviewSliceState,
 }))
 vi.mock('../lib/usePreviewSlice', async (actual) => ({
   ...(await actual<typeof PreviewSliceModule>()),
@@ -32,11 +41,13 @@ async function openPreview(): Promise<HTMLElement> {
   return screen.getByRole('dialog', { name: 'Plate in 3D' })
 }
 
-const done = { job_id: 42, status: 'completed', slots: [] }
+const done = { job_id: 42, status: 'completed', slicer: 'bambuddy' as const, slots: [] }
+/** What the hook hands the picker for `done` (its own test covers how it is built). */
+const doneToolpath = `/api/v1/print/outputs/${output.id}/preview-slices/42/toolpath`
 
 describe('PrintPicker · the slice in the 3D preview (#2072)', () => {
   it('hands the preview the finished slice’s toolpath', async () => {
-    slice.state = { ...slice.state, result: done, stale: false }
+    slice.state = { ...slice.state, result: done, toolpathUrl: doneToolpath, stale: false }
     const dialog = await openPreview()
     expect(dialog).toHaveAttribute('data-toolpath', `/api/v1/print/outputs/${output.id}/preview-slices/42/toolpath`)
   })
@@ -50,13 +61,13 @@ describe('PrintPicker · the slice in the 3D preview (#2072)', () => {
         ]),
       ),
     )
-    slice.state = { ...slice.state, result: done, stale: false }
+    slice.state = { ...slice.state, result: done, toolpathUrl: doneToolpath, stale: false }
     const dialog = await openPreview()
     expect(dialog).toHaveAttribute('data-toolpath', 'null')
   })
 
   it('hands it none while the slice shown is of older choices', async () => {
-    slice.state = { ...slice.state, result: done, stale: true }
+    slice.state = { ...slice.state, result: done, toolpathUrl: doneToolpath, stale: true }
     const dialog = await openPreview()
     expect(dialog).toHaveAttribute('data-toolpath', 'null')
   })

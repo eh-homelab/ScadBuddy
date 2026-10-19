@@ -20,7 +20,7 @@ const plan: NozzlePlan = {
 const slots: SlotNeed[] = [1, 2, 3].map((slot_id) => ({ slot_id, colour_matches: [] }))
 
 function slice(entries: SlicePreview['slots']): SlicePreview {
-  return { job_id: 9, status: 'completed', print_time_seconds: 2666, filament_used_g: 19, slots: entries }
+  return { job_id: 9, status: 'completed', slicer: 'bambuddy', print_time_seconds: 2666, filament_used_g: 19, slots: entries }
 }
 
 function pane(
@@ -201,5 +201,47 @@ describe('PreviewPane: a colour tried on the preview (#3669)', () => {
     expect(screen.queryByLabelText('Colour for slot 2')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Undo' }))
     expect(screen.queryByText('colour tried here, not a spool')).toBeNull()
+  })
+})
+
+describe('PreviewPane: the native slicer (plan 2026-10-16 Task 14)', () => {
+  function slicing(progress: number | null, sliceError: string | null = null, running = true) {
+    render(
+      <PreviewPane
+        url={null}
+        thumbnailUrl={null}
+        slots={slots}
+        spools={[]}
+        plan={[]}
+        colors={new Map()}
+        slice={null}
+        nozzlePlan={plan}
+        plateSlots={slots}
+        stale={false}
+        keepsSides
+        slicing={running}
+        progress={progress}
+        sliceError={sliceError}
+      />,
+    )
+  }
+
+  it('shows how far a native slice has got, as text and a bar', () => {
+    slicing(40)
+    expect(screen.getByTestId('slice-status')).toHaveTextContent('Slicing… 40%')
+    const bar = screen.getByTestId('slice-progress')
+    expect(bar).toHaveAttribute('max', '100')
+    expect(bar).toHaveAttribute('value', '40')
+  })
+
+  it('shows the text alone while there is no progress (Bambuddy, or before the first beat)', () => {
+    slicing(null)
+    expect(screen.getByTestId('slice-status')).toHaveTextContent(/^Slicing…$/)
+    expect(screen.queryByTestId('slice-progress')).toBeNull()
+  })
+
+  it('shows a refused plate the native slicer failed as it said it (spec §5.5)', () => {
+    slicing(null, 'The slicer refused the plate: plate 99 is empty', false)
+    expect(screen.getByRole('alert')).toHaveTextContent(/^The slicer refused the plate: plate 99 is empty$/)
   })
 })

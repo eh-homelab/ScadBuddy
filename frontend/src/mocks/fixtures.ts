@@ -964,6 +964,7 @@ export const settingsDefaults = {
   store_s3_access_key_id: null,
   store_s3_path_style: true,
   library_backend: 'bambuddy',
+  slicer_backend: 'bambuddy',
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,

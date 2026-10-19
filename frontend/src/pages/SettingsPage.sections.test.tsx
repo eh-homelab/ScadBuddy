@@ -897,6 +897,22 @@ describe('SettingsPage blob store (#426)', () => {
     expect(await optionDisabled(user, library, /ScadBuddy.s own/)).toBe(true)
   })
 
+  it('saves slicer_backend, which applies at once (plan 2026-10-16 Task 14)', async () => {
+    const bodies = serve({ ...stored, applies: { ...stored.applies, slicer_backend: 'live' } })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const slicer = screen.getByLabelText('Slicer')
+    expect(slicer).toHaveTextContent('Bambuddy\u2019s slicer')
+    await choose(user, slicer, /ScadBuddy.s slicer \(Bambu Studio CLI\)/)
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ slicer_backend: 'native' })
+    expect(screen.getByLabelText('Slicer')).toHaveTextContent('ScadBuddy\u2019s slicer (Bambu Studio CLI)')
+    expect(within(region('Projects & files')).getByTestId('source-slicer_backend')).not.toHaveTextContent(
+      'Applies on restart',
+    )
+  })
+
   it('saves library_backend and shows it applies on restart', async () => {
     const bodies = serve({
       ...stored,
