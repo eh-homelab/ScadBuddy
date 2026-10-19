@@ -1,0 +1,9 @@
+{
+    "type": "machine",
+    "name": "Bambu Lab H2C 0.4 nozzle",
+    "inherits": "fdm_machine_root",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GM041",
+    "printer_model": "Bambu Lab H2C"
+}

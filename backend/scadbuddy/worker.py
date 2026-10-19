@@ -55,6 +55,7 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.flows.keys import approval_key, payload_keys
@@ -73,16 +74,25 @@ from scadbuddy.library.libraries import (
 from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.library.settings_store import SettingsStore, load_render_store_settings
+from scadbuddy.library.settings_store import (
+    SettingsStore,
+    load_render_store_settings,
+    settings_kek,
+)
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.print_library.remote import RemoteLibrary
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
+from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.usage import RackUsageStore, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
+from scadbuddy.slicing.catalogue import warm_catalogue
+from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.store import BlobRefs
@@ -956,6 +966,12 @@ class PrintWorkerDeps:
     follow_print: Callable[..., Any]
     #: Native library files, read through the API's internal routes (#3827).
     library: LibraryReads | None = None
+    #: The printer registry (#3823): each LAN printer's watch, on the follow queue. The
+    #: KEK opens a printer's access code; without it the watches end, saying why.
+    printers: PrinterStore | None = None
+    reports: PrinterReportStore | None = None
+    kek: Kek | None = None
+    printer_watch: Callable[..., Any] | None = None
 
     async def aclose(self) -> None:
         await self.outputs.aclose()
@@ -1014,6 +1030,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     activity = ActivityIndex(pool, events=events, metrics=metrics)
     print_runs = PrintRunStore(pool, events=events, activity=activity)
     operations = OperationStore(pool, events=events, activity=activity)
+    kek = settings_kek(settings.secret_key_file)
+    printers = PrinterStore(pool, kek)
+    reports = PrinterReportStore(pool)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1067,6 +1086,10 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
         library=library,
+        printers=printers,
+        reports=reports,
+        kek=kek,
+        printer_watch=WatchActivities(printers, reports, events).printer_watch,
     )
 
 
@@ -1083,6 +1106,11 @@ async def run_print_worker(
     AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
+    # The image's preset catalogue, built behind the start for the first native plan_run
+    # (#3818 tier A); nothing waits on it.
+    warming = warm_catalogue(
+        await asyncio.to_thread(Profiles.installed, settings.slicer_profiles_dir)
+    )
     try:
         await deps.events.start()
         client, sdk_port = await _own_client(settings, client)
@@ -1090,7 +1118,13 @@ async def run_print_worker(
         build_id = settings.revision
         workers = [
             bambuddy_worker(client, queue, deps.activities, build_id=build_id),
-            follow_worker(client, queue, deps.follow_print, build_id=build_id),
+            follow_worker(
+                client,
+                queue,
+                deps.follow_print,
+                printer_watch=deps.printer_watch,
+                build_id=build_id,
+            ),
         ]
         routed = asyncio.Event()
         server = (
@@ -1116,6 +1150,9 @@ async def run_print_worker(
                 server.should_exit = True
                 await serving
     finally:
+        if warming is not None:
+            warming.cancel()
+            await asyncio.gather(warming, return_exceptions=True)
         await deps.aclose()
 
 

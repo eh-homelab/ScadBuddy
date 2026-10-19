@@ -1843,6 +1843,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiobotocore" },
+    { name = "aiomqtt" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpcore" },
@@ -1872,7 +1873,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "aiomqtt" },
     { name = "moto", extra = ["server"] },
     { name = "mypy" },
     { name = "psycopg", extra = ["binary"] },
@@ -1892,6 +1892,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiobotocore", specifier = ">=2.21,<3" },
+    { name = "aiomqtt", specifier = ">=2.3,<3" },
     { name = "cryptography", specifier = ">=44,<51" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpcore", specifier = ">=1.0" },
@@ -1921,7 +1922,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aiomqtt", specifier = ">=2.3,<3" },
     { name = "moto", extras = ["server"], specifier = ">=5.1" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },

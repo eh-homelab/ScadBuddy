@@ -36,6 +36,10 @@
         {
             "name": "with_includes",
             "sub_path": "process/with_includes.json"
+        },
+        {
+            "name": "0.20mm Standard @BBL H2C",
+            "sub_path": "process/0.20mm Standard @BBL H2C.json"
         }
     ],
     "filament_list": [
@@ -62,6 +66,18 @@
         {
             "name": "Test Short",
             "sub_path": "filament/Test Short.json"
+        },
+        {
+            "name": "Bambu PLA Basic @base",
+            "sub_path": "filament/Bambu PLA Basic @base.json"
+        },
+        {
+            "name": "Bambu PLA Basic @BBL H2C",
+            "sub_path": "filament/Bambu PLA Basic @BBL H2C.json"
+        },
+        {
+            "name": "Bambu PLA Basic @BBL X1C",
+            "sub_path": "filament/Bambu PLA Basic @BBL X1C.json"
         }
     ],
     "machine_list": [
@@ -72,6 +88,10 @@
         {
             "name": "Test Printer 0.4 nozzle",
             "sub_path": "machine/Test Printer 0.4 nozzle.json"
+        },
+        {
+            "name": "Bambu Lab H2C 0.4 nozzle",
+            "sub_path": "machine/Bambu Lab H2C 0.4 nozzle.json"
         }
     ]
 }

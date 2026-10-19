@@ -7,6 +7,8 @@ import type { PrinterNow, PrintersNow } from '../../api/types'
  */
 export const PRINTERS_NOW: PrinterNow[] = [
   {
+    id: '00000000-0000-4000-8000-000000000001',
+    path: 'bambuddy',
     printer_id: 1,
     name: '3DP-31B-598',
     activity: 'paused',
@@ -27,6 +29,8 @@ export const PRINTERS_NOW: PrinterNow[] = [
     error: null,
   },
   {
+    id: '00000000-0000-4000-8000-000000000002',
+    path: 'bambuddy',
     printer_id: 2,
     name: 'Workshop',
     activity: 'printing',
@@ -44,6 +48,8 @@ export const PRINTERS_NOW: PrinterNow[] = [
     error: null,
   },
   {
+    id: '00000000-0000-4000-8000-000000000003',
+    path: 'bambuddy',
     printer_id: 3,
     name: 'Spare',
     activity: 'idle',

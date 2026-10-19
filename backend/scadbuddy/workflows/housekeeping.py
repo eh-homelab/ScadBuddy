@@ -135,6 +135,11 @@ TRANSFER_PUTS_PATCH = "housekeeping-prune-transfer-puts"
 #: delete (`NATIVE_SLICES_SWEEP`) stays under the switch.
 LOST_NATIVE_SLICES_SWEEP = "housekeeping_stop_lost_native_slices"
 LOST_NATIVE_SLICES_PATCH = "housekeeping-stop-lost-native-slices"
+#: #3823: a `PrinterWatch` for every LAN-linked printer, so one that stopped (or never
+#: started: its link's start failed) comes back. Last, behind its own patch; on the
+#: prune Schedule too, so it comes back within `PRUNE_INTERVAL` (#4186 review I4).
+PRINTER_WATCHES_SWEEP = "housekeeping_printer_watches"
+PRINTER_WATCHES_PATCH = "housekeeping-printer-watches"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -154,6 +159,7 @@ SWEEPS = (
     NATIVE_SLICES_SWEEP,
     TRANSFER_PUTS_SWEEP,
     LOST_NATIVE_SLICES_SWEEP,
+    PRINTER_WATCHES_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -164,7 +170,9 @@ SWEEPS = (
 #: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
 #: Not the dialog's background slices (`PREVIEWS_SWEEP`, `NATIVE_SLICES_SWEEP`): they
 #: obey the sweeps' switch, so with the sweeps off they stay. The transfer PUTs'
-#: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch.
+#: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch. And the
+#: printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started again
+#: within the interval, not the sweeps' day.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -173,6 +181,7 @@ PRUNE_SWEEPS = (
     LIBRARY_SWEEP,
     TRANSFER_PUTS_SWEEP,
     LOST_NATIVE_SLICES_SWEEP,
+    PRINTER_WATCHES_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -207,6 +216,8 @@ NATIVE_SLICES_TIMEOUT = timedelta(minutes=5)
 LOST_NATIVE_SLICES_TIMEOUT = timedelta(minutes=2)
 #: One delete.
 TRANSFER_PUTS_TIMEOUT = timedelta(minutes=2)
+#: One start (or none) per LAN printer, each bounded by `follow.RPC_TIMEOUT`.
+PRINTER_WATCHES_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -233,6 +244,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return LOST_NATIVE_SLICES_TIMEOUT
     if sweep == TRANSFER_PUTS_SWEEP:
         return TRANSFER_PUTS_TIMEOUT
+    if sweep == PRINTER_WATCHES_SWEEP:
+        return PRINTER_WATCHES_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -271,6 +284,8 @@ class Housekeeping:
             if sweep == TRANSFER_PUTS_SWEEP and not workflow.patched(TRANSFER_PUTS_PATCH):
                 continue
             if sweep == LOST_NATIVE_SLICES_SWEEP and not workflow.patched(LOST_NATIVE_SLICES_PATCH):
+                continue
+            if sweep == PRINTER_WATCHES_SWEEP and not workflow.patched(PRINTER_WATCHES_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
