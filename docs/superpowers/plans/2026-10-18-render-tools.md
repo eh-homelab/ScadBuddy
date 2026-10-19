@@ -54,7 +54,7 @@ So a max-difference bound is useless (one flipped edge pixel is up to 107), and 
 
 ## Decisions (my calls; the ones marked **user** need the user)
 
-1. **`render_rust_stages` is a subset of `thumbnail`, `split`, `store`**, not spec §8's `thumbnail, split, solids, store`: solids' parallelism is a Python pool that exists and is gated by `solid_concurrency`, a setting already live (above). **User:** Task 13 either sets prod's `solid_concurrency` to 2 (a stored setting, live, no deploy) or changes `default_solid_concurrency` to stop subtracting `check_concurrency` in a process that runs no editor checks (the render worker), which gives 2 on prod's 4 CPUs. The plan does the code change and recommends the setting as the immediate step; either answers §7.3 step 3.
+1. **`render_rust_stages` is a subset of `thumbnail`, `split`, `store`**, not spec §8's `thumbnail, split, solids, store`: solids' parallelism is a Python pool that exists and is gated by `solid_concurrency`, a setting already live (above). **User:** Task 13 either sets prod's `solid_concurrency` to 2 (a stored setting, live, no deploy) or gives `Config.solid_slots` a `checks_here: bool` so that a process that runs no editor checks (the render worker) passes `check_concurrency=0` to `default_solid_concurrency`, which itself stays unchanged, which gives 2 on prod's 4 CPUs. The plan does the code change and recommends the setting as the immediate step; either answers §7.3 step 3.
 2. **The thumbnail CLI refuses a painted layout** (exit 3, outcome `unsupported`, Python draws it). Painting (`split.painted_pieces`, `render/paint.pieces`, a mesh model's carried `.paint.json`) is 560 lines of Python with its own tests; no `.scad` render has paint (OpenSCAD writes no `paint_color`), so every template render takes the Rust path. Porting it is follow-up issue work, filed in Task 15.
 3. **Rust's PNG bytes are not Python's.** Cover images are compared decoded; the 3MF a Rust stage writes differs in its PNG entries' bytes from a Python one. Nothing keys on those bytes (`piece_key` and `render_key` are inputs, not outputs).
 4. **`split` hands meshes to Python as raw little-endian arrays**, not as a format trimesh parses: `<n>.vertices` (f64 x 3) and `<n>.faces` (u32 x 3), read with `numpy.fromfile` into `trimesh.Trimesh(process=False)`, exactly the arrays `split_by_material` builds. Parity is exact equality (both languages parse decimal to the nearest f64).
@@ -169,7 +169,7 @@ git commit -m "test(render): OpenSCAD-shaped 3MF writer and the stage benchmark 
       version: str                       # CARGO_PKG_VERSION
       stages: list[RustStage]            # what this build implements
   ```
-- Vector file `{"refusal": [...], "split": [...], "thumbnail": [...], "version": [...]}`, each a `model_dump(mode="json")`, compared after a round trip; written with `UPDATE_RENDER_TOOLS_VECTORS=1`, as `slice_plate.json` is.
+- Vector file `{"refusal": [...], "split": [...], "thumbnail": [...], "version": [...]}`, each a `model_dump(mode="json")`, compared after a round trip; written with `UPDATE_RENDER_TOOLS_VECTORS=1`, as `slice_plate.json` is. Without it the test regenerates the cases and asserts the committed file equals them (`json.loads(VECTORS.read_text()) == dumped`, as `backend/tests/slicing/test_models.py:95` does), so a hand edit of `render_tools.json` fails the backend shards (Task 12) as well as the Rust round trip.
 
 - [ ] **Step 1: Write the failing test** (the `slice_plate` vectors test's shape, `backend/tests/slicing/test_models.py`): cases covering a painted and an unpainted `SplitPartFile`, a two-plate `ThumbnailResult`, every `ToolRefusal.error`, a `VersionResult`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/test_render_tools_models.py -v` — Expected: FAIL (`ModuleNotFoundError: scadbuddy.render.tools_models`).
@@ -202,7 +202,7 @@ git commit -m "feat(render): scadbuddy-render-tools result models and their vect
   scadbuddy-render-tools split <model.3mf> <out dir>
   scadbuddy-render-tools thumbnail <layout.json> <out dir>
   ```
-  Every path is canonicalised; `split`'s input and `thumbnail`'s layout must be inside `<out dir>`'s parent tree (the piece's work dir) or exit 2. Exactly one JSON document on stdout, newline-terminated.
+  Every path is canonicalised (`std::fs::canonicalize`: absolute, symlinks resolved). The root is the canonical `<out dir>`'s parent (the piece's work dir); `split`'s input, `thumbnail`'s layout and every file the layout names are accepted only if their canonical path is under that root, compared by path components (`Path::starts_with`, not a string prefix), else exit 2. So `<work>/../x`, and a symlink in the work dir pointing out of it, are refused (Task 9's test). Exactly one JSON document on stdout, newline-terminated.
 - `scadbuddy-render-tools` depends on `sb-render` only (not `sb-temporal`): `cargo build -p scadbuddy-render-tools` compiles no Temporal crate and needs no `protoc`.
 
 - [ ] **Step 1: Write the failing tests** — `vectors.rs` round-trips every entry of `vectors/render_tools.json` (the `slice_plate` vectors test's shape); `cli.rs` runs the built binary (`env!("CARGO_BIN_EXE_scadbuddy-render-tools")`): `version` prints a `VersionResult` with `stages == []` at this task; no arguments exits 2; `split` of a missing file exits 1 with a `ToolRefusal{error:"io"}` on stdout.
@@ -366,7 +366,7 @@ git commit -m "feat(settings): render_rust_stages, live on the API and the rende
       ``path`` (dot-named, so `pack_dir_to` never packs it), removed once the arrays are loaded."""
   ```
   `PlateLayout.load` becomes an async classmethod over `split_parts` (its one caller, `finish_piece_stage`, already awaits it in a thread; the thread moves inside `split_parts`' Python branch). `paint` from `<n>.paint` builds `Paint(codes, palette)` as `split_by_material` does.
-- `timeout` is `config.render_timeout`; a split overrun falls back to Python.
+- `timeout` is what is left of the job's `render_timeout` when the stage starts (the job's deadline, as Task 10's thumbnails take theirs), never a fresh full `render_timeout`, so the CLI never runs the job past its deadline. A split overrun falls back to Python, which runs unbounded as `split_by_material` does today: the stage must produce the parts (Global constraints: a Rust stage never fails a render Python would have finished), and the worst case is today's Python split after the deadline the job already had, not twice the split budget.
 
 - [ ] **Step 1: Write the failing tests** — `test_split_parity.py`, marked `requires_render_tools` (new marker: skips unless `SCADBUDDY_RENDER_TOOLS` or the default resolves on `PATH`; with `SCADBUDDY_TEST_RENDER_TOOLS=required` it fails instead, as `requires_fixtures` does with `SCADBUDDY_TEST_FIXTURES`): for the fake openscad's `FAKE_3MF`, every small `tests/data` 3MF, and (also `requires_fixtures`) each MakerWorld fixture written by `write_openscad_3mf`, the CLI's parts equal `split_by_material`'s: same order, `material_index`, `name`, `colour`, `np.array_equal` vertices and faces, equal `paint`. A painted part (fixture 2069 re-written with its `paint_color` codes) included. `test_jobs.py`: with stages empty the CLI is never started (a `RenderTools` spy); with `{"split"}` and an absent binary the result equals the Python one and the counter says `absent`.
 - [ ] **Step 2: Run** `cd backend && PATH=$PWD/../workers/rust/target/release:$PATH uv run --frozen pytest tests/test_split_parity.py tests/test_jobs.py -v` (after `cargo build --release -p scadbuddy-render-tools` in `workers/rust`) — Expected: FAIL.
@@ -546,7 +546,7 @@ git commit -m "ci: render-tools parity tests required in the backend shards (#38
 ### Task 13: Solids: the pool prod already has, sized for the render worker (measured)
 
 **Files:**
-- Modify: `backend/scadbuddy/core/config.py` (`default_solid_concurrency`), `backend/scadbuddy/worker.py` (the standalone render worker passes `check_concurrency=0` to it: it serves no editor checks)
+- Modify: `backend/scadbuddy/core/config.py` (`Config.solid_slots`, new `checks_here: bool`; `default_solid_concurrency` unchanged), `backend/scadbuddy/worker.py` (the standalone render worker calls `solid_slots(checks_here=False)`: it serves no editor checks)
 - Test: `backend/tests/test_config.py` (cases)
 
 **Interfaces:**

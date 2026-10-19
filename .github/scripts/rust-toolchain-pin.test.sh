@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # rust-toolchain-pin.sh --check against a stub gh: a ci.yml pinned to master passes, one
-# pinned elsewhere fails naming its line. No network.
+# pinned elsewhere fails naming its line, and a stale second pin (in another workflow)
+# fails though the first is at master (#4264). No network.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mktemp -d)"
@@ -31,4 +32,15 @@ if ! grep -qF "$work/ci.yml:4:" <<<"$out" || ! grep -qF "$master" <<<"$out"; the
 fi
 # Without --check it only reports.
 PATH="$work/bin:$PATH" "$here/rust-toolchain-pin.sh" "$work/ci.yml" >/dev/null
-echo "ok: a pin at master passes, a stale pin fails naming its line"
+
+pinned_to "$master"
+printf 'jobs:\n  a:\n    steps:\n      - uses: dtolnay/rust-toolchain@%s\n  b:\n    steps:\n      - uses: dtolnay/rust-toolchain@%s\n' \
+  "$master" 3333333333333333333333333333333333333333 >"$work/other.yml"
+if out="$(PATH="$work/bin:$PATH" "$here/rust-toolchain-pin.sh" --check "$work/ci.yml" "$work/other.yml" 2>&1)"; then
+  echo "FAIL: a stale second pin passed the check"; exit 1
+fi
+if ! grep -qF "$work/other.yml:7:" <<<"$out" || grep -qF "$work/other.yml:4: dtolnay" <<<"$out" \
+  || grep -qF "$work/ci.yml:4: dtolnay" <<<"$out"; then
+  echo "FAIL: the check did not name only the stale second pin:"; echo "$out"; exit 1
+fi
+echo "ok: a pin at master passes, a stale pin fails naming its line, every pin is checked"

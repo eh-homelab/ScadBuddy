@@ -809,8 +809,8 @@ was already true for classic, and for durable's retried segments.
 
 ## 8. Background tasks as workflows
 
-Another agent is adding Claude Code's background built-ins (#2393; local branch
-`feat/background-builtins`). That branch leaves `CronCreate`, `CronDelete`, `CronList`,
+When this spec was written, Claude Code's background built-ins were being added (#2393,
+since merged as #2746). That work left `CronCreate`, `CronDelete`, `CronList`,
 `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification` out of durable
 sessions, because they "only work inside one Claude Code process". The unified runtime
 gives them a single home:

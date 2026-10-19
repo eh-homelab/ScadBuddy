@@ -899,7 +899,13 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   image=mirror.gcr.io/moby/buildkit:buildx-stable-1` (#3370): Docker Hub refuses some
   anonymous pulls from hosted runners, which failed jobs before any test ran. A new
   buildx step needs it too. The tag floats with buildx's own default; nothing would
-  bump a digest pinned there.
+  bump a digest pinned there. Each step also gives its daemon a `buildkitd-config-inline`
+  `[registry."docker.io"] mirrors = ["mirror.gcr.io"]` (#4012), so the Dockerfiles'
+  Docker Hub bases come through the mirror while the Dockerfiles keep their plain
+  references for Dependabot and `openscad-bump.yml` (BuildKit falls back to Docker Hub
+  for an image the mirror lacks; the pinned digests matched on both on 2026-10-19,
+  `docker buildx imagetools inspect`). `lint-buildx-mirror.sh` checks both. The
+  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
@@ -933,8 +939,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - The `rust` job pins `dtolnay/rust-toolchain` by commit (the toolchain itself is
   `rust-toolchain.toml`'s). The action has no release tags, so Dependabot never moves
   that SHA: `rust-toolchain-pin.yml` runs `.github/scripts/rust-toolchain-pin.sh --check`
-  weekly, failing (the reminder) when master has moved past it, naming the line to
-  change (#4099). Move it, and its `master as of` date, in a reviewed PR.
+  weekly over every workflow's pin, failing (the reminder) when master has moved past
+  one, naming each line to change (#4099, #4264). Move it, and its `master as of` date, in a reviewed PR.
 
 ## PR conventions
 

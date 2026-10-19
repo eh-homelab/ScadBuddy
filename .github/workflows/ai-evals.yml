@@ -61,7 +61,7 @@ jobs:
     # ci.yml's `image` job.
     services:
       postgres:
-        image: postgres:17
+        image: mirror.gcr.io/library/postgres:17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_evals
@@ -96,6 +96,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Build the test image (for its Temporal CLI)
         if: ${{ steps.key.outputs.present == 'true' }}

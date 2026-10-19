@@ -156,17 +156,21 @@ async fn stderr_held_outside_the_group_is_abandoned_after_the_grace() {
     .await;
     // The holder is in a session of its own, which the run's kill never reaches: stop it
     // by the pid it wrote, before any assertion can fail.
-    let holder: i32 = std::fs::read_to_string(&pid_file)
-        .expect("the fake writes the holder's pid")
-        .trim()
-        .parse()
-        .unwrap();
-    let _ = nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(holder),
-        nix::sys::signal::Signal::SIGKILL,
-    );
+    let holder: Option<i32> = std::fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|pid| pid.trim().parse().ok());
+    if let Some(holder) = holder {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(holder),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
     let outcome = result.expect("returns within the grace").unwrap();
-    assert!(started.elapsed() < STDERR_GRACE + Duration::from_secs(2));
+    let holder =
+        holder.unwrap_or_else(|| panic!("the fake wrote no holder pid: {}", outcome.stderr_tail));
+    // The timeout above ends far inside the holder's 30 s, so the run did not wait for
+    // the holder; this shows it did wait out the grace for the held stderr (#4263).
+    assert!(started.elapsed() >= STDERR_GRACE);
     assert_eq!(outcome.exit_code, 0);
     assert!(p.out.exists());
     assert!(
