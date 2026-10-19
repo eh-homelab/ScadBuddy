@@ -31,7 +31,7 @@
   - `turn_max_seconds` 7200 (300–86400).
 - **Fixed:** the `session_turn` heartbeat timeout is 20 s with a heartbeat every 5 s, the home schedule-to-start is 5 s, there is 1 activity attempt and 3 recovery cycles.
 - **Clusters.** Clusters PRs are on `eh-homelab/clusters` and follow that repo's conventions. Each is merged only together with the ScadBuddy phase that needs it. Never touch prod by hand.
-- **Shared database.** Test suites share the Postgres `sb-parity-pg` with other agents, so run one suite at a time and use a database of your own (`scadbuddy_test_unify`).
+- **Shared database.** If the Postgres at `SCADBUDDY_TEST_DATABASE_URL` is shared with other runs, run one suite at a time and point it at a database of your own (CLAUDE.md: concurrent runs on one database hear each other's `NOTIFY`).
 - **Commits** end with:
   ```
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -731,9 +731,9 @@ With the lease retired, the claim is `durable_turn_id` alone (as it already is f
 - Modify: `.github/workflows/ci.yml` (the `lint` job runs it)
 - [ ] **Step 1: Write `lint-one-runtime.test.sh`.** It creates fixture trees that each must fail:
   - a `mode === 'durable'` in `agent/src/harness/x.ts`;
-  - a second `query(` call site outside `agent/src/harness/run.ts` and `testConnection.ts`.
+  - an import of the SDK's `query` outside `agent/src/harness/run.ts` and `testConnection.ts`, one tree per form: `import { query } from '@anthropic-ai/claude-agent-sdk'` called as `query(opts)`; the same import across lines (`import {\n  type Options,\n  query,\n} from …`) called as `query(\n  {`; `import { query as q } from …`; `import * as sdk from …` called as `sdk.query(`; and a dynamic `await import('@anthropic-ai/claude-agent-sdk')`.
 
-  The current tree must pass. (`agent-durable/` still exists at this point — PR 7 migrates its sessions and PR 8 removes it — so its own check is added in Task 8.1, once checking for the directory's absence is actually meaningful.)
+  And trees that must pass: `import type { Options } from …` and `import { createSdkMcpServer, tool } from …` in any file (no `query`), and a comment naming `session_mode` (`// the session_mode setting is gone`, ` * sessionModeOf …`): the guard reads code, not comments, so Task 6.1 need not edit comments such as `agent/src/sessions/clientProtocol.ts:67`. The current tree must pass. (`agent-durable/` still exists at this point — PR 7 migrates its sessions and PR 8 removes it — so its own check is added in Task 8.1, once checking for the directory's absence is actually meaningful.)
 - [ ] **Step 2: Run it.** `bash .github/scripts/lint-one-runtime.test.sh`. Expected: FAIL (no script).
 - [ ] **Step 3: Implement.**
 
@@ -743,13 +743,34 @@ With the lease retired, the claim is `durable_turn_id` alone (as it already is f
 set -euo pipefail
 root="${1:-.}"
 fail=0
-if grep -rnE "mode ?={2,3} ?'(durable|classic)'|sessionModeOf|session_mode" "$root/agent/src" --include='*.ts' | grep -v '/db/migrations/'; then
+# --include='*.ts' already leaves out the .sql migrations. A comment line (`//`, `/*`, ` *`)
+# is not a branch, so the comments that still name the old setting pass.
+if grep -rnE "mode ?={2,3} ?'(durable|classic)'|sessionModeOf|session_mode" "$root/agent/src" --include='*.ts' \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)'; then
   echo "a session mode branch is back: every session is an AgentSession" >&2; fail=1
 fi
-mapfile -t sites < <(grep -rlnE "\bquery\(\{" "$root/agent/src" --include='*.ts' || true)
-for f in "${sites[@]}"; do
-  case "$f" in */harness/run.ts|*/harness/testConnection.ts) ;; *) echo "query() outside the harness: $f" >&2; fail=1 ;; esac
-done
+# Every import of the SDK's `query` (named, renamed, across lines, a namespace import, a
+# dynamic import), wherever it is called, outside the harness's two call sites.
+python3 - "$root/agent/src" <<'PY' || fail=1
+import re, sys
+from pathlib import Path
+SDK = r"['\"]@anthropic-ai/claude-agent-sdk['\"]"
+STATIC = re.compile(r"\bimport\s+(?!type\s)([^;]*?)\s+from\s+" + SDK, re.S)
+DYNAMIC = re.compile(r"\bimport\(\s*" + SDK)
+ALLOWED = {"harness/run.ts", "harness/testConnection.ts"}
+root, bad = Path(sys.argv[1]), 0
+for f in sorted(root.rglob("*.ts")):
+    if f.relative_to(root).as_posix() in ALLOWED:
+        continue
+    text = f.read_text(encoding="utf-8")
+    clauses = [m.group(1) for m in STATIC.finditer(text)]
+    if DYNAMIC.search(text) or any(
+        re.search(r"\*\s+as\s|(^|[{,])\s*query\b", c) for c in clauses
+    ):
+        print(f"query() outside the harness: {f}", file=sys.stderr)
+        bad = 1
+sys.exit(bad)
+PY
 exit "$fail"
 ```
 
@@ -859,6 +880,8 @@ Merge this only after the PR 7 backfill reported 0 open `DurableSession`s in pro
 
 ### Task 10.1: Migration
 
+The agent migrates at start, and once Phase 11 moves it to `RollingUpdate` (D6) a release's old pods run beside the new one while it rolls out, so the new pod's migration must not take away what they still read. This migration therefore ships in a release AFTER the one that removed the columns' last readers (Task 6.1 and Phase 8): never in PR 6 or PR 8's release, and only once that release is the one running everywhere. Before opening PR 10, grep the running release's tag for the dropped names (`git grep -nE 'durable_offset|lease_until|turn_id|ai_questions|session_mode' <tag> -- agent/src agent-durable`, plus every read of `ai_sessions.mode`) and expect only migrations.
+
 **Files:**
 - Create: `agent/src/db/migrations/<ts>_drop_session_mode.sql`:
 
@@ -877,40 +900,6 @@ DELETE FROM ai_settings WHERE key = 'session_mode';
 - Modify: every reader the typecheck finds.
 - [ ] **Step 1:** Run `pnpm test` against Postgres. Expected: PASS.
 - [ ] **Step 2: Commit** with `chore(agent): drop the durable-era columns`. Open PR 10.
-
----
-
-## Self-review notes
-
-- **Spec coverage, section by section:**
-  - §5.1 → 5.1
-  - §5.2 → 5.2
-  - §5.3 → 2.1–2.4
-  - §5.4 → 5.3–5.4
-  - §5.5 → 5.5
-  - §5.6 → 5.6
-  - §6.1 → 5.2
-  - §6.2 → 3.1–3.2
-  - §6.3 → 3.2, 6.1
-  - §6.4–6.5 → 5.6
-  - §6.6 → 2.2–2.3
-  - §6.7 → 2.2 (credential recycle)
-  - §6.8 → 6.1, 8.2
-  - §6.9 → 2.3, 9.3
-  - §6.10 → 5.2
-  - §7 → 5.4
-  - §8 → 9.1–9.2
-  - §9 → 6.1 (`flowSessions.ts`)
-  - §10 → 6.1, 7, 10
-  - §11 → 8
-  - §12's unverified items → 5.4, 7.1, 9.2
-- **Decisions D1–D7** were made by the user on 2026-10-13 (spec §13):
-  - D1 → Phase 6;
-  - D2/D3/D5 → Task 2.5 settings;
-  - D3 limit → Task 2.6;
-  - D4 → 5.1;
-  - D6 → Phase 11;
-  - D7 → Phase 3.
 
 ---
 
@@ -950,3 +939,37 @@ is versioned (Task 5.1).
 **Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy.yaml`
 - [ ] Change `strategy` to `RollingUpdate` with `maxUnavailable: 1, maxSurge: 0`. Pod anti-affinity means no surge node is guaranteed; check that against the nodes. Set `terminationGracePeriodSeconds: 60`, so `stopTurns` (12 s) and the worker's force stop (15 s) finish. Rewrite the comment block at `:125-131` to say why.
 - [ ] Open it only after both PRs from Tasks 11.2 and 11.3 have merged and deployed, then drive it to green and merge it by the clusters repo's process.
+
+---
+
+## Self-review notes
+
+- **Spec coverage, section by section:**
+  - §5.1 → 5.1
+  - §5.2 → 5.2
+  - §5.3 → 2.1–2.4
+  - §5.4 → 5.3–5.4
+  - §5.5 → 5.5
+  - §5.6 → 5.6
+  - §6.1 → 5.2
+  - §6.2 → 3.1–3.2
+  - §6.3 → 3.2, 6.1
+  - §6.4–6.5 → 5.6
+  - §6.6 → 2.2–2.3
+  - §6.7 → 2.2 (credential recycle)
+  - §6.8 → 6.1, 8.2
+  - §6.9 → 2.3, 9.3
+  - §6.10 → 5.2
+  - §7 → 5.4
+  - §8 → 9.1–9.2
+  - §9 → 6.1 (`flowSessions.ts`)
+  - §10 → 6.1, 7, 10
+  - §11 → 8
+  - §12's unverified items → 5.4, 7.1, 9.2
+- **Decisions D1–D7** were made by the user on 2026-10-13 (spec §13):
+  - D1 → Phase 6;
+  - D2/D3/D5 → Task 2.5 settings;
+  - D3 limit → Task 2.6;
+  - D4 → 5.1;
+  - D6 → Phase 11;
+  - D7 → Phase 3.
