@@ -578,7 +578,6 @@ ARG BOSL2_REF
 ARG BOSL2_COMMIT
 
 WORKDIR /opt/seed/app/libraries
-COPY THIRD_PARTY_NOTICES.md /opt/seed/app/THIRD_PARTY_NOTICES.md
 RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_REF" \
         https://github.com/BelfrySCAD/BOSL2.git "BOSL2/${BOSL2_COMMIT}/BOSL2" \
     && actual="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" rev-parse HEAD)" \
@@ -588,10 +587,16 @@ RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_RE
          exit 1; \
        fi \
     && committed="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" log -1 --format=%ct)" \
+    && echo "$committed" > /opt/bosl2-committed \
     && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git" \
     && chown scadbuddy:scadbuddy /opt/seed/app \
     && chmod 0755 /opt/seed/app \
     && find /opt/seed -exec touch -h -d "@${committed}" {} +
+# After the clone (#4160), so an edit to the notices re-clones nothing. Adding it moves
+# /opt/seed/app's mtime, so both are set back to the pinned commit's time, read from
+# the file the clone left outside /opt/seed (only /opt/seed is copied on).
+COPY THIRD_PARTY_NOTICES.md /opt/seed/app/THIRD_PARTY_NOTICES.md
+RUN touch -h -d "@$(cat /opt/bosl2-committed)" /opt/seed/app /opt/seed/app/THIRD_PARTY_NOTICES.md
 
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
@@ -735,8 +740,11 @@ ENV SCADBUDDY_DATA_DIR=/data \
 # from the stage, /app keeps the owner, mode and mtime the stage gave /opt/seed/app.
 ARG BOSL2_REF
 COPY --link --from=libraries /opt/seed/ /
+# /app's owner and mode come from the libraries stage now, not from base (#4160): the
+# check fails the build if the two drift apart.
 RUN python -m scadbuddy.library.library_seed verify /app/libraries \
-        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}"
+        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}" \
+    && test "$(stat -c '%U %a' /app)" = "scadbuddy 755"
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is
