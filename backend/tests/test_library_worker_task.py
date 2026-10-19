@@ -26,6 +26,7 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
+    PRINTER_WATCHES_SWEEP,
     PRUNE_SWEEPS,
     SWEEPS,
 )
@@ -68,7 +69,9 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+        ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
@@ -131,15 +134,22 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
     async def preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
         previews.append(render_bound)
 
+    async def spool_schedule(client: object, queue: str, interval: float) -> None:
+        spools.append(interval)
+
+    spools: list[float] = []
     monkeypatch.setattr(main, "ensure_schedules", flaky)
+    monkeypatch.setattr(main, "ensure_spool_schedule", spool_schedule)
     monkeypatch.setattr(main, "ensure_preview_schedule", preview_schedule)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     stop = asyncio.Event()
     await asyncio.wait_for(
-        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop),  # type: ignore[arg-type]
+        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop, spool_refresh=300),  # type: ignore[arg-type]
         5,
     )
     assert calls == [600.0, 600.0]
+    # The spool providers' refresh (#3818), after the sweeps' Schedules.
+    assert spools == [300]
     # The preview backfill's Schedule (#1054) is set up once the housekeeping ones
     # are: each set-up triggers a run, so a retry must not set it up again (final
     # review M3).
@@ -166,9 +176,13 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     async def no_preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
         pass
 
+    async def no_spool_schedule(client: object, queue: str, interval: float) -> None:
+        pass
+
     monkeypatch.setattr(main, "library_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "ensure_spool_schedule", no_spool_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
 
     async def no_triggers() -> None:
@@ -176,7 +190,9 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+        ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
         previews=None,
@@ -233,6 +249,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
+    monkeypatch.setattr(main, "ensure_watches", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -257,6 +274,7 @@ async def test_a_failing_sweep_fails_its_activity(
         settings_store=SimpleNamespace(load=StoredSettings),
         uploads=None,
         history=SimpleNamespace(maintain=_broken(OSError("the volume is gone"))),
+        print_runs=SimpleNamespace(client=object(), task_queue="bambuddy"),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (
@@ -353,12 +371,18 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         await asyncio.sleep(0.1)
         return SimpleNamespace(purged=0, orphans=0)
 
+    async def slow_watches(*args: object) -> list[str]:
+        await asyncio.sleep(0.1)
+        return []
+
     monkeypatch.setattr(main, "sweep_library", slow_library)
+    monkeypatch.setattr(main, "ensure_watches", slow_watches)
+    state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
     state.components = SimpleNamespace(
         get=lambda key: SimpleNamespace(
-            index=SlowIndex(), prune=slow_batches, serving_native=serving_native
+            index=SlowIndex(), prune=slow_batches, serving_native=serving_native, store=None
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
@@ -611,6 +635,11 @@ def test_the_background_slices_obey_the_sweeps_switch() -> None:
     assert PREVIEWS_SWEEP in SWEEPS
     assert PREVIEWS_SWEEP not in PRUNE_SWEEPS
     assert LOST_SLICES_SWEEP in PRUNE_SWEEPS
+
+
+def test_the_printer_watches_come_back_within_the_prune_interval() -> None:
+    """#4186 review I4: a lost watch is started again within 300 s, sweeps on or off."""
+    assert PRINTER_WATCHES_SWEEP in PRUNE_SWEEPS
 
 
 def test_the_native_library_sweep_runs_with_the_sweeps_off() -> None:

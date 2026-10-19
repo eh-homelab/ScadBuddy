@@ -158,6 +158,7 @@ class Outward(Flows):
         tool_tiers: dict[str, str] | None = None,
         host_queue_start_s: int = 60,
         approved_queue_start_s: int = 600,
+        agent_heartbeat_s: int = 30,
     ) -> str:
         """Start a run of `body`, with `grant` approved by the browser, and `before` run
         once the grant is in. `tool_tiers` are the tiers the API read from the agent at the
@@ -187,6 +188,7 @@ class Outward(Flows):
                 tool_tiers=tool_tiers or {},
                 host_queue_start_s=host_queue_start_s,
                 approved_queue_start_s=approved_queue_start_s,
+                agent_heartbeat_s=agent_heartbeat_s,
             ),
         )
         return run_id

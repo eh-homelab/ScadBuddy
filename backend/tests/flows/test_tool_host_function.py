@@ -14,13 +14,21 @@ from temporalio import activity, workflow
 from temporalio.common import RawValue
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
-from scadbuddy.workflows.flow_tools import FLOW_HOST_QUEUE_PATCH, FLOW_PINNED_CALL_PATCH
-from scadbuddy.workflows.projects_worker import projects_worker
+from scadbuddy.workflows.flow_tools import (
+    FLOW_BEATLESS_TIER_PATCH,
+    FLOW_HOST_QUEUE_PATCH,
+    FLOW_PINNED_CALL_PATCH,
+    FLOW_TOOLS,
+)
+from scadbuddy.workflows.flows_client import harness_plugins
+from scadbuddy.workflows.payload_codec import flows_converter
+from scadbuddy.workflows.project import ProjectWorkflow
+from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.fake_api import Outward, outward_activities
 from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, history_payloads, script
 from tests.flows.test_project_replay import HISTORIES, RECORD
@@ -344,6 +352,8 @@ class TurnTools:
         self.tier_fails: str | None = None
         #: The replicas later tiers name, one a tier, as a deploy replaces them.
         self.next_hosts: list[str] = []
+        #: Seconds each tier takes, with no beat: an agent replica from before #4200.
+        self.tier_delay_s = 0.0
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -352,6 +362,7 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
+            await asyncio.sleep(self.tier_delay_s)
             if self.next_hosts:
                 self.host = self.next_hosts.pop(0)
             if self.tier_fails is not None:
@@ -651,6 +662,76 @@ async def test_an_approved_turn_tool_nothing_picks_up_goes_to_the_replica_live_t
     assert served.calls == [
         ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
     ]
+
+
+async def test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    """#4262: every attempt of a `turn_tool_tier` lands on an agent replica from before
+    #4200 (a rollout, or a rollback), which sends no beats and takes longer than the
+    heartbeat timeout to answer. The tier is asked once more without one, and the call
+    runs, instead of the run's tier check failing."""
+    served, queue = turn_tools
+    served.tier_delay_s = 2.5
+    run_id = await outward.run(
+        script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
+        tools_queue=queue,
+        agent_heartbeat_s=1,
+    )
+    run = await outward.finished(run_id)
+    if RECORD:
+        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+        (HISTORIES / "beatless.json").write_text((await handle.fetch_history()).to_json())
+    assert run.result == "result: 'GET done'"
+    # Three attempts that missed their beats, then the one with no heartbeat timeout.
+    assert served.tiered == ["scadbuddy_http__http_request"] * 4
+    [step] = run.steps
+    assert served.calls == [
+        ("turn:scadbuddy_http__http_request", f"tool-{step.call_id}", {"method": "GET"})
+    ]
+
+
+async def test_a_beatless_tier_in_a_run_from_before_4262_still_fails_and_replays(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that recorded its tier's heartbeat timeout before #4262 (no marker) replays
+    on this code: the timeout reaches the script again, and no second tier is asked."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{queue}.host-1")
+    served.tier_delay_s = 2.5
+    projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
+    activities = outward_activities(outward.store, None)
+    patched = workflow.patched
+
+    def before_4262(patch_id: str) -> bool:
+        return False if patch_id == FLOW_BEATLESS_TIER_PATCH else patched(patch_id)
+
+    with monkeypatch.context() as m:
+        m.setattr(workflow, "patched", before_4262)
+        async with (
+            projects_worker(outward.client, projects.queue, activities),
+            Worker(outward.client, task_queue=queue, activities=[served.tier()]),
+        ):
+            run_id = await projects.run(
+                script(
+                    "try:",
+                    "    await tool('scadbuddy_http__http_request', {'method': 'GET'})",
+                    "except Exception as e:",
+                    "    return str(e)",
+                ),
+                tools_queue=queue,
+                agent_heartbeat_s=1,
+            )
+            run = await projects.finished(run_id)
+    assert "Heartbeat timeout" in (run.result or "")
+    assert served.tiered == ["scadbuddy_http__http_request"] * 3
+    history = await outward.client.get_workflow_handle(f"flow-{run_id}").fetch_history()
+    await Replayer(
+        workflows=[ProjectWorkflow],
+        plugins=harness_plugins(FLOW_TOOLS),
+        data_converter=flows_converter(Keys()),
+        workflow_runner=projects_runner(),
+    ).replay_workflow(history)
 
 
 async def test_a_turn_tool_nothing_offers_is_refused_before_any_call(

@@ -36,7 +36,11 @@ from tests.test_print_worker_task import StubWorker
 
 def _library_state(revision: str) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library", revision=revision),
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library",
+            revision=revision,
+            spool_overlay_refresh_seconds=0,
+        ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
@@ -123,6 +127,7 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     monkeypatch.setattr(main, "_make_library_current", current)
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "ensure_spool_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     stop = asyncio.Event()
@@ -193,6 +198,7 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
         "Operation": VersioningBehavior.AUTO_UPGRADE,
         "FlowTriggerFire": VersioningBehavior.AUTO_UPGRADE,
         "StoreMigration": VersioningBehavior.AUTO_UPGRADE,
+        "SpoolRefresh": VersioningBehavior.AUTO_UPGRADE,
     }
 
 
@@ -201,6 +207,13 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
 #: The sweep the new build adds; the old build does not register it.
 NEW_SWEEP = "housekeeping_new_in_this_build"
 BLOCK_SWEEP = "housekeeping_blocks"
+#: A sweep both builds register, run only to see which build its activity reaches.
+PROBE_SWEEP = "housekeeping_probe"
+#: Probes in a row that must reach the new build: an activity goes to one of the
+#: queue's partitions, and each hears of the new current version on its own (#4255).
+#: A heuristic: three in a row can still miss a lagging partition, so this narrows the
+#: flake rather than removing it, and a rare recurrence is not a regression.
+PROBES_IN_A_ROW = 3
 
 
 @pytest.fixture
@@ -277,17 +290,39 @@ async def test_a_run_across_a_rollout_takes_the_new_sweep_on_the_new_build(
     async def new_sweep() -> None:
         ran.append((NEW_SWEEP, "new"))
 
+    probed: list[str] = []
+
+    def probe(build: str) -> Any:
+        @activity.defn(name=PROBE_SWEEP)
+        async def sweep() -> None:
+            probed.append(build)
+
+        return sweep
+
+    async def until_activities_reach_new() -> None:
+        """Probe runs until `PROBES_IN_A_ROW` of their activities run on the new build:
+        `routes_to` reads each queue type's root partition, and an activity goes to any
+        partition, which lagged the root here (#4255)."""
+        async with asyncio.timeout(60):
+            while probed[-PROBES_IN_A_ROW:] != ["new"] * PROBES_IN_A_ROW:
+                await client.execute_workflow(
+                    Housekeeping.run,
+                    [PROBE_SWEEP],
+                    id=f"housekeeping-probe-{uuid.uuid4().hex}",
+                    task_queue=queue,
+                )
+
     old = library_worker(
         client,
         queue,
-        [blocks("old")],
+        [blocks("old"), probe("old")],
         workflow_runner=sandboxed_runner(),
         deployment_config=_deployment(name, "old"),
     )
     new = library_worker(
         client,
         queue,
-        [blocks("new"), new_sweep],
+        [blocks("new"), new_sweep, probe("new")],
         workflow_runner=sandboxed_runner(),
         deployment_config=_deployment(name, "new"),
     )
@@ -309,6 +344,8 @@ async def test_a_run_across_a_rollout_takes_the_new_sweep_on_the_new_build(
                 assert await wait_until_build_serves(
                     client, queue, "new", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
                 )
+                # And as it cannot: the queue's partitions hear of it one by one.
+                await until_activities_reach_new()
                 release.set()
                 failed = await asyncio.wait_for(handle.result(), 60)
     finally:

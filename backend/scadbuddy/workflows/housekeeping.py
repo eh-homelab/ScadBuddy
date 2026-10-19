@@ -120,6 +120,11 @@ ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
 #: The native print library's trash purge and orphan blobs (#3827); after the attachments.
 LIBRARY_SWEEP = "housekeeping_sweep_library"
 LIBRARY_PATCH = "housekeeping-sweep-library"
+#: #3823: a `PrinterWatch` for every LAN-linked printer, so one that stopped (or never
+#: started: its link's start failed) comes back. Last, behind its own patch; on the
+#: prune Schedule too, so it comes back within `PRUNE_INTERVAL` (#4186 review I4).
+PRINTER_WATCHES_SWEEP = "housekeeping_printer_watches"
+PRINTER_WATCHES_PATCH = "housekeeping-printer-watches"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -136,6 +141,7 @@ SWEEPS = (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
     LIBRARY_SWEEP,
+    PRINTER_WATCHES_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -143,10 +149,19 @@ SWEEPS = (
 #: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6);
 #: and the native print library's trash purge and orphan blobs (#3827), which the generic
 #: blob sweep skips, so with the sweeps off nothing else would collect them. Behind
-#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
+#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged. And
+#: the printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started
+#: again within the interval, not the sweeps' day.
 #: Not the dialog's background slices (`PREVIEWS_SWEEP`): they obey the sweeps' switch,
 #: so with the sweeps off they stay in Bambuddy's library.
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP, LIBRARY_SWEEP)
+PRUNE_SWEEPS = (
+    SWEEPS[0],
+    SWEEPS[4],
+    LOST_SLICES_SWEEP,
+    ACTIVITY_SWEEP,
+    LIBRARY_SWEEP,
+    PRINTER_WATCHES_SWEEP,
+)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -174,6 +189,8 @@ ACTIVITY_TIMEOUT = timedelta(minutes=5)
 ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
 #: The library sweep purges trash past 30 days and deletes the blobs no row names.
 LIBRARY_TIMEOUT = timedelta(minutes=10)
+#: One start (or none) per LAN printer, each bounded by `follow.RPC_TIMEOUT`.
+PRINTER_WATCHES_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -194,6 +211,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return ATTACHMENTS_TIMEOUT
     if sweep == LIBRARY_SWEEP:
         return LIBRARY_TIMEOUT
+    if sweep == PRINTER_WATCHES_SWEEP:
+        return PRINTER_WATCHES_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -226,6 +245,8 @@ class Housekeeping:
             if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
                 continue
             if sweep == LIBRARY_SWEEP and not workflow.patched(LIBRARY_PATCH):
+                continue
+            if sweep == PRINTER_WATCHES_SWEEP and not workflow.patched(PRINTER_WATCHES_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

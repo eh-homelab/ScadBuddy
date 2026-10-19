@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// Printer “GET /api/v1/printers/“ and “GET /api/v1/printers/{id}“ — the same shape.“access_code“ is deliberately absent: Bambuddy withholds it from API-keyedcallers, so a model that carried it would be null in production and populatedonly when auth is disabled.
+// Printer “GET /api/v1/printers/“ and “GET /api/v1/printers/{id}“ — the same shape.“access_code“ is deliberately absent: Bambuddy withholds it from API-keyedcallers, so a model that carried it would be null in production and populatedonly when auth is disabled. The serial is not withheld (“printers.json“ and“printer.json“ carry it, redacted): it is what links a Bambuddy printer to theprinter registry (#3823). “GET /printers/{id}/status“ has no top-level serial (the“serial_number“ keys in the status recordings are the AMS units' and hotends'), so“PrinterStatus“ carries none. A serial Bambuddy sends empty reads as “None“: thatprinter cannot be linked by serial.Both are “exclude=True“ (security review of Task 1): read server-side only, neverin the JSON of a response that embeds a “Printer“ (“ConnectionTest“,“BambuddyTargets“, “ChoicesView“). The registry's own routes carry the serial intheir own models; nothing returns the address.
 type Printer struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

@@ -44,6 +44,7 @@ from scadbuddy.workflows.pipelines import (
     RenderPreview,
     TemplatePipeline,
 )
+from scadbuddy.workflows.printer_watch import PrinterWatch
 from scadbuddy.workflows.printing import PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
 from scadbuddy.workflows.registered import RegisteredActivities
@@ -176,6 +177,8 @@ def bambuddy_worker(
             PrintRunWorkflow,
             OperationWorkflow,
             FollowPrint if build_id is None else VersionedFollowPrint,
+            # Each LAN printer's report (#3823); AUTO_UPGRADE by the worker's default.
+            PrinterWatch,
         ],
         activities=activities,
         workflow_runner=sandboxed_runner(),
@@ -190,6 +193,7 @@ def follow_worker(
     task_queue: str,
     follow_print: Callable[..., Any],
     *,
+    printer_watch: Callable[..., Any] | None = None,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
     build_id: str | None = None,
 ) -> Worker:
@@ -198,11 +202,13 @@ def follow_worker(
     slot from the ``bambuddy`` worker's short activities. Its `FOLLOW_SLOTS` are set
     here, not left to the SDK's default (review #1091 2). An attempt ends at once on a
     shutdown (`FollowActivities`). With ``build_id`` it joins the same deployment
-    version as the ``bambuddy`` worker, so the follow's activity is routed within it."""
+    version as the ``bambuddy`` worker, so the follow's activity is routed within it.
+    ``printer_watch`` (#3823) holds a slot per LAN printer for as long as it is
+    reachable, beside the follows."""
     return Worker(
         client,
         task_queue=follow_queue(task_queue),
-        activities=[follow_print],
+        activities=[follow_print, *([printer_watch] if printer_watch is not None else [])],
         max_concurrent_activities=FOLLOW_SLOTS,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),
@@ -293,17 +299,30 @@ async def routes_to(
     ``deployment_name``: `DescribeTaskQueue`'s versioning info, what matching routes
     by. A version is current in the deployment a moment before its queues hear of it
     (0.2-0.3 s on the dev server, #4090); until then the previous build still gets the
-    queue's new tasks."""
-    described = await client.workflow_service.describe_task_queue(
-        DescribeTaskQueueRequest(
-            namespace=client.namespace,
-            task_queue=TaskQueue(name=task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL),
-            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-        ),
-        timeout=RPC_TIMEOUT,
-    )
-    current = described.versioning_info.current_deployment_version
-    return current.deployment_name == deployment_name and current.build_id == build_id
+    queue's new tasks.
+
+    Asked of the workflow-type queue and of the activity-type one: each has its own copy
+    of the routing, and an activity is dispatched by the activity type's, which lagged
+    the workflow type's on the dev server (#4255). Both answer from their root partition,
+    so a non-root partition can lag still: this narrows the window, it does not close it.
+
+    So the queue must have activity pollers of this build: the activity type hears of a
+    version only from them. A queue that serves workflows only never answers True, and
+    a caller waiting on it waits out its whole timeout: a caller's worker must register
+    activities."""
+    for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
+        described = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace,
+                task_queue=TaskQueue(name=task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL),
+                task_queue_type=kind,
+            ),
+            timeout=RPC_TIMEOUT,
+        )
+        current = described.versioning_info.current_deployment_version
+        if current.deployment_name != deployment_name or current.build_id != build_id:
+            return False
+    return True
 
 
 async def is_current(

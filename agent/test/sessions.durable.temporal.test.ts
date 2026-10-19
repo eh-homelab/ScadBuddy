@@ -501,6 +501,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     // few ms, so only a lock held across every probe of the wait counts.
     await new Promise((r) => setTimeout(r, 300))
     let row: { owner_id: string } | undefined
+    // Up to 10 probes, a refused one waiting 50 ms: the budget fits inside the 1 s cancel
+    // wait (from 300 ms in), so a free row is found while the handoff still waits. Raise
+    // either number and a probe can land after the wait, failing the check below.
     for (let probe = 0; probe < 10 && !row; probe++) {
       ;[row] = await db.sql
         .begin((tx) => tx<{ owner_id: string }[]>`SELECT owner_id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
@@ -513,7 +516,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(row?.owner_id).toBe(browser.id)
     // Taken inside the wait: a probe that only got through once the handoff ended, as on
     // a slow runner, would pass even if the handoff held the lock through the wait.
-    expect(settled).toBe(false)
+    expect(settled, 'a probe got the row only after the handoff ended, not inside its wait').toBe(false)
     // A cancel that goes unanswered neither fails nor undoes the handoff.
     expect((await handing).owner).toEqual(browser)
     expect((await recorded(other.id)).calls).toEqual([

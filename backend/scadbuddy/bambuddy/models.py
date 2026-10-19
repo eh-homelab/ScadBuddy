@@ -8,6 +8,7 @@ Bambuddy's own OpenAPI, not a guess.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -25,6 +26,10 @@ SliceStatus = Literal["pending", "running", "completed", "failed"]
 #: ``bed_levelling``, ``flow_cali`` and ``nozzle_offset_cali`` on the queue route.
 CalibrationMode = Literal["off", "on", "auto"]
 PreheatOverride = Literal["inherit", "on", "off"]
+
+
+#: A Bambu printer serial, as the registry stores one (`printers.models.PrinterCreate`).
+_SERIAL = re.compile(r"[0-9A-Z]{8,32}")
 
 
 class BambuddyModel(BaseModel):
@@ -108,7 +113,17 @@ class Printer(BambuddyModel):
 
     ``access_code`` is deliberately absent: Bambuddy withholds it from API-keyed
     callers, so a model that carried it would be null in production and populated
-    only when auth is disabled.
+    only when auth is disabled. The serial is not withheld (``printers.json`` and
+    ``printer.json`` carry it, redacted): it is what links a Bambuddy printer to the
+    printer registry (#3823). ``GET /printers/{id}/status`` has no top-level serial (the
+    ``serial_number`` keys in the status recordings are the AMS units' and hotends'), so
+    ``PrinterStatus`` carries none. A serial Bambuddy sends empty reads as ``None``: that
+    printer cannot be linked by serial.
+
+    Both are ``exclude=True`` (security review of Task 1): read server-side only, never
+    in the JSON of a response that embeds a ``Printer`` (``ConnectionTest``,
+    ``BambuddyTargets``, ``ChoicesView``). The registry's own routes carry the serial in
+    their own models; nothing returns the address.
     """
 
     id: int
@@ -116,6 +131,27 @@ class Printer(BambuddyModel):
     model: str | None = None
     is_active: bool = True
     nozzle_count: int | None = None
+    serial_number: str | None = Field(default=None, repr=False, exclude=True)
+    ip_address: str | None = Field(default=None, repr=False, exclude=True)
+
+    @field_validator("serial_number", "ip_address", mode="before")
+    @classmethod
+    def _blank_is_none(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("serial_number")
+    @classmethod
+    def _a_serial_or_withheld(cls, value: str | None) -> str | None:
+        """A serial names the printer's MQTT topics (``device/<serial>/report``), so only
+        a Bambu serial's shape is one (upper-cased); anything else counts as withheld,
+        never a topic with ``+``, ``#`` or ``/`` in it (#4186 review M6)."""
+        if value is None:
+            return None
+        upper = value.upper()
+        return upper if _SERIAL.fullmatch(upper) else None
 
 
 class Archive(BambuddyModel):
@@ -861,6 +897,10 @@ class Spool(BambuddyModel):
     #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
     #: nobody entered a price (#785).
     cost_per_kg: float | None = None
+    #: The RFID tag's UID and the spool's UUID, as the AMS read them (#3818); all zeros,
+    #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
+    tag_uid: str | None = None
+    tray_uuid: str | None = None
 
     @property
     def remaining_g(self) -> float:
@@ -896,6 +936,10 @@ class SpoolAssignment(BambuddyModel):
     ams_id: int
     tray_id: int
     spool: Spool | None = None
+    #: What Bambuddy saw in the tray when it assigned the spool (#3818):
+    #: ``tests/bambuddy/recordings/inventory-assignments.json``.
+    fingerprint_type: str | None = None
+    fingerprint_color: str | None = None
 
 
 class FilamentGroup(BambuddyModel):

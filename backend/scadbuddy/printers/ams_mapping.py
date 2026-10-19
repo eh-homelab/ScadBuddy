@@ -106,9 +106,9 @@ def ams_mapping(
     ``bambu_mqtt.py:6056-6058``), and an AMS tray in the plan is refused. Otherwise
     ``use_ams`` follows the printer unless the plan maps external spools and no AMS
     tray, so a plan that maps nothing on an AMS printer has it true (the vector "an
-    AMS printer, nothing mapped", #4204). A positive (inventory) spool id raises
-    ``ValueError``: a native plan is trays only, and so does a ``project_filament_count``
-    below 1, since every project has a filament slot."""
+    AMS printer, nothing mapped", #4177). A positive (inventory) spool id raises
+    ``ValueError``: a native plan is trays only. A ``project_filament_count`` below 1
+    also raises ``ValueError``: every project has a filament slot (#4204)."""
     count = project_filament_count
     if count < 1:
         raise ValueError(f"a project has at least one filament slot, not {count}")

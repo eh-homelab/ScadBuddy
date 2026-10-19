@@ -347,6 +347,25 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "print time and open picks in the print check's rack options, for the hotends that job could use. " +
       "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
+  ...(
+    [
+      'GET /api/v1/printers',
+      'POST /api/v1/printers',
+      'GET /api/v1/printers/discover',
+      'GET /api/v1/printers/{printer_id}',
+      'PATCH /api/v1/printers/{printer_id}',
+      'DELETE /api/v1/printers/{printer_id}',
+      'PUT /api/v1/printers/{printer_id}/bambuddy',
+      'DELETE /api/v1/printers/{printer_id}/bambuddy',
+      'PUT /api/v1/printers/{printer_id}/lan',
+      'DELETE /api/v1/printers/{printer_id}/lan',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      'The printer registry (#3823, plan 2026-10-16-printer-identity-native-path) lands API-first; its agent ' +
+      'tools are that plan\'s Task 11, which replaces this entry (link_printer_lan outward, never echoing the code).',
+  })),
 ]
 
 /**
