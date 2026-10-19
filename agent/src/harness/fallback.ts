@@ -491,8 +491,8 @@ export async function* runWithFallback(
       pending.push(
         probe(current.credential, model, base.signal)
           .then((answer) =>
-            // An `unknown` answer (always, for an OAuth key) knows less than the
-            // reset the text named: that one stands. Any other answer replaces it, even
+            // An `unknown` answer, from any key (an OAuth key's probe never gives
+            // another), knows less than the reset the text named: that one stands. Any other answer replaces it, even
             // an earlier one (a minute-level header reset under a weekly limit's text):
             // the endpoint's own answer is the newer evidence, and a key let back too
             // soon is only limited again.
