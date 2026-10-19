@@ -460,9 +460,11 @@ export function PrintPicker({
     setPicked(null)
     setAlgorithmUnsaved(false)
   }, [printerId])
-  // Clears a pick left from Advanced, so going back to Advanced starts with none. It no
-  // longer decides what is sent: `rackPosition` already reads no pick outside Advanced.
-  // The same for the prime tower (#3648 review): Simple mode sends none.
+  // Clears a rack pick left from Advanced, so going back to Advanced starts with none; it
+  // no longer decides what is sent, since `rackPosition` reads no pick outside Advanced.
+  // For the prime tower it still does (#3648 review): its read is not gated, as a batch
+  // step's own tower is seeded in Simple mode (#2718 review), so this reset is what makes
+  // leaving Advanced send none.
   useEffect(() => {
     if (!advanced) {
       setPicked(null)
