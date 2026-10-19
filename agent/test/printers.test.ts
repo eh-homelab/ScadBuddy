@@ -110,9 +110,23 @@ describe('printer registry tools (#3823)', () => {
     server.use(http.get(`${BACKEND}/api/v1/printers`, () => HttpResponse.json([ROW])))
     const result = await runTool(tool('list_printers'), {}, ctx())
     expect(result.isError).toBeFalsy()
-    const listed = firstText(result) as Record<string, unknown>[]
-    expect(listed[0]).toMatchObject({ id: ID, name: 'Garage', has_access_code: true })
+    const listed = firstText(result) as { items: Record<string, unknown>[]; next_cursor: string | null; total: number }
+    expect(listed).toMatchObject({ next_cursor: null, total: 1 })
+    expect(listed.items[0]).toMatchObject({ id: ID, name: 'Garage', has_access_code: true })
     expect(JSON.stringify(result)).not.toContain('01P00A0000000AA')
+  })
+
+  it('pages a long registry in the agent, keyed by id', async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({ ...ROW, id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` }))
+    server.use(http.get(`${BACKEND}/api/v1/printers`, () => HttpResponse.json(rows)))
+    const first = firstText(await runTool(tool('list_printers'), {}, ctx())) as { items: { id: string }[]; next_cursor: string }
+    expect(first.items).toHaveLength(25)
+    const second = firstText(await runTool(tool('list_printers'), { cursor: first.next_cursor }, ctx())) as {
+      items: { id: string }[]
+      next_cursor: string | null
+    }
+    expect(second.items.map((row) => row.id)).toEqual(rows.slice(25).map((row) => row.id))
+    expect(second.next_cursor).toBeNull()
   })
 
   it('discovers Bambuddy printers without their serials', async () => {

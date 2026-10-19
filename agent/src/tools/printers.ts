@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { defineTool, json, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // The printer registry (#3823, plan 2026-10-16-printer-identity-native-path, Task 11):
 // one row per physical printer, keyed by its serial, with the Bambuddy printer it is and
@@ -42,13 +43,17 @@ const LAN_IN_SETTINGS =
 export const printerTools: Tool[] = [
   defineTool({
     name: 'list_printers',
-    description: `Every printer in ScadBuddy's registry, with its Bambuddy link and its LAN link. ${ROW_FIELDS}${LAN_IN_SETTINGS}`,
-    input: z.object({}),
+    description:
+      `Every printer in ScadBuddy's registry, with its Bambuddy link and its LAN link. ${ROW_FIELDS}${LAN_IN_SETTINGS}` +
+      PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source: SOURCE,
     routes: ['GET /api/v1/printers'],
-    handler: async (_args, { backend }) =>
-      json((await ok(backend.GET('/api/v1/printers'), 'list the printers')).map(shown)),
+    handler: async (args, { backend }) => {
+      const rows = (await ok(backend.GET('/api/v1/printers'), 'list the printers')).map(shown)
+      return json(page(rows, args, (row) => row.id, 'list_printers'))
+    },
   }),
 
   defineTool({

@@ -6,6 +6,7 @@ import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
+import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
 import { PrintersPanel } from './Printers'
 
 const H2C = 'Printer 3DP-31B-598'
@@ -29,10 +30,24 @@ describe('PrintersPanel (#3823)', () => {
 
   it("reads again on a registry change, not on a printer's LAN report (#4340 review I3)", async () => {
     const reads: string[] = []
+    let open = 0
+    const ours = (request: Request) => request.method === 'GET' && new URL(request.url).pathname.startsWith('/api/v1/printers')
     server.events.on('request:start', ({ request }) => {
-      const path = new URL(request.url).pathname
-      if (request.method === 'GET' && path.startsWith('/api/v1/printers')) reads.push(path)
+      if (!ours(request)) return
+      open += 1
+      reads.push(new URL(request.url).pathname)
     })
+    server.events.on('request:end', ({ request }) => {
+      if (ours(request)) open -= 1
+    })
+    /** No read in flight, and none started for a while: a trailing throttled read has run. */
+    const settled = async () => {
+      for (let quiet = 0; quiet < 3; ) {
+        const before = reads.length
+        await act(() => new Promise((resolve) => setTimeout(resolve, SIGNAL_READ_MIN_MS * 2)))
+        quiet = open === 0 && reads.length === before ? quiet + 1 : 0
+      }
+    }
     renderPage(<PrintersPanel />)
     await screen.findByRole('listitem', { name: GARAGE })
 
@@ -43,12 +58,14 @@ describe('PrintersPanel (#3823)', () => {
       expect(screen.getByRole('listitem', { name: 'Printer Shed' })).toBeInTheDocument()
     })
     await waitFor(() => expect(reads.filter((path) => path === '/api/v1/printers/discover').length).toBeGreaterThan(1))
+    // The changes above may each have queued a read behind the throttle: let them all run.
+    await settled()
 
     reads.length = 0
     for (let i = 0; i < 5; i += 1) {
       act(() => emitRealtime('printer.report', ['printers', `printer:${printersState()[0]!.id}`], { progress: i }))
     }
-    await act(() => new Promise((resolve) => setTimeout(resolve, 600)))
+    await settled()
     expect(reads).toEqual([])
   })
 
