@@ -46,6 +46,9 @@ func (d *dir) Create(ctx context.Context, name string, _, _ uint32, out *fuse.En
 	}
 	ctx, op := telemetry.StartOp(ctx, "create", telemetry.FolderID(d.id))
 	defer func() { op.End(errno) }()
+	if errno := storable(name); errno != 0 {
+		return nil, nil, 0, errno
+	}
 	if errno := d.free(ctx, d, name); errno != 0 {
 		return nil, nil, 0, errno
 	}
@@ -62,6 +65,9 @@ func (d *dir) Mkdir(ctx context.Context, name string, _ uint32, out *fuse.EntryO
 	}
 	ctx, op := telemetry.StartOp(ctx, "mkdir", telemetry.FolderID(d.id))
 	defer func() { op.End(errno) }()
+	if errno := storable(name); errno != 0 {
+		return nil, errno
+	}
 	if errno := d.free(ctx, d, name); errno != 0 {
 		return nil, errno
 	}
@@ -195,6 +201,9 @@ func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 	}
 	ctx, op := telemetry.StartOp(ctx, "rename", telemetry.FolderID(d.id), telemetry.ToFolderID(to.id))
 	defer func() { op.End(errno) }()
+	if errno := storable(newName); errno != 0 {
+		return errno
+	}
 	src, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return errno
@@ -400,6 +409,17 @@ func (d *dir) free(ctx context.Context, in *dir, name string) syscall.Errno {
 	_, isFile := l.files[name]
 	if child, _ := in.unsent(name); isDir || isFile || child != nil || l.queued[name] != nil {
 		return syscall.EEXIST
+	}
+	return 0
+}
+
+// storable refuses, EINVAL, a name Bambuddy never takes (#4142), before anything is
+// stored or queued under it: a colon, as in the `<name>:Zone.Identifier` stream Windows
+// Explorer writes beside a file copied in through \\wsl$. That write is best-effort, so
+// the copy itself still succeeds.
+func storable(name string) syscall.Errno {
+	if strings.Contains(name, ":") {
+		return syscall.EINVAL
 	}
 	return 0
 }

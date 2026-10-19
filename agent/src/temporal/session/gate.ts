@@ -13,6 +13,8 @@ import {
 import type { Duration } from '@temporalio/common'
 import { ASK_USER, buildEntry, DEFAULT_TIMEOUT_S, MalformedAnswerInputError } from '../../gate/entry.js'
 import { durableRequestId } from '../../gate/ids.js'
+import { cut } from '../../gate/limits.js'
+import { refusal } from '../../gate/refusal.js'
 import { CANCEL_INPUT_UPDATE, GATE_REFUSED, PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../../gate/names.js'
 import type { DenyInput, GrantInput, OpenInput, ResolveInput, Responder } from '../../gate/store.js'
 import { type GateEntry, type RefusalCode, RespondRefusal, type RespondRequest, type Role, validateRespond } from '../../gate/validate.js'
@@ -133,21 +135,10 @@ function ignoreCancellation(err: unknown): void {
 
 const iso = (at: number): string => new Date(at).toISOString()
 
+export { refusal }
+
 export function refused(code: RefusalCode, message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, `${GATE_REFUSED}:${code}`)
-}
-
-/** What the model is told when its call was not approved, in the words a classic turn uses (approvals/service.ts `refusal`). */
-export function refusal(tool: string, requestId: string, outcome: string, reason?: string | null): string {
-  const what = `${tool} (approval ${requestId})`
-  if (outcome === 'denied') return `The user denied ${what}; it was not run. Do not retry it unless the user asks you to.`
-  if (outcome === 'flow_denied') {
-    return `The flow that sent this turn refused ${what}: it is outside what the run may do (${reason || 'no reason given'}), so it was not run. Do not retry it.`
-  }
-  if (outcome === 'expired') return `Nobody decided on ${what} before it expired, so it was not run. Tell the user it needs their approval.`
-  if (outcome === 'cancelled') return `The approval for ${what} was cancelled (${reason || 'no reason given'}), so it was not run.`
-  if (outcome === 'withdrawn') return `The approval for ${what} was withdrawn before it ran (${reason || 'no reason given'}), so it was not run.`
-  return `${what} was not approved, so it was not run.`
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -159,7 +150,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 export class SessionGate {
-  readonly #opts: SessionGateOptions
+  #opts: SessionGateOptions
   readonly #parked = new Map<string, Parked>()
   readonly #resolutions = new Map<string, { promise: Promise<Resolution>; resolve: (r: Resolution) => void }>()
   readonly #seen = new Set<string>()
@@ -211,7 +202,7 @@ export class SessionGate {
   install(): void {
     setHandler(respondUpdate, (args) => this.#respond(args), { validator: (args) => this.#validateRespond(args) })
     setHandler(cancelInputUpdate, async (args) => {
-      const reason = String(args?.reason || 'cancelled').slice(0, 200)
+      const reason = cut(String(args?.reason || 'cancelled'), 200)
       return (await this.cancelAll(reason, true)) > 0 ? 'cancelled' : 'none'
     })
     setHandler(pendingInputQuery, () => this.pending())
@@ -251,8 +242,13 @@ export class SessionGate {
    * timer running in the scope it was opened in. A call that needs no entry is settled at
    * once and its resolution says how: a read turn tool and one inside the run's grant are
    * `approved`, one the flow denies is `denied`, a malformed answer is `cancelled`.
+   *
+   * `live`, when given, is asked before each write (a grant, the flow's refusal, the entry):
+   * a call whose turn ended while it was described is settled `cancelled` and writes nothing,
+   * so it can never mark an idle session waiting (AgentSession's `open_input` handler outlives
+   * its turn; DurableSession's parks are tasks its turn cancels).
    */
-  async open(call: GateCall): Promise<string> {
+  async open(call: GateCall, live?: () => boolean): Promise<string> {
     const { sessionId, owner, creator, host } = this.#opts
     const rid = durableRequestId(sessionId, workflowInfo().runId, call.id)
     const kind: 'approval' | 'answer' = this.#opts.kindOf(call.name) === 'answer' ? 'answer' : 'approval'
@@ -264,9 +260,12 @@ export class SessionGate {
       slot.resolve(resolution)
       return rid
     }
+    const gone = (): boolean => live !== undefined && !live()
+    const ended = (): string => settled(false, 'scadbuddy', { kind, outcome: 'cancelled' } satisfies Resolution)
     if (this.#opts.turnTools?.().has(call.name) && !(await this.#outward(call))) {
       // A read or write call goes straight through, as the permission seam lets it; its activity checks the tier again.
-      return settled(true, 'scadbuddy', { kind, outcome: 'approved' } as Resolution)
+      // A turn tool is never an answer tool (kindOf names only ask_user and wait_for_user), so `answered` is unreachable.
+      return settled(true, 'scadbuddy', kind === 'approval' ? { kind, outcome: 'approved' } : { kind, outcome: 'answered' })
     }
     let summary = ''
     let inputHash: string | null = null
@@ -280,6 +279,7 @@ export class SessionGate {
     const flow = turn?.flow
     if (kind === 'approval' && flow && inputHash !== null) {
       const verdict = await this.#grantVerdict(rid, call, flow)
+      if (gone()) return ended()
       if (verdict?.verdict === 'inside') {
         const grantId = String(verdict.grant_id || '')
         if (
@@ -305,6 +305,7 @@ export class SessionGate {
     }
     // A flow turn's call is in its run's queue (#2482): the person's, never a grant's.
     const escalation = kind === 'approval' && flow !== undefined
+    if (gone()) return ended()
     if (escalation && outside?.on_outside === 'deny' && inputHash !== null) {
       const reason = String(outside.reason || '') || null
       await this.#grants[SESSION_GATE_ACTIVITIES.deny]!({
@@ -380,7 +381,9 @@ export class SessionGate {
       openFailed: false,
     }
     // Parked before its row is opened, so a respond that reads the row as soon as it is
-    // written finds the call here; every resolution waits for the open (resolve).
+    // written finds the call here; every resolution waits for the open (resolve). From here
+    // the turn's end cancels it (cancelAll, settle) before its end is written.
+    if (gone()) return ended()
     this.#parked.set(rid, parked)
     try {
       await this.#own[SESSION_GATE_ACTIVITIES.open]!({
@@ -404,12 +407,29 @@ export class SessionGate {
     } catch (err) {
       parked.openFailed = true
       this.#parked.delete(rid)
-      slot.resolve({ kind, outcome: 'cancelled' } as Resolution)
+      slot.resolve({ kind, outcome: 'cancelled' } satisfies Resolution)
       throw err
     }
     parked.opened = true
     void this.#expire(parked, timeout)
     return rid
+  }
+
+  /** Whether the entry is parked here (not yet resolved); a call settled at once never was. */
+  /** The session's owner from now on (a handoff, §5.6): what each later entry names, and a response is checked against. */
+  setOwner(owner: Owner): void {
+    this.#opts = { ...this.#opts, owner }
+  }
+
+  isParked(requestId: string): boolean {
+    return this.#parked.has(requestId)
+  }
+
+  /** The entry of the call `callId` cancelled with `reason`, if it is still pending: a call its turn no longer waits on. */
+  async cancelCall(callId: string, reason: string): Promise<boolean> {
+    const parked = [...this.#parked.values()].find((p) => p.callId === callId)
+    if (!parked || parked.entry.state !== 'pending') return false
+    return await this.#resolve(parked, 'cancelled', SYSTEM, undefined, reason, true)
   }
 
   /** How the entry ended, once it has. */

@@ -155,7 +155,8 @@ permission layer. Durability is about *where* and *when* that turn runs:
   - A grep of `@temporalio/worker` and `@temporalio/workflow` 1.24.0 `lib/*.d.ts` finds no
     session API.
   - ScadBuddy already runs one unique queue per replica: `agent-tools.<hostname>`
-    (`agent/src/main.ts:426`, `530-539`).
+    (`agent/src/main.ts:426`, `530-539`). `AgentSession` gets a second one of the same
+    shape, `agent-sessions.<hostname>` (§5.2), served by a worker of its own.
 - **A Go worker is not worth it.** There is no Go Claude Agent SDK, so the turn itself
   would stay in a TypeScript process: `canUseTool`, the in-process MCP servers, the hooks
   and the tool registry. A Go worker would only add a third language and an IPC hop, to
@@ -215,7 +216,7 @@ browser / MCP / flow ──send──▶ SessionManager.send ──update-with-s
                                                                           (session-<id>, queue agent-sessions)
                                                                                    │
             ┌── acquire_worker on agent-tools (first turn / after a failure) → home ┘
-            ▼   session_turn on home = agent-tools.<hostname> (5 s schedule-to-start, 20 s heartbeat;
+            ▼   session_turn on home = agent-sessions.<hostname> (5 s schedule-to-start, 20 s heartbeat;
                 on timeout: acquire again, resume from the checkpoint)
    agent replica  ──▶ TurnHost.run(turn)
                        ├─ WarmSessions: reuse the live Claude Code process if its fingerprint
@@ -236,11 +237,21 @@ What changes for each session operation:
 | Claude Code process | one per turn | one per segment | one per session, kept warm between turns |
 | Transcript | `ai_session_entries` (plaintext) | workflow state (sealed by codec) | `ai_session_entries`, sealed under the session's data key (§6.2) |
 | Tool calls | in-process | each an activity on `agent-tools` | in-process, inside the turn activity |
-| Parallel tool calls | yes | no (one paused call per run) | yes |
+| Parallel tool calls | yes | no (one paused call per run) | yes; parallel outward calls park one after another (below) |
 | Parks | `ai_approvals`/`ai_questions`, in-memory wait | workflow entries, `ai_pending_input` | workflow entries, `ai_pending_input`; the activity holds, then releases (§5.4) |
 | Restart mid-turn | turn ends, `interrupted` | segment retried | activity retried on another replica, resumed (§5.5) |
 | Fork | yes | refused | yes |
 | Subagents | in-process, full tool set | loopback MCP, own tools only | in-process, full tool set |
+
+Parallel outward calls park one after another, each on an entry of its own. Claude Code 2.1.296
+calls `canUseTool` for the second call of an assistant message only after the first has run.
+Measured on the unified runtime's branch (Task 5.3) with `agent/test/sessionPark.temporal.test.ts`
+("two outward calls in one assistant message each park on an entry of their own"): the fake
+endpoint returns two `tool_use` blocks of an in-process outward tool in one message. The event log
+then reads `tool.call, tool.call, approval.required` with one entry. The second `approval.required`
+appears only after the first is approved and its `tool.result` is logged. The workflow and the turn's
+holds allow entries side by side (one per request id; `agent/test/agentSession.temporal.test.ts`, "two
+calls of one turn park side by side"), so a call the CLI does check in parallel parks alongside.
 
 ## 5. The session workflow and the turn activity
 
@@ -305,13 +316,20 @@ lack them (§2.3).
 | Go Sessions | `AgentSession` | Where |
 |---|---|---|
 | `workflow.CreateSession(ctx, SessionOptions{CreationTimeout, …})` | the `acquire_worker` activity on the shared queue `agent-tools`, with `scheduleToCloseTimeout: 60s` | any replica |
-| the session's worker-specific queue | `agent-tools.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
-| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10) | worker |
+| the session's worker-specific queue | `agent-sessions.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
+| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10). A reservation is not evicted for `RESERVATION_HOLD_MS` (30 s), while its turn is still on its way. At 0 every session is admitted and each turn runs cold | worker |
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
-| `workflow.RecreateSession` | on a timeout: `acquire_worker` again, then `session_turn` with `continuation: restarted` (§5.5) | workflow |
-| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs on end, handoff, archive, forget, and when the workflow moves the session elsewhere | `home` |
+| `workflow.RecreateSession` | on a lost home (`ScheduleToStart`, `Heartbeat`, `ShuttingDown`, `NoCapacity`): `acquire_worker` again, naming the homes the turn was lost on (`exclude`: a lost home that is asked refers the turn to the other live replicas, and takes it only when none can; the last placement names none), then `session_turn` with `continuation: restarted` (§5.5) | workflow |
+| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends (handoff, archive and forget end it). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
 
+- **Why not `agent-tools.<hostname>`.** That queue carries `DurableSession`'s pinned calls
+  (`http_request`, the browser, kept plugin clients, and the `turn_tools` listing with its
+  5 s schedule-to-start and one attempt; #2320, #2581), so a shared activity limit would
+  either starve them (10 slots, `warm_max_per_replica + 2`, where they have the SDK's 100
+  today) or let them fill the queue and fake a dead home to a turn's 5 s schedule-to-start.
+  `home` is therefore a queue of its own, with the same identity
+  (`agent/src/temporal/session/hostWorkers.ts`).
 - **Acquire.** `acquire_worker({sessionId})` runs on whichever replica polls `agent-tools`.
   It reserves a slot in that replica's `WarmSessions` and returns `{hostQueue, identity}`.
   The reservation lapses after `warm_idle_seconds` like a warm entry. The workflow keeps
@@ -329,10 +347,51 @@ lack them (§2.3).
   - `retry: { maximumAttempts: 1 }`. As the guide says, the workflow never retries on the
     failed worker's queue.
 - **Recovery is a workflow loop**, at most 3 cycles per turn.
-  - **A timeout** (`ScheduleToStart`, `Heartbeat` or `StartToClose`) or a
-    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, then run
-    `session_turn` on the new home with `continuation: {kind: 'restarted'}`. That resumes
-    from the checkpoint, the sealed transcript (§5.5, §6.2).
+  - **A lost home** (a `ScheduleToStart` or `Heartbeat` timeout) or a
+    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, naming
+    every home this turn was lost on (`exclude`), then run `session_turn` on the new home with
+    `continuation: {kind: 'restarted'}`. That resumes from the checkpoint, the sealed
+    transcript (§5.5, §6.2). The acquire is inside the cycle: one that fails past its own
+    retries costs a cycle, as a lost home does.
+  - **Exclusion is a preference, not a ban.** A replica in `exclude` that is asked answers a
+    referral: itself as home, and `elsewhere`, the other live replicas that could take the
+    turn (the session host queues whose replica's `agent-tools` worker and own
+    `agent-sessions.<hostname>` worker both polled within 70 s: `liveHostQueues`, from
+    DescribeTaskQueue, in a random order each time; each worker polls as
+    `<pid>@<hostname>`). The workflow asks each of those first, `acquire_worker` on that
+    replica's own session host queue (5 s to start, one attempt), and the first to reserve a
+    place is home. When none answers, the lost home is asked the same way on its own queue,
+    with no exclusion, so it reserves a place as any home does, or refuses `NoCapacity` when
+    full, which costs the cycle. When none was named (no other live replica, or a listing
+    that failed: Temporal did not answer, or the role may not describe a queue), the lost
+    home reserves at once, as a lone replica would. The last of the three placements names
+    no exclusion at all. A refusal in place of the referral would need its retry to reach
+    another replica, which the shared queue does not promise (a retry goes to whichever
+    poller is next, and that can be the same replica ten times over); and a ban would never
+    lift where the lost home is the only one there is: a container restarted in place keeps
+    its hostname, and a lone replica whose heartbeat stalled is the only poller there is, so
+    every placement would be refused and the turn would fail after three minutes.
+  - **A `StartToClose` timeout** is the turn's wall clock (D5), not a lost home: the turn is
+    over, and placing it again could triple its spend. It ends idle with the error
+    `turn_max_seconds`, as classic's `error_max_turns` does, and never re-acquires.
+  - **Placements are fenced.** Each placement carries an attempt id (the run id and the
+    cycle), which `session_turn` writes to `ai_sessions.turn_attempt` as it claims the turn.
+    A placement the workflow gave up on may still run (a stalled heartbeat on a live
+    replica). Each of its event and transcript appends, and each store of a tool result's
+    images, checks `turn_attempt` and `durable_turn_id` in the write's own transaction, so
+    none lands once another placement has claimed the turn or the turn has ended (the
+    attempt id is the run's and the cycle's, so the next turn's first placement in the same
+    run carries the same one).
+    It also checks the row every second and is cut off once another placement holds it or
+    the turn is no longer the row's: its process is closed. Its spend is never fenced: its
+    requests are its own, so writing them cannot count anything twice, and the budget holds
+    whichever replicas ran the turn. A new placement on the same replica cuts an older one
+    of the session first, so the warm process is free.
+  - **Spend is written as it goes.** A placement adds what its model requests cost at the
+    table's prices (each finished request, and every second) to `cost_usd` and
+    `unpriced_cost_usd`, so the budget sees a placement that dies before its result. At its
+    end it replaces that with the turn's own reckoning (Claude Code's price, or the table's
+    without a result).
   - **A non-retryable application failure** (`BudgetExhausted`, `CredentialRefused`,
     `SessionGone`) ends the turn with that outcome.
   - **After 3 cycles** the turn ends `failed` with the last reason.
@@ -344,10 +403,22 @@ lack them (§2.3).
   replacement pod never polls a dead pod's queue. Work left on a dead queue expires by
   its schedule-to-start; it is never picked up late by a stranger.
 - **The workers.**
-  - `acquire_worker` is registered on the shared `agent-tools` worker.
-  - `session_turn` and `release_worker` are registered on the per-host worker only.
-  - The host worker's `maxConcurrentActivityTaskExecutions` is `warm_max_per_replica + 2`:
-    the slots, plus room for releases.
+  - `acquire_worker` is registered on the shared `agent-tools` worker, only on a replica
+    that also runs the session host worker.
+  - `session_turn` and `release_worker` are registered only on a second per-host worker,
+    on `agent-sessions.<hostname>`, and `acquire_worker` there too, for a turn another
+    replica (one it was lost on) refers here. The `agent-tools.<hostname>` worker and its
+    limit do not change.
+  - The session host worker's `maxConcurrentActivityTaskExecutions` is the largest
+    `warm_max_per_replica` the setting allows (32) plus 2 for releases. It is fixed when the
+    worker starts, while the setting may change at run time; the warm cache's `reserve`
+    holds a replica to the setting.
+  - Both host workers are unversioned, as activity-only queues (no workflow is pinned to
+    them), and stop together on SIGTERM. The session host worker's shutdown grace is the
+    turns' own (§5.5 "Deploy"), so it never cancels a turn before the turn host does.
+  - A new unified session is ready (`DurableTurns.unready`) only with fresh pollers on the
+    `agent-sessions` workflow queue, the shared `agent-tools` activity queue and this
+    replica's own `agent-sessions.<hostname>`.
 - **Ownership.** The acquired slot plus the running activity *is* the turn's claim. The
   60 s row lease, its renew loop and the reaper retire (`manager.ts:351-354`, `1514-1530`,
   `2505-2538`):
@@ -532,12 +603,18 @@ never did (`questions/service.ts:34-38`).
   - The activity sends one user message: *"The agent service restarted during this turn.
     Calls that were in flight are marked as interrupted; check before repeating any of
     them. Continue the task."*
+  - Only when the turn's prompt is in the transcript. The first placement records the main
+    transcript's last entry (`ai_sessions.turn_mark`); a later one sends the restart message
+    when a user entry landed after that mark, and otherwise sends the turn's own message.
+    The heartbeat's word that the message went in is advisory: a process can take the
+    message and die before Claude Code writes it.
 - **Retries are bounded** by the recovery loop's 3 cycles. After that the turn ends `failed`,
   with the reason, as classic's `interrupted` does today.
 - **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 12 s
-  (`stopTurns` `graceMs`, `main.ts:691-695`), and is then closed with `q.close()`, which
-  gives E3's graceful synthetic result. The activity fails with `ShuttingDown`, which is
-  retryable, and the new pods resume it as above. `Recreate` means every turn of every
+  (`TurnHost.stop` `graceMs`, beside `stopTurns`), and is then closed with `q.close()`, which
+  gives E3's graceful synthetic result. Only such a cut turn fails with `ShuttingDown`,
+  which is retryable, and the new pods resume it as above. A turn that ends on its own in
+  the grace, a refusal included, keeps its end. The warm processes are closed only after. `Recreate` means every turn of every
   session takes this path at each deploy. Under D6 (decided), the pod moves to
   `RollingUpdate` once its queues are versioned (Phase 11). Then a deploy drains one
   replica at a time and only that replica's turns move.
@@ -626,8 +703,12 @@ The row's owner changes, as today. Then:
 - **Recycling.** The reuse rule (§5.3) respawns whenever the remaining amount moved
   outside this process.
 - **`raiseBudget`** is unchanged (`manager.ts:2393-2452`).
-- **What is fixed.** The Python runner counted segments as turns
-  (`session/runner.py:700-706`). Unified, `turns` counts user turns again.
+- **What is fixed.** The Python runner added one to `turns` per segment
+  (`session/runner.py:700-706`). Unified, `turns` follows classic's reckoning, as the first
+  bullet requires: each placement's end adds its result's `num_turns` (Claude Code's answered
+  round trips; `turnCore.ts` `tallyTurn`), so one user turn with a tool call counts 2. Known
+  oddity: a stopped turn that still returns a result adds that result's `num_turns`, which Claude
+  Code reports as 3 for one interrupted request (#3695), as classic does too.
 
 ### 6.7 Credential, KEK, security
 
@@ -682,7 +763,8 @@ All of these are classic's, because the turn is classic's:
   - spawn latency (p50/p95) by outcome;
   - releases per hour;
   - continued turns by kind.
-- **Temporal's own metrics** for `agent-sessions` (schedule-to-start, task latency) come
+- **Temporal's own metrics** for `agent-sessions` and the `agent-sessions.<hostname>` host
+  queues (schedule-to-start, task latency) come
   from the Temporal server's dashboards, as for other queues.
 
 ### 6.10 Scaling
@@ -799,7 +881,7 @@ gives them a single home:
 done. Their conversation exists only in workflow state.
 
 1. **New durable sends go to `AgentSession`** once Phase 7 ships. The flag
-   `session_runtime=unified` comes first (Phase 5) and becomes the only path in Phase 7.
+   `unified_sessions=true` comes first (Phase 5) and becomes the only path in Phase 7.
 2. **Lazy migration on next send.**
    - When `send` finds an open `DurableSession` for the session (`describe` reports the
      workflow type), it first cancels its parked entries: `cancel_input(migrated)`.
@@ -864,10 +946,11 @@ done. Their conversation exists only in workflow state.
 
 - **Unverified, checked by a plan task before it is relied on:**
   - the DurableSession transcript resumes under the TypeScript CLI (Task 7.1);
-  - Visibility `STARTS_WITH` (Task 9.2);
-  - that `q.close()` during a held `canUseTool` writes E3's synthetic result and not
-    E4's (Task 5.4). Both are error results the continuation message overrides, so this
-    only changes the wording the model sees.
+  - Visibility `STARTS_WITH` (Task 9.2).
+- **Verified by Task 5.4:** closing a released turn's process while its `canUseTool` is
+  held leaves an `is_error` tool result for the parked call in its transcript
+  (`agent/test/sessionRelease.temporal.test.ts`). The continuation message settles it
+  either way.
 - **The `Recreate` deploy restarts every turn** (§5.5) until Phase 11 versions the queues
   and moves the pod to `RollingUpdate` (D6).
 - **Warm memory.** 8 × about 206 MiB, plus remote MCP connections and the service itself,
@@ -891,7 +974,8 @@ done. Their conversation exists only in workflow state.
 - **D5. Turn wall clock.** `turn_max_seconds` defaults to 7200 (2 h) and is a setting
   (§5.2).
 - **D6. `RollingUpdate`**, once the pod's queues are versioned. Phase 11 versions them:
-  the agent's `agent-tools` and host queues, and the backend's `library` queue, which the
+  the agent's `agent-tools` and both host queues (`agent-tools.<hostname>`,
+  `agent-sessions.<hostname>`), and the backend's `library` queue, which the
   clusters manifest names as what blocks it (`scadbuddy.yaml:125-131`). The clusters PR
   then lands.
 - **D7. `ai_session_entries` is sealed** (§6.2).

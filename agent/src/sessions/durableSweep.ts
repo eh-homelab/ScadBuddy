@@ -9,15 +9,16 @@ import { event, type ServerEvent } from './protocol.js'
 // finish_turn's, run by `session-<id>`. A claim is left with no turn behind it when the
 // workflow ends (terminated, failed, reset) before finish_turn runs, or when a kept
 // claim's update-with-start never reached Temporal, so the workflow was never started.
-// Every later send is then refused `busy`. Each pass, a durable row `running` with no
-// write for `graceMs` is described; when its workflow is closed, not found, or open
+// Every later send is then refused `busy`. Each pass, a durable row `running`, or parked
+// on a call (`waiting_approval`, `waiting_input`: a gone workflow answers neither, #4133),
+// with no write for `graceMs` is described; when its workflow is closed, not found, or open
 // but holding no turn (its `turn` Query: the kept claim's Update never reached it,
 // #2078), the turn's end is written as finish_turn writes a failed turn (a
 // `turn_failed` error, then the status), but to `idle`: the next send either starts or
 // reaches the workflow, or is refused `closed`. A workflow not found for a row whose
 // `durable_offset` moved ran a turn and was removed by retention; the error says so,
 // and the send refuses it `closed` (plan 5c Ruling 18). The UPDATE is guarded on the
-// claim read (still `running`, same event_seq), so a turn that claimed the row
+// claim read (still in TURN_STATUSES, same event_seq), so a turn that claimed the row
 // meanwhile is never ended here.
 
 /**
@@ -36,7 +37,12 @@ export const TURN_QUERY = 'turn'
 export const RUNNING_GRACE_MS = 120_000
 /** How long one describe may take before the row is left for the next pass. */
 const DESCRIBE_DEADLINE_MS = 3_000
-/** Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s interval. */
+/**
+ * Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s
+ * interval. A parked approval or question takes a slot, and a describe and a Query, on
+ * every pass it waits through; the rotating cursor (`#after`) keeps such rows from
+ * starving the rest, but many long waits slow how soon a lost turn is found.
+ */
 const BATCH = 10
 
 const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
@@ -46,7 +52,14 @@ const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
   removed: "the turn never started: the session's workflow is gone (it ended and was removed); continue in a new chat",
 }
 
-/** A `running` row as read: its claim (`event_seq`) and how far its workflow's output got. */
+/**
+ * A durable row's statuses while it holds a turn: running, or parked on one of its calls.
+ * The same list as agent-durable's `_RUNNING` (session/activities.py), whose waiting half
+ * is gate/store.py's `_WAITING`: change them together.
+ */
+const TURN_STATUSES = ['running', 'waiting_approval', 'waiting_input']
+
+/** A row in TURN_STATUSES as read: its claim (`event_seq`) and how far its workflow's output got. */
 export type RunningRow = { id: string; event_seq: string; durable_offset: string }
 
 /**
@@ -69,7 +82,8 @@ export async function endLostTurn(
   const done = await sql.begin(async (tx) => {
     const [claimed] = await tx`
       UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
-      WHERE id = ${row.id} AND mode = 'durable' AND status = 'running' AND event_seq = ${row.event_seq}
+      WHERE id = ${row.id} AND mode = 'durable' AND status IN ${tx(TURN_STATUSES)}
+        AND event_seq = ${row.event_seq}
       RETURNING id`
     return claimed ? await events.append(row.id, tail, tx) : undefined
   })
@@ -115,7 +129,7 @@ export class DurableRunningSweep {
     const { sql, events } = this.#deps
     const page = (after: string) => sql<RunningRow[]>`
       SELECT id, event_seq, durable_offset FROM ai_sessions
-      WHERE mode = 'durable' AND status = 'running' AND id::text > ${after}
+      WHERE mode = 'durable' AND status IN ${sql(TURN_STATUSES)} AND id::text > ${after}
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
       ORDER BY id::text LIMIT ${this.#batch}`
     let rows = await page(this.#after)

@@ -170,7 +170,10 @@ on shutdown.
   editor checks (the API; not a separate render worker), divided by
   `SCADBUDDY_RENDER_CONCURRENCY`, between 1 and 8, so renders and checks together
   stay at one process per CPU. A value saved in Settings reaches a separate render
-  worker within 30 seconds, at its next per-colour stage. If no
+  worker within 30 seconds (its settings cache), at its next per-colour stage. An
+  in-process worker (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) on the replica that took
+  the save sees it at once, since the save invalidates that cache; on another
+  replica, within the same 30 seconds. If no
   cgroup CPU controller is readable, a warning is logged at the first render and it
   sizes for every CPU it can see; set it by hand there. It reads no memory limit:
   size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
@@ -656,7 +659,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   while it is current, and the new build schedules it only once it is. Not covered: a
   new workflow type on the queue (the API starts it while the old build, which does not
   register it, is current; the SDK fails that as a task, not a workflow, but this was
-  not measured, so such a release still rolls `scadbuddy-print` with `Recreate`), and a
+  not measured, so such a release still rolls `scadbuddy-print` with `Recreate`: see
+  "A release that needs `Recreate`" below), and a
   prelude kind on another queue (`output_inbox_delete`, which a library `Operation`
   runs on `bambuddy`). **Rolling back** to a build without a kind leaves that kind's
   operations still in flight deferred (their record `running`) until a build with it is
@@ -704,9 +708,17 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
 - **Later changes** to `PrintRun` or `Operation` are made with `workflow.patched` (see
   "Versioning" above). A new operation kind or a new activity needs nothing more
   ("Rolling it"); a release that adds a workflow type to the queue says so here and
-  needs a `Recreate` rollout of `scadbuddy-print`. Where the API still serves the queue
+  needs a `Recreate` rollout of `scadbuddy-print`, done as below. Where the API still serves the queue
   itself (unversioned), a new activity in `PrintRun` or `FollowPrint` needs the API
   rolled out with `Recreate` too: there any replica takes any task.
+- **A release that needs `Recreate`:** the deploy PR cannot carry it, because the deploy
+  pipeline (`deploy.reusable.yml`'s `pin` step) rewrites only the image and the
+  `scadbuddy.eh-homelab.io/*` annotation lines. Open a clusters PR of its own that sets
+  `strategy: {type: Recreate}` on the affected Deployment (`scadbuddy-print` or
+  `scadbuddy-projects`) and removes its `rollingUpdate:` block, which the API server
+  refuses beside `Recreate`. Merge it before the release's deploy PR, and restore
+  `RollingUpdate` once the release has rolled out. The clusters manifests' comments
+  describe the same steps (eh-homelab/clusters#2557).
 
 ### Flow runs on the `projects` queue (#1057)
 
@@ -772,9 +784,11 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
     workflows' `flow_grant_check` reaches the versioned `projects` queue (both in the
     same test file).
   - Not covered: a new workflow type on the queue, which still needs a `Recreate`
-    rollout.
+    rollout of `scadbuddy-projects`, done through a clusters PR merged before the deploy
+    PR ("A release that needs `Recreate`" under the `bambuddy` queue).
 - **The first deploy of #4146** goes from an unversioned worker to a versioned one.
-  Deploy it with the `Recreate` the manifest has today. The new pod makes
+  It was deployed with `Recreate`, before eh-homelab/clusters#2557 moved the worker to
+  `RollingUpdate`. The new pod makes
   `scadbuddy-projects` current, and from then on unversioned workers get no tasks. Open
   runs, all of them started unversioned, move to the versioned build at their next task
   ([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)):

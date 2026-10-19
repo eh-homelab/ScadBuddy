@@ -914,3 +914,30 @@ def test_a_negative_store_cap_is_refused_naming_its_field(name: str) -> None:
     with pytest.raises(ValueError, match=f"SCADBUDDY_{name.upper()} must be at least 0"):
         SettingsPatch.model_validate({name: -1})
     assert getattr(SettingsPatch.model_validate({name: 0}), name) == 0
+
+
+def test_a_missing_or_refused_solid_concurrency_is_the_environments(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#4203: the worker's read falls back to the environment for a row it does not
+    have, as for one the bounds refuse or one cleared to null."""
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        solid_concurrency=4,
+    )
+    store = SettingsStore(seeded)
+    store.open()
+    try:
+        assert load_render_store_settings(store.pool, seeded).solid_concurrency == 4
+        for stored, read in (("-1", 4), ("null", 4), ("2", 2)):
+            with store.pool.connection() as conn:
+                conn.execute(
+                    "INSERT INTO settings (name, value) VALUES ('solid_concurrency', %s::jsonb)"
+                    " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+                    (stored,),
+                )
+            assert load_render_store_settings(store.pool, seeded).solid_concurrency == read, stored
+    finally:
+        store.close()

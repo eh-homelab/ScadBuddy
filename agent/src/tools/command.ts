@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
-import { type ToolContext, ToolError } from './registry.js'
+import { idempotencyKey, type ToolContext, ToolError } from './registry.js'
 
 // A ScadBuddy command from a tool (#1052, #1053, spec 2026-10-01 §4.2), as the browser
 // client's `command()` does it: one key per call, kept by every re-send, so a re-send
@@ -247,7 +246,7 @@ export async function commandAnswer<T>(
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
 ): Promise<FetchResult<T> | OperationRunning> {
-  const headers: CommandHeaders = { 'Idempotency-Key': randomUUID().replaceAll('-', ''), ...RESPOND_ASYNC }
+  const headers: CommandHeaders = { 'Idempotency-Key': idempotencyKey(ctx), ...RESPOND_ASYNC }
   const gaveUp = ' It may have been done anyway: check before trying again.'
   const first = await answeredFollowing(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return first

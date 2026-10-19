@@ -26,6 +26,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -248,6 +249,41 @@ async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> Non
     assert piece.log_tail == main.log_tail
     assert main.returncode == 0
     assert piece.result.libraries == []
+
+
+async def test_render_solids_renders_with_the_solid_concurrency_in_effect_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live setting (#4172) reaches the stage that sizes the pool: each run asks
+    for the value in effect, so a change lands at the next solids stage."""
+    paths = demo_paths(tmp_path)
+    stored = iter([3, 5, 0])
+
+    async def stored_solid_concurrency() -> int:
+        return next(stored)
+
+    deps = replace(worker_deps(tmp_path, paths), stored_solid_concurrency=stored_solid_concurrency)
+    acts = RenderActivities(deps)
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    main = await env.run(acts.render_main, req, prepared)
+
+    sized: list[tuple[int, int]] = []
+    solid_slots = Config.solid_slots
+
+    def spy(config: Config) -> int:
+        slots = solid_slots(config)
+        sized.append((config.solid_concurrency, slots))
+        return slots
+
+    monkeypatch.setattr(Config, "solid_slots", spy)
+    for _ in range(3):
+        await env.run(acts.render_solids, req, prepared, main)
+    # The fixture's own value is 0, so its slots are the derived default (#4202).
+    assert deps.config.solid_concurrency == 0
+    derived = solid_slots(deps.config)
+    assert sized == [(3, 3), (5, 5), (0, derived)]
 
 
 async def test_a_piece_records_the_library_pins_its_template_declares(tmp_path: Path) -> None:

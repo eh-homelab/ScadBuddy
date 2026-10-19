@@ -300,8 +300,12 @@ class Settings(BaseSettings):
     temporal_projects_worker_inprocess: bool = False
     # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
     # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5), and the
-    # projects worker calls for a flow's render, print and arrange (#1057).
+    # projects worker calls for a flow's render, print and arrange (#1057). Also the base
+    # the API mints the native slicer's transfer URLs under (`slicing/transfer.py`, #3822).
     api_internal_url: str | None = None
+    # SCADBUDDY_SLICER_PROFILES_DIR: Bambu Studio's BBL vendor profiles and the image's
+    # BAMBU_STUDIO_VERSION, which the native slicer's preset files are built from (#3822).
+    slicer_profiles_dir: Path = Path("/opt/slicer-profiles")
     # SCADBUDDY_TEMPORAL_UI_URL: the Temporal web UI, which Settings → Administration
     # links to (#668). Empty (the default) shows no link.
     temporal_ui_url: str | None = None
@@ -378,6 +382,10 @@ class Settings(BaseSettings):
     # a flow run waits for a person's decision before it is denied. 0 is never. A flow
     # may set its own, and a run may override both.
     flow_approval_timeout_seconds: int = 0
+    # SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS (#3818 tier A, plan 2026-10-18 Task 6b): how
+    # often the spool providers' records are refreshed into Postgres, on their own
+    # Schedule (`workflows/spool_refresh.py`); 0 turns the refresh off.
+    spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -571,8 +579,13 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " deployment runs the `scadbuddy-print` worker."
         ),
         "api_internal_url": (
-            "Where the print and projects workers reach the API inside the cluster: the"
-            " deployment's Service, read only by those workers."
+            "Where the print, projects and slicer workers reach the API inside the cluster:"
+            " the deployment's Service, read by those workers and by the API, which mints"
+            " the slicer's transfer URLs under it."
+        ),
+        "slicer_profiles_dir": (
+            "Where the image puts Bambu Studio's BBL profiles and their VERSION, copied from"
+            " the slicer's AppImage at build time: not a setting."
         ),
         "download_cache_dir": (
             "Where this process keeps whole Bambuddy downloads (#2788): a directory of the"
@@ -643,6 +656,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "preview_renders": "restart",
         # Decides at start whether the periodic sweep runs at all.
         "asset_sweep_interval": "restart",
+        # The spool providers' Schedule is set up at start, as the sweeps' is.
+        "spool_overlay_refresh_seconds": "restart",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",

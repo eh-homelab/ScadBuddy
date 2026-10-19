@@ -14,7 +14,7 @@ import logging
 import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, BinaryIO, get_args
 
 from aiobotocore.config import AioConfig
@@ -183,6 +183,17 @@ class S3ContentBackend:
                 return False
             raise
         return True
+
+    async def presign_get(self, backend_id: str, expires: timedelta) -> str:
+        """A URL that GETs the object without credentials until ``expires`` from now
+        (aiobotocore's `generate_presigned_url` is a coroutine). The query carries the
+        signature: never log it."""
+        client = await self._s3()
+        return await client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.settings.bucket, "Key": self._key(backend_id)},
+            ExpiresIn=int(expires.total_seconds()),
+        )
 
     async def remove(self, backend_id: str) -> None:
         key = self._key(backend_id)

@@ -31,6 +31,8 @@ import {
   type RunInput,
 } from './names.js'
 
+export { AgentSession } from './session/workflow.js'
+
 // AgentOperation: the agent's commands in the shape of spec 2026-10-01 §4.2 (#1055),
 // the backend `Operation`'s order and answers (backend/scadbuddy/workflows/operation.py):
 //

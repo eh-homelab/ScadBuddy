@@ -3,6 +3,9 @@ import os
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from scadbuddy.slicing.models import (
     SlicePlateInput,
     SlicePlateOutput,
@@ -105,3 +108,50 @@ def test_expires_at_is_normalised_to_utc() -> None:
         expires_at=datetime(2026, 10, 16, 14, 0, tzinfo=timezone(timedelta(hours=2))),
     )
     assert url.model_dump(mode="json")["expires_at"] == "2026-10-16T12:00:00Z"
+
+
+SECRET_URL = TransferUrl(
+    url="https://garage.example:3900/bucket/slice/x?X-Amz-Signature=presigned-sig",
+    headers={"X-ScadBuddy-Transfer": "bearer-token"},
+    expires_at=AT,
+)
+
+
+def test_a_transfer_url_never_prints_its_secrets() -> None:
+    for text in (repr(SECRET_URL), str(SECRET_URL), f"{SECRET_URL}", repr([SECRET_URL])):
+        assert "presigned-sig" not in text
+        assert "bearer-token" not in text
+        assert "/bucket" not in text
+        assert "https://garage.example" in text
+        assert "X-ScadBuddy-Transfer" in text
+    assert "presigned-sig" in SECRET_URL.url  # the value itself is untouched
+
+
+def test_a_slice_input_never_prints_its_urls_secrets() -> None:
+    raw = SlicePlateInput(
+        input_3mf=SECRET_URL,
+        plate=1,
+        machine_preset=SECRET_URL,
+        process_preset=SECRET_URL,
+        filament_presets=[SECRET_URL],
+        sliced_3mf=SECRET_URL,
+    )
+    assert "bearer-token" not in repr(raw)
+    assert "presigned-sig" not in repr(raw)
+    dumped = raw.model_dump(mode="json")
+    assert dumped["input_3mf"]["headers"] == {"X-ScadBuddy-Transfer": "bearer-token"}
+
+
+def test_a_validation_error_never_carries_a_token() -> None:
+    url = SECRET_URL.model_dump(mode="json")
+    for cls, payload in (
+        (TransferUrl, {**url, "expires_at": "not a time"}),
+        (TransferUrl, {"url": url["url"], "headers": url["headers"]}),
+        (SlicePlateInput, {"input_3mf": {"url": url["url"], "headers": url["headers"]}}),
+        (SlicePlateInput, {"input_3mf": url, "plate": -1, "sliced_3mf": [url]}),
+    ):
+        with pytest.raises(ValidationError) as caught:
+            cls.model_validate(payload)
+        message = str(caught.value)
+        assert "bearer-token" not in message
+        assert "presigned-sig" not in message

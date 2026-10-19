@@ -262,6 +262,25 @@ def _skip_without_postgres(request: pytest.FixtureRequest) -> None:
         pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
 
 
+#: Where the image puts Bambu Studio's BBL profiles; read once, at import, as the
+#: Postgres URL is, since the API tests scrub every SCADBUDDY_* variable.
+SLICER_PROFILES_DIR = Path(
+    os.environ.get("SCADBUDDY_SLICER_PROFILES_DIR") or "/opt/slicer-profiles"
+)
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_slicer_profiles(request: pytest.FixtureRequest) -> None:
+    if (
+        request.node.get_closest_marker("requires_slicer_profiles")
+        and not (SLICER_PROFILES_DIR / "BBL.json").is_file()
+    ):
+        pytest.skip(
+            f"no Bambu Studio profiles: {SLICER_PROFILES_DIR / 'BBL.json'} is missing"
+            " (set SCADBUDDY_SLICER_PROFILES_DIR; the app and test images ship them)"
+        )
+
+
 @pytest.fixture(autouse=True)
 def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_temporal") and not temporal_available():

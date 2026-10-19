@@ -69,7 +69,9 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+        ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
@@ -132,15 +134,22 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
     async def preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
         previews.append(render_bound)
 
+    async def spool_schedule(client: object, queue: str, interval: float) -> None:
+        spools.append(interval)
+
+    spools: list[float] = []
     monkeypatch.setattr(main, "ensure_schedules", flaky)
+    monkeypatch.setattr(main, "ensure_spool_schedule", spool_schedule)
     monkeypatch.setattr(main, "ensure_preview_schedule", preview_schedule)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     stop = asyncio.Event()
     await asyncio.wait_for(
-        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop),  # type: ignore[arg-type]
+        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop, spool_refresh=300),  # type: ignore[arg-type]
         5,
     )
     assert calls == [600.0, 600.0]
+    # The spool providers' refresh (#3818), after the sweeps' Schedules.
+    assert spools == [300]
     # The preview backfill's Schedule (#1054) is set up once the housekeeping ones
     # are: each set-up triggers a run, so a retry must not set it up again (final
     # review M3).
@@ -167,9 +176,13 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     async def no_preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
         pass
 
+    async def no_spool_schedule(client: object, queue: str, interval: float) -> None:
+        pass
+
     monkeypatch.setattr(main, "library_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "ensure_spool_schedule", no_spool_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
 
     async def no_triggers() -> None:
@@ -177,7 +190,9 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
 
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library", revision="test"),
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+        ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
         previews=None,

@@ -1,0 +1,7 @@
+{
+    "type": "process",
+    "name": "loop_a",
+    "inherits": "loop_b",
+    "from": "system",
+    "instantiation": "true"
+}

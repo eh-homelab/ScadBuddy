@@ -27,7 +27,7 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// cancellation only on a heartbeat and fails an activity silent past its heartbeat timeout.
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
 /// How long stderr may stay open after the CLI exits (a straggler holding it).
-const STDERR_GRACE: Duration = Duration::from_secs(1);
+pub const STDERR_GRACE: Duration = Duration::from_secs(1);
 /// The worker's variables the CLI sees, when set, besides `HOME` ([`cli_env`]). AppRun
 /// sets `LD_LIBRARY_PATH` and `LC_ALL` itself; it needs nothing else.
 const PASSED_VARS: &[&str] = &["PATH", "LANG", "LC_ALL", "TZ", "LD_LIBRARY_PATH", "APPDIR"];

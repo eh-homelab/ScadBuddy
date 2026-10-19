@@ -98,8 +98,8 @@ export type QuestionRequest = {
 export type QuestionVerdict =
   /** Keyed by question text; a multi-select answer is its labels joined by ", ". */
   | { answered: true; answers: Record<string, string> }
-  /** Not answered; `message` is what the model reads as the tool's error. */
-  | { answered: false; message: string; timedOut?: false; posted?: false; reconnected?: false }
+  /** Not answered; `message` is what the model reads as the tool's error. `interrupt`: the turn stops there (permissions.ts ApprovalVerdict). */
+  | { answered: false; message: string; interrupt?: true; timedOut?: false; posted?: false; reconnected?: false }
   /** #815: an attention request's `proceed` timer fired. Never an answer, and never an approval. */
   | { answered: false; timedOut: true; message: string; posted?: false; reconnected?: false }
   /** #815: a `done` summary was posted. Nothing waits on it, so it has no answer. */
@@ -123,7 +123,7 @@ async function ask(
   input: unknown,
   toolUseId: string,
   signal: AbortSignal,
-): Promise<{ answered: true; questions: UserQuestion[]; answers: Record<string, string> } | { answered: false; message: string }> {
+): Promise<{ answered: true; questions: UserQuestion[]; answers: Record<string, string> } | { answered: false; message: string; interrupt?: true }> {
   const parsed = parseQuestions(input)
   if (!parsed.ok) return { answered: false, message: `The question was not asked: ${parsed.error}` }
   try {
@@ -143,7 +143,7 @@ export async function askThroughGate(
   signal: AbortSignal,
 ): Promise<PermissionResult> {
   const result = await ask(gate, ASK_USER_QUESTION, input, toolUseId, signal)
-  if (!result.answered) return { behavior: 'deny', message: result.message }
+  if (!result.answered) return { behavior: 'deny', message: result.message, ...(result.interrupt ? { interrupt: true } : {}) }
   return { behavior: 'allow', updatedInput: { questions: result.questions, answers: result.answers } }
 }
 

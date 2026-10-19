@@ -31,7 +31,7 @@ import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
-import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
+import { loadPackagesForRun, PackageInstaller, warmPackages } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
@@ -61,8 +61,16 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
+import { sessionFinishActivities } from './temporal/session/finishActivity.js'
+import { sessionGateActivities } from './temporal/session/gateActivities.js'
+import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
+import { startHostWorkers } from './temporal/session/hostWorkers.js'
+import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
+import { sessionTurnActivity } from './temporal/session/turnActivity.js'
+import { TurnHost } from './sessions/turnHost.js'
+import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
@@ -73,12 +81,13 @@ import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
-import { AgentWorker } from './temporal/worker.js'
+import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, subjectDataConverter } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
+import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -290,6 +299,22 @@ const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
 // Each session turn loads the enabled ones (`packagePlugins` below).
 const pluginPackages = database ? new PackageStore(database.sql) : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+// The cache is this pod's scratch, empty after every deploy: filled at start, so a
+// turn does not wait on a whole repository's fetch (#4217).
+if (database && pluginPackages) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (!ok) {
+        console.warn('plugin package warm-up skipped: the database is not ready; the first turn fetches instead')
+        return
+      }
+      for (const problem of await warmPackages(pluginPackages, packageInstaller)) {
+        console.warn('plugin package warm-up:', problem)
+      }
+    })
+    .catch((err: unknown) => console.error('plugin package warm-up failed:', (err as Error).message))
+}
 
 // One store for Settings (routes/mcpTokens.ts) and /mcp. Mint and revoke are
 // recorded in the audit log (#258), whichever of the two makes them.
@@ -506,10 +531,54 @@ if (database) {
   sweep()
   setInterval(sweep, 3600_000).unref()
 }
+// The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
+// start. Every hour, once the database is ready.
+if (database) {
+  const sweep = () =>
+    void database
+      .ready()
+      .then((ok) => (ok ? sweepOrphanedSessionKeys(database.sql) : 0))
+      .catch((err: unknown) => console.error('orphaned payload key sweep failed:', (err as Error).message))
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 // What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
 // classic turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
-// own queue, HOST_QUEUE, served by `hostWorker` below.
+// own queue, HOST_QUEUE (above), served by `hostWorkers` below.
+// AgentSession's turns on this replica (unified runtime spec 2026-10-13 §5.2): its own queue,
+// `agent-sessions.<identity>`, beside HOST_QUEUE (temporal/session/hostWorkers.ts says why), on
+// this replica's warm processes. `acquire_worker` on agent-tools hands it out.
+const SESSION_HOST_QUEUE = sessionHostQueue(replicaIdentity())
+// What a durable session's tool runs with: its activities on agent-tools, and a released
+// AgentSession turn's approved call (§5.4 step 5), which runs on the turn's own replica.
+const durableToolDeps: ToolActivityDeps | undefined = temporal
+  ? {
+      services: toolServices,
+      sessions: new PgSessionOwners(temporal.sql),
+      approvals: new PgApprovalRecords(temporal.sql),
+      flows: new PgFlowRuns(temporal.sql),
+      audit,
+      answers: new PgAnswers(temporal.sql),
+      currentTiers: liveTokenTiers(tokens),
+      // A result's images, for the durable segment's view_tool_images (#2320).
+      blobs: new SessionBlobs(temporal.sql),
+      // A flow call's images, sealed under its run's payload key (#2477).
+      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
+    }
+  : undefined
+// A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
+const turnHost =
+  temporal && sessions
+    ? new TurnHost({
+        core: sessions.turnCore,
+        sql: temporal.sql,
+        images: new SessionBlobs(temporal.sql),
+        hostQueue: SESSION_HOST_QUEUE,
+        ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
+        ...(durableToolDeps ? { runCall: decidedCalls(DURABLE_TOOLS, durableToolDeps) } : {}),
+      })
+    : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -593,6 +662,40 @@ const turnToolDeps = temporal
         : {}),
     }
   : undefined
+// AgentSession's turns are hosted here only with both halves (§5.2): acquire_worker on agent-tools
+// hands out SESSION_HOST_QUEUE, so it is offered only where the session host worker below serves it.
+const sessionHosting = turnHost && sessions && operationStore && turnToolDeps ? { turnHost, warm: sessions.warm } : undefined
+/**
+ * The session host worker's slots, fixed when it starts: the most warm processes
+ * `warm_max_per_replica` may be set to (RUNTIME_BOUNDS), which can change while it runs, plus two
+ * for releases. The warm cache's `reserve` is what holds a replica to its setting.
+ */
+const SESSION_HOST_SLOTS = RUNTIME_BOUNDS.warm_max_per_replica.max + 2
+// Routes start commands, and reach durable sessions' gates, through a lazy client: a
+// Temporal that is down answers 503. acquire_worker lists the live session hosts with it.
+const temporalClient = temporal
+  ? new Client({
+      connection: Connection.lazy({ address: temporal.address }),
+      namespace: config.temporalNamespace,
+      ...(dataConverter ? { dataConverter } : {}),
+    })
+  : undefined
+// A place in this replica's warm cache, and its session host queue (§5.2): on agent-tools, and on
+// the session host queue for a turn another replica (one it was lost on) refers here.
+const sessionAcquire =
+  sessionHosting && temporalClient
+    ? acquireActivities({
+        warm: sessionHosting.warm,
+        hostQueue: SESSION_HOST_QUEUE,
+        identity: replicaIdentity(),
+        liveHosts: () =>
+          liveHostQueues(temporalClient).catch((err: unknown) => {
+            // acquire_worker takes the turn here instead (affinity.ts): said, so a role that may not describe queues is seen.
+            console.warn('acquire_worker: could not list the live session hosts:', (err as Error).message)
+            throw err
+          }),
+      })
+    : undefined
 
 // One set of background-task activities (src/background/): the shared queue's, and the Monitor command this replica runs.
 const background =
@@ -608,25 +711,19 @@ const background =
       })
     : undefined
 const temporalWorker =
-  temporal && operationStore && turnToolDeps
+  temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
+        // Polled as this replica: a poller listing names it (affinity.ts `liveHostQueues`, pluginSessions.ts).
+        identity: workerIdentity(replicaIdentity()),
         activities: {
-          ...toolActivities(DURABLE_TOOLS, {
-            services: toolServices,
-            sessions: new PgSessionOwners(temporal.sql),
-            approvals: new PgApprovalRecords(temporal.sql),
-            flows: new PgFlowRuns(temporal.sql),
-            audit,
-            answers: new PgAnswers(temporal.sql),
-            currentTiers: liveTokenTiers(tokens),
-            // A result's images, for the durable segment's view_tool_images (#2320).
-            blobs: new SessionBlobs(temporal.sql),
-            // A flow call's images, sealed under its run's payload key (#2477).
-            ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
-          }),
+          ...toolActivities(DURABLE_TOOLS, durableToolDeps),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
+          // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
+          ...sessionGateActivities(temporal.sql),
+          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
+          ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
@@ -656,38 +753,69 @@ const temporalWorker =
         },
       })
     : undefined
-// This replica's own queue: a pinned turn tool's calls (#2320). Its tools die with the
-// pod; a call scheduled after that fails at its schedule-to-close timeout.
-const hostWorker =
-  temporal && operationStore && turnToolDeps
+// AgentSession (unified runtime spec 2026-10-13 §5.1): new durable sessions run here only
+// while `unified_sessions` is on; flagged off, nothing is ever started on this queue.
+// Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
+// else unversioned like the agent's other workers. `session_settings` is a local activity, so it
+// is served here. `session_turn` is Task 5.2's, on the host worker.
+const sessionWorker =
+  temporal && settings
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
-        taskQueue: HOST_QUEUE,
-        activities: {
+        taskQueue: SESSION_QUEUE,
+        activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
+        ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId } } : {}),
+        workflows: {
+          workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
+        },
+      })
+    : undefined
+// This replica's own queues (temporal/session/hostWorkers.ts): a pinned turn tool's calls
+// (#2320) and a classic session's Monitor commands on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
+// cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
+// that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
+const hostWorkers =
+  temporal && operationStore && turnToolDeps
+    ? startHostWorkers({
+        address: temporal.address,
+        namespace: config.temporalNamespace,
+        identity: replicaIdentity(),
+        pinned: {
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A classic session's Monitor commands, in its directory on this replica.
           ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
         },
+        ...(sessionHosting
+          ? {
+              sessions: {
+                activities: { ...sessionTurnActivity(sessionHosting.turnHost, temporalClient ? { client: temporalClient } : {}), ...releaseActivities(sessionHosting.warm), ...(sessionAcquire ?? {}) },
+                // `warm_max_per_replica` may be raised while the replica runs; the slots cannot be.
+                slots: SESSION_HOST_SLOTS,
+                // The turns' own drain and abort wait (TurnHost.stop), so the worker never cuts one first.
+                shutdownGraceMs: TURN_DRAIN_MS + TURN_ABORT_WAIT_MS,
+                shutdownForceMs: TURN_DRAIN_MS + TURN_ABORT_WAIT_MS + 1_000,
+              },
+            }
+          : {}),
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
-// Routes start commands, and reach durable sessions' gates, through a lazy client: a
-// Temporal that is down answers 503.
-const temporalClient = temporal
-  ? new Client({
-      connection: Connection.lazy({ address: temporal.address }),
-      namespace: config.temporalNamespace,
-      ...(dataConverter ? { dataConverter } : {}),
-    })
-  : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.
 if (sessions && temporalClient && payloadKeys && database) {
-  sessions.durableTurns = new DurableTurns({ client: temporalClient, sql: database.sql, events: sessions.events })
+  sessions.durableTurns = new DurableTurns({
+    client: temporalClient,
+    sql: database.sql,
+    events: sessions.events,
+    audit,
+    // This replica's host for AgentSession turns, which a unified session's readiness checks (§5.2).
+    ...(hostWorkers?.sessions ? { sessionHostQueue: SESSION_HOST_QUEUE } : {}),
+  })
 }
 // Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
 // has ended or never started (#2001); a durable turn takes no lease.
@@ -857,11 +985,17 @@ async function stop(): Promise<void> {
   // turns' pending approvals stay pending (approvals/service.ts).
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
-  // and at 15 s it stops regardless: inside the turns' 17 s budget.
+  // and at 15 s it stops regardless: inside the turns' 17 s budget. Both host workers stop
+  // with it, the session host worker with the turns' 17 s as its grace. AgentSession turns get
+  // the classic turns' grace (TurnHost.stop); one still running then is cut and fails
+  // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
+  // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
+  const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
   await Promise.all([
     temporalWorker?.stop(),
-    hostWorker?.stop(),
-    sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
+    hostWorkers?.stop(),
+    sessionWorker?.stop(),
+    sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS, ...(hostedTurns ? { others: hostedTurns } : {}) }),
   ])
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
   await turnClients.closeAll()

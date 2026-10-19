@@ -21,6 +21,13 @@
 ARG BOSL2_REF=v2.0.761
 ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 
+# The Bambu Studio release `slicer-dist` downloads (#3821), global so the `slicer`
+# stage's BAMBU_STUDIO_VERSION, which the worker checks the CLI against, is the same
+# value. See `slicer-dist` for how to bump it.
+ARG BAMBU_STUDIO_VERSION=02.08.02.61
+ARG BAMBU_STUDIO_ASSET=BambuStudio_ubuntu24.04-v02.08.02.61-20260820225108.AppImage
+ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320d723740c81a7fd
+
 # ── uv ────────────────────────────────────────────────────────────────────────
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
@@ -379,6 +386,66 @@ COPY workers/rust /src
 WORKDIR /src
 RUN cargo build --release --locked -p scadbuddy-slicer
 
+# ── slicer-dist: Bambu Studio itself, downloaded and checked once ─────────────
+# The CLI the slicer worker runs, and the BBL profiles the API builds a slice's preset
+# files from (#3822, backend/scadbuddy/slicing/profiles.py). A stage of its own so the
+# app and test images take the profiles without compiling the worker. It runs
+# nothing it extracts, so any base would do; it shares `slicer`'s base, tag and
+# digest, so the two cannot drift apart.
+#
+# Bambu Studio is pinned by version and the AppImage's sha256, bumped
+# deliberately as OPENSCAD_VERSION is: change BAMBU_STUDIO_VERSION, the release
+# asset's name and the sha256 (the global ARGs at the top) together, and re-measure
+# what backend/scadbuddy/slicing/profiles.py says of the profiles. The sha256 was
+# measured with `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
+# lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
+# Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
+# whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
+# `slicer`, which runs the CLI, refuses another architecture.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer-dist
+
+ARG BAMBU_STUDIO_VERSION
+ARG BAMBU_STUDIO_ASSET
+ARG BAMBU_STUDIO_SHA256_AMD64
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl squashfs-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Extracted, never run: the AppImage is an x86-64 ELF runtime followed by a squashfs
+# image, which starts where the ELF's section header table ends (e_shoff at byte 40 plus
+# e_shnum at 60 times e_shentsize at 58, little-endian, ELF64 only: EI_CLASS, byte 4, is
+# checked to be 2), so unsquashfs reads it on any
+# build host, where `--appimage-extract` would have to execute the runtime. AppRun
+# sets LD_LIBRARY_PATH to the bundled bin/ and LC_ALL=C, then execs
+# bin/bambu-studio. `profiles` is the vendor profile tree (profiles/BBL/),
+# linked where the worker's contract names it. VERSION is what a native slice's
+# preset key carries (backend/scadbuddy/slicing/presets.py `native_preset_key`).
+#
+# /opt/slicer-profiles is what the API reads (settings.slicer_profiles_dir): the
+# vendor file BBL.json beside the machine, process and filament presets, laid out
+# as resources/profiles/ is, without the tree's cover images and bed models.
+WORKDIR /opt
+RUN curl --fail --silent --show-error --location --output bambu-studio.AppImage \
+         "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
+    && printf '%s  bambu-studio.AppImage\n' "$BAMBU_STUDIO_SHA256_AMD64" > bambu-studio.sha256 \
+    && sha256sum --check --strict bambu-studio.sha256 \
+    && le() { od -An -t "u$2" -j "$1" -N "$2" --endian=little bambu-studio.AppImage; } \
+    && { [ $(( $(le 4 1) )) -eq 2 ] \
+         || { echo "ERROR: the AppImage runtime is not a 64-bit ELF; re-measure the squashfs offset." >&2; exit 1; }; } \
+    && offset=$(( $(le 40 8) + $(le 60 2) * $(le 58 2) )) \
+    && unsquashfs -quiet -no-progress -offset "$offset" -dest bambu-studio bambu-studio.AppImage \
+    && ln -s resources/profiles bambu-studio/profiles \
+    && test -d bambu-studio/profiles/BBL \
+    && rm bambu-studio.AppImage bambu-studio.sha256 \
+    && printf '%s\n' "$BAMBU_STUDIO_VERSION" > bambu-studio/VERSION \
+    && mkdir -p slicer-profiles/BBL \
+    && cp bambu-studio/resources/profiles/BBL.json bambu-studio/VERSION slicer-profiles/ \
+    && cp -r bambu-studio/resources/profiles/BBL/machine bambu-studio/resources/profiles/BBL/process \
+         bambu-studio/resources/profiles/BBL/filament slicer-profiles/BBL/
+
+# ── slicer: the worker image ───────────────────────────────────────────────────
 # Ubuntu 24.04, not debian:bookworm-slim: the AppImage is Bambu Studio's
 # ubuntu24.04 build and needs GLIBC_2.38 and GLIBCXX_3.4.32, which bookworm
 # (glibc 2.36) lacks: `ldd /opt/bambu-studio/bin/bambu-studio` there reports
@@ -386,19 +453,14 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # by tag and index digest, as `base` is, so the glibc the CLI was checked
 # against cannot move under a build. The worker built on bookworm (glibc 2.36)
 # runs on 24.04's 2.39.
-#
-# Bambu Studio is pinned by version and the AppImage's sha256, bumped
-# deliberately as OPENSCAD_VERSION is: change BAMBU_STUDIO_VERSION, the release
-# asset's name and the sha256 together. The sha256 was measured with
-# `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
-# lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
-# Upstream publishes no arm64 AppImage, so any other TARGETARCH fails here.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer
 
 ARG TARGETARCH
-ARG BAMBU_STUDIO_VERSION=02.08.02.61
-ARG BAMBU_STUDIO_ASSET=BambuStudio_ubuntu24.04-v02.08.02.61-20260820225108.AppImage
-ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320d723740c81a7fd
+ARG BAMBU_STUDIO_VERSION
+
+# `slicer-dist` holds the amd64 CLI only: upstream publishes no other AppImage.
+RUN [ "$TARGETARCH" = amd64 ] \
+    || { echo "ERROR: Bambu Studio publishes no AppImage for '${TARGETARCH}'." >&2; exit 1; }
 
 # The CLI's runtime libraries. The AppImage bundles only ffmpeg's (in bin/, which
 # AppRun puts on LD_LIBRARY_PATH); the rest are the binary's NEEDED entries
@@ -420,26 +482,7 @@ RUN apt-get update \
          libgstreamer-plugins-base1.0-0 libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Extracted, not run as an AppImage: --appimage-extract needs no FUSE. AppRun
-# sets LD_LIBRARY_PATH to the bundled bin/ and LC_ALL=C, then execs
-# bin/bambu-studio. `profiles` is the vendor profile tree the backend reads
-# (profiles/BBL/), linked where the worker's contract names it.
-WORKDIR /opt
-RUN case "$TARGETARCH" in \
-      amd64) sha="$BAMBU_STUDIO_SHA256_AMD64" ;; \
-      *) echo "ERROR: Bambu Studio publishes no AppImage for '${TARGETARCH}'." >&2; exit 1 ;; \
-    esac \
-    && curl --fail --silent --show-error --location --output bambu-studio.AppImage \
-         "https://github.com/bambulab/BambuStudio/releases/download/v${BAMBU_STUDIO_VERSION}/${BAMBU_STUDIO_ASSET}" \
-    && printf '%s  bambu-studio.AppImage\n' "$sha" > bambu-studio.sha256 \
-    && sha256sum --check --strict bambu-studio.sha256 \
-    && chmod +x bambu-studio.AppImage \
-    && ./bambu-studio.AppImage --appimage-extract > /dev/null \
-    && mv squashfs-root bambu-studio \
-    && ln -s resources/profiles bambu-studio/profiles \
-    && test -d bambu-studio/profiles/BBL \
-    && rm bambu-studio.AppImage bambu-studio.sha256
-
+COPY --from=slicer-dist /opt/bambu-studio /opt/bambu-studio
 COPY --from=slicer-build /src/target/release/scadbuddy-slicer /usr/local/bin/
 
 # --help runs headless (no DISPLAY, no xvfb: the CLI path starts no GUI). HOME is
@@ -657,10 +700,10 @@ RUN uv sync --frozen --no-dev
 COPY --chown=scadbuddy:scadbuddy models/ /app/models/
 COPY --chown=scadbuddy:scadbuddy --from=frontend /src/frontend/dist /app/frontend/dist
 
-# Last of the app layers, after the dependency sync: bumping the openscad-lsp
-# ARGs then rebuilds this one copy and nothing above it. Root-owned (a COPY
-# without --chown is, whatever the USER), outside /app; `test` and `runtime`
-# both inherit it from here.
+# Last of the app layers but the slicer profiles below, after the dependency sync:
+# bumping the openscad-lsp ARGs then rebuilds these two copies and nothing above them.
+# Root-owned (a COPY without --chown is, whatever the USER), outside /app; `test` and
+# `runtime` both inherit them from here.
 #
 # `--link` (#4140): the frontend bundle above changes on every build (it carries
 # SCADBUDDY_VERSION), so a plain COPY here re-ran on every build and recorded that
@@ -670,6 +713,11 @@ COPY --chown=scadbuddy:scadbuddy --from=frontend /src/frontend/dist /app/fronten
 # stage keeps the binary's mtime the release tarball's, so a cold cache makes the
 # same layer too.
 COPY --link --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
+
+# Bambu Studio's BBL presets and its VERSION, which the native slicer's preset files
+# are built from (settings.slicer_profiles_dir, #3822). From `slicer-dist`, not
+# `slicer`, so this build never compiles the slicer worker.
+COPY --link --from=slicer-dist /opt/slicer-profiles /opt/slicer-profiles
 
 ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \

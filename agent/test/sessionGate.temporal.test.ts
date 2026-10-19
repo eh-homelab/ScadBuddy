@@ -356,6 +356,17 @@ describe.skipIf(!TEMPORAL_CLI)(`the session gate as workflow code${TEMPORAL_SKIP
     })
   })
 
+  it('cuts a cancel_input reason at 200 code points, as Python slices it, never splitting a pair (#3561)', async () => {
+    await using(await session(), async (s) => {
+      await s.call()
+      await s.parked()
+      // The 200th code point is an emoji, two UTF-16 units: a unit slice would leave half of it.
+      const reason = `${'a'.repeat(199)}😀 and more`
+      expect(await s.handle.executeUpdate(CANCEL_INPUT_UPDATE, { args: [{ reason }] })).toBe('cancelled')
+      expect(s.fake.resolved[0]?.reason).toBe(`${'a'.repeat(199)}😀`)
+    })
+  })
+
   it('test_two_responds_at_once_refuse_the_second_and_the_session_goes_on', async () => {
     const fake = new Fake()
     const gate = held()

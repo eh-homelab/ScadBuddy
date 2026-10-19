@@ -910,6 +910,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   step that runs `go` holds a token. A gomod PR without it fails the `go` job's drift
   check. Once it pushes, Dependabot stops rebasing that PR (`@dependabot recreate`
   starts over).
+- The `rust` job pins `dtolnay/rust-toolchain` by commit (the toolchain itself is
+  `rust-toolchain.toml`'s). The action has no release tags, so Dependabot never moves
+  that SHA: `rust-toolchain-pin.yml` runs `.github/scripts/rust-toolchain-pin.sh --check`
+  weekly, failing (the reminder) when master has moved past it, naming the line to
+  change (#4099). Move it, and its `master as of` date, in a reviewed PR.
 
 ## PR conventions
 
