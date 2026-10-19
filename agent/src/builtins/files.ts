@@ -4,9 +4,12 @@ import {
   decodeText,
   type SessionFiles,
   sniffImage,
+  EDIT_CALL,
   WorkspaceError,
   type WorkspaceFileInfo,
   type WorkspaceRef,
+  type WorkspaceSource,
+  withoutEditCall,
   workspacePath,
 } from '../workspace/store.js'
 
@@ -106,7 +109,7 @@ export function write(ctx: FileToolContext, input: { file_path: string; content:
     const before = await ctx.files.stat(ctx.ws, rel)
     await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(input.content), {
       ...(before ? { mediaType: before.mediaType } : {}),
-      source: before?.source ?? { tool: 'Write' },
+      source: withoutEditCall(before?.source) ?? { tool: 'Write' },
     })
     return ok(before ? updated(rel) : `File created successfully at: ${shown(rel)}`)
   })
@@ -134,24 +137,33 @@ export function applyEdit(text: string, edit: Edit): string | BuiltinResult {
   return edit.replace_all ? text.split(edit.old_string).join(edit.new_string) : text.replace(edit.old_string, () => edit.new_string)
 }
 
-export function edit(ctx: FileToolContext, input: { file_path: string } & Edit): Promise<BuiltinResult> {
+
+/**
+ * `callId`: the call's tool_use id, when its turn tool sends one. An activity retried
+ * after its answer was lost finds its own write already made: it answers as it would
+ * have, rather than refuse (the old string is gone) or edit twice (the new string
+ * holds the old one).
+ */
+export function edit(ctx: FileToolContext, input: { file_path: string } & Edit, callId?: string): Promise<BuiltinResult> {
   return guarded(async () => {
     const rel = toWorkspacePath(input.file_path)
     if (!rel) throw new BuiltinError(`${WORKSPACE_ROOT} is a directory`)
     const file = await ctx.files.read(ctx.ws, rel)
+    const call: WorkspaceSource = callId === undefined ? {} : { [EDIT_CALL]: callId }
     if (!file) {
       // As Claude Code: an empty old_string creates the file.
       if (input.old_string !== '') return { text: NOT_FOUND, isError: true }
-      await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(input.new_string), { source: { tool: 'Edit' }, expectedSha256: null })
+      await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(input.new_string), { source: { tool: 'Edit', ...call }, expectedSha256: null })
       return ok(updated(rel))
     }
+    if (callId !== undefined && file.source?.[EDIT_CALL] === callId) return ok(updated(rel))
     const text = decodeText(file.bytes, file.mediaType)
     if (text === undefined) throw new BuiltinError(`${shown(rel)} is a binary file; Edit edits text`)
     const after = applyEdit(text, input)
     if (typeof after !== 'string') return after
     await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(after), {
       mediaType: file.mediaType,
-      source: file.source ?? { tool: 'Edit' },
+      source: { ...(withoutEditCall(file.source) ?? { tool: 'Edit' }), ...call },
       expectedSha256: file.sha256,
     })
     return ok(updated(rel))
@@ -246,8 +258,9 @@ export const GREP_BUDGET_MS = 2_000
 // Without multiline, ripgrep matches each line on its own, so no match crosses a newline
 // (not even \s or [^x]) and the empty "line" after a final newline never matches. The
 // split runs inside the vm too, so it stays under the Grep timeout; matches go
-// straight into one array.
-const MATCH_SCRIPT = `
+// straight into one array. One function body: the context is the call's, used for
+// each of its files, and a top-level const would be declared twice there.
+const MATCH_SCRIPT = `(() => {
   const out = []
   const at = (line, offset) => {
     for (const m of line.matchAll(re)) out.push({ index: offset + m.index, text: m[0] })
@@ -262,12 +275,17 @@ const MATCH_SCRIPT = `
       offset += line.length + 1
     }
   }
-  out`
+  return out
+})()`
 
-function matchesOf(text: string, re: RegExp, whole: boolean, deadline: number): { index: number; text: string }[] {
+const MATCH = new vm.Script(MATCH_SCRIPT)
+
+/** Matches in `context`, one per Grep call: a context per file could spend the budget on contexts alone (#3202). */
+function matchesOf(context: vm.Context, text: string, re: RegExp, whole: boolean, deadline: number): { index: number; text: string }[] {
   const timeout = Math.max(1, deadline - Date.now())
+  Object.assign(context, { text, re, whole })
   try {
-    return vm.runInNewContext(MATCH_SCRIPT, { text, re, whole }, { timeout }) as {
+    return MATCH.runInContext(context, { timeout }) as {
       index: number
       text: string
     }[]
@@ -334,6 +352,7 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
     const name = (p: string) => (target && !single ? shown(p) : p)
     const matched: { path: string; lines: string[]; count: number }[] = []
     const deadline = Date.now() + GREP_BUDGET_MS
+    const context = vm.createContext({})
     for (const info of candidates.sort((a, b) => (a.path < b.path ? -1 : 1))) {
       const base = path.posix.basename(info.path)
       if (input.glob && !path.posix.matchesGlob(base, input.glob) && !path.posix.matchesGlob(info.path, input.glob)) continue
@@ -341,7 +360,7 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
       const file = await ctx.files.read(ctx.ws, info.path)
       const text = file && decodeText(file.bytes, file.mediaType)
       if (text === undefined || text === null || text === '') continue
-      const hits = matchesOf(text, re, input.multiline === true, deadline)
+      const hits = matchesOf(context, text, re, input.multiline === true, deadline)
       if (!hits.length) continue
       const lines: string[] = []
       if (mode === 'content') {
@@ -455,7 +474,7 @@ export function notebookEdit(
     }
     await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(JSON.stringify(notebook, null, 1)), {
       mediaType: file.mediaType,
-      source: file.source ?? { tool: 'NotebookEdit' },
+      source: withoutEditCall(file.source) ?? { tool: 'NotebookEdit' },
       expectedSha256: file.sha256,
     })
     if (mode === 'delete') return ok(`Deleted cell ${input.cell_id}`)

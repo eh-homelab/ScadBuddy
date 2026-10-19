@@ -151,6 +151,9 @@ export function parseAttention(input: unknown): { ok: true; input: AttentionInpu
   }
   // #1204: `wait` parks to WAIT_CEILING_S whatever `timeout_s` says, so a model that
   // named one would wait far longer than it asked. Refused, rather than dropped unsaid.
+  // Deliberately unlike a durable session (#3236): there `wait_for_user` takes `timeout_s`
+  // with `wait` and honours it, because the workflow's timer, not a turn's process and
+  // lease, holds the wait (agent-durable gate/entry.py `_check_wait`).
   if (
     typeof input === 'object' &&
     input !== null &&

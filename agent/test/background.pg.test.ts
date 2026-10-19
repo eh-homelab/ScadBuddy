@@ -524,7 +524,8 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     })
     const { session } = await classic.start(browser, { origin: 'chat' })
     const turn = await classic.send(session.id, browser, 'fetch it')
-    await turn.done
+    // The turn itself ends on that cause, not quietly (#3933).
+    expect(await turn.done).toEqual({ kind: 'failed', message: 'no Claude credential is usable' })
     expect(ran).toBe(false)
     expect(credential).toBeDefined()
     await expect(credential!()).rejects.toBeInstanceOf(NoUsableCredentialError)

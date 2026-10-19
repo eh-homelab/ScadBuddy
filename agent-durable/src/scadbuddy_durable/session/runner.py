@@ -560,6 +560,8 @@ class HeldText:
 DURABLE_PREFIX = "mcp__durable__"
 #: Claude Code's subagent tool, under its current and older names (agent harness/ownPlugin.ts).
 AGENT_TOOLS = frozenset({"Agent", "Task"})
+#: The subagent an ``Agent`` call runs when its input names none (Claude Code's default).
+DEFAULT_SUBAGENT = "general-purpose"
 
 
 class SegmentCalls:
@@ -569,12 +571,22 @@ class SegmentCalls:
     (its own server's and ``tool_activities``), and of the segment itself only the main
     agent's text, so a turn spent in a skill or a subagent showed nothing until it ended.
 
-    A subagent's call names the ``Agent`` call that runs it as ``parent`` when only one
-    is open; the hooks are not told which, so of several at once none is named."""
+    A subagent's call names the ``Agent`` call that runs it as ``parent``. The hooks do
+    not say which that is (#4184): a subagent's ``SubagentStart`` names its ``agent_id``
+    and type, so it is the one open ``Agent`` call of that ``subagent_type``, or the one
+    open ``Agent`` call at all; of several alike none is named, never the wrong one.
+
+    An attempt that fails leaves the calls it opened with no end: ``close_open`` ends
+    each as ``failed``, so the panel shows none of them running past it (#4184)."""
 
     def __init__(self, activities: list[str]) -> None:
         self._activities = activities
-        self._agents: set[str] = set()
+        # Open Agent calls: their subagent_type, until a SubagentStart claims one.
+        self._agents: dict[str, str] = {}
+        # A subagent's agent_id -> the Agent call that runs it.
+        self._owners: dict[str, str] = {}
+        # Every call opened and not yet ended: id -> name.
+        self._open: dict[str, str] = {}
 
     def _workflows(self, name: str) -> bool:
         """The plugin's ``decides_alone``: a call the workflow runs and publishes itself."""
@@ -582,6 +594,12 @@ class SegmentCalls:
         return name.startswith(DURABLE_PREFIX) or any(
             fnmatch.fnmatchcase(tool, p) for p in self._activities if p
         )
+
+    def _parent(self, agent_id: str) -> str | None:
+        owner = self._owners.get(agent_id)
+        if owner in self._agents:
+            return owner
+        return next(iter(self._agents)) if len(self._agents) == 1 else None
 
     async def _started(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
         name = str(data.get("tool_name") or "")
@@ -594,11 +612,28 @@ class SegmentCalls:
             "name": name,
             "input": data.get("tool_input") or {},
         }
-        if data.get("agent_id") and len(self._agents) == 1:
-            event["parent"] = next(iter(self._agents))
-        elif not data.get("agent_id") and name in AGENT_TOOLS:
-            self._agents.add(call)
+        agent = data.get("agent_id")
+        if agent:
+            parent = self._parent(str(agent))
+            if parent is not None:
+                event["parent"] = parent
+        elif name in AGENT_TOOLS:
+            kind = (data.get("tool_input") or {}).get("subagent_type")
+            self._agents[call] = str(kind) if kind else DEFAULT_SUBAGENT
+        self._open[call] = name
         emit(event)
+        return {}
+
+    async def _subagent_started(self, data: Any, _tool_use_id: str | None, _context: Any) -> Any:
+        agent, kind = data.get("agent_id"), data.get("agent_type")
+        if not agent:
+            return {}
+        claimed = set(self._owners.values())
+        alike = [
+            c for c, k in self._agents.items() if same_subagent(k, str(kind)) and c not in claimed
+        ]
+        if len(alike) == 1:
+            self._owners[str(agent)] = alike[0]
         return {}
 
     async def _ended(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
@@ -606,7 +641,8 @@ class SegmentCalls:
         call = str(data.get("tool_use_id") or tool_use_id or "")
         if not call or self._workflows(name):
             return {}
-        self._agents.discard(call)
+        self._agents.pop(call, None)
+        self._open.pop(call, None)
         failed = data.get("hook_event_name") == "PostToolUseFailure"
         emit(
             {
@@ -618,12 +654,45 @@ class SegmentCalls:
         )
         return {}
 
+    def close_open(self, publish: Callable[[dict[str, Any]], None]) -> None:
+        """Ends every call still open as ``failed``: its attempt failed, and a retry or the
+        next credential opens its calls again under new ids."""
+        opened, self._open = self._open, {}
+        self._agents.clear()
+        self._owners.clear()
+        for call, name in opened.items():
+            publish({"type": "tool_result", "id": call, "name": name, "status": "failed"})
+
     def hooks(self) -> dict[str, list[HookMatcher]]:
         return {
             "PreToolUse": [HookMatcher(hooks=[self._started])],
             "PostToolUse": [HookMatcher(hooks=[self._ended])],
             "PostToolUseFailure": [HookMatcher(hooks=[self._ended])],
+            "SubagentStart": [HookMatcher(hooks=[self._subagent_started])],
         }
+
+
+def same_subagent(given: str, started: str) -> bool:
+    """Whether an ``Agent`` call's ``subagent_type`` names the type its ``SubagentStart``
+    reports: equal, or one the plugin-qualified form of the other (``scadbuddy:model-author``
+    and ``model-author``), since which form the hook reports is not measured here. Two
+    qualified types must be equal: ``a:reviewer`` is not ``b:reviewer``."""
+    if given == started:
+        return True
+    if ":" in given and ":" in started:
+        return False
+    return given.endswith(f":{started}") or started.endswith(f":{given}")
+
+
+def merged_hooks(
+    given: dict[str, list[HookMatcher]] | None, ours: dict[str, list[HookMatcher]]
+) -> dict[str, list[HookMatcher]]:
+    """``ours`` added to hooks already in ``extra_options`` per event (#4184), never in
+    their place: a pin or another option that sets hooks keeps them."""
+    out = {event: list(matchers) for event, matchers in (given or {}).items()}
+    for event, matchers in ours.items():
+        out[event] = [*out.get(event, []), *matchers]
+    return out
 
 
 class ScadBuddyRunner:
@@ -779,6 +848,7 @@ class ScadBuddyRunner:
         left: float,
         extra: dict[str, Any],
         settings: TurnSettings,
+        calls: SegmentCalls | None = None,
     ) -> SegmentOutput:
         """Runs the segment on each usable credential in priority order, moving on only
         when the failure was the credential's (``fallback.credentials_fault``), as a classic
@@ -815,6 +885,9 @@ class ScadBuddyRunner:
                     return replace(out, error=BUDGET_EXHAUSTED, cost_usd=max(out.cost_usd, left))
                 return out
             except Exception as err:
+                if calls is not None and publish is not None:
+                    # Straight to the feed, past `held`: its text is the attempt's to keep or drop.
+                    calls.close_open(publish)
                 # Never the text: like the codec's sealed failures, it is the session's content.
                 logger.warning(
                     "segment of %s failed (attempt %d, %s): %s, %d bytes of text",
@@ -875,6 +948,11 @@ class ScadBuddyRunner:
                     error=bounded(str(err)),
                     cost_usd=_cost(err),
                 )
+            except BaseException:
+                # Cancelled (an interrupt, a worker shutting down): its calls end too.
+                if calls is not None and publish is not None:
+                    calls.close_open(publish)
+                raise
             finally:
                 if token is not None:
                     _EMIT.reset(token)
@@ -991,9 +1069,10 @@ class ScadBuddyRunner:
         plugins += [{"type": "local", "path": d} for d in self._packages(workflow_id, context)]
         if plugins:
             extra["plugins"] = plugins
-        extra["hooks"] = SegmentCalls(list(inp.tool_activities)).hooks()
+        calls = SegmentCalls(list(inp.tool_activities))
+        extra["hooks"] = merged_hooks(extra.get("hooks"), calls.hooks())
         out = await self._on_credentials(
-            session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
+            session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings, calls
         )
         if out.cost_usd > 0 or not out.is_error:
             async with self._connect() as conn:

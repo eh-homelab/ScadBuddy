@@ -1,6 +1,7 @@
 import TurndownService from 'turndown'
 import type { AuditActor, AuditSink } from '../audit/log.js'
 import { NoUsableCredentialError } from '../harness/fallback.js'
+import { BudgetSpentError } from './nested.js'
 import { exchange, requestProblem } from '../harness/httpRequest.js'
 import { assertHttpUrl, type Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
@@ -153,7 +154,7 @@ export async function webFetch(ctx: WebContext, input: WebFetchInput): Promise<B
   try {
     answer = await ctx.nested.ask(fetchPrompt(text, input.prompt, got.finalUrl), ctx.signal)
   } catch (err) {
-    if (err instanceof NoUsableCredentialError) return error(`WebFetch cannot run: ${err.message}`)
+    if (err instanceof NoUsableCredentialError || err instanceof BudgetSpentError) return error(`WebFetch cannot run: ${err.message}`)
     throw err
   }
   if (end < got.markdown.length) {
