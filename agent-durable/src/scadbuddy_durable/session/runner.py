@@ -675,8 +675,13 @@ class SegmentCalls:
 def same_subagent(given: str, started: str) -> bool:
     """Whether an ``Agent`` call's ``subagent_type`` names the type its ``SubagentStart``
     reports: equal, or one the plugin-qualified form of the other (``scadbuddy:model-author``
-    and ``model-author``), since which form the hook reports is not measured here."""
-    return given == started or given.endswith(f":{started}") or started.endswith(f":{given}")
+    and ``model-author``), since which form the hook reports is not measured here. Two
+    qualified types must be equal: ``a:reviewer`` is not ``b:reviewer``."""
+    if given == started:
+        return True
+    if ":" in given and ":" in started:
+        return False
+    return given.endswith(f":{started}") or started.endswith(f":{given}")
 
 
 def merged_hooks(

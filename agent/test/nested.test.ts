@@ -41,7 +41,7 @@ const searchResult = (t: string) =>
 function harness(
   script: (attempt: number) => SDKMessage[],
   candidates: () => Promise<PooledCredential[]> = async () => [A, B],
-  remaining?: () => Promise<number>,
+  remaining?: () => Promise<number | undefined>,
 ) {
   const secrets: string[] = []
   /** Each query's maxBudgetUsd. */
@@ -89,7 +89,7 @@ describe('nested WebFetch and WebSearch queries (#3200)', () => {
   })
 
   it("spends no more than the session's budget has left, and nothing once it is spent", async () => {
-    let left = 0.2
+    let left: number | undefined = 0.2
     const h = harness(() => answered('done', [searchResult('results')]), undefined, async () => left)
     expect(await h.nested.ask('p', new AbortController().signal)).toBe('done')
     expect(await h.nested.search({ query: 'openscad' }, new AbortController().signal)).toEqual({ text: 'results' })
@@ -103,6 +103,10 @@ describe('nested WebFetch and WebSearch queries (#3200)', () => {
       text: "WebSearch cannot run: the session's budget is spent",
       isError: true,
     })
+    expect(h.caps).toHaveLength(3)
+    // A session that is gone says so, not that its budget is spent.
+    left = undefined
+    await expect(h.nested.ask('p', new AbortController().signal)).rejects.toThrow('the session is gone')
     expect(h.caps).toHaveLength(3)
   })
 

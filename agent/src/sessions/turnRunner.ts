@@ -532,7 +532,10 @@ export class TurnRunner {
                                 if (slot.current?.nested) slot.current.nested.usd += cost
                               },
                               // The row's cost moves at the turn's end, so what this turn's own queries spent comes off too.
-                              remaining: async () => (await poolRemainingUsd(this.deps.sql, id)) - (slot.current?.nested?.usd ?? 0),
+                              remaining: async () => {
+                                const left = await poolRemainingUsd(this.deps.sql, id)
+                                return left === undefined ? undefined : left - (slot.current?.nested?.usd ?? 0)
+                              },
                             }),
                             secrets: () => secrets,
                             audit: this.deps.audit,

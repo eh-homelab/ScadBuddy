@@ -34,9 +34,10 @@ export type NestedDeps = {
    * What the session's budget has left: each query's cap is at most that, and none runs at
    * 0. An upper bound: the row's cost does not yet hold the running turn's (or segment's)
    * own model spend, which is written as it ends, so a query may still pass the budget by
-   * that much; the turn's own cap and the next turn's check hold the rest.
+   * that much; the turn's own cap and the next turn's check hold the rest. Undefined: the
+   * session is gone, and nothing is spent for it.
    */
-  remaining?: (() => Promise<number>) | undefined
+  remaining?: (() => Promise<number | undefined>) | undefined
   /** Tests: runs one query (runHarness), and asks about a refused credential (probeCredential). */
   run?: FallbackOptions['run']
   probe?: FallbackOptions['probe']
@@ -54,7 +55,7 @@ async function costOf(message: SDKMessage, deps: NestedDeps): Promise<void> {
   if (message.type === 'result' && message.total_cost_usd > 0) await deps.spent?.(message.total_cost_usd)
 }
 
-/** The session's budget is spent: a nested query would spend past it. */
+/** No nested query may run for the session: its budget is spent, or it is gone. */
 export class BudgetSpentError extends Error {
   override name = 'BudgetSpentError'
 }
@@ -66,6 +67,7 @@ export class BudgetSpentError extends Error {
  */
 async function query(deps: NestedDeps, cap: number, base: Omit<HarnessRun, 'credential' | 'maxBudgetUsd'>): Promise<AsyncIterable<SDKMessage>> {
   const left = deps.remaining ? await deps.remaining() : cap
+  if (left === undefined) throw new BudgetSpentError('the session is gone')
   if (!(left > 0)) throw new BudgetSpentError("the session's budget is spent")
   const capped = { ...base, maxBudgetUsd: Math.min(cap, left) }
   if (!deps.credentials) {

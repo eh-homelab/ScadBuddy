@@ -1006,6 +1006,8 @@ def test_a_subagent_type_matches_its_plugin_qualified_form() -> None:
     assert same_subagent("reviewer", "reviewer")
     assert not same_subagent("scadbuddy:reviewer", "author")
     assert not same_subagent("viewer", "reviewer")
+    # Two plugins' subagents of one bare name are not each other's.
+    assert not same_subagent("a:reviewer", "b:reviewer")
 
 
 def test_segment_hooks_are_added_to_hooks_already_set() -> None:

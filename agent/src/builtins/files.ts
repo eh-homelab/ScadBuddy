@@ -4,10 +4,12 @@ import {
   decodeText,
   type SessionFiles,
   sniffImage,
+  EDIT_CALL,
   WorkspaceError,
   type WorkspaceFileInfo,
   type WorkspaceRef,
   type WorkspaceSource,
+  withoutEditCall,
   workspacePath,
 } from '../workspace/store.js'
 
@@ -135,15 +137,6 @@ export function applyEdit(text: string, edit: Edit): string | BuiltinResult {
   return edit.replace_all ? text.split(edit.old_string).join(edit.new_string) : text.replace(edit.old_string, () => edit.new_string)
 }
 
-/** The source key naming the Edit call that last wrote a file (#3202): its retry is that call again. */
-export const EDIT_CALL = 'edit_call'
-
-/** A file's source kept by a write that is not that Edit call's: it names the call no longer. */
-function withoutEditCall(source: WorkspaceSource | null | undefined): WorkspaceSource | undefined {
-  if (!source) return undefined
-  const { [EDIT_CALL]: _call, ...rest } = source
-  return rest
-}
 
 /**
  * `callId`: the call's tool_use id, when its turn tool sends one. An activity retried

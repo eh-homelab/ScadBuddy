@@ -21,13 +21,14 @@ export const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHE
 /** What every session spending from that budget has spent. Read at the statement's snapshot. */
 export const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
 
-/** What is left of the budget `sessionId` spends from (POOL_BUDGET less POOL_COST); 0 for a session that is gone. */
-export async function poolRemainingUsd(sql: Sql, sessionId: string): Promise<number> {
+/** What is left of the budget `sessionId` spends from (POOL_BUDGET less POOL_COST); undefined for a session that is gone. */
+export async function poolRemainingUsd(sql: Sql, sessionId: string): Promise<number | undefined> {
   const [row] = await sql.unsafe<{ left_usd: string | null }[]>(
     `SELECT ${POOL_BUDGET} - coalesce(${POOL_COST}, 0) AS left_usd FROM ai_sessions WHERE id = $1`,
     [sessionId],
   )
-  return row?.left_usd == null ? 0 : Number(row.left_usd)
+  if (!row) return undefined
+  return row.left_usd === null ? 0 : Number(row.left_usd)
 }
 
 /** The most of one memory, or of a memory event's input, a panel event carries. */
