@@ -1727,8 +1727,8 @@ export const timelapseFrames: Record<number, TimelapseFrames> = {
 export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
   36: [
     {
-      name: 'video_2026-09-26_20-01-00.mp4',
-      path: '/timelapse/video_2026-09-26_20-01-00.mp4',
+      name: 'video_2026-09-26_20-01-00.MP4',
+      path: '/timelapse/video_2026-09-26_20-01-00.MP4',
       size: 1843200,
       mtime: '2026-09-26T20:44:00',
       kind: 'timelapse',

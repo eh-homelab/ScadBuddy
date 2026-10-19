@@ -45,7 +45,9 @@ const LARGE: ReadonlySet<Kind> = new Set(['video', 'timelapse'])
 async function download(url: string, name: string, large = false): Promise<void> {
   // #3107 — outside the frame, a video is saved from its URL by the browser, never read
   // into memory first; the frame's sandbox drops such a download (CLAUDE.md, "Bambuddy
-  // iframe facts"), so there it takes `downloadBlob`'s popup.
+  // iframe facts"), so there it takes `downloadBlob`'s popup. Deliberately so: the page
+  // never sees the answer, so a refusal (a 502 from Bambuddy) is the browser's failed
+  // download, not "Could not download" here.
   if (large && !isEmbedded()) {
     const anchor = document.createElement('a')
     anchor.href = url

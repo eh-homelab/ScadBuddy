@@ -227,7 +227,9 @@ function AttachmentItem({
     } catch (caught) {
       setError({ what, text: failure(caught) })
       // Copied from another tab, say (a 409): the print read again says so, and the
-      // refusal is not shown once it does (#3114).
+      // refusal is not shown once it does (#3114). The route's other 409s (the template
+      // full, a copy still in flight) leave `promoted_to` without this template, so
+      // theirs stays shown: what hides it is the record, not the status.
       if (what === 'promote' && caught instanceof ApiError && caught.status === 409) onChanged()
     } finally {
       setBusy(null)

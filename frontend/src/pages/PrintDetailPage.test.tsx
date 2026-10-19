@@ -810,11 +810,14 @@ describe('PrintDetailPage (#311)', () => {
     // An outward write: only a person may press it, never the agent's fallback click.
     expect(pull).toHaveAttribute('data-agent-user-only')
     // Only the timelapse is offered, not the camera recording.
-    expect(timelapse).toHaveTextContent('video_2026-09-26_20-01-00.mp4')
+    expect(timelapse).toHaveTextContent('video_2026-09-26_20-01-00.MP4')
     expect(timelapse).not.toHaveTextContent('ipcam-record')
 
     await user.click(pull)
     await waitFor(() => expect(timelapse.querySelector('video')).toHaveAttribute('src', '/api/v1/prints/36/timelapse'))
+    // Saved under its own extension, lower-cased (#3107): the printer named it `.MP4`.
+    const files = await section('Files')
+    expect(within(files).getByRole('button', { name: 'Download print-36-timelapse.mp4' })).toBeInTheDocument()
     server.events.removeAllListeners()
   })
 
