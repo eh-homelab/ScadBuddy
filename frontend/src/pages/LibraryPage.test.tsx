@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { libraryFiles, libraryFolders } from '../mocks/features/library'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { sharedInFlight } from '../test/inFlight'
 import { NARROW_QUERY } from '../lib/useMediaQuery'
 import { renderPage } from '../test/utils'
 import { LibraryPage } from './LibraryPage'
@@ -43,28 +44,19 @@ function listingAnswers(): { count: () => number; stop: () => void } {
 }
 
 /**
- * Every request MSW answers from now on, as `METHOD path`, and how many it has started
- * and not yet answered (`open`), until `stop`.
+ * Every request MSW answers from now on, as `METHOD path`, until `stop`; `open` is the
+ * setup's own count of the requests still in flight (`sharedInFlight`).
  */
 function answered(): { list: string[]; open: () => number; stop: () => void } {
   const list: string[] = []
-  const started = new Set<string>()
-  const onStart = ({ requestId }: { requestId: string }) => started.add(requestId)
-  const onEnd = ({ requestId }: { requestId: string }) => started.delete(requestId)
   const onAnswer = ({ request }: { request: Request }) => {
     list.push(`${request.method} ${new URL(request.url).pathname}`)
   }
-  server.events.on('request:start', onStart)
-  server.events.on('request:end', onEnd)
   server.events.on('response:mocked', onAnswer)
   return {
     list,
-    open: () => started.size,
-    stop: () => {
-      server.events.removeListener('request:start', onStart)
-      server.events.removeListener('request:end', onEnd)
-      server.events.removeListener('response:mocked', onAnswer)
-    },
+    open: sharedInFlight(server).open,
+    stop: () => server.events.removeListener('response:mocked', onAnswer),
   }
 }
 

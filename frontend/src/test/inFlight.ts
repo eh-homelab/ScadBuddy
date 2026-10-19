@@ -12,8 +12,8 @@ const realSetTimeout = globalThis.setTimeout
  * read slip past MSW after it (mswjs/interceptors#862), `resending` sends it again.
  *
  * Tests call `server.events.removeAllListeners()` to drop their own listeners, which would
- * drop these too, so that call puts them back. A request started before it is forgotten,
- * as its end may have gone unheard.
+ * drop these too, so that call puts back the ones it removed, before any event can pass.
+ * `sharedInFlight` is the one the setup waits on; a test reads its `open` count.
  */
 export function trackInFlight(server: SetupServer) {
   const open = new Map<string, string>()
@@ -25,21 +25,23 @@ export function trackInFlight(server: SetupServer) {
   const ended = ({ requestId }: { requestId: string }) => {
     open.delete(requestId)
   }
-  const attach = () => {
-    server.events.on('request:start', started)
-    server.events.on('request:end', ended)
+  const listeners = {
+    'request:start': () => server.events.on('request:start', started),
+    'request:end': () => server.events.on('request:end', ended),
     // A handler that threw ends here, never at request:end.
-    server.events.on('unhandledException', ended)
+    unhandledException: () => server.events.on('unhandledException', ended),
   }
   const events = server.events
   const removeAll = events.removeAllListeners.bind(events)
   events.removeAllListeners = (...args: Parameters<typeof removeAll>) => {
     removeAll(...args)
-    open.clear()
-    attach()
+    const [type] = args
+    for (const [name, attach] of Object.entries(listeners)) if (type === undefined || type === name) attach()
   }
-  attach()
+  for (const attach of Object.values(listeners)) attach()
   return {
+    /** How many requests are open now. */
+    open: () => open.size,
     /**
      * Waits up to `ms` (real time) for every open request to be answered, and returns
      * those still open, then forgets them: a handler that never answers is the test's
@@ -54,4 +56,12 @@ export function trackInFlight(server: SetupServer) {
       return left
     },
   }
+}
+
+let shared: ReturnType<typeof trackInFlight> | undefined
+
+/** The one tracker on `server` that the setup waits on after each test. */
+export function sharedInFlight(server: SetupServer): ReturnType<typeof trackInFlight> {
+  shared ??= trackInFlight(server)
+  return shared
 }

@@ -61,6 +61,8 @@ export function LibraryUpgrade() {
   // A removal's re-list that failed: the removed checkout may still be listed, so say so,
   // until the list is read again (#3839): what was on screen when it failed. A later read
   // that lands, a realtime refresh or the next removal's, replaces that and the alert goes.
+  // This leans on `useAsync`: a failed background read keeps `data`'s reference, and one
+  // that lands sets a new one (a change there would stick or drop this alert).
   const [relistFailedOn, setRelistFailedOn] = useState<typeof libraries.data | null>(null)
   const shownLibraries = useRef(libraries.data)
   useEffect(() => {

@@ -9,7 +9,7 @@ import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
 import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
 import { resending } from './src/test/resend'
-import { trackInFlight } from './src/test/inFlight'
+import { sharedInFlight } from './src/test/inFlight'
 
 // A find*/waitFor re-runs its query on every DOM change, and by default each miss
 // builds its error with prettyDOM of the whole document: on a page of ~1000 elements
@@ -41,7 +41,7 @@ getComputedStyle(document.documentElement)
 let mswFetch: typeof fetch | undefined
 /** How long a test's requests still in flight are waited for once it ends (#3243). */
 const IN_FLIGHT_WAIT_MS = 500
-const inFlight = trackInFlight(server)
+const inFlight = sharedInFlight(server)
 
 /** `line` on stderr with the test it is about, as files run in parallel. */
 function report(line: string) {
