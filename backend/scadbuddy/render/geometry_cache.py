@@ -8,8 +8,9 @@ anything the program computes, and only rendering it tells, so it keeps only the
 piece cache.
 
 `geometry_key` hashes the scene's objects with each colour replaced by its *class*,
-the place it first appears in the scene (`scene_classes`), and the ``model.scad`` they
-compile to, classed the same way (so a change to `compile_scene` is another key), with
+the place it first appears in the scene (`scene_classes`), and the ``model.scad`` that
+is rendered, classed the same way (so the same scene compiled by another `compile_scene`
+is another key), with
 the meshes' and paint codes' contents, the template file, the libraries and the
 parameters. Recolouring a
 part is a scene edit, a new revision and a new piece key, but the same geometry key
@@ -41,7 +42,6 @@ from pydantic import ValidationError
 
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.library.libraries import ModelLibrary
-from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Add,
@@ -60,8 +60,8 @@ from scadbuddy.render.split import ColourPart, Paint, split_by_material
 
 #: Part of every key: bump it when what a geometry key promises changes, or when what a
 #: row holds does (`RenderMainResult`, a piece's files), so no older row is read under
-#: the new meaning. A change to what `compile_scene` writes needs no bump: the compiled
-#: source is in the key (#3448).
+#: the new meaning. A change to what `compile_scene` writes needs no bump: the source
+#: rendered is in the key (#3448).
 GEOMETRY_VERSION = 5
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
 #: A colour as `compile_scene` writes it, around each piece. A custom op's own
@@ -126,16 +126,17 @@ def _classed(scene: Scene, classes: Sequence[str]) -> list[dict[str, Any]]:
     return objects
 
 
-def _classed_source(scene: Scene, classes: Sequence[str]) -> str:
-    """The ``model.scad`` the scene compiles to (`mesh_scene` checked that it is the one
-    on disk) with each class's ``color("#…")`` its class's index: the compiler's output,
-    whatever the colours."""
+def _classed_source(source: str, classes: Sequence[str]) -> str:
+    """``source``, the ``model.scad`` that is rendered, with each class's ``color("#…")``
+    its class's index. The file on disk, not what `compile_scene` would write now: it was
+    written by whichever compiler last compiled the scene, and nothing compiles it again
+    on a deploy (#3448)."""
 
     def classed(match: re.Match[str]) -> str:
         colour = match.group(1)
         return f"color({classes.index(colour)})" if colour in classes else match.group(0)
 
-    return _COLOUR_CALL.sub(classed, compile_scene(scene))
+    return _COLOUR_CALL.sub(classed, source)
 
 
 def _file_digests(root: Path, scene: Scene) -> dict[str, str]:
@@ -163,7 +164,7 @@ def geometry_key(
             slug,
             file,
             objects,
-            _classed_source(scene, classes),
+            _classed_source((root / file).read_text(encoding="utf-8"), classes),
             _file_digests(root, scene),
             [library.model_dump(mode="json") for library in libraries],
             dict(params),

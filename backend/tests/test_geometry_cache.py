@@ -82,6 +82,13 @@ def _write_model(root: Path, scene: Scene) -> None:
 
 
 def _key(root: Path, scene: Scene, **params: ParamValue) -> str:
+    """``scene``'s key with its ``model.scad`` written, as `mesh_scene` admits only a
+    scene whose source is on disk."""
+    _write_model(root, scene)
+    return _key_on_disk(root, scene, **params)
+
+
+def _key_on_disk(root: Path, scene: Scene, **params: ParamValue) -> str:
     return geometry_key("demo", "model.scad", root, scene, [], params)
 
 
@@ -174,20 +181,29 @@ def test_a_geometry_change_is_another_geometry_key(tmp_path: Path) -> None:
     assert base != _key(tmp_path, _scene())
 
 
-def test_a_compiler_change_is_another_geometry_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#3448: an unchanged scene that compiles to other geometry after a deploy must not
-    reuse the meshes the old compiler built; colours alone still share the key."""
-    _write_model(tmp_path, _scene())
-    base = _key(tmp_path, _scene())
-    monkeypatch.setattr(
-        geometry_cache,
-        "compile_scene",
-        lambda scene: compile_scene(scene).replace("{", "{ union() {"),
-    )
-    assert _key(tmp_path, _scene()) != base
-    assert _key(tmp_path, _scene()) == _key(tmp_path, _scene("#0000FF", "#ABCDEF"))
+def test_a_compiler_change_is_another_geometry_key(tmp_path: Path) -> None:
+    """#3448: a model compiled before a deploy keeps the old compiler's ``model.scad``
+    (nothing compiles it again), and the same scene compiled after it renders the new
+    one: the two must not share meshes. The key classes the source on disk, so colours
+    alone still share it."""
+
+    def compiled_by_the_old_compiler(root: Path, body: str, trim: str) -> Scene:
+        """The scene as an older `compile_scene`, which wrapped each piece in a union,
+        left it: its ``model.scad`` and the hash it recorded."""
+        _write_model(root, _scene(body, trim))
+        old = compile_scene(_scene(body, trim)).replace("{", "{ union() {")
+        (root / "model.scad").write_text(old, encoding="utf-8")
+        scene = _scene(body, trim).model_copy(update={"generated_sha256": text_sha256(old)})
+        (root / SCENE_NAME).write_text(dump_scene(scene), encoding="utf-8")
+        assert mesh_scene(root, "model.scad") == scene
+        return scene
+
+    before, after, recoloured = tmp_path / "before", tmp_path / "after", tmp_path / "recoloured"
+    old = compiled_by_the_old_compiler(before, "#FF0000", "#00FF00")
+    _write_model(after, _scene())
+    assert _key_on_disk(before, old) != _key(after, _scene())
+    again = compiled_by_the_old_compiler(recoloured, "#0000FF", "#ABCDEF")
+    assert _key_on_disk(before, old) == _key_on_disk(recoloured, again)
 
 
 def test_only_a_mesh_models_compiled_scene_has_a_scene(tmp_path: Path) -> None:

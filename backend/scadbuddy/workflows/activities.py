@@ -584,13 +584,20 @@ class RenderActivities:
             return None
         try:
             layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
-        except (OSError, ValueError) as error:
+        except (FileNotFoundError, ValueError) as error:
             # As unreusable: every retry would read the same file (#3449).
             logger.warning(
                 "the geometry's source layout is unreadable; rendering the piece",
                 extra={"piece_key": req.piece_key, "error": type(error).__name__},
             )
             layout = None
+        except OSError as error:
+            # Perhaps the volume's blip: a miss for this render only, the row kept.
+            logger.warning(
+                "could not read the geometry's source layout; rendering the piece",
+                extra={"piece_key": req.piece_key, "error": type(error).__name__},
+            )
+            return None
         if layout is None or not reusable(layout, row.colours):
             # Forgotten, or every later recolour of this geometry fetches it again only
             # to refuse it again (#3449). `finish_piece` records no such row now; one an

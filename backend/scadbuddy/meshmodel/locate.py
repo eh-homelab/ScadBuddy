@@ -50,6 +50,8 @@ def _nearness(
     )
     distance = point_triangle_distance(np.tile(world, (len(triangles), 1)), triangles)
     # A mirrored placement winds its triangles the other way: the number turns negative.
+    # A point on the surface is about one half, either side of it by rounding, and about 0
+    # from the nearest triangle: its nearness is about 0 whichever way it falls.
     inside = _winding_number(world, triangles) * np.sign(np.linalg.det(m)) > 0.5
     return 0.0 if inside else float(distance.min())
 
