@@ -345,7 +345,7 @@ def test_a_failed_build_is_answered_from_memory_for_a_while(
 
     clock = [1000.0]
     monkeypatch.setattr(native, "_build", broken)
-    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(native, "_now", lambda: clock[0])
     for _ in range(2):
         with pytest.raises(ProfileImageError):
             native_catalogue(Profiles(root))

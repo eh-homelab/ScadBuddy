@@ -70,6 +70,9 @@ _lock = threading.Lock()
 
 #: How long a failed build is answered from memory before it is tried again.
 FAILED_RETRY = 60.0
+#: The clock :data:`FAILED_RETRY` is measured on; the catalogue's own, so a test can
+#: move it without moving every other clock in the process.
+_now = time.monotonic
 
 
 def native_catalogue(profiles: Profiles) -> _Catalogue:
@@ -84,12 +87,12 @@ def native_catalogue(profiles: Profiles) -> _Catalogue:
         if built is not None:
             return built
         failed = _failed.get(key)
-        if failed is not None and time.monotonic() - failed[0] < FAILED_RETRY:
+        if failed is not None and _now() - failed[0] < FAILED_RETRY:
             raise ProfileImageError(str(failed[1]))
         try:
             built = _built[key] = _build(profiles)
         except ProfileImageError as error:
-            _failed[key] = (time.monotonic(), error)
+            _failed[key] = (_now(), error)
             raise
         _failed.pop(key, None)
     return built
