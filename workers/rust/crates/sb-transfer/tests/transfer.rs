@@ -253,3 +253,11 @@ fn debug_never_prints_the_signature_or_a_header_value() {
         assert!(!shown.contains(leaked), "{leaked} leaked: {shown}");
     }
 }
+
+#[test]
+fn an_invalid_header_says_it_is_one() {
+    assert_eq!(
+        TransferError::InvalidHeader("invalid header name \"a b\"".into()).to_string(),
+        "invalid transfer header: invalid header name \"a b\""
+    );
+}
