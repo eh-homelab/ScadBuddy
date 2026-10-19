@@ -13,8 +13,8 @@ from typing import cast
 
 import pytest
 from temporalio import workflow
-from temporalio.api.enums.v1 import EventType
-from temporalio.api.failure.v1 import ApplicationFailureInfo, Failure
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
+from temporalio.api.failure.v1 import ApplicationFailureInfo, Failure, TimeoutFailureInfo
 from temporalio.api.history.v1 import (
     History,
     HistoryEvent,
@@ -166,6 +166,38 @@ async def test_a_deferral_under_a_page_of_signals_is_still_found() -> None:
     client = SimpleNamespace(namespace="default", workflow_service=service)
     assert await deferred_kind(cast(Client, client), "op-x")
     assert service.tokens == [b"", b"1"]
+
+
+async def test_another_failure_is_no_deferral_and_says_what_it_was(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failure that is not a deferral answers no, and the warning names its kind and
+    cause (#4320), a cause newer than the protos included: its number, not a failed read."""
+    timed_out = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(timeout_failure_info=TimeoutFailureInfo()),
+            cause=WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_STICKY_TASK_QUEUE,
+        ),
+    )
+    newer = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(application_failure_info=ApplicationFailureInfo(type="Other")),
+            cause=cast(WorkflowTaskFailedCause.ValueType, 999),
+        ),
+    )
+    caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
+    for event in (timed_out, newer):
+        client = SimpleNamespace(namespace="default", workflow_service=_Pages([event]))
+        assert not await deferred_kind(cast(Client, client), "op-x")
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "command op-x: its newest workflow task failure is timeout_failure_info '', cause"
+        " WORKFLOW_TASK_FAILED_CAUSE_RESET_STICKY_TASK_QUEUE, not a deferral",
+        "command op-x: its newest workflow task failure is application_failure_info"
+        " 'Other', cause 999, not a deferral",
+    ]
 
 
 async def test_a_history_of_only_signals_is_no_deferral() -> None:
