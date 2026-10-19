@@ -51,6 +51,11 @@ LEGACY_GRACE = timedelta(seconds=30)
 #: How old an unsettled row must be before a settle pass asks about its run: Visibility,
 #: which `open_runs` reads, can list a run a moment after it started.
 VISIBILITY_GRACE = timedelta(seconds=30)
+#: How long a `project` activity's statement waits for a pool connection: below its
+#: `start_to_close` (`workflows.pipelines.PROJECT_TIMEOUT`, 10 s; a test holds them in
+#: order), so an attempt that cannot get one fails and is retried rather than lingering
+#: past its timeout, holding a worker thread and then a connection the retry also needs.
+PROJECT_POOL_TIMEOUT = 5.0
 #: The executions whose rows a settle pass leaves alone: every open render run, of
 #: this build (`render-<render_key>`) or an older one (`render-<job id>`).
 OPEN_RENDERS = "WorkflowType = 'TemplatePipeline' AND ExecutionStatus = 'Running'"
@@ -450,7 +455,7 @@ class JobProjection:
     # -- the workflow's writes (each guarded by the state it expects) -----------
 
     def mark_started(self, job_id: str) -> Job | None:
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection(timeout=PROJECT_POOL_TIMEOUT) as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE render_jobs SET state = 'running', started_at = now(),"
                 " attempts = attempts + 1, workflow_id = coalesce(workflow_id, %s)"
@@ -462,7 +467,7 @@ class JobProjection:
         return _job(row) if row is not None else None
 
     def set_steps(self, job_id: str, steps: list[StepInfo]) -> None:
-        with self._pool.connection() as conn:
+        with self._pool.connection(timeout=PROJECT_POOL_TIMEOUT) as conn:
             conn.execute(
                 "UPDATE render_jobs SET steps = %s"
                 " WHERE id = %s AND state IN ('pending', 'running')",
@@ -476,7 +481,7 @@ class JobProjection:
         error only where the API stored none -- without a second event. A done or
         failed job is left alone."""
         assert job.state in ("done", "failed", "cancelled")
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection(timeout=PROJECT_POOL_TIMEOUT) as conn, conn.transaction():
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, finished_at = %s, log_tail = %s,"
                 " error = %s, result = %s, diagnostics = %s, diagnostics_dropped = %s,"
@@ -518,8 +523,10 @@ class JobProjection:
 
     # -- reads ------------------------------------------------------------------
 
-    def read(self, job_id: str) -> Job:
-        with self._pool.connection() as conn:
+    def read(self, job_id: str, *, pool_timeout: float | None = None) -> Job:
+        """``pool_timeout``: the `project` activity's (`PROJECT_POOL_TIMEOUT`); the API's
+        reads keep the pool's own wait."""
+        with self._pool.connection(timeout=pool_timeout) as conn:
             row = conn.execute("SELECT * FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
         if row is None:
             raise JobNotFoundError(job_id)

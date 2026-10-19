@@ -26,8 +26,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.workflows.print_activities import raised_as
-from scadbuddy.workflows.printing import HEARTBEAT, PLAN_TIMEOUT
 from scadbuddy.workflows.print_models import FAILED, SliceRunInput
+from scadbuddy.workflows.printing import HEARTBEAT, PLAN_TIMEOUT
 from scadbuddy.workflows.slicing_activities import WAITING, RunActivities
 from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared

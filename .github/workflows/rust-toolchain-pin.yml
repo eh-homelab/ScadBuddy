@@ -1,0 +1,26 @@
+# dtolnay/rust-toolchain has no release tags, so ci.yml pins it by commit and
+# Dependabot never moves that pin (#4099). This compares it with the action's
+# master weekly; a failure is the reminder to move it in a reviewed PR, as
+# agent-durable-pin.yml is for its pin.
+name: rust-toolchain pin
+
+on:
+  schedule:
+    - cron: "29 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Compare the pin with master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/rust-toolchain-pin.sh --check

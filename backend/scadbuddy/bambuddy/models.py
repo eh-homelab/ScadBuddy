@@ -861,6 +861,10 @@ class Spool(BambuddyModel):
     #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
     #: nobody entered a price (#785).
     cost_per_kg: float | None = None
+    #: The RFID tag's UID and the spool's UUID, as the AMS read them (#3818); all zeros,
+    #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
+    tag_uid: str | None = None
+    tray_uuid: str | None = None
 
     @property
     def remaining_g(self) -> float:
@@ -896,6 +900,10 @@ class SpoolAssignment(BambuddyModel):
     ams_id: int
     tray_id: int
     spool: Spool | None = None
+    #: What Bambuddy saw in the tray when it assigned the spool (#3818):
+    #: ``tests/bambuddy/recordings/inventory-assignments.json``.
+    fingerprint_type: str | None = None
+    fingerprint_color: str | None = None
 
 
 class FilamentGroup(BambuddyModel):

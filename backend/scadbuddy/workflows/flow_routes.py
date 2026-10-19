@@ -142,19 +142,26 @@ class FlowRoutes:
     @activity.defn(name=FLOW_ROUTE_SEND)
     async def send(self, call: RouteSend) -> RouteAnswer:
         """One command, re-sent with its key until ScadBuddy itself answers. The
-        activity's deadline bounds the re-sends; its retry sends the same key."""
+        activity's deadline bounds the re-sends; its retry sends the same key. It beats
+        throughout, so an attempt that was never delivered is retried at the workflow's
+        heartbeat timeout rather than at that deadline (#4199)."""
         api = self._api()
         while True:
             try:
-                response = await api.request(
-                    call.method, call.path, json=call.body, headers={"Idempotency-Key": call.key}
+                response = await _heartbeating(
+                    api.request(
+                        call.method,
+                        call.path,
+                        json=call.body,
+                        headers={"Idempotency-Key": call.key},
+                    )
                 )
             except httpx.TransportError:
-                await asyncio.sleep(RESEND_S)
+                await _heartbeating(asyncio.sleep(RESEND_S))
                 continue
             if _unanswered(response):
                 after = retry_after_s(response.headers.get("Retry-After", ""))
-                await asyncio.sleep(max(RESEND_S, after))
+                await _heartbeating(asyncio.sleep(max(RESEND_S, after)))
                 continue
             if response.status_code >= 400:
                 raise _refused(response)

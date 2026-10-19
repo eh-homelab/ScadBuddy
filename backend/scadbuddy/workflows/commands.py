@@ -14,16 +14,22 @@ that holds itself open for a window (a print without a ``request_id``, §5.2).
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.enums.v1 import EventType
 from temporalio.api.errordetails.v1 import (
     MultiOperationExecutionFailure,
     NamespaceNotFoundFailure,
     WorkflowNotReadyFailure,
 )
-from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
+from temporalio.api.workflowservice.v1 import (
+    DescribeNamespaceRequest,
+    GetWorkflowExecutionHistoryReverseRequest,
+)
 from temporalio.client import (
     Client,
     WithStartWorkflowOperation,
@@ -37,6 +43,8 @@ from temporalio.common import (
 )
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
+
+logger = logging.getLogger(__name__)
 
 #: Below Envoy's 15 s route timeout (§1), so no command holds a request open past it.
 COMMAND_ANSWER_DEADLINE = timedelta(seconds=10)
@@ -135,9 +143,7 @@ def workflow_not_ready(error: RPCError) -> bool:
     """Temporal refused an Update because the execution's workflow task is failing
     (`WorkflowNotReadyFailure`, "Workflow Task in failed state"), on its own or inside an
     update-with-start's `MultiOperationExecutionFailure`, whose details the SDK keeps on
-    the error it raises. An ``Operation`` whose kind its build does not register fails
-    its task until a build that has it is current (#4139): the execution exists and
-    goes on, so this is still accepting, not a refusal."""
+    the error it raises. Whether it is still accepting is `deferred_kind`'s to say."""
     for detail in error.grpc_status.details:
         if detail.Is(WorkflowNotReadyFailure.DESCRIPTOR):
             return True
@@ -148,6 +154,58 @@ def workflow_not_ready(error: RPCError) -> bool:
             for inner in status.details
         ):
             return True
+    return False
+
+
+#: The failure type an ``Operation`` fails its workflow task with to defer a kind its
+#: build does not register (operation.py `UnregisteredKindError`, #4139).
+DEFERRED_KIND = "UnregisteredKindError"
+#: How many of an execution's newest events `deferred_kind` reads per page: a failing
+#: task adds only its transient scheduled and started events above its failure, but
+#: signals that arrive meanwhile stack up there too, so it reads on, page by page.
+NOT_READY_EVENTS = 20
+#: The most pages `deferred_kind` reads before it answers no (all within `DESCRIBE_SECONDS`).
+NOT_READY_PAGES = 5
+
+
+async def deferred_kind(client: Client, id: str) -> bool:
+    """Whether ``id``'s failing workflow task is an ``Operation`` deferring a kind its build
+    does not register (#4139): the newest workflow task failure since its last completed
+    task is `DEFERRED_KIND`. That task goes on once a build with the kind is current, so
+    the command is still accepting. A task failing for any other reason (nondeterminism,
+    a bug in workflow code) waits for nothing (#4156), nor does one whose history cannot
+    be read within `DESCRIBE_SECONDS`. Never raises.
+
+    The limit: Temporal records only a task's first failure, and the SDK lets later
+    attempts time out rather than report them. An ``Operation`` that deferred and then
+    fails on the new build for another reason still reads as a deferral, and is answered
+    still accepting until it completes a task or is terminated."""
+    token = b""
+    try:
+        async with asyncio.timeout(DESCRIBE_SECONDS):
+            for _ in range(NOT_READY_PAGES):
+                page = await client.workflow_service.get_workflow_execution_history_reverse(
+                    GetWorkflowExecutionHistoryReverseRequest(
+                        namespace=client.namespace,
+                        execution=WorkflowExecution(workflow_id=id),
+                        maximum_page_size=NOT_READY_EVENTS,
+                        next_page_token=token,
+                    ),
+                    timeout=timedelta(seconds=DESCRIBE_SECONDS),
+                )
+                for event in page.history.events:
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+                        return False
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+                        failure = event.workflow_task_failed_event_attributes.failure
+                        return failure.application_failure_info.type == DEFERRED_KIND
+                token = page.next_page_token
+                if not token:
+                    return False
+    except Exception as e:
+        logger.debug("command %s: could not read its history to tell a deferral: %r", id, e)
+        return False
+    logger.debug("command %s: no workflow task event in its newest %d pages", id, NOT_READY_PAGES)
     return False
 
 
@@ -286,8 +344,12 @@ async def start_command[T](
             # USE_EXISTING never misses an execution, so it closed under the Update.
             raise CommandClosingError(id) from error
         if isinstance(error, RPCError) and workflow_not_ready(error):
-            # The execution exists, and its task waits for a build with its kind (#4139).
-            raise CommandStillAcceptingError(id) from error
+            if await deferred_kind(client, id):
+                # The execution exists, and its task waits for a build with its kind (#4139).
+                raise CommandStillAcceptingError(id) from error
+            # Stuck, not waiting (#4156): refused as before, and said here, since only
+            # the execution's history says why.
+            logger.warning("command %s: its workflow task is failing, and not to defer a kind", id)
         if (failure := temporal_failure(error, id)) is None:
             raise
         raise failure from error
