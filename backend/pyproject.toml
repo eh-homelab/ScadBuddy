@@ -37,7 +37,8 @@ dependencies = [
     # Imported directly for the error an unresolvable `$ref` raises (flow_tools `_answer`).
     "referencing>=0.28",
     "regex>=2024.11.6",
-    "aiobotocore>=2.21,<3",
+    "aiobotocore>=2.21,<4",
+    "aiomqtt>=2.3,<3",
 ]
 
 [build-system]
@@ -68,8 +69,7 @@ dev = [
     "types-jsonschema>=4.26.0.20261006",
     "types-regex>=2026.9.29.20261005",
     "moto[server]>=5.1",
-    "types-aiobotocore[s3]>=2.21,<3",
-    "aiomqtt>=2.3,<3",
+    "types-aiobotocore[s3]>=2.21,<4",
     "pyftpdlib[ssl]>=2.2",
 ]
 
@@ -108,6 +108,7 @@ markers = [
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
+    "requires_printer: needs SCADBUDDY_TEST_PRINTER_HOST, _SERIAL and _ACCESS_CODE naming a real Bambu printer on the LAN",
     "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose; it blinds the guard to every fallback in the test, so inject an expected type (ApiError, psycopg.OperationalError) instead when that proves the same point",
     "requires_fixtures: needs the Git LFS files under test-fixtures/ (git lfs pull), or SCADBUDDY_TEST_FIXTURES naming where they are",
     "requires_slicer_profiles: needs Bambu Studio's BBL profiles under SCADBUDDY_SLICER_PROFILES_DIR (the app and test images ship them at /opt/slicer-profiles)",
