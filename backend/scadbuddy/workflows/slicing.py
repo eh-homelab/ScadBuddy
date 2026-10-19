@@ -58,10 +58,9 @@ with workflow.unsafe.imports_passed_through():
 
 #: One ``slice_plate`` attempt's start-to-close.
 SLICE_TIMEOUT = timedelta(minutes=30)
-#: Spec §5.2; the worker beats every 10 s.
-SLICE_HEARTBEAT = timedelta(seconds=60)
 #: "Retries three times" (spec §5.5, Ruling C4): a worker shutdown and a heartbeat
-#: timeout take attempts too, and a shutdown's retry starts about at once.
+#: timeout take attempts too. An attempt the worker ends as cancelled with no cancel
+#: asked of it is not taken by the server, so it ends at the heartbeat timeout (#4403).
 SLICE_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=4)
 #: The prepare downloads a whole copy from Bambuddy: its upload timeout (180 s,
 #: ``DEFAULT_UPLOAD_TIMEOUT``) and a margin, as ``printing.py`` ``PLAN_TIMEOUT``.
@@ -242,7 +241,7 @@ class SliceWorkflow:
                     task_queue=input.slicer_queue,
                     schedule_to_start_timeout=input.slicer_wait,
                     start_to_close_timeout=SLICE_TIMEOUT,
-                    heartbeat_timeout=SLICE_HEARTBEAT,
+                    heartbeat_timeout=input.slice_heartbeat,
                     retry_policy=SLICE_RETRY,
                     result_type=SlicePlateOutput,
                 )
