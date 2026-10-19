@@ -718,6 +718,24 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(await sweepOf(m).sweep()).toEqual([])
   }, 60_000)
 
+  it('resets a parked session whose workflow is gone, and leaves one whose workflow holds its turn (#4133)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
+    const live = (await m.start(browser, { origin: 'chat', prompt: 'still going' })).session
+    // Both parked on a call: one asking for input, one for an approval.
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_input' WHERE id = ${session.id}`
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${live.id}`
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('gone')
+
+    expect(await sweepOf(m).sweep()).toEqual([session.id])
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/workflow has ended/) },
+      { type: 'session.status', status: 'idle' },
+    ])
+    expect(await status(live.id)).toBe('waiting_approval')
+  }, 60_000)
+
   it('resets a running session whose workflow was never started (not found), only past the grace period', async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
