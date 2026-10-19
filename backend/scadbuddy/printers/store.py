@@ -18,14 +18,18 @@ a table that names a printer adds itself there (`tests/printers/test_store.py` c
 that every foreign key to ``printers`` is listed), in one of two forms:
 
 - a `PrinterReference` (table, column), for a plain column or one row per printer;
-- a `RepointHook`, ``hook(conn, merged, into)``, for a table whose key holds more than
-  the printer and whose conflicts only it can settle. It runs on the merge's connection,
-  inside its transaction, while both rows still exist; raising undoes the merge. This is
-  how #4180's ``tray_spool_links`` (primary key ``(printer_id, ams_id, tray_id)``)
-  registers itself: its ``spools.store.repoint_tray_links``, in which ``into``'s link
-  wins, added here once both have merged (#4190). Task 8's activity attribution joins
-  the same way.
-"""
+- a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into)``,
+  for a table whose key holds more than the printer and whose conflicts only it can
+  settle. It runs on the merge's connection, inside its transaction, while both rows
+  still exist; raising undoes the merge. ``tray_spool_links`` (#4180, primary key
+  ``(printer_id, ams_id, tray_id)``) is registered this way with
+  ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190); Task 8's
+  activity attribution joins the same way. A bare hook is accepted too, for a reference
+  with no column to name.
+
+A table that names a printer also carries ``REFERENCES printers (id) ON DELETE
+CASCADE`` (``tray_spool_links``: 20261019T0304Z), so a delete takes its rows with it
+and the test above sees it."""
 
 from __future__ import annotations
 
@@ -103,24 +107,36 @@ class SerialUnknownError(ValueError):
         self.printer_id = printer_id
 
 
+#: ``hook(conn, merged, into)``: repoint one table's references from ``merged`` to
+#: ``into`` inside the merge's transaction (module docstring).
+RepointHook = Callable[[Connection[DictRow], str, str], None]
+
+
 @dataclass(frozen=True)
 class PrinterReference:
     """A column naming a printer by its registry id. ``unique``: one row per printer
-    (the gone row's is dropped when the kept row has one)."""
+    (the gone row's is dropped when the kept row has one). ``repoint``: the table's own
+    hook, called instead of the generic update."""
 
     table: str
     column: str
     unique: bool = False
+    repoint: RepointHook | None = None
 
 
-#: ``hook(conn, merged, into)``: repoint one table's references from ``merged`` to
-#: ``into`` inside the merge's transaction (module docstring).
-RepointHook = Callable[[Connection[DictRow], str, str], None]
+def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # Imported here: `spools` is a feature of its own, and the registry needs it only
+    # while merging.
+    from scadbuddy.spools.store import repoint_tray_links
+
+    repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
+
 
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
+    PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),
 )
 
 
@@ -248,6 +264,9 @@ class PrinterStore:
         for ref in PRINTER_REFERENCES:
             if not isinstance(ref, PrinterReference):
                 ref(conn, gone, kept)
+                continue
+            if ref.repoint is not None:
+                ref.repoint(conn, gone, kept)
                 continue
             if ref.unique:
                 conn.execute(
