@@ -905,7 +905,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   references for Dependabot and `openscad-bump.yml` (BuildKit falls back to Docker Hub
   for an image the mirror lacks; the pinned digests matched on both on 2026-10-19,
   `docker buildx imagetools inspect`). `lint-buildx-mirror.sh` checks both. The
-  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`.
+  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`;
+  a service container has no such fallback, so a tag the mirror lacks fails the job.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a

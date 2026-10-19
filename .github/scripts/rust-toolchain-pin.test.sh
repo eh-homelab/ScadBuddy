@@ -34,12 +34,13 @@ fi
 PATH="$work/bin:$PATH" "$here/rust-toolchain-pin.sh" "$work/ci.yml" >/dev/null
 
 pinned_to "$master"
-printf 'jobs:\n  a:\n    steps:\n      - uses: dtolnay/rust-toolchain@%s\n  b:\n    steps:\n      - uses: dtolnay/rust-toolchain@%s\n' \
+# A comment naming the action with a short ref is not a pin (line 2).
+printf 'jobs:\n  # dtolnay/rust-toolchain@master is the ref the weekly check reads\n  a:\n    steps:\n      - uses: dtolnay/rust-toolchain@%s\n  b:\n    steps:\n      - uses: dtolnay/rust-toolchain@%s\n' \
   "$master" 3333333333333333333333333333333333333333 >"$work/other.yml"
 if out="$(PATH="$work/bin:$PATH" "$here/rust-toolchain-pin.sh" --check "$work/ci.yml" "$work/other.yml" 2>&1)"; then
   echo "FAIL: a stale second pin passed the check"; exit 1
 fi
-if ! grep -qF "$work/other.yml:7:" <<<"$out" || grep -qF "$work/other.yml:4: dtolnay" <<<"$out" \
+if ! grep -qF "$work/other.yml:8:" <<<"$out" || grep -qF "$work/other.yml:5: dtolnay" <<<"$out" \
   || grep -qF "$work/ci.yml:4: dtolnay" <<<"$out"; then
   echo "FAIL: the check did not name only the stale second pin:"; echo "$out"; exit 1
 fi
