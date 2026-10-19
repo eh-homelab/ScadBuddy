@@ -128,6 +128,32 @@ it('hears its topics again after its effects are torn down and replayed in place
   await waitFor(() => expect(resolvers.length).toBeGreaterThan(before))
 })
 
+// #4291 review — the same replay, with the read in flight answering only once the view
+// is shown again: the wait from before the teardown starts nothing beside the replay's.
+it('starts no read for a wait left from before its effects were replayed', async () => {
+  const { load, resolvers } = deferred<number>()
+  let mode: 'visible' | 'hidden' = 'visible'
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(Activity, { mode, children })
+  const { rerender } = renderHook(() => useAsync(load, [], ['models']), { wrapper })
+  await act(async () => resolvers[0]?.(0))
+  await act(async () => signals.at(-1)?.('resync'))
+  expect(resolvers).toHaveLength(2)
+  // Past the spacing, so this signal's wait is on the read in flight, not on a timer
+  // the teardown clears.
+  await act(() => new Promise((r) => setTimeout(r, SIGNAL_READ_MIN_MS + 50)))
+  await act(async () => signals.at(-1)?.('resync'))
+  mode = 'hidden'
+  rerender()
+  mode = 'visible'
+  rerender()
+  const before = resolvers.length
+  await act(async () => resolvers[1]?.(1))
+  expect(resolvers).toHaveLength(before)
+  // The replay's own signal reads once.
+  await act(async () => signals.at(-1)?.('resync'))
+  await waitFor(() => expect(resolvers).toHaveLength(before + 1))
+})
+
 it('keeps the data on screen, not loading, while a refresh is in flight', async () => {
   const { load, resolvers } = deferred<string>()
   const { result } = renderHook(() => useAsync(load, [], ['m']))

@@ -198,25 +198,34 @@ export function useAsync<T>(
   }, [])
 
   /**
-   * #4149 — a topic's signal reads through here, never straight through `refresh`: at
-   * most one such read in flight and one waiting behind it, which every signal meanwhile
-   * joins, and each started at least `SIGNAL_READ_MIN_MS` after the last. However often a
-   * topic is signalled (or a bug signals it), this hook reads it a few times a second at most.
+   * #4149 — a topic's signal reads through here, never straight through `refresh`: one
+   * such read in flight and one waiting behind it, which every signal meanwhile joins,
+   * and each started at least `SIGNAL_READ_MIN_MS` after the last. However often a topic
+   * is signalled (or a bug signals it), this hook reads it a few times a second at most.
+   * A read in flight that stalls is waited on for `SIGNAL_READ_STALL_MS` only (#4165):
+   * then the next starts beside it, so a stalled fetch adds one read per that interval.
    */
-  const signals = useRef<{ waiting: boolean; last: number; timer?: ReturnType<typeof setTimeout> }>({
-    waiting: false,
-    last: -Infinity,
-  })
+  const signals = useRef<{
+    waiting: boolean
+    last: number
+    timer?: ReturnType<typeof setTimeout>
+    stalled?: ReturnType<typeof setTimeout>
+    /** Bumped when the effects are torn down: a wait from before that ends doing nothing. */
+    generation: number
+  }>({ waiting: false, last: -Infinity, generation: 0 })
   const signalled = useCallback(() => {
     const state = signals.current
     if (state.waiting) return
     state.waiting = true
+    const mine = state.generation
     const start = () => {
       state.timer = undefined
-      let stalled: ReturnType<typeof setTimeout> | undefined
-      const stall = new Promise<void>((resolve) => (stalled = setTimeout(resolve, SIGNAL_READ_STALL_MS)))
+      const stall = new Promise<void>((resolve) => (state.stalled = setTimeout(resolve, SIGNAL_READ_STALL_MS)))
       void Promise.race([reading.current, stall]).then(() => {
-        clearTimeout(stalled)
+        // Torn down and replayed in place meanwhile: that replay's own signals read.
+        if (state.generation !== mine) return
+        clearTimeout(state.stalled)
+        state.stalled = undefined
         if (!mounted.current) return
         state.waiting = false
         state.last = Date.now()
@@ -231,9 +240,13 @@ export function useAsync<T>(
     const state = signals.current
     return () => {
       clearTimeout(state.timer)
-      // A read left waiting here never runs (unmounted): an effect replayed in place
-      // (StrictMode, Fast Refresh) must hear its topics again.
+      clearTimeout(state.stalled)
+      // A read left waiting here never runs: an effect replayed in place (StrictMode,
+      // Fast Refresh, <Activity>) must hear its topics again, and a wait from before
+      // must not start a read beside the replay's own.
+      state.generation++
       state.timer = undefined
+      state.stalled = undefined
       state.waiting = false
       state.last = -Infinity
     }
