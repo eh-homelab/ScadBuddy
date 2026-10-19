@@ -63,7 +63,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.print_library.copies import ensure_native_copy
+from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, ensure_native_copy
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies, reads_of
 from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
@@ -217,6 +217,13 @@ class PrintSource(Protocol):
         """After a print into a project: what the next Generate into it lays its file
         out for (#317), its nozzle plan too (#2166)."""
         ...
+
+
+def _misuse(message: str) -> ApiError:
+    """A caller's mistake the print activities reach: an `ApiError`, which they raise as
+    non-retryable (`raised_as`), so it fails the run once rather than being retried to
+    the end of the policy as a `TypeError` would (#4312 review M6)."""
+    return ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, message)
 
 
 MAX_RECORDED_SLICES = 3
@@ -406,7 +413,11 @@ class PrintPipeline:
                 if error.status == status.HTTP_404_NOT_FOUND:
                     await _forget_slice(uploads, self.subject.run_subject, sliced.id)
                 continue
-            if is_sliced(file.file_type) and file.file_hash == sliced.file_hash:
+            # A native sliced upload is named `.sliced.3mf`, which its name-derived
+            # `file_type` reads as a plain 3MF; its id is never reissued, so the recorded
+            # hash alone is the check (#4312 review I2).
+            sliced_kind = is_native_id(sliced.id) or is_sliced(file.file_type)
+            if sliced_kind and file.file_hash == sliced.file_hash:
                 return sliced.id
             logger.info(
                 "a recorded slice's id now holds another file; it is not reused",
@@ -462,7 +473,7 @@ class PrintPipeline:
                 printer_model=printer_model,
             )
         if client is None:
-            raise TypeError("a copy in Bambuddy's library needs a Bambuddy client")
+            raise _misuse("a copy in Bambuddy's library needs a Bambuddy client")
         # A project's folder replaces the one from Settings for this send, which is what
         # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload,
         # because the copy is looked up by (folder, target): a project gets a copy of its
@@ -532,10 +543,10 @@ class PrintPipeline:
                 "a native print needs ScadBuddy's own library, which does not serve here",
             )
         if project_id is not None:
-            raise TypeError("a native print is never filed in a Bambuddy project")
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, NATIVE_PROJECT_REFUSAL)
         own_id = self.file_id if isinstance(self, LibrarySource) else None
         if own_id is not None and not is_native_id(own_id):
-            raise TypeError(f"library file {own_id} is Bambuddy's: a native print has none")
+            raise _misuse(f"library file {own_id} is Bambuddy's: a native print has none")
         fetched = await PrintPipeline._fetch(self, client)
         if fetched.payload is None:
             if own_id is None:

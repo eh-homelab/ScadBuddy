@@ -225,7 +225,7 @@ async def test_a_native_sliced_upload_left_unanswered_is_taken(tmp_path: Path) -
     left, recorded, other = COPY + 30, COPY + 20, COPY + 25
 
     class Listed(_Native):
-        async def library_listing(self, *, folder_id: int | None) -> list[Any]:
+        async def per_print_files(self, folder_id: int | None) -> list[Any]:
             assert folder_id == NATIVE_ID_BASE + 3
             return [
                 SimpleNamespace(id=i, filename=name, file_size=6) for i in (recorded, other, left)

@@ -14,9 +14,11 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy import print_run
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.projects import PATH_SEPARATOR
@@ -36,6 +38,7 @@ from scadbuddy.workflows import print_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import REFUSED, CheckInput
 from tests.api.test_library_native import _native, _native_settings
+from tests.support.no_bambuddy import forbid_bambuddy
 from tests.test_print_workflow import run_input
 
 pytestmark = pytest.mark.requires_postgres
@@ -212,15 +215,25 @@ async def test_prepare_run_on_native_checks_the_folder_natively(
     assert refused.value.status == 422
 
 
+@pytest.fixture
+def configured_client(settings: Settings, s3: S3Settings) -> Iterator[TestClient]:
+    """The native library with a Bambuddy configured: what a native run must not ask."""
+    with TestClient(create_app(_native_settings(settings, s3, bambuddy_url=BAMBUDDY))) as client:
+        yield client
+
+
 def test_the_picker_on_native_lists_native_folders_and_no_projects(
-    native_client: TestClient, native: NativeLibrary
+    configured_client: TestClient, spans: InMemorySpanExporter
 ) -> None:
-    gifts = _call(native_client, native.create_folder, "Gifts", None).id
-    nested = _call(native_client, native.create_folder, "Birthdays", gifts).id
-    with respx.mock(assert_all_called=False) as router:
-        bambuddy = router.route(host="bambuddy.test").respond(500)
-        listed = native_client.get("/api/v1/print/projects", params={"native": "true"})
-        default = native_client.get(
+    """#4312 review M3: with Bambuddy configured, inside the zero-call harness."""
+    native = _native(configured_client)
+    gifts = _call(configured_client, native.create_folder, "Gifts", None).id
+    nested = _call(configured_client, native.create_folder, "Birthdays", gifts).id
+    state = getattr(configured_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert state.settings_store.load().bambuddy_url == BAMBUDDY
+    with forbid_bambuddy(spans, BAMBUDDY):
+        listed = configured_client.get("/api/v1/print/projects", params={"native": "true"})
+        default = configured_client.get(
             "/api/v1/print/projects/default",
             params={"native": "true", "library_file_id": 1_000_000_001},
         )
@@ -234,7 +247,6 @@ def test_the_picker_on_native_lists_native_folders_and_no_projects(
     ]
     assert default.status_code == 200, default.text
     assert default.json() == {"project_id": None, "reason": "none"}
-    assert not bambuddy.called
 
 
 def test_the_native_picker_on_the_bambuddy_library_is_a_conflict(client: TestClient) -> None:

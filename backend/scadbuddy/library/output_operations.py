@@ -32,6 +32,7 @@ from scadbuddy.library.outputs import MODEL_NAME, hold_parts, release_parts, req
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copies import trash_copies
 from scadbuddy.print_library.filing import file_output, trash_filed
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
@@ -234,6 +235,10 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         native = await components.get(PRINT_LIBRARY).serving_native()
         if native is not None and request["delete_inbox_copies"]:
             await trash_filed(native, output_id)
+            # Its native per-print copies and their slices too, the native run's inbox
+            # copies: they name no output, so the upload rows forgotten below are all
+            # that leads to them (#4312 review I1).
+            await trash_copies(native, state.uploads, output_id)
         await asyncio.to_thread(state.outputs.delete, output_id)
         if native is not None:
             await asyncio.to_thread(native.rows.forget_output, output_id)

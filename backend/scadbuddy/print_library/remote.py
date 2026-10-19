@@ -97,25 +97,20 @@ class RemoteLibrary:
             response = await self.http.put(url, params={"name": name})
         return Folder.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 
-    async def upload(
-        self,
-        filename: str,
-        data: BinaryIO,
-        folder_id: int | None,
-        *,
-        output_id: str | None = None,
-        filed: bool = False,
-    ) -> LibraryFile:
+    async def per_print_files(self, folder_id: int | None) -> list[LibraryListRow]:
+        params = {"per_print": "true"}
+        if folder_id is not None:
+            params["folder_id"] = str(folder_id)
+        response = await self._get(f"{self.base_url}{INTERNAL_LIBRARY}", params)
+        return _ROWS.validate_json(_answer(response, JSON_MEDIA_TYPE).content)
+
+    async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> LibraryFile:
         """``data`` uploaded as a new native file, streamed. Never retried here (a second
         PUT would be a second file): the caller finds an earlier attempt's upload by its
         bytes (`copies.left_unrecorded`), and the activity's retry policy retries."""
         params = {"filename": filename}
         if folder_id is not None:
             params["folder_id"] = str(folder_id)
-        if output_id is not None:
-            params["output_id"] = output_id
-        if filed:
-            params["filed"] = "true"
 
         async def body() -> AsyncIterator[bytes]:
             while chunk := await asyncio.to_thread(data.read, UPLOAD_CHUNK):

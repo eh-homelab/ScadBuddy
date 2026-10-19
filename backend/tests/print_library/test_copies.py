@@ -6,28 +6,35 @@ from __future__ import annotations
 
 import hashlib
 import io
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import respx
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.dispatch import SlicePlan
+from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.send import Printable, Target, _laid_out_for, ensure_uploaded, target_for
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.copies import ensure_native_copy
-from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.ids import NATIVE_ID_BASE, is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.render.plate import plate_for
 from scadbuddy.store.index import Pool
+from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.slicing_activities import SliceActivities
 from scadbuddy.workflows.slicing_models import SliceWorkflowInput
 from tests.print_library.conftest import upload
+from tests.support.no_bambuddy import forbid_bambuddy
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -208,8 +215,34 @@ async def test_target_for_with_a_model_reads_no_printers() -> None:
 
 
 async def test_target_for_without_a_client_needs_the_model() -> None:
-    with pytest.raises(TypeError):
+    """M6: a misuse an activity reaches is an `ApiError`, which the print activities
+    raise as non-retryable, never a `TypeError` retried to the end of its policy."""
+    with pytest.raises(ApiError) as raised:
         await target_for(None, StoredSettings(), printer_id=3)
+    assert raised.value.status == 500
+
+
+async def test_a_bambuddy_copy_without_a_client_is_refused_once(
+    native: NativeLibrary, uploads: BambuddyUploadStore, three_mf: Path
+) -> None:
+    original = await upload(native, three_mf)
+    source = await LibrarySource.load(
+        None, original.id, uploads=uploads, settings=StoredSettings(), files=native
+    )
+    with pytest.raises(ApiError):
+        await source.file_to_print(
+            None, printer_id=3, nozzle_size="0.4", plan=FilamentPlan(), project_id=None
+        )
+    with pytest.raises(ApiError):
+        await source.file_to_print(
+            None,
+            printer_id=3,
+            nozzle_size="0.4",
+            plan=FilamentPlan(),
+            project_id=5,
+            native_copy=True,
+            printer_model="Bambu Lab H2D",
+        )
 
 
 async def test_a_native_run_lays_a_library_files_copy_out_natively(
@@ -294,3 +327,122 @@ async def test_the_native_slicer_reads_the_copy_without_a_copy(
     assert key == blob_key(copy_id)
     assert sha == (await native.library_file(copy_id)).file_hash
     assert await native.content.stat(f"slice-{sha}") is None
+
+
+# --- #4312 review --------------------------------------------------------------------------
+
+
+async def _copy_with_slice(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, key: str
+) -> tuple[int, int, str]:
+    """A native copy recorded under ``key``, with a native sliced file recorded on it as
+    `print_sliced_upload` and `print_record` leave one: the copy, the slice, its sha256."""
+    copy_id = await ensure_native_copy(
+        native, uploads, fetches.printable(key), target=H2D, folder_id=None
+    )
+    sliced = await native.upload("bracket.plate1.sliced.3mf", io.BytesIO(b"gcode"), None)
+    await uploads.record_sliced(key, copy_id, SlicedCopy(id=sliced.id, preset_key="k"))
+    return copy_id, sliced.id, sliced.sha256
+
+
+async def test_a_recorded_native_slice_is_reused_without_bambuddy(
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    fetches: _Fetches,
+    three_mf: Path,
+    spans: InMemorySpanExporter,
+) -> None:
+    """I2: `recorded_slice` reads a native slice in the native library, with no client."""
+    original = await upload(native, three_mf)
+    source = await LibrarySource.load(
+        None, original.id, uploads=uploads, settings=StoredSettings(), files=native, native=native
+    )
+    key = source.subject.run_subject
+    copy_id, sliced_id, sha = await _copy_with_slice(native, uploads, fetches, key)
+    await uploads.record_slice_hash(key, sliced_id, sha)
+
+    with forbid_bambuddy(spans, BAMBUDDY):
+        found = await source.recorded_slice(None, copy_id, "k")
+
+    assert found == sliced_id
+
+
+async def test_a_native_slices_hash_is_kept_without_bambuddy(
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    fetches: _Fetches,
+    spans: InMemorySpanExporter,
+) -> None:
+    """I2: `print_record`'s `_keep_slice_hash` reads a native sliced file's sha256 in the
+    native library, never asking the Bambuddy that is configured."""
+    copy_id, sliced_id, sha = await _copy_with_slice(native, uploads, fetches, KEY)
+    unused: Any = None
+    store: Any = SimpleNamespace(load=lambda: StoredSettings(bambuddy_url=BAMBUDDY))
+    activities = PrintActivities(
+        PrintDeps(
+            settings_store=store,
+            outputs=unused,
+            uploads=uploads,
+            prints=unused,
+            store=unused,
+            observer=unused,
+            library=native,
+        )
+    )
+    outcome = QueueOutcome(
+        native_slice_id=3, sliced_library_file_id=sliced_id, preset_key="k", printer_id=1
+    )
+
+    with forbid_bambuddy(spans, BAMBUDDY):
+        await activities._keep_slice_hash(PrintSubject.output(KEY), outcome)
+
+    [slice_row] = await uploads.slices_of(KEY, copy_id, "k")
+    assert slice_row.file_hash == sha
+
+
+async def test_the_id_spaces_split_at_native_id_base(uploads: BambuddyUploadStore) -> None:
+    """M8: the SQL's boundary is `is_native_id`'s."""
+    for file_id in (NATIVE_ID_BASE - 1, NATIVE_ID_BASE):
+        await uploads.record(KEY, LibraryCopy(id=file_id, folder_id=None, target_key="t"))
+
+    assert [c.id for c in await uploads.for_output(KEY)] == [NATIVE_ID_BASE - 1]
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [NATIVE_ID_BASE]
+    assert not is_native_id(NATIVE_ID_BASE - 1) and is_native_id(NATIVE_ID_BASE)
+
+
+async def test_the_archive_window_is_bambuddys_copies_only(uploads: BambuddyUploadStore) -> None:
+    """M1: `sent_between` scans Bambuddy's archives, so a native copy, older than every
+    Bambuddy one, never widens the window."""
+    await uploads.record(KEY, LibraryCopy(id=NATIVE_ID_BASE + 5, folder_id=None, target_key="t"))
+    await uploads.record_sliced(KEY, NATIVE_ID_BASE + 5, SlicedCopy(id=NATIVE_ID_BASE + 6))
+    after_native = datetime.now(UTC)
+    await uploads.record(KEY, LibraryCopy(id=41, folder_id=None, target_key="t"))
+    await uploads.record_sliced(KEY, 41, SlicedCopy(id=77))
+    before_native_slice = datetime.now(UTC)
+    await uploads.record_sliced(KEY, NATIVE_ID_BASE + 5, SlicedCopy(id=NATIVE_ID_BASE + 7))
+
+    window = await uploads.sent_between(KEY)
+
+    assert window is not None
+    first, last = window
+    assert first >= after_native
+    assert last <= before_native_slice
+
+
+@pytest.mark.parametrize("kind", ["filed", "named"])
+async def test_an_outputs_or_persons_file_is_never_taken_as_an_earlier_attempts(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, kind: str
+) -> None:
+    """M2: only an unrecorded per-print copy (no output named, not filed) is an earlier
+    attempt's upload: never the output's filed copy, nor a file a person's copy made
+    named as an output (``output_id`` kept)."""
+    laid_out = _laid_out_for(fetches.payload, H2D)
+    theirs = await native.upload(
+        "bracket.3mf", io.BytesIO(laid_out), None, output_id="out-x", filed=kind == "filed"
+    )
+
+    made = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=H2D, folder_id=None
+    )
+
+    assert made != theirs.id

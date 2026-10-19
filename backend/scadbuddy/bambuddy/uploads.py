@@ -829,11 +829,14 @@ class BambuddyUploadStore:
     def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         with self._pool.connection() as conn:
             row = conn.execute(
+                # Bambuddy's copies and slices only (#4312 review M1): the window scans
+                # Bambuddy's archives, which a native copy is never in.
                 "SELECT (SELECT min(created_at) FROM output_bambuddy_uploads"
-                "  WHERE output_id = %(output)s) AS first_upload,"
+                "  WHERE output_id = %(output)s AND library_file_id < %(base)s) AS first_upload,"
                 " (SELECT max(created_at) FROM output_bambuddy_slices"
-                "  WHERE output_id = %(output)s) AS last_slice",
-                {"output": output_id},
+                "  WHERE output_id = %(output)s AND sliced_library_file_id < %(base)s)"
+                " AS last_slice",
+                {"output": output_id, "base": NATIVE_ID_BASE},
             ).fetchone()
         if row is None or row["first_upload"] is None or row["last_slice"] is None:
             return None

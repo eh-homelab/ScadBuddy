@@ -47,15 +47,10 @@ class Uploaded(Protocol):
 
 
 class LibraryWrites(Protocol):
-    async def upload(
-        self,
-        filename: str,
-        data: BinaryIO,
-        folder_id: int | None,
-        *,
-        output_id: str | None = None,
-        filed: bool = False,
-    ) -> Uploaded: ...
+    """A per-print file's upload: it names no output and is not filed (#4312 review I3),
+    so nothing written through it can pass for an output's filed copy."""
+
+    async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> Uploaded: ...
 
 
 class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
@@ -66,6 +61,11 @@ class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
     worker."""
 
     async def template_folder(self, name: str) -> Uploaded: ...
+
+    async def per_print_files(self, folder_id: int | None) -> list[LibraryListRow]:
+        """The live files directly in ``folder_id`` that name no output and are not filed:
+        per-print copies and slices, and files a person uploaded."""
+        ...
 
 
 def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None) -> LibraryReads:

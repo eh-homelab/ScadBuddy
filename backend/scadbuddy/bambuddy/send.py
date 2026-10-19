@@ -285,7 +285,11 @@ async def target_for(
         return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
-        raise TypeError(f"printer {printer_id}'s plate needs its model or a Bambuddy client")
+        # An `ApiError`, so an activity that reaches it refuses once (#4312 review M6).
+        raise ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"printer {printer_id}'s plate needs its model or a Bambuddy client",
+        )
     if printer_id is None or client is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
         return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)

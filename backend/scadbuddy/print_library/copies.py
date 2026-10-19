@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads, NativeCopies
 from scadbuddy.store.bambuddy import folder_name
 
@@ -53,14 +54,17 @@ async def left_unrecorded(
     besides: int | None = None,
 ) -> LibraryFile | None:
     """The file an earlier attempt uploaded into ``folder_id`` and died before recording
-    (`send._left_unrecorded`'s rule, #1145, on the native library): named ``filename``,
+    (`send._left_unrecorded`'s rule, #1145, on the native library). Only a per-print file
+    (`NativeCopies.per_print_files`: no output named, not filed) is a candidate, never the
+    output's filed copy or a person's copy of it, which can share the name and the bytes
+    (#4312 review M2). Named ``filename``,
     of ``size`` bytes hashing to ``digest`` (a sha256), that no subject records as a
     copy or a slice, and not ``besides`` (the file the upload is made from). Newest first;
     ``None`` when there is none."""
     name = filename.casefold()
     rows = [
         row
-        for row in await native.library_listing(folder_id=folder_id)
+        for row in await native.per_print_files(folder_id)
         if row.id != besides
         and is_native_id(row.id)
         and row.file_size == size
@@ -189,3 +193,16 @@ async def native_destination(
     if title is None:
         return None
     return (await native.template_folder(folder_name(title))).id
+
+
+async def trash_copies(native: NativeLibrary, uploads: BambuddyUploadStore, key: str) -> list[int]:
+    """Trash ``key``'s native per-print copies and the slices recorded on them, before an
+    output delete forgets their rows (#4312 review I1): they name no output (Ruling 6),
+    so those rows are all that leads to them. A file already gone is passed over. Their
+    ids."""
+    ids = [
+        file_id
+        for copy in await uploads.for_output(key, native=True)
+        for file_id in (copy.id, *(s.id for s in copy.sliced))
+    ]
+    return [f.id for f in await native.trash(ids)] if ids else []
