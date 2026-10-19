@@ -905,8 +905,9 @@ workers restart.
     `namespace` label is the Temporal namespace, which Prometheus keeps as
     `exported_namespace`. A port another process holds leaves a worker without them
     (logged once at start) rather than stopping it. The renders dashboard's "Worker
-    Temporal tasks" panel charts them for the render, print and projects workers. Each
-    ServiceMonitor keeps only the three `temporal_*` histograms that panel reads.
+    Temporal tasks" panel charts them for the render, print and projects workers. Of the
+    SDK's `temporal_*` series, each ServiceMonitor keeps only the three histograms that
+    panel reads.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
