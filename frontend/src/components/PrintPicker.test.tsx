@@ -3957,6 +3957,23 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(puts.bodies).toEqual([{ algorithm: 'newest_first', version: expect.any(Number) }])
   })
 
+  it("never builds a check of one printer with another's hand-picked nozzle (#4347)", async () => {
+    // As the algorithm above: a rack position is the printer's own, cleared on a switch.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ printer_id: 2 }))
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
+      expect.objectContaining({ rack_position: 2 }),
+    )
+  })
+
   it('goes back to Automatic when the nozzle size changes', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     renderPicker()
@@ -4076,6 +4093,28 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer_id: 2 }))
     expect(checks.bodies.filter((b) => (b as { printer_id?: number }).printer_id === 2)).toEqual(
       expect.not.arrayContaining([expect.objectContaining({ rack_algorithm: 'oldest_first' })]),
+    )
+  })
+
+  it("never builds a check of one printer with another's algorithm (#4347)", async () => {
+    // The check is debounced, so the test above sees only the requests sent. A request
+    // built for a render is sent if nothing replaces it within the debounce, and under load
+    // the render that clears the old printer's algorithm came later than that (#4347):
+    // so no render may build one.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    pickAlgorithm(await screen.findByLabelText('Rack algorithm'), 'oldest_first')
+    await waitFor(() =>
+      expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_algorithm: 'oldest_first' }),
+    )
+    vi.mocked(usePrintCheck).mockClear()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ printer_id: 2 }))
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
+      expect.objectContaining({ rack_algorithm: 'oldest_first' }),
     )
   })
 
