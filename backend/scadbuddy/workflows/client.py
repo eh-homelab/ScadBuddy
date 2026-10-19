@@ -302,8 +302,8 @@ async def routes_to(
 
     So the queue must have activity pollers of this build: the activity type hears of a
     version only from them. A queue that serves workflows only never answers True, and
-    a caller waiting on it waits out its whole timeout (every caller's worker today
-    registers activities: render, print, projects, library)."""
+    a caller waiting on it waits out its whole timeout: a caller's worker must register
+    activities."""
     for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
         described = await client.workflow_service.describe_task_queue(
             DescribeTaskQueueRequest(
