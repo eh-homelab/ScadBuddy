@@ -113,6 +113,7 @@ function PrinterItem({
             <div className="min-w-0">
               <p className="text-sm font-medium">{row.name}</p>
               <p className="text-xs text-muted-foreground">
+                {/* Plain text, never a control's name: the agent's page read skips it (#4375). */}
                 <span className="sb-num">{row.serial}</span>
                 {row.model ? ` · ${row.model}` : ''}
               </p>

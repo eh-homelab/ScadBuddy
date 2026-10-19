@@ -10,8 +10,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import (
+    Catalogue,
     PresetChoice,
-    _Catalogue,
     cached_catalogue,
 )
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -117,7 +117,7 @@ class ChoicesView(BaseModel):
     sliced: SlicedProfile | None = None
 
 
-def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPresetOption]]:
+def filament_presets_by_size(catalogue: Catalogue) -> dict[str, list[FilamentPresetOption]]:
     out: dict[str, list[FilamentPresetOption]] = {}
     for size in SIZES:
         printer = f"Bambu Lab H2C {size} nozzle"
@@ -191,7 +191,7 @@ async def _choices(
     client: BambuddyClient,
     source: Awaitable[PrintSource],
     settings: StoredSettings,
-    presets: asyncio.Future[_Catalogue],
+    presets: asyncio.Future[Catalogue],
     *,
     remembered: ModelPrintChoices | None,
     printer_id: int | None,

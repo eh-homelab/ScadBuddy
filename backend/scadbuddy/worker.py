@@ -1109,7 +1109,8 @@ async def run_print_worker(
     # The image's preset catalogue, built behind the start for the first native plan_run
     # (#3818 tier A); nothing waits on it.
     warming = warm_catalogue(
-        await asyncio.to_thread(Profiles.installed, settings.slicer_profiles_dir)
+        await asyncio.to_thread(Profiles.installed, settings.slicer_profiles_dir),
+        lambda: deps.settings_store.load().slicer_backend == "native",
     )
     try:
         await deps.events.start()

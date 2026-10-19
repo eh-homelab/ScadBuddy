@@ -259,7 +259,9 @@ async def test_the_print_worker_serves_before_the_native_catalogue_is_built(
     monkeypatch.setattr(worker_module, "follow_worker", lambda *_a, **_k: "follow")
     root = tmp_path / "profiles"
     shutil.copytree(PROFILES, root)
-    settings = print_settings(pg_conninfo, tmp_path, revision="b1", slicer_profiles_dir=root)
+    settings = print_settings(
+        pg_conninfo, tmp_path, revision="b1", slicer_profiles_dir=root, slicer_backend="native"
+    )
     try:
         async with asyncio.timeout(30):
             await run_print_worker(settings, health_port=None, client=cast(Client, object()))

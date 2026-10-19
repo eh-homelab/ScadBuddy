@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
-from scadbuddy.bambuddy.models import PresetRef, SlotChoice
+from scadbuddy.bambuddy.models import PresetRef, SlotChoice, SpoolFilamentPreset
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices, resolve
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.slicing import catalogue as native
@@ -148,6 +148,29 @@ def test_a_trays_filament_id_resolves_only_a_preset_that_fits_the_printer(
     )
     assert [error.kind for error in resolved.errors if error.slot_id == 1] == ["no-preset"]
     assert resolved.filament_presets == []
+
+
+def test_a_spools_cloud_preset_resolves_to_its_standard_ref(profiles: Profiles) -> None:
+    """A spool's own preset is a Bambu Cloud ``setting_id``; on the native catalogue it is
+    the preset of that id, not a name fallback (#4349)."""
+    options = FilamentOptions(
+        library_file_id=None,
+        slots=[SlotNeed(slot_id=1, colour="#FFFFFF")],
+        spools=[SpoolOption(spool_id=7, material="PETG", colour="#FFFFFF")],
+    )
+    plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=7)])
+    own = {
+        7: [
+            SpoolFilamentPreset(
+                printer_model="H2C", nozzle_diameter="0.4", slicer_filament="GFSA00_99"
+            )
+        ]
+    }
+    resolved = resolve(options, plan, h2c_choices(), native_catalogue(profiles), own)
+    assert resolved.errors == [] and resolved.warnings == []
+    assert resolved.filament_presets == [
+        PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
+    ]
 
 
 def test_an_override_by_cloud_ref_resolves_to_its_standard_ref(profiles: Profiles) -> None:
@@ -292,7 +315,7 @@ async def test_warming_starts_the_build_without_waiting_on_it(
 ) -> None:
     release = _blocking_build(monkeypatch)
     profiles = Profiles(_tree(tmp_path))
-    task = warm_catalogue(profiles)
+    task = warm_catalogue(profiles, lambda: True)
     assert task is not None
     await asyncio.sleep(0.05)
     assert not task.done()
@@ -302,7 +325,21 @@ async def test_warming_starts_the_build_without_waiting_on_it(
 
 
 def test_warming_without_a_tree_does_nothing() -> None:
-    assert warm_catalogue(None) is None
+    assert warm_catalogue(None, lambda: True) is None
+
+
+async def test_warming_builds_nothing_while_slices_go_through_bambuddy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing reads the catalogue unless ``slicer_backend`` is ``native`` (#4348)."""
+
+    def build(profiles: Profiles) -> Any:
+        raise AssertionError("built")
+
+    monkeypatch.setattr(native, "_build", build)
+    task = warm_catalogue(Profiles(_tree(tmp_path)), lambda: False)
+    assert task is not None
+    await asyncio.wait_for(task, 10)
 
 
 async def test_a_failed_warm_is_logged_once_and_never_raised(
@@ -310,7 +347,7 @@ async def test_a_failed_warm_is_logged_once_and_never_raised(
 ) -> None:
     root = _tree(tmp_path)
     (root / "BBL" / "process" / "leaf.json").write_text("{not json")
-    task = warm_catalogue(Profiles(root))
+    task = warm_catalogue(Profiles(root), lambda: True)
     assert task is not None
     with caplog.at_level(logging.WARNING, logger=native.__name__):
         await asyncio.wait_for(task, 10)
@@ -324,7 +361,11 @@ async def test_the_api_start_does_not_wait_on_the_build(
     """The SLICING component's run (entered in the lifespan) starts the warm and
     returns at once; leaving it stops waiting on the build."""
     release = _blocking_build(monkeypatch)
-    slicing = SimpleNamespace(profiles=Profiles(_tree(tmp_path)))
+    stored = SimpleNamespace(slicer_backend="native")
+    slicing = SimpleNamespace(
+        profiles=Profiles(_tree(tmp_path)),
+        core=SimpleNamespace(settings_store=SimpleNamespace(load=lambda: stored)),
+    )
     run = SLICING_COMPONENT.run
     assert run is not None
     async with asyncio.timeout(1):
