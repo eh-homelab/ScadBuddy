@@ -38,6 +38,8 @@ APPROVAL_SUMMARY_MAX = 500
 
 Outcome = Literal["approved", "denied", "expired", "answered", "cancelled", "timed_out"]
 Kind = Literal["approval", "answer"]
+# The parked half of session/activities.py's _RUNNING and the agent's TURN_STATUSES
+# (agent/src/sessions/durableSweep.ts): change them together.
 _WAITING = ("waiting_approval", "waiting_input")
 _SETTLED = ("idle", "done", "failed")
 

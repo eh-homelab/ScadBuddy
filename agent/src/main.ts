@@ -305,7 +305,13 @@ if (database && pluginPackages) {
   void database
     .ready()
     .then(async (ok) => {
-      if (ok) await warmPackages(pluginPackages, packageInstaller)
+      if (!ok) {
+        console.warn('plugin package warm-up skipped: the database is not ready; the first turn fetches instead')
+        return
+      }
+      for (const problem of await warmPackages(pluginPackages, packageInstaller)) {
+        console.warn('plugin package warm-up:', problem)
+      }
     })
     .catch((err: unknown) => console.error('plugin package warm-up failed:', (err as Error).message))
 }

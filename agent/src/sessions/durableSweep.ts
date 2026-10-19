@@ -18,7 +18,7 @@ import { event, type ServerEvent } from './protocol.js'
 // reaches the workflow, or is refused `closed`. A workflow not found for a row whose
 // `durable_offset` moved ran a turn and was removed by retention; the error says so,
 // and the send refuses it `closed` (plan 5c Ruling 18). The UPDATE is guarded on the
-// claim read (still `running`, same event_seq), so a turn that claimed the row
+// claim read (still in TURN_STATUSES, same event_seq), so a turn that claimed the row
 // meanwhile is never ended here.
 
 /**
@@ -37,7 +37,12 @@ export const TURN_QUERY = 'turn'
 export const RUNNING_GRACE_MS = 120_000
 /** How long one describe may take before the row is left for the next pass. */
 const DESCRIBE_DEADLINE_MS = 3_000
-/** Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s interval. */
+/**
+ * Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s
+ * interval. A parked approval or question takes a slot, and a describe and a Query, on
+ * every pass it waits through; the rotating cursor (`#after`) keeps such rows from
+ * starving the rest, but many long waits slow how soon a lost turn is found.
+ */
 const BATCH = 10
 
 const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
@@ -47,10 +52,14 @@ const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
   removed: "the turn never started: the session's workflow is gone (it ended and was removed); continue in a new chat",
 }
 
-/** A durable row's statuses while it holds a turn: running, or parked on one of its calls. */
+/**
+ * A durable row's statuses while it holds a turn: running, or parked on one of its calls.
+ * The same list as agent-durable's `_RUNNING` (session/activities.py), whose waiting half
+ * is gate/store.py's `_WAITING`: change them together.
+ */
 const TURN_STATUSES = ['running', 'waiting_approval', 'waiting_input']
 
-/** A `running` row as read: its claim (`event_seq`) and how far its workflow's output got. */
+/** A row in TURN_STATUSES as read: its claim (`event_seq`) and how far its workflow's output got. */
 export type RunningRow = { id: string; event_seq: string; durable_offset: string }
 
 /**
