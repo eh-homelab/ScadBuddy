@@ -15,7 +15,9 @@ LABELS_TTL = 30.0
 
 class SubjectLabels:
     """Subject → its name, or ``None`` when ScadBuddy holds none, each kept for
-    ``ttl`` seconds. One per app, on the activity component."""
+    ``ttl`` seconds. One per app, on the activity component. Two reads that land
+    together may both miss and both look a subject up; that costs one extra lookup, and
+    a lock held across the lookup would make every facets read wait on the slowest."""
 
     def __init__(self, ttl: float = LABELS_TTL, clock: Callable[[], float] = time.monotonic):
         self._ttl = ttl

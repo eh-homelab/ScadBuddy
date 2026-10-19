@@ -89,8 +89,8 @@ class OperationStore:
         return await asyncio.to_thread(self._named_by_running, names)
 
     def subjects_of(self, kind: str) -> list[str]:
-        """The subject of every operation of ``kind`` on record, oldest first (#4004).
-        Blocking, unlike the reads above."""
+        """The subject of every operation of ``kind`` on record, oldest first: the
+        tests' read (#4004), never a route's. Blocking, unlike the reads above."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT subject FROM operations WHERE kind = %s ORDER BY created_at", (kind,)

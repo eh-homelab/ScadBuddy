@@ -655,4 +655,5 @@ def test_the_latest_copies_are_read_off_an_index_not_sorted(pool: Pool) -> None:
         plan = conn.execute(f"EXPLAIN {COPIED_REFS_SQL}", ("local", "s3", 3)).fetchall()
     lines = [next(iter(row.values())) for row in plan]
     assert any("store_blobs_backend_migrated_touched" in line for line in lines), lines
-    assert not any("Sort" in line for line in lines), lines
+    # Every sort node, an Incremental Sort too, names its "Sort Key".
+    assert not any("Sort Key" in line for line in lines), lines
