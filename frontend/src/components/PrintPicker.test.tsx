@@ -3974,6 +3974,20 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     )
   })
 
+  it('never builds a check with a hand-picked nozzle once Advanced is left (#4361 review)', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByTestId('rack-position-2')).not.toBeInTheDocument())
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built).not.toContainEqual(expect.objectContaining({ rack_position: 2 }))
+  })
+
   it('goes back to Automatic when the nozzle size changes', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     renderPicker()
