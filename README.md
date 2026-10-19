@@ -895,8 +895,9 @@ workers restart.
     name of the worker's Service in eh-homelab/clusters
     ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-projects.yaml)),
     which its ServiceMonitor scrapes with no `jobLabel`
-    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml);
-    the projects worker's since clusters#2504), so renaming a Service empties its series.
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml)),
+    so renaming a Service empties its series. The projects worker's ServiceMonitor
+    arrived in clusters#2504.
   - Every worker's `/metrics` also carries the Temporal SDK's own series (#3788):
     `temporal_workflow_task_execution_latency`, `temporal_workflow_task_schedule_to_start_latency`,
     `temporal_activity_schedule_to_start_latency` and the rest, in seconds. The SDK exports
@@ -906,13 +907,10 @@ workers restart.
     `exported_namespace`. A port another process holds leaves a worker without them
     (logged once at start) rather than stopping it. The renders dashboard's "Worker
     Temporal tasks" panel charts them for the render, print and projects workers. Of the
-    SDK's `temporal_*` series, each of the three ServiceMonitors keeps only the three
+    SDK's `temporal_*` series, each worker's ServiceMonitor (linked above) keeps only the three
     histograms that panel reads, and clusters'
     [`check-scadbuddy-keep-lists.sh`](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/.github/scripts/check-scadbuddy-keep-lists.sh)
-    keeps their lists in step
-    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml),
-    [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml),
-    [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml)).
+    keeps their lists in step.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
