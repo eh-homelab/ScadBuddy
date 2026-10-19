@@ -293,17 +293,30 @@ async def routes_to(
     ``deployment_name``: `DescribeTaskQueue`'s versioning info, what matching routes
     by. A version is current in the deployment a moment before its queues hear of it
     (0.2-0.3 s on the dev server, #4090); until then the previous build still gets the
-    queue's new tasks."""
-    described = await client.workflow_service.describe_task_queue(
-        DescribeTaskQueueRequest(
-            namespace=client.namespace,
-            task_queue=TaskQueue(name=task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL),
-            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-        ),
-        timeout=RPC_TIMEOUT,
-    )
-    current = described.versioning_info.current_deployment_version
-    return current.deployment_name == deployment_name and current.build_id == build_id
+    queue's new tasks.
+
+    Asked of the workflow-type queue and of the activity-type one: each has its own copy
+    of the routing, and an activity is dispatched by the activity type's, which lagged
+    the workflow type's on the dev server (#4255). Both answer from their root partition,
+    so a non-root partition can lag still: this narrows the window, it does not close it.
+
+    So the queue must have activity pollers of this build: the activity type hears of a
+    version only from them. A queue that serves workflows only never answers True, and
+    a caller waiting on it waits out its whole timeout (every caller's worker today
+    registers activities: render, print, projects, library)."""
+    for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
+        described = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace,
+                task_queue=TaskQueue(name=task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL),
+                task_queue_type=kind,
+            ),
+            timeout=RPC_TIMEOUT,
+        )
+        current = described.versioning_info.current_deployment_version
+        if current.deployment_name != deployment_name or current.build_id != build_id:
+            return False
+    return True
 
 
 async def is_current(

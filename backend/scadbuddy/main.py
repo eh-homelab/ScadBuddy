@@ -1135,8 +1135,11 @@ async def _make_library_current(
     then takes every new task of the queue, and an old one only finishes the activity
     attempts it already holds. It gives up once a newer build is current (#2538). Then
     it waits, up to `LIBRARY_ROUTED_WAIT`, for the queue itself to route to this build
-    (`routes_to`), and sets ``routed`` whatever came of it. An error other than
-    Temporal's is logged, not raised: the worker keeps serving."""
+    (`routes_to`), and sets ``routed`` whatever came of it. The wait narrows the window
+    in which a sweep only this build has reaches an old replica; it does not close it,
+    as a non-root partition of the queue can lag its root (#4255). Such a sweep fails
+    and runs again at its next tick. An error other than Temporal's is logged, not
+    raised: the worker keeps serving."""
     set_current, read_current = deployment_writes(client, build_id, LIBRARY_DEPLOYMENT_NAME)
     loop = asyncio.get_running_loop()
     try:
