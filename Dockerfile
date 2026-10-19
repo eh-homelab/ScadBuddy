@@ -360,9 +360,11 @@ RUN .venv/bin/python -B -m scadbuddy_durable.check_cli_version \
 # Fails the build when a module the worker imports at start has no .pyc beside it
 # (#4316 review): a move of the stdlib, of src/, or of the compile steps above would
 # otherwise bring the per-start compile back unnoticed. `-B`, so it writes none itself.
+# It imports the entry point, `python -m scadbuddy_durable`'s module, whose server runs
+# only under `__name__ == "__main__"`: everything it imports is checked, nothing starts.
 RUN .venv/bin/python -B - <<'CHECK'
 import importlib.util, os, sys
-import scadbuddy_durable.health, scadbuddy_durable.worker
+import scadbuddy_durable.__main__
 missing = sorted(
     m.__file__ for m in list(sys.modules.values())
     if (getattr(m, "__file__", None) or "").endswith(".py")
@@ -598,8 +600,9 @@ RUN case "$TARGETARCH" in \
 # The stage lays out the image's /app as the `app` stage's one linked copy writes it
 # (#4140): `app/libraries/` and `app/THIRD_PARTY_NOTICES.md`, under /opt/seed. That
 # copy carries /opt/seed/app's owner and mode onto /app: scadbuddy, 0755, set by
-# this stage's chown and chmod and checked in the app stage. Every mtime is set to the pinned commit's time, so a re-run of
-# this stage (a cold cache) produces the same files, and the same layer, as the last.
+# this stage's chown and chmod and checked in the app stage. Every mtime is set to
+# the pinned commit's time, so a re-run of this stage (a cold cache) produces the
+# same files, and the same layer, as the last.
 FROM base AS libraries
 
 ARG BOSL2_REF
