@@ -61,7 +61,7 @@ from scadbuddy.bambuddy.models import (
     Tier,
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
-from scadbuddy.core.config import LibraryBackend, StoreBackend
+from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import (
@@ -304,6 +304,8 @@ class StoredSettings(BambuddyIds):
     store_backend: StoreBackend = "local"
     #: Whose library the print routes serve (restart).
     library_backend: LibraryBackend = "bambuddy"
+    #: Who slices a print (live: read by every slice's start).
+    slicer_backend: Slicer = "bambuddy"
     #: The S3 store's connection (:data:`S3_FIELDS`); the secret is sealed as the
     #: Bambuddy keys are.
     store_s3_endpoint: str | None = None
@@ -558,6 +560,7 @@ class SettingsPatch(BaseModel):
     #: change applies at the next one; a reset puts one back on the deployment's value.
     store_backend: StoreBackend | None = None
     library_backend: LibraryBackend | None = None
+    slicer_backend: Slicer | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None

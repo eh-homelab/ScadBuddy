@@ -47,6 +47,9 @@ class SlicedCopy(BaseModel):
     #: Bambuddy's SHA-256 of the sliced file, read once (#306). An archive of a print of
     #: it has the same ``content_hash``: the link once the queue item is gone.
     file_hash: str | None = None
+    #: The native slicer's blob it was uploaded from (plan 2026-10-16 Task 13):
+    #: provenance only. Nothing reads it, and the blob goes with its `native_slices` row.
+    sliced_blob_key: str | None = None
 
 
 class LibraryCopy(BaseModel):
@@ -181,6 +184,11 @@ class BambuddyUploadStore:
     async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
         """Those of ``library_file_ids`` that any output records as a copy (#1145)."""
         return await asyncio.to_thread(self._recorded, list(library_file_ids))
+
+    async def recorded_files(self, library_file_ids: Iterable[int]) -> set[int]:
+        """Those of ``library_file_ids`` that any output records, as a copy or as a sliced
+        file: what an earlier attempt's upload, left unrecorded, is not (Task 13 review I1)."""
+        return await asyncio.to_thread(self._recorded_files, list(library_file_ids))
 
     async def outputs_for_files(self, library_file_ids: Iterable[int]) -> dict[int, str]:
         """The output each of ``library_file_ids`` is a copy of, for those any output
@@ -689,6 +697,19 @@ class BambuddyUploadStore:
             ).fetchall()
         return {row["library_file_id"] for row in rows}
 
+    def _recorded_files(self, ids: list[int]) -> set[int]:
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT library_file_id AS id FROM output_bambuddy_uploads"
+                " WHERE library_file_id = ANY(%s)"
+                " UNION SELECT sliced_library_file_id FROM output_bambuddy_slices"
+                " WHERE sliced_library_file_id = ANY(%s)",
+                (ids, ids),
+            ).fetchall()
+        return {row["id"] for row in rows}
+
     def _outputs_for_files(self, ids: list[int]) -> dict[int, str]:
         if not ids:
             return {}
@@ -741,8 +762,9 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_slices"
-                " (output_id, source_library_file_id, sliced_library_file_id, preset_key)"
-                " SELECT %(output)s, %(source)s, %(sliced)s, %(preset)s"
+                " (output_id, source_library_file_id, sliced_library_file_id, preset_key,"
+                " sliced_blob_key)"
+                " SELECT %(output)s, %(source)s, %(sliced)s, %(preset)s, %(blob)s"
                 " WHERE EXISTS (SELECT 1 FROM output_bambuddy_uploads"
                 "  WHERE output_id = %(output)s AND library_file_id = %(source)s)"
                 " ON CONFLICT (output_id, sliced_library_file_id) DO NOTHING",
@@ -751,6 +773,7 @@ class BambuddyUploadStore:
                     "source": library_file_id,
                     "sliced": sliced.id,
                     "preset": sliced.preset_key,
+                    "blob": sliced.sliced_blob_key,
                 },
             )
 

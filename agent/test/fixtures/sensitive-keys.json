@@ -1,0 +1,33 @@
+{
+  "comment": "Tool-call argument names whose values the session log blanks, and some it keeps. Read by agent/test/sessions.protocol.test.ts (sdkEvents.ts SENSITIVE_KEY) and agent-durable/tests/test_session_events.py (session/events.py SENSITIVE_KEY), so the two copies cannot drift (#4340 review C1).",
+  "blanked": {
+    "secret": "s3cr3t",
+    "client_secret": "cs-1",
+    "token": "tok-1",
+    "access_token": "tok-2",
+    "password": "hunter2",
+    "passwd": "hunter3",
+    "passphrase": "correct horse",
+    "api_key": "sk-1",
+    "apiKey": "sk-2",
+    "api-key": "sk-3",
+    "authorization": "Bearer x",
+    "Authorisation": "Bearer y",
+    "credential": "cred-1",
+    "cookie": "c=1",
+    "private_key": "-----BEGIN-----",
+    "privateKey": "-----BEGIN2-----",
+    "access_code": "12345678",
+    "accessCode": "87654321",
+    "access-code": "11223344"
+  },
+  "kept": {
+    "host": "10.0.0.9",
+    "printer": "00000000-0000-4000-8000-0000000000aa",
+    "name": "Garage",
+    "serial_number_label": "label",
+    "code": "print(1)",
+    "access": "read",
+    "author": "kept"
+  }
+}

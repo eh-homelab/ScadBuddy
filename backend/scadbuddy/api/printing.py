@@ -14,7 +14,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 import httpx
@@ -109,8 +109,11 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.printers.component import PrintersDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
+from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -548,16 +551,23 @@ async def post_tray_spool(
     response_model=PrintersNow,
     summary="What each printer is doing now",
     description=(
-        "Every active Bambuddy printer's live state (#977): what it prints, how far, "
-        "time left and its HMS errors, whoever started the job. A job whose archive "
+        "Every registry printer's live state (#977, #3823): what it prints, how far, "
+        "time left and its HMS errors, whoever started the job, from Bambuddy's status or "
+        "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
         "names Bambuddy's archives page. A printer whose status cannot be read is a "
         "card with `error`, never a failed page."
     ),
 )
-async def get_printers_now(store: SettingsStoreDep, links: PrintLinksDep) -> PrintersNow:
+async def get_printers_now(
+    store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep
+) -> PrintersNow:
+    now = datetime.now(UTC)
+    if not (await asyncio.to_thread(store.load)).bambuddy_url:
+        # No Bambuddy (#3823): the LAN printers still have cards.
+        return await printers_now(None, links, printers.store, printers.reports, now=now)
     async with client_for(store.load()) as client:
-        return await printers_now(client, links)
+        return await printers_now(client, links, printers.store, printers.reports, now=now)
 
 
 @router.get(
@@ -1052,11 +1062,16 @@ async def get_preview_slice(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    slicing: SlicingDep,
+    slicer: SlicerQuery = "bambuddy",
 ) -> SlicePreview:
     """#2169: grams per slot, print time, the side each filament went to and how many
     filament changes the slice makes, once it has finished. Only a slice started for
-    this output, while Bambuddy's job is still that slice; else 404."""
+    this output, while Bambuddy's job is still that slice; else 404. ``slicer`` is the
+    one `PreviewStarted` named: a native slice's id is a `native_slices` row's."""
     meta = require_output(outputs, output_id)
+    if slicer == "native":
+        return await read_native_preview(slicing, job_id, PrintSubject.output(meta.id).run_subject)
     async with client_for(store.load()) as client:
         return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
 
@@ -1078,11 +1093,16 @@ async def get_preview_toolpath(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    slicing: SlicingDep,
+    slicer: SlicerQuery = "bambuddy",
 ) -> Response:
     """#2072: every move of the sliced plate, from its G-code, for the plate preview's
     Speed, Movement and Layers views: a binary header and float32 segments. 409 while
     the slice is under way; 422 when its G-code cannot be read."""
     meta = require_output(outputs, output_id)
+    if slicer == "native":
+        body = await read_native_toolpath(slicing, job_id, PrintSubject.output(meta.id).run_subject)
+        return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
     async with client_for(store.load()) as client:
         body = await read_toolpath(
             client, uploads, job_id, PrintSubject.output(meta.id).run_subject

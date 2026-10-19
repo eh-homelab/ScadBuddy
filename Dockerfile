@@ -39,7 +39,7 @@ FROM ghcr.io/astral-sh/uv:0.13.1 AS uv
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-10-12@sha256:4098a7c2c37d5a9110121635a568e6596b8619362ced5c84cc67f47d395e7fd0 AS base
+FROM openscad/openscad:dev.2026-10-19@sha256:bbed39fad63b66f26113d82e2b39ce1e14b2568378426fb2cdfeb41e34d7837b AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -299,6 +299,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tini libpq5 git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/
+# The stdlib's bytecode (#4161). The python image ships none, and the worker (user
+# 10001) cannot write it, so every start compiled what it imported (~0.6 s). A
+# checked-hash .pyc names its source's hash, not its mtime, and every file and
+# directory this writes gets a fixed mtime: the layer is the same on each rebuild of
+# the same base (#4140). The stdlib's path is the interpreter's own, so a new Python
+# minor compiles its own tree rather than nothing.
+RUN stdlib="$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" \
+    && python -m compileall -q -j 0 --invalidation-mode checked-hash "$stdlib" \
+    && find "$stdlib" \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
 RUN groupadd --gid 10001 scadbuddy \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/agent --shell /usr/sbin/nologin scadbuddy \
@@ -312,7 +321,11 @@ ENV UV_PROJECT_ENVIRONMENT=/app/agent-durable/.venv \
 COPY agent-durable/pyproject.toml agent-durable/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY agent-durable/src ./src
-RUN uv sync --frozen --no-dev
+# src/'s bytecode, checked-hash for the reason the stdlib's is (#4161): uv compiles the
+# venv's packages (UV_COMPILE_BYTECODE), not the project installed from src/.
+RUN uv sync --frozen --no-dev \
+    && .venv/bin/python -m compileall -q -j 0 --invalidation-mode checked-hash src \
+    && find src \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
 # ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
 # A directory with no .claude-plugin/plugin.json: the bundled Claude Code takes a
@@ -343,6 +356,23 @@ COPY --link --from=agent-build /src/agent/dist/tools.json /app/agent-durable/too
 # whenever this RUN re-ran. It applies to these two commands only, not the runtime.
 RUN .venv/bin/python -B -m scadbuddy_durable.check_cli_version \
     && .venv/bin/python -B -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
+
+# Fails the build when a module the worker imports at start has no .pyc beside it
+# (#4316 review): a move of the stdlib, of src/, or of the compile steps above would
+# otherwise bring the per-start compile back unnoticed. `-B`, so it writes none itself.
+# It imports the entry point, `python -m scadbuddy_durable`'s module, whose server runs
+# only under `__name__ == "__main__"`: everything it imports is checked, nothing starts.
+RUN .venv/bin/python -B - <<'CHECK'
+import importlib.util, os, sys
+import scadbuddy_durable.__main__
+missing = sorted(
+    m.__file__ for m in list(sys.modules.values())
+    if (getattr(m, "__file__", None) or "").endswith(".py")
+    and not os.path.exists(importlib.util.cache_from_source(m.__file__))
+)
+if missing:
+    sys.exit(f"ERROR: {len(missing)} start-up modules ship no .pyc, e.g. {missing[:5]}")
+CHECK
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev
@@ -569,16 +599,16 @@ RUN case "$TARGETARCH" in \
 #
 # The stage lays out the image's /app as the `app` stage's one linked copy writes it
 # (#4140): `app/libraries/` and `app/THIRD_PARTY_NOTICES.md`, under /opt/seed. That
-# copy carries /opt/seed/app's owner and mode onto /app, so it is the base's
-# (scadbuddy, 0755). Every mtime is set to the pinned commit's time, so a re-run of
-# this stage (a cold cache) produces the same files, and the same layer, as the last.
+# copy carries /opt/seed/app's owner and mode onto /app: scadbuddy, 0755, set by
+# this stage's chown and chmod and checked in the app stage. Every mtime is set to
+# the pinned commit's time, so a re-run of this stage (a cold cache) produces the
+# same files, and the same layer, as the last.
 FROM base AS libraries
 
 ARG BOSL2_REF
 ARG BOSL2_COMMIT
 
 WORKDIR /opt/seed/app/libraries
-COPY THIRD_PARTY_NOTICES.md /opt/seed/app/THIRD_PARTY_NOTICES.md
 RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_REF" \
         https://github.com/BelfrySCAD/BOSL2.git "BOSL2/${BOSL2_COMMIT}/BOSL2" \
     && actual="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" rev-parse HEAD)" \
@@ -588,10 +618,16 @@ RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_RE
          exit 1; \
        fi \
     && committed="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" log -1 --format=%ct)" \
+    && echo "$committed" > /opt/bosl2-committed \
     && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git" \
     && chown scadbuddy:scadbuddy /opt/seed/app \
     && chmod 0755 /opt/seed/app \
     && find /opt/seed -exec touch -h -d "@${committed}" {} +
+# After the clone (#4160), so an edit to the notices re-clones nothing. Adding it moves
+# /opt/seed/app's mtime, so both are set back to the pinned commit's time, read from
+# the file the clone left outside /opt/seed (only /opt/seed is copied on).
+COPY THIRD_PARTY_NOTICES.md /opt/seed/app/THIRD_PARTY_NOTICES.md
+RUN touch -h -d "@$(cat /opt/bosl2-committed)" /opt/seed/app /opt/seed/app/THIRD_PARTY_NOTICES.md
 
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
@@ -606,7 +642,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.10.12
+ARG OPENSCAD_VERSION=2026.10.19
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
@@ -735,8 +771,12 @@ ENV SCADBUDDY_DATA_DIR=/data \
 # from the stage, /app keeps the owner, mode and mtime the stage gave /opt/seed/app.
 ARG BOSL2_REF
 COPY --link --from=libraries /opt/seed/ /
+# /app's owner and mode come from the libraries stage now, not from base (#4160): the
+# check fails the build if the two drift apart.
 RUN python -m scadbuddy.library.library_seed verify /app/libraries \
-        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}"
+        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}" \
+    && { test "$(stat -c '%U %a' /app)" = "scadbuddy 755" \
+         || { echo "ERROR: /app is $(stat -c '%U %a' /app), want scadbuddy 755" >&2; exit 1; }; }
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is

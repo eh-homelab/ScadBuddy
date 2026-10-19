@@ -2,6 +2,7 @@ import { HttpResponse, http } from 'msw'
 import type { PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from '../../api/types'
 import { demoToolpath } from '../toolpath'
 import { H2C_FILE, assignH2cTray, h2cPlan, h2cSlice, resetH2c } from '../h2c'
+import { mockSettings } from '../handlers'
 import { acceptOperation } from './operations'
 
 /**
@@ -15,10 +16,20 @@ const base = '/api/v1'
 const jobs = new Map<number, { request: PrintRunRequest; reads: number; h2c: boolean }>()
 let nextJob = 9000
 
+/** Who slices, as Settings say: a native start is read with `?slicer=native` (Task 14). */
+function slicer(): PreviewStarted['slicer'] {
+  return mockSettings().slicer_backend === 'native' ? 'native' : 'bambuddy'
+}
+
 function start(request: PrintRunRequest, h2c: boolean): PreviewStarted {
   const jobId = ++nextJob
   jobs.set(jobId, { request, reads: 0, h2c })
-  return { job_id: jobId, plate_id: request.plate_id ?? 1, nozzle_plan: h2c ? h2cPlan(request) : null }
+  return {
+    job_id: jobId,
+    plate_id: request.plate_id ?? 1,
+    nozzle_plan: h2c ? h2cPlan(request) : null,
+    slicer: slicer(),
+  }
 }
 
 /**
@@ -49,13 +60,25 @@ export const handlers = [
       : HttpResponse.json({ detail: 'there is no background slice' }, { status: 404 }),
   ),
 
-  http.get(`${base}/print/:kind/:id/preview-slices/:job`, ({ params }) => {
+  http.get(`${base}/print/:kind/:id/preview-slices/:job`, ({ params, request }) => {
     const jobId = Number(params['job'])
     const job = jobs.get(jobId)
     if (!job) return HttpResponse.json({ detail: `there is no background slice ${jobId}` }, { status: 404 })
     job.reads += 1
     const done = job.reads > 1
-    if (job.h2c) return HttpResponse.json(h2cSlice(jobId, job.request, done))
+    const native = new URL(request.url).searchParams.get('slicer') === 'native'
+    // The native slicer's read says how far it has got while it runs (Task 14).
+    if (native && !done) {
+      return HttpResponse.json({
+        job_id: jobId,
+        status: 'running',
+        slots: [],
+        progress: 40,
+        slicer: 'native',
+        warnings: [],
+      } satisfies SlicePreview)
+    }
+    if (job.h2c) return HttpResponse.json({ ...h2cSlice(jobId, job.request, done), slicer: native ? 'native' : 'bambuddy' })
     return HttpResponse.json(
       (done
         ? {
@@ -65,8 +88,10 @@ export const handlers = [
             filament_used_g: 6.7,
             slots: (job.request.filament_plan?.slots ?? []).map((slot) => ({ slot_id: slot.slot_id, grams: 3.3 })),
             filament_changes: 6,
+            slicer: native ? 'native' : 'bambuddy',
+            warnings: [],
           }
-        : { job_id: jobId, status: 'running', slots: [] }) satisfies SlicePreview,
+        : { job_id: jobId, status: 'running', slots: [], slicer: 'bambuddy', warnings: [] }) satisfies SlicePreview,
     )
   }),
 

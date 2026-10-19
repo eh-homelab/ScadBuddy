@@ -341,6 +341,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'reads the camera a frame at a time through get_printer_camera.',
   },
   {
+    operation: 'PUT /api/v1/printers/{printer_id}/lan',
+    reason:
+      "A printer's LAN access code is a device credential, written only in Settings > Printers, as the Bambuddy " +
+      'key and the settings are (#4340 review I1): a tool would put it in the model\'s context, the transcript ' +
+      'and any flow script that called it. The agent sends the user there (list_printers, get_printer).',
+  },
+  {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +

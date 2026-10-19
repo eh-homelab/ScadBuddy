@@ -63,11 +63,17 @@ covers the same ground more briefly.
   `_agent_heartbeat`). An agent replica from before #4200 sends no beats, and
   `agent-tools` is unversioned, so while one still polls (during the API Deployment's
   rolling update, or after rolling the agent back past #4200) any attempt may land on
-  it. A `turn_tool_tier` whose three attempts all missed their beats is asked once more
-  with no heartbeat timeout (#4262), so it cannot fail the run's tier check for that;
-  it only takes longer. A flow's tool calls have no such fallback: one slower than 30 s
-  that lands on an old replica times out, a read up to three times and a write at once,
-  and the script sees the error (`flow_session_check` retries without limit).
+  it. A `turn_tool_tier` whose last attempt missed its beats (the failure the call ends
+  with, whatever the earlier attempts did) is asked once more with no heartbeat timeout
+  (#4262), so it cannot fail the run's tier check for that; it only takes longer. A
+  tier whose attempts are all lost (recorded as started but never delivered, or taken
+  by a replica that died) now reaches the script, at the default 30 s heartbeat, after
+  450 s, about 7.5 min (3 × 30 s of missed beats, then up to 3 × 120 s, the
+  `_TOOL_TIMEOUT`, plus the retries' backoff), not 90 s; one whose last attempt ends on
+  its 120 s start-to-close instead takes no fallback and fails there. A flow's tool
+  calls have no such fallback: one slower than 30 s that lands on an old replica times
+  out, a read up to three times and a write at once, and the script sees the error
+  (`flow_session_check` retries without limit).
 
 ### 1.1 Routing the UI's origin to the agent
 
@@ -1251,3 +1257,17 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.
+
+## 14. The slicer setting (#3822)
+
+`get_settings` shows `slicer_backend` (`bambuddy` or `native`) with the other stored
+settings, so an agent can say which slicer the print dialog and print runs use. No
+ScadBuddy tool changes it: `PUT /api/v1/settings`, where `slicer_backend` is written, is
+Settings-only (`agent/src/tools/coverage.ts`), and switching slicer is an operator's
+decision (`README.md` "Rolling out the native slicer"). Two other paths do write the
+settings store, and neither is a way to this setting by design: `set_print_options`
+writes the print options (`PUT /api/v1/settings/print-options`,
+`agent/src/tools/settings.ts`), an outward call; and `http_request` (§12), once enabled
+and each call approved, can reach any LAN URL, ScadBuddy's own `PUT /api/v1/settings`
+included, so approving such a call is approving a settings write. A print an agent starts slices
+on whichever slicer is set when its run is planned.

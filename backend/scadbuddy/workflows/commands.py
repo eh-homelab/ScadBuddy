@@ -20,7 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio.api.common.v1 import WorkflowExecution
-from temporalio.api.enums.v1 import EventType
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
 from temporalio.api.errordetails.v1 import (
     MultiOperationExecutionFailure,
     NamespaceNotFoundFailure,
@@ -182,6 +182,8 @@ async def deferred_kind(client: Client, id: str) -> bool:
     still accepting until it completes a task or is terminated."""
     token = b""
     try:
+        # The one bound on the whole read, every page within it: no per-page RPC timeout,
+        # which would only restart the clock on each page.
         async with asyncio.timeout(DESCRIBE_SECONDS):
             for _ in range(NOT_READY_PAGES):
                 page = await client.workflow_service.get_workflow_execution_history_reverse(
@@ -196,15 +198,39 @@ async def deferred_kind(client: Client, id: str) -> bool:
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
                         return False
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
-                        failure = event.workflow_task_failed_event_attributes.failure
-                        return failure.application_failure_info.type == DEFERRED_KIND
+                        attributes = event.workflow_task_failed_event_attributes
+                        kind = attributes.failure.application_failure_info.type
+                        if kind == DEFERRED_KIND:
+                            return True
+                        # What it failed with instead: the failure's kind (application,
+                        # timeout, …), its type and the task's cause, never the message,
+                        # which can carry the workflow's values. A cause newer than these
+                        # protos is logged as its number, not taken for a failed read. Only
+                        # an application failure has a type to name.
+                        info = attributes.failure.WhichOneof("failure_info")
+                        what = (
+                            f"{info} {kind!r}"
+                            if info == "application_failure_info"
+                            else info or "a failure with no info"
+                        )
+                        cause = attributes.cause
+                        logger.warning(
+                            "command %s: its newest workflow task failure is %s, cause %s,"
+                            " not a deferral",
+                            id,
+                            what,
+                            WorkflowTaskFailedCause.Name(cause)
+                            if cause in WorkflowTaskFailedCause.values()
+                            else cause,
+                        )
+                        return False
                 token = page.next_page_token
                 if not token:
                     return False
     except Exception as e:
-        logger.debug("command %s: could not read its history to tell a deferral: %r", id, e)
+        logger.warning("command %s: could not read its history to tell a deferral: %r", id, e)
         return False
-    logger.debug("command %s: no workflow task event in its newest %d pages", id, NOT_READY_PAGES)
+    logger.warning("command %s: no workflow task event in its newest %d pages", id, NOT_READY_PAGES)
     return False
 
 

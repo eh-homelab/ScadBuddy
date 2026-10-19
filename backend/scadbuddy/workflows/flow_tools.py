@@ -175,13 +175,28 @@ def _agent_heartbeat() -> timedelta:
     return timedelta(seconds=owner.agent_heartbeat_s)
 
 
-#: A `turn_tool_tier` whose every attempt missed its beats is asked once more with no
+#: A `turn_tool_tier` whose last attempt missed its beats is asked once more with no
 #: heartbeat timeout, as before #4199 (#4262). An agent replica from before #4200 never
 #: beats, and a tier call takes ~35 s there (it connects the turn's servers): during an
 #: agent rollout, or after a rollback past #4200, all three attempts could land on such
 #: replicas (`agent-tools` is unversioned, so any poller takes any attempt) and fail the
-#: run's tier check. Runs recorded before raised that heartbeat timeout to the script.
+#: run's tier check. The fallback needs only the last attempt to have missed its beats:
+#: that is the failure the call ends with. Runs recorded before raised that heartbeat
+#: timeout to the script.
+#: The cost: a tier whose attempts are all lost (recorded as started but never
+#: delivered, or taken by a replica that died) now reaches the script after
+#: 3 x `agent_heartbeat_s` of missed beats plus up to 3 x `_TOOL_TIMEOUT` (120 s) of
+#: start-to-close: at the default 30 s heartbeat, 450 s (about 7.5 min, plus the
+#: retries' backoff), where #4199 alone gave up after the first 90 s. A tier whose last
+#: attempt ends on its start-to-close instead takes no fallback.
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
+
+#: The same for a call's own activity (#4281). A read whose last attempt missed its
+#: beats is asked once more with no heartbeat timeout, as the tier is. A write is never
+#: sent again: one that missed its beats may still have run on a replica that does not
+#: beat, so it fails saying so, and the script checks before calling it again. Runs
+#: recorded before raised that heartbeat timeout to the script.
+FLOW_BEATLESS_CALL_PATCH = "flow-beatless-call-4281"
 
 
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
@@ -672,6 +687,7 @@ async def _call_tool(
     # A pinned call nothing picked up is asked for once more on the replica the agent
     # names then (#4152): one tiered just before a deploy took its replica.
     tries = 2 if per_call else 1
+    heartbeat: timedelta | None = _agent_heartbeat()
     while True:
         tries -= 1
         try:
@@ -684,7 +700,7 @@ async def _call_tool(
                 task_queue=task_queue,
                 schedule_to_start_timeout=to_start,
                 start_to_close_timeout=_TOOL_TIMEOUT,
-                heartbeat_timeout=_agent_heartbeat(),
+                heartbeat_timeout=heartbeat,
                 retry_policy=RetryPolicy(
                     maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
                 ),
@@ -693,6 +709,25 @@ async def _call_tool(
         except ActivityError as err:
             if isinstance(err.cause, ApplicationError):
                 raise ToolFailedError(err.cause.message) from None
+            # Only the last attempt's failure is known, as for the tier.
+            if (
+                heartbeat is not None
+                and isinstance(err.cause, ActivityTimeoutError)
+                and err.cause.type == TimeoutType.HEARTBEAT
+                and workflow.patched(FLOW_BEATLESS_CALL_PATCH)
+            ):
+                if attempts == 1:
+                    raise ToolFailedError(
+                        f"{name} may have run: the agent replica that took it sent no "
+                        f"heartbeat for {heartbeat.seconds}s (one from before the agent "
+                        "beat its calls, or one that stopped). Check whether it did before "
+                        "calling it again."
+                    ) from None
+                # A read: safe to ask again. Not a move to another replica, so the
+                # re-homing try below is kept.
+                heartbeat = None
+                tries += 1
+                continue
             if not (
                 isinstance(err.cause, ActivityTimeoutError)
                 and err.cause.type == TimeoutType.SCHEDULE_TO_START
@@ -784,7 +819,8 @@ async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
                 )
                 return tiered
             except ActivityError as err:
-                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH).
+                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH). Only the
+                # last attempt's failure is known: earlier ones may have failed otherwise.
                 if (
                     heartbeat is not None
                     and isinstance(err.cause, ActivityTimeoutError)

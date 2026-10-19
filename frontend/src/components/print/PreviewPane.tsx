@@ -151,6 +151,8 @@ type Props = {
   keepsSides?: boolean
   stale: boolean
   slicing: boolean
+  /** The native slicer's percent while it slices (plan 2026-10-16 Task 14). */
+  progress?: number | null
   sliceError: string | null
 }
 
@@ -175,6 +177,7 @@ export function PreviewPane({
   keepsSides = true,
   stale,
   slicing,
+  progress = null,
   sliceError,
 }: Props) {
   /** Colours tried in the pane, by slot id: the preview only, never sent. */
@@ -275,8 +278,22 @@ export function PreviewPane({
         <div className="flex items-center justify-between gap-2">
           <span className="font-medium text-foreground">Slice</span>
           {slicing ? (
-            <span className="text-[12px] text-subtle" data-testid="slice-status">
+            <span className="flex items-center gap-2 text-[12px] text-subtle" data-testid="slice-status">
               {slice ? 'Reslicing for your changes…' : 'Slicing…'}
+              {progress != null && (
+                <>
+                  {/* Out of the summary's live region: each poll's percentage is not
+                      announced, only the state; the bar keeps the value (review M4). */}
+                  <span aria-hidden="true">{` ${progress}%`}</span>
+                  <progress
+                    max={100}
+                    value={progress}
+                    aria-label="Slicing progress"
+                    className="h-1.5 w-16 overflow-hidden rounded-full bg-muted accent-primary [&::-moz-progress-bar]:bg-primary [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary"
+                    data-testid="slice-progress"
+                  />
+                </>
+              )}
             </span>
           ) : stale ? (
             <span className="text-[12px] text-subtle" data-testid="slice-status">

@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { PrinterNow, PrintersNow } from '../../api/types'
+import { printersState } from './printers'
 
 /**
  * #977 — what each printer is doing now: the H2C paused on the 2026-10-01 spaghetti
@@ -7,6 +8,8 @@ import type { PrinterNow, PrintersNow } from '../../api/types'
  */
 export const PRINTERS_NOW: PrinterNow[] = [
   {
+    id: '00000000-0000-4000-8000-000000000001',
+    path: 'bambuddy',
     printer_id: 1,
     name: '3DP-31B-598',
     activity: 'paused',
@@ -27,8 +30,10 @@ export const PRINTERS_NOW: PrinterNow[] = [
     error: null,
   },
   {
+    id: '00000000-0000-4000-8000-000000000002',
+    path: 'bambuddy',
     printer_id: 2,
-    name: 'Workshop',
+    name: '3DP-77A-114',
     activity: 'printing',
     state: 'RUNNING',
     job_name: 'Luna keychain',
@@ -44,6 +49,8 @@ export const PRINTERS_NOW: PrinterNow[] = [
     error: null,
   },
   {
+    id: '00000000-0000-4000-8000-000000000003',
+    path: 'bambuddy',
     printer_id: 3,
     name: 'Spare',
     activity: 'idle',
@@ -73,8 +80,38 @@ export function setPrintersNow(printers: PrinterNow[]): void {
   state.printers = printers
 }
 
+/**
+ * #3823 — the registry shows as the backend reports it: a card carries the id of the
+ * row that links its Bambuddy printer, a row with a LAN link answers its card itself
+ * (`path: 'native'`), and a row only the LAN reaches is a card with no Bambuddy id.
+ */
+function withLan(cards: PrinterNow[]): PrinterNow[] {
+  const rows = printersState()
+  const lan = rows.filter((row) => row.lan_host)
+  const shown = cards.map((card) => {
+    // A card's `id` is the registry row that links its Bambuddy printer, as the backend's is.
+    const row = card.printer_id === null ? undefined : rows.find((entry) => entry.bambuddy_printer_id === card.printer_id)
+    if (!row) return card
+    return row.lan_host ? { ...card, id: row.id, path: 'native' as const } : { ...card, id: row.id }
+  })
+  const lanOnly = lan
+    .filter((row) => row.bambuddy_printer_id == null)
+    .map(
+      (row): PrinterNow => ({
+        ...IDLE,
+        id: row.id,
+        path: 'native',
+        printer_id: null,
+        name: row.name,
+      }),
+    )
+  return [...shown, ...lanOnly]
+}
+
+const IDLE = PRINTERS_NOW[2]!
+
 export const handlers = [
   http.get('/api/v1/print/printers/now', () =>
-    HttpResponse.json({ printers: state.printers } satisfies PrintersNow),
+    HttpResponse.json({ printers: withLan(state.printers) } satisfies PrintersNow),
   ),
 ]

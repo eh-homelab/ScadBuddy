@@ -198,6 +198,7 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
         "Operation": VersioningBehavior.AUTO_UPGRADE,
         "FlowTriggerFire": VersioningBehavior.AUTO_UPGRADE,
         "StoreMigration": VersioningBehavior.AUTO_UPGRADE,
+        "SliceWorkflow": VersioningBehavior.AUTO_UPGRADE,
         "SpoolRefresh": VersioningBehavior.AUTO_UPGRADE,
     }
 
@@ -211,6 +212,8 @@ BLOCK_SWEEP = "housekeeping_blocks"
 PROBE_SWEEP = "housekeeping_probe"
 #: Probes in a row that must reach the new build: an activity goes to one of the
 #: queue's partitions, and each hears of the new current version on its own (#4255).
+#: A heuristic: three in a row can still miss a lagging partition, so this narrows the
+#: flake rather than removing it, and a rare recurrence is not a regression.
 PROBES_IN_A_ROW = 3
 
 

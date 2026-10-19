@@ -1,4 +1,4 @@
-import { api } from '../api/client'
+import { api, type Slicer } from '../api/client'
 import type { Within } from './traceAction'
 import type {
   AttachResult,
@@ -51,10 +51,10 @@ export interface SourceApi {
   check: (body: PrintRunRequest) => Promise<PrintCheck>
   /** #2169 — slice `body` in the background through the run's own path; nothing queued. */
   preview: (body: PrintRunRequest) => Promise<PreviewStarted>
-  /** #2169 — how one of this source's background slices stands. */
-  readPreview: (jobId: number) => Promise<SlicePreview>
+  /** #2169 — how one of this source's background slices stands; `slicer` is its start's. */
+  readPreview: (jobId: number, slicer: Slicer) => Promise<SlicePreview>
   /** #2072 — a finished background slice's toolpath (binary; see `lib/toolpath`). */
-  toolpathUrl: (jobId: number) => string
+  toolpathUrl: (jobId: number, slicer: Slicer) => string
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
 }
@@ -130,8 +130,8 @@ export function sourceApi(source: PrintSource): SourceApi {
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body) => api.checkPrint(id, body),
       preview: (body) => api.previewSlice(id, body),
-      readPreview: (jobId) => api.getPreviewSlice(id, jobId),
-      toolpathUrl: (jobId) => api.previewToolpathUrl(id, jobId),
+      readPreview: (jobId, slicer) => api.getPreviewSlice(id, jobId, slicer),
+      toolpathUrl: (jobId, slicer) => api.previewToolpathUrl(id, jobId, slicer),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
   }
@@ -145,8 +145,8 @@ export function sourceApi(source: PrintSource): SourceApi {
     run: (body, signal, within) => api.runLibraryPrint(id, body, signal, within),
     check: (body) => api.checkLibraryPrint(id, body),
     preview: (body) => api.previewLibrarySlice(id, body),
-    readPreview: (jobId) => api.getLibraryPreviewSlice(id, jobId),
-    toolpathUrl: (jobId) => api.libraryPreviewToolpathUrl(id, jobId),
+    readPreview: (jobId, slicer) => api.getLibraryPreviewSlice(id, jobId, slicer),
+    toolpathUrl: (jobId, slicer) => api.libraryPreviewToolpathUrl(id, jobId, slicer),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }
 }

@@ -15,7 +15,12 @@ runs ``PREVIEWS_SWEEP``, ``models_git`` with ``GIT_PATCH`` (#2289), which also r
 runs ``ACTIVITY_SWEEP``, and ``lost_slices`` with ``LOST_SLICES_PATCH`` (#2715's sweep
 out of ``PREVIEWS_SWEEP``), which also runs ``LOST_SLICES_SWEEP``, and
 ``print_attachments`` with ``ATTACHMENTS_PATCH`` (#3047), which also runs
-``ATTACHMENTS_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
+``ATTACHMENTS_SWEEP``, and ``native_slices`` with ``LIBRARY_PATCH`` (#3827, recorded
+with none of its own), ``NATIVE_SLICES_PATCH``, ``TRANSFER_PUTS_PATCH`` and
+``LOST_NATIVE_SLICES_PATCH`` (plan 2026-10-16-native-slicer-rust-worker Task 12), which
+also run ``LIBRARY_SWEEP``, ``NATIVE_SLICES_SWEEP``, ``TRANSFER_PUTS_SWEEP`` and
+``LOST_NATIVE_SLICES_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1``
+runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -50,6 +55,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "activity",
         "lost_slices",
         "print_attachments",
+        "native_slices",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -67,7 +73,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_print_attachments(recording_temporal: str) -> None:
+async def test_record_native_slices(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -96,4 +102,4 @@ async def test_record_print_attachments(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "print_attachments.json").write_text(history.to_json())
+    (HISTORIES / "native_slices.json").write_text(history.to_json())

@@ -536,6 +536,8 @@ git commit -m "feat(frontend): printers in Settings; the picker and Now printing
 **Interfaces:**
 - Tools: `list_printers` (read), `get_printer` (read), `discover_printers` (read), `create_printer` (write), `update_printer` (write; `preferred_path` and `name`), `link_printer_bambuddy` (write), `unlink_printer_bambuddy` (write), `link_printer_lan` (outward: it stores a credential and connects to a device), `unlink_printer_lan` (write), `delete_printer` (outward). Each `defineTool` names its operation as `farm.ts:17-60` does.
 
+> **As built (#4340 review, departing from the interface above):** there is no `link_printer_lan`. The access code is a device credential, so it is written only in Settings > Printers, as the Bambuddy key and the settings are. As a tool argument it would reach the model's context, the transcript, Hindsight and any flow script. `PUT /api/v1/printers/{printer_id}/lan` is a `coverage.ts` `NOT_A_TOOL` entry with that reason. `list_printers` and `get_printer` send the user to Settings > Printers, and the model can open the page with `browser_navigate` (the form there is `USER_ONLY`). `unlink_printer_lan` is **outward**, not write: it deletes the stored code and stops the printer's watch. Both SENSITIVE_KEY copies (agent `sdkEvents.ts`, agent-durable `session/events.py`) blank `access_code`, and both are pinned to `agent/test/fixtures/sensitive-keys.json`.
+
 - [ ] **Step 1: Write the failing tests** (the fake backend pattern of `agent/test/farm.test.ts`)
 
 ```ts
