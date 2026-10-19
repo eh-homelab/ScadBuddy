@@ -303,9 +303,11 @@ COPY --from=uv /uv /usr/local/bin/
 # 10001) cannot write it, so every start compiled what it imported (~0.6 s). A
 # checked-hash .pyc names its source's hash, not its mtime, and every file and
 # directory this writes gets a fixed mtime: the layer is the same on each rebuild of
-# the same base (#4140).
-RUN python -m compileall -q -j 0 --invalidation-mode checked-hash /usr/local/lib/python3.14 \
-    && find /usr/local/lib/python3.14 \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
+# the same base (#4140). The stdlib's path is the interpreter's own, so a new Python
+# minor compiles its own tree rather than nothing.
+RUN stdlib="$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" \
+    && python -m compileall -q -j 0 --invalidation-mode checked-hash "$stdlib" \
+    && find "$stdlib" \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
 RUN groupadd --gid 10001 scadbuddy \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/agent --shell /usr/sbin/nologin scadbuddy \
@@ -322,7 +324,7 @@ COPY agent-durable/src ./src
 # src/'s bytecode, checked-hash for the reason the stdlib's is (#4161): uv compiles the
 # venv's packages (UV_COMPILE_BYTECODE), not the project installed from src/.
 RUN uv sync --frozen --no-dev \
-    && .venv/bin/python -m compileall -q --invalidation-mode checked-hash src \
+    && .venv/bin/python -m compileall -q -j 0 --invalidation-mode checked-hash src \
     && find src \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
 # ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
@@ -354,6 +356,21 @@ COPY --link --from=agent-build /src/agent/dist/tools.json /app/agent-durable/too
 # whenever this RUN re-ran. It applies to these two commands only, not the runtime.
 RUN .venv/bin/python -B -m scadbuddy_durable.check_cli_version \
     && .venv/bin/python -B -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
+
+# Fails the build when a module the worker imports at start has no .pyc beside it
+# (#4316 review): a move of the stdlib, of src/, or of the compile steps above would
+# otherwise bring the per-start compile back unnoticed. `-B`, so it writes none itself.
+RUN .venv/bin/python -B - <<'CHECK'
+import importlib.util, os, sys
+import scadbuddy_durable.health, scadbuddy_durable.worker
+missing = sorted(
+    m.__file__ for m in list(sys.modules.values())
+    if (getattr(m, "__file__", None) or "").endswith(".py")
+    and not os.path.exists(importlib.util.cache_from_source(m.__file__))
+)
+if missing:
+    sys.exit(f"ERROR: {len(missing)} start-up modules ship no .pyc, e.g. {missing[:5]}")
+CHECK
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev
@@ -580,8 +597,8 @@ RUN case "$TARGETARCH" in \
 #
 # The stage lays out the image's /app as the `app` stage's one linked copy writes it
 # (#4140): `app/libraries/` and `app/THIRD_PARTY_NOTICES.md`, under /opt/seed. That
-# copy carries /opt/seed/app's owner and mode onto /app, so it is the base's
-# (scadbuddy, 0755). Every mtime is set to the pinned commit's time, so a re-run of
+# copy carries /opt/seed/app's owner and mode onto /app: scadbuddy, 0755, set by
+# this stage's chown and chmod and checked in the app stage. Every mtime is set to the pinned commit's time, so a re-run of
 # this stage (a cold cache) produces the same files, and the same layer, as the last.
 FROM base AS libraries
 
@@ -755,7 +772,8 @@ COPY --link --from=libraries /opt/seed/ /
 # check fails the build if the two drift apart.
 RUN python -m scadbuddy.library.library_seed verify /app/libraries \
         /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}" \
-    && test "$(stat -c '%U %a' /app)" = "scadbuddy 755"
+    && { test "$(stat -c '%U %a' /app)" = "scadbuddy 755" \
+         || { echo "ERROR: /app is $(stat -c '%U %a' /app), want scadbuddy 755" >&2; exit 1; }; }
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is
