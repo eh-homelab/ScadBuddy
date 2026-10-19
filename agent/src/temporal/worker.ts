@@ -73,8 +73,6 @@ export type AgentWorkerOptions = {
    * current version, which a versioned worker needs before it takes new workflows.
    */
   deployment?: { name: string; buildId: string }
-  /** How often its activities beat (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
-  activityHeartbeatMs?: number
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
   /** How often each activity heartbeats (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */

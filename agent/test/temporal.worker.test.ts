@@ -1,3 +1,5 @@
+import { WorkflowFailedError } from '@temporalio/client'
+import { ActivityFailure, TimeoutFailure, TimeoutType } from '@temporalio/common'
 import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
@@ -7,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
+import { SESSION_TURN_ACTIVITY } from '../src/temporal/session/names.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { defineTool, json } from '../src/tools/registry.js'
@@ -186,14 +189,25 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
   }, 120_000)
 
   it('beats for every activity, so one that outlives its heartbeat timeout completes (#4261)', async () => {
-    // No beat of its own: only the worker's interceptor (heartbeatingActivities) keeps it alive.
-    // Without it in Worker.create's interceptors, the call fails with `TimeoutFailure: activity
-    // Heartbeat timeout` after 1 s. Its name is its own, so no other poller on `agent-tools` takes it.
-    const slow = `slow-${randomUUID()}`
+    // `slow` never beats: only the worker's interceptor (heartbeatingActivities) keeps it alive.
+    // Without it in Worker.create's interceptors, the call fails on its heartbeat timeout.
+    // Timing (#4352): the interceptor beats every 200 ms, but the SDK sends at most one beat
+    // per 0.8 × the 2 s timeout, so the server hears one every ~1.6 s; the 4 s sleep spans
+    // two timeouts. `session_turn`, which the interceptor leaves alone, is the control: the
+    // same call fails on that timeout, so the test cannot pass with no timeout enforced.
+    // Its own queue, so no other `agent-tools` poller on this dev server is offered either.
+    const taskQueue = `heartbeat-${randomUUID()}`
+    const release = new AbortController()
     const agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
-      activities: { [slow]: async () => (await sleep(4_000), 'done') },
+      taskQueue,
+      activities: {
+        slow: async () => (await sleep(4_000), 'done'),
+        // Cut short once the control has failed, so stop() does not wait out its sleep:
+        // without beats the worker is never told of the timeout.
+        [SESSION_TURN_ACTIVITY]: () => sleep(60_000, 'done', { signal: release.signal }).catch(() => 'released'),
+      },
       activityHeartbeatMs: 200,
     })
     const caller = await Worker.create({
@@ -201,17 +215,28 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
       taskQueue: 'heartbeat-standin',
       workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
     })
+    const call = (name: string) =>
+      env.client.workflow.execute('callBeating', {
+        workflowId: `beating-${randomUUID()}`,
+        taskQueue: 'heartbeat-standin',
+        args: [name, 2_000, taskQueue],
+      })
     try {
       await agent.running()
-      const result = await caller.runUntil(
-        env.client.workflow.execute('callBeating', {
-          workflowId: `beating-${randomUUID()}`,
-          taskQueue: 'heartbeat-standin',
-          args: [slow, 1_000],
-        }),
-      )
-      expect(result).toBe('done')
+      await caller.runUntil(async () => {
+        expect(await call('slow')).toBe('done')
+        const failed = await call(SESSION_TURN_ACTIVITY).then(
+          () => undefined,
+          (error: unknown) => error,
+        )
+        expect(failed).toBeInstanceOf(WorkflowFailedError)
+        const activity = (failed as WorkflowFailedError).cause
+        expect(activity).toBeInstanceOf(ActivityFailure)
+        expect(activity?.cause).toBeInstanceOf(TimeoutFailure)
+        expect((activity?.cause as TimeoutFailure).timeoutType).toBe(TimeoutType.HEARTBEAT)
+      })
     } finally {
+      release.abort()
       await agent.stop()
     }
   }, 120_000)
