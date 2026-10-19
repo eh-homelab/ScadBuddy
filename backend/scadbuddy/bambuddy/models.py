@@ -20,6 +20,7 @@ from pydantic import (
     ValidatorFunctionWrapHandler,
     field_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -437,6 +438,13 @@ class AmsTray(BambuddyModel):
     nozzle_temp_max: int | None = None
     state: int | None = None
     exists: bool | None = None
+    #: The RFID tag's UID and the spool's UUID (#3818), all zeros for an untagged spool:
+    #: OpenBambuAPI ``mqtt.md`` at ``cc383a2c``, the ``pushing.pushall`` example, and
+    #: ``tests/bambuddy/recordings/printer-status-rack.json``. `spools.models` cleans them.
+    #: Read in the backend only, by the spool overlay (`trays.seen_trays`): never in a
+    #: status the API serves (#4336 review M6), so a dump of this model drops them.
+    tag_uid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
+    tray_uuid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
 
 
 class AmsUnit(BambuddyModel):
@@ -807,6 +815,11 @@ class PresetValues(BambuddyModel):
     resolved: bool = False
     values: dict[str, Any] = Field(default_factory=dict)
     reason: str | None = None
+
+
+#: :attr:`PresetValues.reason` for a preset the image's BBL tree does not offer, from a
+#: native run's reader (``slicing/values.py``, #3818 tier A); never Bambuddy's.
+NOT_IN_PROFILES = "not_in_profiles"
 
 
 class SliceJobAccepted(BambuddyModel):

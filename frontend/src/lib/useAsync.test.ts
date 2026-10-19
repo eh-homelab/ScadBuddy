@@ -120,7 +120,10 @@ it('leaves no timer or wait behind when unmounted while a signal waits on a read
     await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_MIN_MS))
     const race = vi.spyOn(Promise, 'race')
     await act(async () => signals[0]?.('resync'))
-    const wait = race.mock.results.at(-1)?.value as Promise<unknown>
+    // The hook's own race, and only it: another caller of Promise.race here (React, msw)
+    // fails the test rather than leaving it watching the wrong promise.
+    expect(race).toHaveBeenCalledTimes(1)
+    const wait = race.mock.results[0]?.value as Promise<unknown>
     race.mockRestore()
     let settled = false
     void wait.then(() => (settled = true))

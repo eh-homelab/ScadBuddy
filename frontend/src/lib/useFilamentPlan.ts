@@ -135,6 +135,8 @@ export function useFilamentPlan(
       setPlan(seeded)
     }
     const printerId = choices.printer_id ?? null
+    // This render's plates: `useLatest` writes its ref in a layout effect, which runs
+    // before this passive one (#3970). Written in a `useEffect`, it would hold the last.
     const asked = latestPlate.current
     const chosen = asked === 'all' ? [] : asked
     // Plate 1 is in the choices read already; so is a set emptied while it is changed,

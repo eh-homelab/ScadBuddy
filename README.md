@@ -615,8 +615,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
 - **No volume.** It does not mount `scadbuddy-data` and runs no template code. It reads an
   output's record, its stored `model.3mf` and the names taken from the model's files from
   the API's cluster-internal routes (`/api/v1/internal/outputs/…`, and a native library
-  file's record, plates and bytes from `/api/v1/internal/library/…`, #3827; neither in
-  the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
+  file's record, plates and bytes from `/api/v1/internal/library/…`, #3827, where a
+  native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
   like the rest of the API they have no auth today, so whoever reaches the API reaches
   them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in
@@ -890,12 +890,14 @@ workers restart.
     `asyncio.to_thread`: an activity that starts with one waits for a free thread
     while the loop runs on. For a hang it does not catch,
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
-    The renders dashboard's "Worker event loops" panel charts the render and print
-    workers by `job="scadbuddy-render"` and `job="scadbuddy-print"`. Each `job` is
-    the name of the worker's Service, which its ServiceMonitor scrapes (eh-homelab/clusters
-    `applications/scadbuddy/scadbuddy-{render,print}.yaml`, no `jobLabel`), so renaming
-    either Service empties its series. `scadbuddy-projects` has no scrape target, so
-    its stalls show only in its log.
+    The renders dashboard's "Worker event loops" panel charts the render, print and
+    projects workers by `job=~"scadbuddy-(render|print|projects)"`. Each `job` is the
+    name of the worker's Service in eh-homelab/clusters
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-projects.yaml)),
+    which its ServiceMonitor scrapes with no `jobLabel`
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml)),
+    so renaming a Service empties its series. The projects worker's ServiceMonitor
+    arrived in clusters#2504.
   - Every worker's `/metrics` also carries the Temporal SDK's own series (#3788):
     `temporal_workflow_task_execution_latency`, `temporal_workflow_task_schedule_to_start_latency`,
     `temporal_activity_schedule_to_start_latency` and the rest, in seconds. The SDK exports
@@ -904,8 +906,11 @@ workers restart.
     `namespace` label is the Temporal namespace, which Prometheus keeps as
     `exported_namespace`. A port another process holds leaves a worker without them
     (logged once at start) rather than stopping it. The renders dashboard's "Worker
-    Temporal tasks" panel charts them for the render and print workers; the projects
-    worker exports them too, but with no scrape target nothing reads them.
+    Temporal tasks" panel charts them for the render, print and projects workers. Of the
+    SDK's `temporal_*` series, each worker's ServiceMonitor (linked above) keeps only the three
+    histograms that panel reads, and clusters'
+    [`check-scadbuddy-keep-lists.sh`](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/.github/scripts/check-scadbuddy-keep-lists.sh)
+    keeps their lists in step.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
@@ -1442,6 +1447,38 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   `emptyDir` there and keep the root filesystem read-only.
 - The new GHCR package needs the one-time **public** visibility step
   described above.
+
+What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822):
+
+- The KEK (`SCADBUDDY_SECRET_KEY_FILE`) and `SCADBUDDY_API_INTERNAL_URL` on the API:
+  every transfer URL's token is signed under a key derived from the KEK, and the URLs
+  name the internal blob routes at that base. Without either, a native slice fails
+  saying which is missing. The slicer pod must reach that URL.
+- `store_backend` `s3` or `bambuddy`: `local` has no content store for the slices'
+  blobs, and a native slice there fails with a 503.
+- The print worker's `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` and
+  `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` matching the API's: the dialog's slice is
+  started from the print worker onto those queues, and the API's `library` worker runs
+  it.
+- Bambu Studio's profiles ship in the API image (`/opt/slicer-profiles`, from the same
+  download as the slicer image), so nothing else is mounted.
+
+#### Rolling out the native slicer
+
+1. Deploy the API images and the slicer image together, from one build: a native
+   slice's preset key carries the API image's `BAMBU_STUDIO_VERSION`, which must be the
+   CLI the slicer runs (spec §8).
+2. On the slicer pod, `scadbuddy-slicer --check-cli` prints the CLI's version (the
+   image build runs it too); its `/healthz` answers on `9090`.
+3. With `slicer_backend` still `bambuddy`, slice one plate in the print dialog, so the
+   deploy itself is known good before the switch.
+4. In Settings → Projects & files, set **Slicer** to "ScadBuddy's slicer (Bambu Studio
+   CLI)". It applies at once, no restart: the next dialog slice and the next print run
+   use it (a run already planned keeps the slicer it planned with). Slice a plate in the
+   dialog (its progress shows as a percentage), then print one. The "Native slicer" row
+   of the printing dashboard charts the slices' duration and outcomes.
+5. To go back, set **Slicer** to "Bambuddy's slicer" the same way. Native slices already
+   recorded stay as provenance and are swept with their rows.
 
 ### Switching continuous deploy off
 

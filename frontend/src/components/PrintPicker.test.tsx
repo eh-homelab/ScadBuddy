@@ -8,9 +8,11 @@ import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
+import { printersState } from '../mocks/features/printers'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { useAnalysis } from '../lib/useAnalysis'
@@ -22,7 +24,7 @@ import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 import { chooseProject, openPicker } from '../test/projectPicker'
-import { choose, optionNames } from '../test/select'
+import { choose, optionDisabled, optionNames } from '../test/select'
 
 /** #3669 — the option text for the value a native select took, in the shadcn select that replaced it. */
 const OPTION_TEXT: Record<string, string | RegExp> = {
@@ -378,14 +380,19 @@ describe('PrintPicker', () => {
 
   it('sends the whole run request, with the plan the server suggested', async () => {
     const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
     const { user } = renderPicker()
     await loaded()
+    // `printer` goes out once the registry has answered (#4340 review M4).
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
 
     expect(bodies).toHaveLength(1)
     expect(bodies[0]).toEqual({
+      // #3823 — the registry printer, and its Bambuddy id for a backend that reads only that.
+      printer: '00000000-0000-4000-8000-000000000001',
       printer_id: 1,
       filament_plan: {
         slots: [
@@ -1606,6 +1613,99 @@ describe('PrintPicker · Printer', () => {
     await waitFor(() => expect(urls.at(-1)).toContain('printer_id=2'))
   })
 
+  it('names the registry printer only for a Bambuddy printer the registry links (#3823)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114'))
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    const body = bodies[0] as { printer?: unknown; printer_id?: unknown }
+    expect(body.printer_id).toBe(2)
+    expect(body).not.toHaveProperty('printer')
+  })
+
+  it('names a registry printer linked elsewhere while the dialog is open (#4376)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
+    const { user } = renderPicker()
+    await loaded()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114'))
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
+
+    // Another tab links Garage to Bambuddy's printer 2: the dialog reads the registry again.
+    const garage = printersState()[1]!
+    garage.bambuddy_printer_id = 2
+    const before = registry.answered
+    // Sent until it is read: the subscription may not be open yet.
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', `printer:${garage.id}`], { printer_id: garage.id })
+      expect(registry.answered).toBeGreaterThan(before)
+    })
+
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ printer: garage.id, printer_id: 2 })
+  })
+
+  it('keeps the registry printer when a re-read of the registry fails (#4391 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
+
+    server.use(http.get('/api/v1/printers', () => problem(503, 'Service Unavailable')))
+    const before = registry.answered
+    const linked = printersState()[0]!
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', `printer:${linked.id}`], { printer_id: linked.id })
+      expect(registry.answered).toBeGreaterThan(before)
+    })
+
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ printer: linked.id, printer_id: 1 })
+  })
+
+  it('inherits no template sequence for a library file (#4391 review)', async () => {
+    const checks = watch('POST', '/check')
+    server.use(
+      http.post('/api/v1/print/library/:id/check', () => HttpResponse.json({ errors: [], warnings: [], objects: 3 })),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+        // Only an output's template settings are a template's: a library file has none.
+        printSettings={{ print_sequence: 'by object' }}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(checks.answered).toBeGreaterThan(0))
+    expect(screen.queryByText(/objects need room between them/)).not.toBeInTheDocument()
+  })
+
+  it('lists a printer reached only over the LAN, not yet choosable (#3823)', async () => {
+    printersState()[1]!.lan_host = '10.0.0.9'
+    await api.createPrinter({ serial: '01P00A0000000BB', name: 'Attic', preferred_path: 'auto' })
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(await optionDisabled(user, screen.getByLabelText('Printer'), /^Garage/)).toBe(true)
+    await user.click(screen.getByLabelText('Printer'))
+    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not in Bambuddy')
+    // A row neither Bambuddy nor the LAN reaches is not a printer to offer (#4340 review M3).
+    expect(screen.queryByRole('option', { name: /^Attic/ })).toBeNull()
+  })
+
   it('does not ask which printer when there is only one', async () => {
     server.use(
       http.get('/api/v1/print/outputs/:id/choices', () =>
@@ -2211,6 +2311,18 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]?.['prime_tower']).toEqual({ enabled: false })
+  })
+
+  it("counts a plate's objects when by object is the template's default (#3222)", async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], objects: 3 })),
+    )
+    renderPicker({ printSettings: { print_sequence: 'by object' } })
+    await loaded()
+    await showAdvanced()
+
+    expect(screen.getByLabelText('Print sequence')).toHaveTextContent('Default (template or process)')
+    expect(await screen.findByText(/This plate has 3 objects\./)).toBeInTheDocument()
   })
 
   it('says what Default means for a template that declares the tower, and strikes it when overridden', async () => {
@@ -3957,6 +4069,37 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(puts.bodies).toEqual([{ algorithm: 'newest_first', version: expect.any(Number) }])
   })
 
+  it("never builds a check of one printer with another's hand-picked nozzle (#4347)", async () => {
+    // As the algorithm above: a rack position is the printer's own, cleared on a switch.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ printer_id: 2 }))
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
+      expect.objectContaining({ rack_position: 2 }),
+    )
+  })
+
+  it('never builds a check with a hand-picked nozzle once Advanced is left (#4361 review)', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByTestId('rack-position-2')).not.toBeInTheDocument())
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built).not.toContainEqual(expect.objectContaining({ rack_position: 2 }))
+  })
+
   it('goes back to Automatic when the nozzle size changes', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     renderPicker()
@@ -4076,6 +4219,28 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer_id: 2 }))
     expect(checks.bodies.filter((b) => (b as { printer_id?: number }).printer_id === 2)).toEqual(
       expect.not.arrayContaining([expect.objectContaining({ rack_algorithm: 'oldest_first' })]),
+    )
+  })
+
+  it("never builds a check of one printer with another's algorithm (#4347)", async () => {
+    // The check is debounced, so the test above sees only the requests sent. A request
+    // built for a render is sent if nothing replaces it within the debounce, and under load
+    // the render that clears the old printer's algorithm came later than that (#4347):
+    // so no render may build one.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    pickAlgorithm(await screen.findByLabelText('Rack algorithm'), 'oldest_first')
+    await waitFor(() =>
+      expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_algorithm: 'oldest_first' }),
+    )
+    vi.mocked(usePrintCheck).mockClear()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ printer_id: 2 }))
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
+      expect.objectContaining({ rack_algorithm: 'oldest_first' }),
     )
   })
 
@@ -4206,9 +4371,18 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
   /** Holds each algorithm PUT until the test answers it, in any order. */
   function heldSaves() {
+    /** Answers each save, by the order its `version` was first sent. */
     const answers: ((status: number) => void)[] = []
-    /** The `version` each save was sent with, in the order sent. */
+    /** The `version` each save was sent with, in the order sent, each once. */
     const versions: number[] = []
+    // Every PUT the handler holds for each save, and the answer once given. A save can
+    // reach the handler twice: the test setup resends one MSW let through after an aborted
+    // request (src/test/resend.ts), and here the handler had seen that one too, so a count
+    // of PUTs read three for two saves. A save is its version, which a resend repeats.
+    const held: ((status: number) => void)[][] = []
+    const given: (number | undefined)[] = []
+    /** Every PUT the handler has seen, a resend included. */
+    let seen = 0
     // The printer's stored algorithm, as the choices read reports it.
     let stored = 'least_used'
     // While set, each choices read answers with what was stored when it started, but only
@@ -4225,8 +4399,21 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       }),
       http.put('/api/v1/print/printers/:id/rack-algorithm', async ({ request }) => {
         const { algorithm, version } = (await request.json()) as { algorithm: string; version: number }
-        versions.push(version)
-        const status = await new Promise<number>((resolve) => answers.push(resolve))
+        seen += 1
+        let index = versions.indexOf(version)
+        if (index === -1) {
+          index = versions.push(version) - 1
+          held.push([])
+          answers.push((status) => {
+            given[index] = status
+            held[index]?.splice(0).forEach((resolve) => resolve(status))
+          })
+        }
+        const status = await new Promise<number>((resolve) => {
+          const answered = given[index]
+          if (answered === undefined) held[index]?.push(resolve)
+          else resolve(answered)
+        })
         if (status !== 200) return HttpResponse.json({ title: 'Service Unavailable', status }, { status })
         stored = algorithm
         return HttpResponse.json({ algorithm })
@@ -4248,8 +4435,43 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     const releaseReads = () => heldReads.splice(0).forEach((resolve) => resolve())
     /** What the printer stores now. */
     const storedNow = () => stored
-    return { answers, answer, saves, versions, heldReads, holdChoiceReads, releaseReads, stored: storedNow }
+    const puts = () => seen
+    return { answers, answer, saves, versions, puts, heldReads, holdChoiceReads, releaseReads, stored: storedNow }
   }
+
+  /** One save's PUT, as the dialog sends it, for the tests of the fake below. */
+  const sendSave = () =>
+    fetch('/api/v1/print/printers/1/rack-algorithm', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ algorithm: 'oldest_first', version: 7 }),
+    })
+
+  it('counts a save its handler sees twice once, and answers both while held', async () => {
+    // What the test setup's resend can do (see heldSaves): one save, two PUTs, both held
+    // by the handler when the save is answered.
+    const { answers, answer, versions, puts } = heldSaves()
+    const first = sendSave()
+    const resent = sendSave()
+    await waitFor(() => expect(puts()).toBe(2))
+    expect(answers).toHaveLength(1)
+    answer(0, 200)
+    expect((await first).status).toBe(200)
+    expect((await resent).status).toBe(200)
+    expect(versions).toEqual([7])
+  })
+
+  it('answers a resent save that arrives after the save was answered', async () => {
+    const { answers, answer, puts } = heldSaves()
+    const first = sendSave()
+    await waitFor(() => expect(puts()).toBe(1))
+    answer(0, 200)
+    expect((await first).status).toBe(200)
+    // The resend comes after: answered as the save was, not held for an answer.
+    expect((await sendSave()).status).toBe(200)
+    expect(puts()).toBe(2)
+    expect(answers).toHaveLength(1)
+  })
 
   it('lets only the latest of two saves say it was not remembered', async () => {
     // #1086 review: an earlier save failing after a later one succeeded said the later

@@ -122,3 +122,91 @@ def test_drifted_fields_read_as_unknown() -> None:
     assert [unit.id for unit in status.ams] == [1] and status.ams[0].tray == []
     assert [tray.id for tray in status.vt_tray] == [254]
     assert status.nozzles == [] and status.active_extruder == 0
+
+
+# --- #4336 review I1, I3: presence bits and the H2 external holders ---------------------
+
+
+def _lan(print_: dict[str, object]) -> LanReport:
+    return LanReport(serial="S", received_at=datetime.now(UTC), print=print_)
+
+
+def _two_nozzles() -> dict[str, object]:
+    return {
+        "device": {
+            "nozzle": {
+                "info": [
+                    {"id": 0, "diameter": "0.4", "type": "HS01"},
+                    {"id": 1, "diameter": "0.4", "type": "HS01"},
+                ]
+            }
+        }
+    }
+
+
+def test_tray_exist_bits_set_each_trays_presence() -> None:
+    """Bambuddy's bit layout (``apply_tray_exist_bits``, ``bambu_mqtt.py:216-330`` at
+    ``0d427510``): an AMS tray is bit ``ams_id * 4 + tray``, an AMS-HT bit
+    ``16 + (ams_id - 128)``. ``0x10002`` is AMS 0 slot 2 and HT-A."""
+    report = _lan(
+        {
+            "ams": {
+                "tray_exist_bits": "10002",
+                "ams": [
+                    {
+                        "id": "0",
+                        "tray": [
+                            {"id": "0", "tray_type": "PLA", "state": 11},
+                            {"id": "1", "tray_type": "PLA", "state": 11},
+                        ],
+                    },
+                    {"id": "128", "tray": [{"id": "0", "tray_type": "PETG", "state": 9}]},
+                    {"id": "129", "tray": [{"id": "0", "tray_type": "PETG", "state": 9}]},
+                ],
+            }
+        }
+    )
+    status = status_from_report(row(), report, now=report.received_at)
+    exists = {(unit.id, tray.id): tray.exists for unit in status.ams for tray in unit.tray}
+    assert exists == {(0, 0): False, (0, 1): True, (128, 0): True, (129, 0): False}
+
+
+def test_no_presence_bits_leave_presence_unknown() -> None:
+    """A report without the mask, or the printer-off pattern (all zeros with
+    ``power_on_flag`` false, Bambuddy #765), says nothing about presence."""
+    for ams in (
+        {"ams": [{"id": "0", "tray": [{"id": "0", "tray_type": "PLA"}]}]},
+        {
+            "tray_exist_bits": "0",
+            "power_on_flag": False,
+            "ams": [{"id": "0", "tray": [{"id": "0", "tray_type": "PLA"}]}],
+        },
+    ):
+        report = _lan({"ams": ams})
+        status = status_from_report(row(), report, now=report.received_at)
+        assert status.ams[0].tray[0].exists is None
+
+
+def test_vir_slot_is_both_h2_external_holders() -> None:
+    """H2-series: ``vt_tray`` is the one active spool and ``vir_slot`` lists both
+    holders (Bambuddy ``bambu_mqtt.py:2323-2349``; ha-bambulab ``models.py:3696``)."""
+    report = _lan(
+        {
+            **_two_nozzles(),
+            "vt_tray": {"id": "255", "tray_type": "PETG", "tray_color": "00FF00FF"},
+            "vir_slot": [
+                {"id": "254", "tray_type": "PLA", "tray_color": "FF0000FF"},
+                {"id": "255", "tray_type": "PETG", "tray_color": "00FF00FF"},
+            ],
+        }
+    )
+    status = status_from_report(row(), report, now=report.received_at)
+    assert [(tray.id, tray.tray_type) for tray in status.vt_tray] == [(254, "PLA"), (255, "PETG")]
+
+
+def test_a_single_vir_slot_255_is_the_one_holder() -> None:
+    """A single-nozzle printer's one holder arrives as 255 in ``vir_slot``; Bambuddy
+    reads it as 254 (``bambu_mqtt.py:2327-2333``)."""
+    report = _lan({"vir_slot": [{"id": "255", "tray_type": "PLA"}]})
+    status = status_from_report(row(), report, now=report.received_at)
+    assert [tray.id for tray in status.vt_tray] == [254]

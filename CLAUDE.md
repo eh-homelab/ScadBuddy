@@ -304,7 +304,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish; a kind its worker does not register fails the workflow task until a build that
-  has it is current, #4139, told by `registered.py` `RegisteredActivities`), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+  has it is current, #4139, told by `registered.py` `RegisteredActivities`),
+  `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
   Flows (#1057, plan `docs/superpowers/plans/2026-10-09-durable-phase-6-flows.md`):
   `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
   the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no
@@ -399,6 +400,26 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (template Python in its own process group, env allowlisted), `verify_pipeline.py`
   (for `verify.sh`). `scadbuddy/template.py` is the surface a template's
   `activities.py` imports.
+- `backend/scadbuddy/slicing/` — the native slicer's Python side (#3822, spec 2026-10-16
+  §5, plan `docs/superpowers/plans/2026-10-16-native-slicer-rust-worker.md`), on
+  `slicer_backend` `native`: `models.py` (`slice_plate`'s payloads, pinned to the Rust
+  worker by a vector file), `profiles.py` (Bambu Studio's tree in the API image,
+  `/opt/slicer-profiles` from the Dockerfile's `slicer-dist`; `Profiles.version` keys the
+  slices), `presets.py` (a `SlicePlan` built into machine, process and filament files,
+  `native_preset_key`), `slice_info.py` (grams and G-code from the sliced 3MF),
+  `transfer.py` and `transfer_token.py` (the worker's transfer URLs: presigned S3 GET or
+  the internal blob routes, a token MACed under a KEK-derived key; never log one),
+  `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
+  `start.py` (`start_native_slice`: one execution per copy, subject, copy sha256 and
+  presets, which the dialog and the run share; the lost-row repair), `preview.py` (the
+  dialog's reads under `?slicer=native`) and `component.py` (`SLICING`).
+  `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
+  `workflows/slicing_activities.py`, the run's `slice_run` and `print_sliced_upload`
+  among them); the print worker only starts it. `api/internal_blobs.py` is the hidden
+  `GET`/`PUT /api/v1/internal/blobs/{key}` the worker reads and writes through.
+  `SliceWorkflow` histories replay from `tests/fixtures/slice_workflow_histories/`; a
+  change goes behind `workflow.patched`. The worker is `workers/rust/`
+  (`scadbuddy-slicer`, README "Slicer worker").
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -423,14 +444,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); `PrintRun`
-  and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
-  unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
-  unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
-  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`. `--queue projects`
-  (`run_projects_worker`, #1057) serves flow runs, deployment `scadbuddy-projects`
-  (#4146; `/readyz` once the queue routes to it, as the print worker's): Postgres and the
-  KEK only, and it refuses to start without the KEK.
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); every
+  workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
+  it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
+  behavior), so an `Operation` moves to the current build, which #4139's deferral
+  needs. The API serves `bambuddy` itself, unversioned, only with
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
+  `--queue projects` (`run_projects_worker`, #1057) serves flow runs, deployment
+  `scadbuddy-projects` (#4146; `/readyz` once the queue routes to it, as the print
+  worker's): Postgres and the KEK only, and it refuses to start without the KEK.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -795,9 +817,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-12@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-19@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.12). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.19). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -879,7 +901,14 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   image=mirror.gcr.io/moby/buildkit:buildx-stable-1` (#3370): Docker Hub refuses some
   anonymous pulls from hosted runners, which failed jobs before any test ran. A new
   buildx step needs it too. The tag floats with buildx's own default; nothing would
-  bump a digest pinned there.
+  bump a digest pinned there. Each step also gives its daemon a `buildkitd-config-inline`
+  `[registry."docker.io"] mirrors = ["mirror.gcr.io"]` (#4012), so the Dockerfiles'
+  Docker Hub bases come through the mirror while the Dockerfiles keep their plain
+  references for Dependabot and `openscad-bump.yml` (BuildKit falls back to Docker Hub
+  for an image the mirror lacks; the pinned digests matched on both on 2026-10-19,
+  `docker buildx imagetools inspect`). `lint-buildx-mirror.sh` checks both. The
+  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`;
+  a service container has no such fallback, so a tag the mirror lacks fails the job.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
@@ -913,8 +942,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - The `rust` job pins `dtolnay/rust-toolchain` by commit (the toolchain itself is
   `rust-toolchain.toml`'s). The action has no release tags, so Dependabot never moves
   that SHA: `rust-toolchain-pin.yml` runs `.github/scripts/rust-toolchain-pin.sh --check`
-  weekly, failing (the reminder) when master has moved past it, naming the line to
-  change (#4099). Move it, and its `master as of` date, in a reviewed PR.
+  weekly over every workflow's pin, failing (the reminder) when master has moved past
+  one, naming each line to change (#4099, #4264). Move it, and its `master as of` date, in a reviewed PR.
 
 ## PR conventions
 

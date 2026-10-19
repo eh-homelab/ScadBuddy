@@ -33,6 +33,7 @@ from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import (
     INPUT_MAX,
+    READ_IMAGES,
     REDACTED,
     SessionEvents,
     append_from,
@@ -40,6 +41,7 @@ from scadbuddy_durable.session.events import (
     translate,
 )
 from scadbuddy_durable.session.models import FinishTurn, FollowArgs, FollowResult
+from scadbuddy_durable.session.runner import VIEW_IMAGES_TOOL, VIEW_TOOL_IMAGES_TOOL
 from scadbuddy_durable.worker import config_from_env
 
 SID = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
@@ -89,6 +91,9 @@ def test_a_segments_own_call_keeps_its_parent_and_takes_its_tools_tier() -> None
     assert call("mcp__scadbuddy__print_output")["risk"] == "outward"
     assert call("mcp__scadbuddy__unknown")["risk"] == "outward"
     assert [call(n)["risk"] for n in ("Skill", "Agent", "Task")] == ["read"] * 3
+    # The images tools read only what the session holds (#4185), under runner.py's names.
+    assert {VIEW_IMAGES_TOOL, VIEW_TOOL_IMAGES_TOOL} == READ_IMAGES
+    assert [call(n)["risk"] for n in sorted(READ_IMAGES)] == ["read"] * 2
     assert "parent" not in call("Skill", parent="")
 
 
@@ -524,6 +529,26 @@ def test_risk_tiers_are_the_agents() -> None:
         Path(__file__).resolve().parents[2] / "agent" / "test" / "fixtures" / "risk-tiers.json"
     )
     assert frozenset(json.loads(fixture.read_text())) == events_module.RISK_TIERS
+
+
+def test_sensitive_keys_are_the_agents() -> None:
+    """#4340 review C1: `SENSITIVE_KEY` copies sdkEvents.ts's; both read one fixture."""
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "agent"
+            / "test"
+            / "fixtures"
+            / "sensitive-keys.json"
+        ).read_text()
+    )
+    blanked: dict[str, str] = fixture["blanked"]
+    kept: dict[str, str] = fixture["kept"]
+    logged = logged_input({**blanked, **kept})
+    assert logged == {**{key: events_module.REDACTED for key in blanked}, **kept}
+    text = json.dumps(logged)
+    for value in blanked.values():
+        assert value not in text
 
 
 @workflow.defn(sandboxed=False)

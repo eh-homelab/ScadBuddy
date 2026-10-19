@@ -9,9 +9,13 @@ The plan, for the sides that have a nozzle of the chosen size
 (:func:`~scadbuddy.bambuddy.extruders._offered_sides`):
 
 * A filament chosen for a side by hand (Advanced) prints there.
-* Without the Filament Track Switch an AMS is wired to one extruder, so a loaded spool
-  prints on the side it feeds. With the switch any AMS reaches either nozzle, and the
-  side a spool rests on only breaks ties.
+* A loaded spool prints on the side it feeds or rests on. Without the Filament Track
+  Switch an AMS is wired to one extruder. With the switch any AMS reaches either nozzle,
+  but one inlet feeding both in one print stalled print #355: the switch flipped inlet A
+  between the extruders at every colour change (#4272). So each inlet feeds the side it
+  rests on (inlet A the left, B the right), and two spools on one inlet share a nozzle.
+  A side chosen by hand can still split an inlet; Checks warns of it
+  (``print_run.inlet_warnings``).
 * The rest are grouped by what can share a hotend: one material family (PLA, PETG, ABS,
   TPU …), which is also one temperature window. Two or more families go to the side
   with fewer filaments so far, a family at a time, so no hotend runs two families. One
@@ -170,15 +174,24 @@ class NozzlePlan(BaseModel):
         plan, every filament where it puts it (#3955)."""
         return any(slot.by_hand for slot in self.slots)
 
+    @property
+    def keeps_sides(self) -> bool:
+        """Whether the slice must keep the plan's sides: one chosen by hand (#3955), or
+        both sides used with the Track Switch fitted (#4272). Left to regroup, the
+        slicer could put two spools of one inlet on different extruders, and the switch
+        would then move that inlet between them at every colour change, as it did on
+        print #355. With one side used, the nozzle stats offer only it."""
+        return self.by_hand or (self.track_switch and len(self.sides) == 2)
+
     def stated_map(self, filaments: int, *, one_plate: bool) -> FilamentMap | None:
         """The Manual map the 3MF states for a file of ``filaments`` filaments, pinned
-        when a side was chosen by hand and the file has ``one_plate``."""
+        when the plan :attr:`keeps_sides` and the file has ``one_plate``."""
         if filaments < 1:
             return None
         return FilamentMap(
             tuple(self.filament_map(filaments)),
             tuple(self.volume_map(filaments)),
-            pinned=self.by_hand and one_plate,
+            pinned=self.keeps_sides and one_plate,
         )
 
 
@@ -226,7 +239,7 @@ def plan_nozzles(
             chosen.add(filament.slot_id)
         elif len(allowed) == 1:
             placed[filament.slot_id] = next(iter(allowed))
-        elif not switch and filament.rests is not None and filament.rests in allowed:
+        elif filament.rests is not None and filament.rests in allowed:
             placed[filament.slot_id] = filament.rests
     load = {side: sum(1 for value in placed.values() if value == side) for side in allowed}
 

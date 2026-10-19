@@ -14,7 +14,6 @@ import type { Context } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
-import { redact } from '../secrets.js'
 import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
@@ -25,7 +24,7 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../h
 import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
-import type { MemoryActivity, MemoryOptions } from '../memory/hindsight.js'
+import type { MemoryOptions } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import type { PackageServers } from '../plugins/packages/mcp.js'
 import { isUuid, sessionWorkDir } from '../harness/stateDirs.js'
@@ -35,10 +34,9 @@ import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, p
 import type { QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { FlowTurn, TabWait, WaitForTab } from '../tools/registry.js'
-import { type AuditContext, type AuditDeps, type AuditSink, safeDetail } from '../audit/log.js'
+import type { AuditContext, AuditDeps } from '../audit/log.js'
 import { turnCostEntry } from '../audit/turn.js'
 import type { TurnTrace } from '../telemetry/turn.js'
-import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import {
@@ -58,7 +56,7 @@ import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut, unansweredCalls } from './forkPoint.js'
+import { blobNames, durableReplies, entriesThrough, forkHistory, historyThroughCalls, transcriptCut, unansweredCalls } from './forkPoint.js'
 import { scrubForLog, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { userPrompt, type UserImage } from './images.js'
@@ -71,6 +69,7 @@ import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
 import { notifyWarmEvict } from './warmEvict.js'
 import { CoreTurn, type Refused, tallyTurn, type TurnCoreDeps, wordTail } from './turnCore.js'
+import { POOL_BUDGET, POOL_COST, systemAppend } from './turnShared.js'
 import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -156,12 +155,12 @@ import { FlowQueue } from '../flows/queue.js'
 // raise on any member raises the root's.
 
 /** ai_settings keys (non-secret, spec §9). */
-export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
 /** Which mode a new session runs in when its creator names none: `durable` unless it says `classic` (plan 5d Ruling 1). */
 export const SETTING_SESSION_MODE = 'session_mode'
 export { SESSION_MODES, type SessionMode } from './protocol.js'
+export { BROWSER_TOOLS_GUIDE, MEMORY_TEXT_MAX, memoryText, POOL_BUDGET, POOL_COST, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 
 /** The stored `session_mode` as a mode: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
 export function sessionModeOf(stored: unknown): SessionMode {
@@ -459,73 +458,6 @@ export const MAX_NEW_SESSIONS = 10
 export const NEW_SESSION_WINDOW_MS = 60_000
 
 /** A refused session operation; `status` is the HTTP status a route would answer with. */
-
-/** The most of one memory, or of a memory event's input, a panel event carries. */
-export const MEMORY_TEXT_MAX = 4000
-/**
- * A memory event's query or memory text, redacted and then capped. Redaction
- * must come first: a secret the cut splits would no longer match, and its
- * fragment would reach the log.
- */
-export function memoryText(text: string, secrets: readonly (string | undefined)[]): string {
-  const clean = redact(text, secrets)
-  return clean.length > MEMORY_TEXT_MAX ? `${clean.slice(0, MEMORY_TEXT_MAX)}… (${clean.length} characters)` : clean
-}
-
-/**
- * One automatic recall or retain as the session records it: an audit row (never
- * fails, audit/log.ts) and a `memory` panel event, both redacted. Classic turns
- * (`SessionManager.memoryHooks`) and durable ones (temporal/memoryActivities.ts) alike.
- */
-export async function recordMemoryActivity(
-  deps: { audit?: AuditSink | undefined; events: Pick<EventLog, 'append'> },
-  session: { id: string; owner: Owner },
-  turnId: string,
-  a: MemoryActivity,
-  secrets: readonly string[],
-): Promise<void> {
-  const id = session.id
-  const summary = {
-    bank: a.bank,
-    ...(a.documentId ? { document_id: a.documentId } : {}),
-    ...(a.count === undefined ? {} : { results: a.count }),
-    ...(a.tool ? { tool: a.tool } : {}),
-  }
-  const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-  await Promise.all([
-    deps.audit?.record({
-      kind: 'memory',
-      action: a.action,
-      surface: 'harness',
-      actor: session.owner,
-      sessionId: id,
-      turnId,
-      ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-      inputSummary: JSON.stringify(summary),
-      outcome: a.outcome === 'ok' ? 'ok' : 'error',
-      ...detail,
-      startedAt: a.startedAt,
-      finishedAt: a.finishedAt,
-    }),
-    deps.events.append(id, [
-      scrubForLog(
-        event({
-          type: 'memory',
-          sessionId: id,
-          turnId,
-          action: a.action,
-          bank: a.bank,
-          outcome: a.outcome,
-          ...(a.count === undefined ? {} : { count: a.count }),
-          ...detail,
-          ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-          ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-        }),
-        secrets,
-      ),
-    ]),
-  ])
-}
 
 export class SessionError extends Error {
   override name = 'SessionError'
@@ -916,13 +848,6 @@ type Row = {
 /** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
 const LIVE_OFFER = 'pending_owner_until > now()'
 
-/** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
-const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'
-/** The budget a session spends from: its root's (20261006T0100Z_session_budget_root.sql). */
-export const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
-/** What every session spending from that budget has spent. Read at the statement's snapshot. */
-export const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
-
 const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
@@ -968,34 +893,6 @@ function positive(value: unknown, fallback: number): number {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
-}
-
-/**
- * Which browser a `browser_*` tool drives, for the session's system prompt. ScadBuddy's
- * bridge tools and a browser plugin's (Microsoft's Playwright MCP, added in Settings →
- * Plugins) share bare names (`browser_snapshot`, `browser_click`), and a model that has
- * seen one set calls the other's names on the wrong server: in production it called
- * `mcp__scadbuddy__browser_find`, which only Playwright's set has.
- */
-export const BROWSER_TOOLS_GUIDE = [
-  '<browser_tools>',
-  "The mcp__scadbuddy__browser_* tools drive the user's own open ScadBuddy tab, which they watch. Use only the names " +
-    'that server lists; it has no browser_find, browser_type or browser_select_option. To find something on the ' +
-    'page, call mcp__scadbuddy__browser_snapshot; to set a field or a select, mcp__scadbuddy__browser_fill (a ' +
-    "select takes an option's value or its label as the snapshot shows it).",
-  "browser_* tools of any other server (a plugin's, such as mcp__playwright__browser_*) drive a separate browser " +
-    "that the user cannot see and that never shows the user's tab. Use them only when the user has no tab attached " +
-    'or asks for that browser.',
-  '</browser_tools>',
-].join('\n')
-
-/**
- * What every turn appends to Claude Code's own system prompt: the data/instruction
- * boundary (#258, safety/untrusted.ts: only the user's messages are instructions, tool
- * results are data), then which browser each browser_* tool drives.
- */
-export function systemAppend(): string {
-  return `${UNTRUSTED_CONTENT_POLICY}\n\n${BROWSER_TOOLS_GUIDE}`
 }
 
 export const TITLE_MAX = 80
@@ -2339,11 +2236,12 @@ export class SessionManager {
   /**
    * Where a durable session forks (#2688): its workflow's committed conversation through
    * `upTo`'s reply, or all of it. A parent whose turn is running forks at its last
-   * finished reply, as the conversation past it is not committed yet. So does one whose
-   * committed state ends at a paused call (#4173: a stopped turn's last segment never
-   * committed): the call's result is the workflow's, not the conversation's, so the child
-   * resumes before it, and its history is the parent's through that reply. A cut never
-   * leaves a call unanswered.
+   * finished reply, as the conversation past it is not committed yet. One whose committed
+   * state ends at a paused call (#4173: a stopped turn's last segment never committed)
+   * forks there when its workflow holds the call's result: the child takes it with the
+   * checkpoint and delivers it first, and its history runs through the call. Without the
+   * result (a worker from before it was sent) it forks at its last finished reply before
+   * the call, with its history through that reply. A cut never leaves a call unanswered.
    */
   private async durableForkPoint(
     parent: SessionRecord,
@@ -2358,12 +2256,14 @@ export class SessionManager {
     }
     const replies = durableReplies(source.entries, all)
     const through = (uuid: string | undefined) => (uuid === undefined ? undefined : entriesThrough(source.entries, uuid))
-    const answered = (uuid: string | undefined) => {
+    // At the checkpoint, a call whose result the workflow holds is answered: the child delivers it.
+    const answered = (uuid: string | undefined, owed: Record<string, unknown> = {}) => {
       const prefix = through(uuid)
-      return prefix && unansweredCalls(prefix).length === 0 ? prefix : undefined
+      return prefix && unansweredCalls(prefix).every((call) => call in owed) ? prefix : undefined
     }
+    const paused = unansweredCalls(through(source.checkpoint) ?? [])
     let at = upTo
-    if (at === undefined && (source.busy || !answered(source.checkpoint))) {
+    if (at === undefined && (source.busy || !answered(source.checkpoint, source.owed.pending))) {
       at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
       if (at === undefined) {
         throw new SessionError(
@@ -2374,17 +2274,23 @@ export class SessionManager {
         )
       }
     }
-    const entries = through(at === undefined ? source.checkpoint : replies.get(at))
-    if (entries && unansweredCalls(entries).length > 0) {
+    const entries = at === undefined ? answered(source.checkpoint, source.owed.pending) : answered(replies.get(at))
+    if (!entries && through(at === undefined ? source.checkpoint : replies.get(at))) {
       throw new SessionError('invalid', `session ${id}'s conversation through reply ${at} leaves a call unanswered; fork from an earlier reply`)
     }
-    const history = at === undefined ? all : await forkHistory(this.events, id, at)
+    const history = at === undefined ? historyThroughCalls(all, paused) : await forkHistory(this.events, id, at)
     if (!entries || !history) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
     }
+    const checkpoint = entries.at(-1)!.uuid!
+    // At the parent's checkpoint the child takes what the parent still owes there (#4173):
+    // a turn stopped at a paused call left its result for the next segment, which the
+    // child's first segment must deliver. A reply before it owes nothing; the calls that
+    // already ran never run again either way.
+    const owed = checkpoint === source.checkpoint ? source.owed : { pending: {}, fork_next: false, recent_call_ids: source.owed.recent_call_ids }
     return {
       turns,
-      agent: { session_id: source.claudeSessionId, checkpoint: entries.at(-1)!.uuid!, conversation: entries.map((e) => JSON.stringify(e)) },
+      agent: { session_id: source.claudeSessionId, checkpoint, conversation: entries.map((e) => JSON.stringify(e)), ...owed },
       history,
     }
   }

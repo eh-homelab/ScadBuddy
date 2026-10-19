@@ -242,6 +242,11 @@ class PrintRunStore:
         place a run that failed before it queued anything is recorded."""
         return await asyncio.to_thread(self._latest_for_output, output_id)
 
+    async def running_for(self, output_id: str) -> list[PrintRun]:
+        """The output's runs still ``running``, newest first: what may still read a
+        slice of it (#4312 re-review I-a)."""
+        return await asyncio.to_thread(self._running_for, output_id)
+
     async def failed_before_queueing(self, output_ids: list[str]) -> set[str]:
         """Which of ``output_ids`` have a newest run that failed before it queued
         anything (#1831), in one query: what ``/progress`` reports as the failure."""
@@ -357,6 +362,15 @@ class PrintRunStore:
                 (output_id,),
             ).fetchone()
         return PrintRun.model_validate(row) if row else None
+
+    def _running_for(self, output_id: str) -> list[PrintRun]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s AND status = 'running'"
+                " ORDER BY created_at DESC",
+                (output_id,),
+            ).fetchall()
+        return [PrintRun.model_validate(row) for row in rows]
 
     def _failed_before_queueing(self, output_ids: list[str]) -> set[str]:
         if not output_ids:

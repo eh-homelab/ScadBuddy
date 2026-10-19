@@ -493,7 +493,9 @@ async def _write_refusal(
     the retry; a read the busy server refuses counts as "not known current" (#3293)."""
     attempts = IS_CURRENT_ATTEMPTS if attempts is None else attempts
     max_wait = IS_CURRENT_MAX_WAIT if max_wait is None else max_wait
-    assert attempts >= 1, f"a write takes at least one attempt, not {attempts}"
+    if attempts < 1:
+        # Raised, not asserted: under `python -O` the loop would never write at all.
+        raise AssertionError(f"a write takes at least one attempt, not {attempts}")
     every = min(0.25, max_wait)
     for attempt in range(attempts):
         if attempt > 0 and await _known_current(routing, build_id, every=every):
@@ -1638,23 +1640,25 @@ async def test_a_conflict_is_returned_as_the_refusal() -> None:
     assert await _write_refusal(write, routing, "old", max_wait=0) == STALE_TOKEN_REFUSAL
 
 
-async def test_a_last_write_applied_before_its_transient_error_is_accepted() -> None:
+@pytest.mark.parametrize("attempts", [1, 2])
+async def test_a_last_write_applied_before_its_transient_error_is_accepted(attempts: int) -> None:
     """#3479 review: the last attempt's write can be applied too; it is read before the
-    helper says the server stayed busy."""
+    helper says the server stayed busy. With one attempt (#3906) it is also the first,
+    and no read has run before it."""
     current: list[str | None] = ["new"]
     sent: list[int] = []
 
     async def write() -> None:
         sent.append(1)
-        if len(sent) == 2:
+        if len(sent) == attempts:
             current[0] = "old"  # applied, then the answer was lost
         raise _transient()
 
     async def routing() -> str | None:
         return current[0]
 
-    assert await _write_refusal(write, routing, "old", attempts=2, max_wait=0) is None
-    assert len(sent) == 2
+    assert await _write_refusal(write, routing, "old", attempts=attempts, max_wait=0) is None
+    assert len(sent) == attempts
 
 
 async def test_no_attempts_is_said_as_such() -> None:

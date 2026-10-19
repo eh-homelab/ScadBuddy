@@ -101,18 +101,20 @@ async def test_only_a_deferred_kind_is_still_accepting(
         workflow_runner=UnsandboxedWorkflowRunner(),
     ):
         id = await _failing(client, workflow_name, queue)
-        with pytest.raises(answer):
-            await start_command(
-                client,
-                workflow_name,
-                None,
-                id=id,
-                task_queue=queue,
-                update="accepted",
-                result_type=str,
-                reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
-            )
-        await client.get_workflow_handle(id).terminate()
+        try:
+            with pytest.raises(answer):
+                await start_command(
+                    client,
+                    workflow_name,
+                    None,
+                    id=id,
+                    task_queue=queue,
+                    update="accepted",
+                    result_type=str,
+                    reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                )
+        finally:
+            await _terminate(client, id)
 
 
 async def _start(client: Client, id: str, queue: str) -> None:
@@ -189,16 +191,66 @@ async def test_another_failure_is_no_deferral_and_says_what_it_was(
             cause=cast(WorkflowTaskFailedCause.ValueType, 999),
         ),
     )
+    empty = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(failure=Failure()),
+    )
+    untyped = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(application_failure_info=ApplicationFailureInfo())
+        ),
+    )
     caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
-    for event in (timed_out, newer):
+    for event in (timed_out, newer, empty, untyped):
         client = SimpleNamespace(namespace="default", workflow_service=_Pages([event]))
         assert not await deferred_kind(cast(Client, client), "op-x")
     messages = [record.getMessage() for record in caplog.records]
     assert messages == [
-        "command op-x: its newest workflow task failure is timeout_failure_info '', cause"
+        "command op-x: its newest workflow task failure is timeout_failure_info, cause"
         " WORKFLOW_TASK_FAILED_CAUSE_RESET_STICKY_TASK_QUEUE, not a deferral",
         "command op-x: its newest workflow task failure is application_failure_info"
         " 'Other', cause 999, not a deferral",
+        "command op-x: its newest workflow task failure is a failure with no info, cause"
+        " WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
+        # An application failure with no type is the one line that still shows ''.
+        "command op-x: its newest workflow task failure is application_failure_info '',"
+        " cause WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
+    ]
+
+
+def _task(event_type: EventType.ValueType) -> HistoryEvent:
+    return HistoryEvent(event_type=event_type)
+
+
+async def test_a_task_completed_since_the_refusal_is_still_accepting() -> None:
+    """#4320: the refusal said the task was failing, and by the history read it has
+    completed (the new build took it, its first activation slow under load). Nothing is
+    stuck: the same request sent again is accepted."""
+    completed = [
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED),
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_STARTED),
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_SCHEDULED),
+        _task_failed(DEFERRED_KIND),
+    ]
+    client = SimpleNamespace(namespace="default", workflow_service=_Pages(completed))
+    assert await deferred_kind(cast(Client, client), "op-x")
+
+
+async def test_a_task_timed_out_since_its_last_completion_is_no_deferral(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A task timing out (no failure of its own to read) above a completed one is not
+    taken for the recovery #4320's is: nothing says it waits for a build."""
+    timed_out = [
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT),
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED),
+    ]
+    client = SimpleNamespace(namespace="default", workflow_service=_Pages(timed_out))
+    caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
+    assert not await deferred_kind(cast(Client, client), "op-x")
+    assert [record.getMessage() for record in caplog.records] == [
+        "command op-x: its workflow task timed out since it last completed, not a deferral"
     ]
 
 
@@ -236,10 +288,15 @@ async def test_a_history_that_cannot_be_read_is_refused(
                 await _start(client, id, queue)
         finally:
             monkeypatch.undo()
-            # An execution already closed must not hide the assertion's own failure; any
-            # other refusal (a lost connection, a permission) still fails the test.
-            try:
-                await client.get_workflow_handle(id).terminate()
-            except RPCError as error:
-                if not execution_gone(error):
-                    raise
+            await _terminate(client, id)
+
+
+async def _terminate(client: Client, id: str) -> None:
+    """End ``id`` after its test. An execution already closed must not hide the
+    assertion's own failure; any other refusal (a lost connection, a permission) still
+    fails the test."""
+    try:
+        await client.get_workflow_handle(id).terminate()
+    except RPCError as error:
+        if not execution_gone(error):
+            raise

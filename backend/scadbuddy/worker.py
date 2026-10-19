@@ -91,6 +91,10 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
+from scadbuddy.slicing.catalogue import warm_catalogue
+from scadbuddy.slicing.profiles import Profiles
+from scadbuddy.slicing.start import native_slice_starter
+from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
@@ -1007,7 +1011,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     links = PrintLinkStore(pool)
     outputs = RemoteOutputs(settings.api_internal_url)
     # Asked of the API whichever library serves: on ``bambuddy`` it answers every native
-    # id with the 404 of a file not found.
+    # id with the 404 of a file not found. A native run's copy is written through it too
+    # (#3818 tier A Task 4).
     library = RemoteLibrary(settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT))
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
@@ -1037,6 +1042,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         on_settled=[settle_hook(rack, links, settings_store.load)],
         newest_failed=newest_failed_from(print_runs, settings_store.load),
     )
+    # The image's profiles, read once for the dialog's starts and the runs' reuse keys.
+    native = native_slice_starter(settings)
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
         outputs=outputs,
@@ -1044,6 +1051,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         links=links,
         archive_cache=ArchiveCache(),
         library=partial(_given, library),
+        native_slices=NativeSliceStore(pool),
+        native=native,
     )
     printing = PrintActivities(
         PrintDeps(
@@ -1056,6 +1065,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             rack=rack,
             links=links,
             library=library,
+            native=native,
         )
     )
     return PrintWorkerDeps(
@@ -1096,6 +1106,11 @@ async def run_print_worker(
     AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
+    # The image's preset catalogue, built behind the start for the first native plan_run
+    # (#3818 tier A); nothing waits on it.
+    warming = warm_catalogue(
+        await asyncio.to_thread(Profiles.installed, settings.slicer_profiles_dir)
+    )
     try:
         await deps.events.start()
         client, sdk_port = await _own_client(settings, client)
@@ -1135,6 +1150,9 @@ async def run_print_worker(
                 server.should_exit = True
                 await serving
     finally:
+        if warming is not None:
+            warming.cancel()
+            await asyncio.gather(warming, return_exceptions=True)
         await deps.aclose()
 
 

@@ -1,6 +1,6 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
-import { blobNames, DURABLE_TEXT_MAX, durableReplies, entriesThrough, transcriptCut, unansweredCalls } from '../src/sessions/forkPoint.js'
+import { blobNames, DURABLE_TEXT_MAX, durableReplies, entriesThrough, historyThroughCalls, transcriptCut, unansweredCalls } from '../src/sessions/forkPoint.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // Fork from a message (#793): the panel's assistant message id (`<API message id>:<block>`,
@@ -141,5 +141,23 @@ describe('unansweredCalls (#4173)', () => {
     ]
     expect(unansweredCalls(entries)).toEqual(['toolu_2'])
     expect(unansweredCalls(entries.slice(0, 2))).toEqual([])
+  })
+})
+
+describe('historyThroughCalls (#4173)', () => {
+  const s = 's1'
+  const history = [
+    { type: 'user.turn', sessionId: s, turnId: 't1', text: 'list them', author: { kind: 'browser', id: 'browser', label: 'You' } },
+    { type: 'tool.call', sessionId: s, id: 'toolu_p', name: 'list_models', input: {}, risk: 'read' },
+    { type: 'tool.result', sessionId: s, id: 'toolu_p', ok: true, summary: 'done' },
+    { type: 'assistant.text.delta', sessionId: s, messageId: 'durable-3', delta: 'uncommitted' },
+    { type: 'assistant.text.done', sessionId: s, messageId: 'durable-3' },
+  ] as ServerEvent[]
+  it("ends at the calls' last event, dropping what was streamed after them", () => {
+    expect(historyThroughCalls(history, ['toolu_p']).map((e) => e.type)).toEqual(['user.turn', 'tool.call', 'tool.result'])
+  })
+  it('keeps everything when no call is named, or the log has none of them', () => {
+    expect(historyThroughCalls(history, [])).toEqual(history)
+    expect(historyThroughCalls(history, ['toolu_x'])).toEqual(history)
   })
 })

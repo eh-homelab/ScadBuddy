@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.extruders import (
     extruder_of,
     high_flow_warning,
     high_flow_warnings,
+    one_flow,
     rack_volume_type,
     side_of,
     slicer_nozzle_stats,
@@ -494,23 +495,25 @@ def _rack(*types: str) -> list[dict[str, Any]]:
 @pytest.mark.parametrize(
     ("mounted", "rack", "flows"),
     [
-        # The right (index 0) mounted High Flow: the right side defaults to it.
-        ([("HH01", "0.4"), ("HS01", "0.4")], [], ["standard", "high_flow"]),
+        # The right (index 0) mounted High Flow: both sides default to it, never one
+        # of each (#4272).
+        ([("HH01", "0.4"), ("HS01", "0.4")], [], ["high_flow", "high_flow"]),
         # Both sides mounted High Flow.
         ([("HH01", "0.4"), ("HH01", "0.4")], [], ["high_flow", "high_flow"]),
         # High Flow of another size is not the default size's.
         ([("HH01", "0.6"), ("HH01", "0.6")], [], ["standard", "standard"]),
-        # A High Flow spare of the size in the rack serves the right, the side it swaps onto.
-        ([("HS01", "0.4"), ("HS01", "0.4")], ["HH01"], ["standard", "high_flow"]),
+        # A High Flow spare of the size in the rack serves the right, the side it swaps
+        # onto: both sides default to High Flow.
+        ([("HS01", "0.4"), ("HS01", "0.4")], ["HH01"], ["high_flow", "high_flow"]),
         # Standard everywhere: unchanged.
         ([("HS01", "0.4"), ("HS01", "0.4")], ["HS01"], ["standard", "standard"]),
     ],
 )
-def test_the_default_nozzles_are_high_flow_wherever_the_side_has_one(
+def test_the_default_nozzles_are_high_flow_when_either_side_has_one(
     mounted: list[tuple[str, str]], rack: list[str], flows: list[str]
 ) -> None:
-    """#1895: the dialog and print_output open on High Flow on each side that can print
-    with a High Flow nozzle of the size; listed left first, as the dialog does."""
+    """#1895, #4272: the dialog and print_output open on one flow for both sides: High
+    Flow when either side can print with a High Flow nozzle of the size."""
     status = mapped_status(
         nozzles=[{"nozzle_type": kind, "nozzle_diameter": size} for kind, size in mounted],
         nozzle_rack=_rack(*rack),
@@ -518,6 +521,32 @@ def test_the_default_nozzles_are_high_flow_wherever_the_side_has_one(
     defaults = default_nozzles(status)
     assert [nozzle.size for nozzle in defaults] == ["0.4", "0.4"]
     assert _flows_of(defaults) == flows
+
+
+@pytest.mark.parametrize(
+    ("flows", "one"),
+    [
+        (["high_flow", "standard"], ["high_flow", "high_flow"]),
+        (["standard", "high_flow"], ["high_flow", "high_flow"]),
+        (["standard", "standard"], ["standard", "standard"]),
+        (["high_flow"], ["high_flow"]),
+    ],
+)
+def test_one_flow_is_high_flow_when_either_side_was(flows: list[str], one: list[str]) -> None:
+    """#4381 review of #4272: a remembered pair of two flows becomes one, by the
+    default's rule."""
+    nozzles = [NozzleChoice(size="0.4", flow=flow) for flow in flows]  # type: ignore[arg-type]
+    assert _flows_of(one_flow(nozzles)) == one
+
+
+def test_one_flow_keeps_each_sides_size() -> None:
+    """#4398 review: only the flow is made one; two sizes are left for the resolver to
+    refuse (`mixed-sizes`)."""
+    pair = [NozzleChoice(size="0.4", flow="high_flow"), NozzleChoice(size="0.2")]
+    assert one_flow(pair) == [
+        NozzleChoice(size="0.4", flow="high_flow"),
+        NozzleChoice(size="0.2", flow="high_flow"),
+    ]
 
 
 def test_an_unreadable_status_defaults_to_standard() -> None:

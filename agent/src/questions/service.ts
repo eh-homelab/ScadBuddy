@@ -977,7 +977,12 @@ export class QuestionService {
             toolUseId: request.toolUseId,
             tier: 'read',
             outcome: 'refused',
-            detail: safeDetail(`${request.tool} attention request (${attention?.reason ?? 'question'}): ${asked.limited}`),
+            // A done post is the turn's summary, which waits for nothing: not an attention request (#3236).
+            detail: safeDetail(
+              attention?.reason === 'done'
+                ? `${request.tool} done summary refused: ${asked.limited}`
+                : `${request.tool} attention request (${attention?.reason ?? 'question'}): ${asked.limited}`,
+            ),
             startedAt,
             finishedAt: new Date(),
           },

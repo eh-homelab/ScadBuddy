@@ -58,8 +58,17 @@ export function LibraryUpgrade() {
   // A running move re-pins every row to the ref it started with, so the field is held
   // until it ends. A check leaves it open: its result is marked stale on a change.
   const [moving, setMoving] = useState(false)
-  // A removal's re-list that failed: the removed checkout may still be listed, so say so.
-  const [relistFailed, setRelistFailed] = useState(false)
+  // A removal's re-list that failed: the removed checkout may still be listed, so say so,
+  // until the list is read again (#3839): what was on screen when it failed. A later read
+  // that lands, a realtime refresh or the next removal's, replaces that and the alert goes.
+  // This leans on `useAsync`: a failed background read keeps `data`'s reference, and one
+  // that lands sets a new one (a change there would stick or drop this alert).
+  const [relistFailedOn, setRelistFailedOn] = useState<typeof libraries.data | null>(null)
+  const shownLibraries = useRef(libraries.data)
+  useEffect(() => {
+    shownLibraries.current = libraries.data
+  })
+  const relistFailed = libraries.data !== undefined && relistFailedOn === libraries.data
   const selectId = useId()
   const refId = useId()
 
@@ -128,8 +137,11 @@ export function LibraryUpgrade() {
       <UnusedCheckouts
         installed={installed}
         onRemoved={() => {
-          setRelistFailed(false)
-          libraries.refresh(undefined, () => setRelistFailed(true))
+          setRelistFailedOn(null)
+          // Best effort: a read started after this one (a realtime refresh) supersedes it,
+          // and only that read's own failure is reported, not this one's (#3839). Should it
+          // fail too, the list shown is still the one from before the removal.
+          libraries.refresh(undefined, () => setRelistFailedOn(shownLibraries.current))
         }}
       />
       {/* Keyed by library: another library's checks and ticks never carry over. */}

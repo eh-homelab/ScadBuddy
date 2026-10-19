@@ -23,6 +23,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from scadbuddy.print_library.ids import NATIVE_ID_BASE
+
 #: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
 COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 
@@ -47,6 +49,9 @@ class SlicedCopy(BaseModel):
     #: Bambuddy's SHA-256 of the sliced file, read once (#306). An archive of a print of
     #: it has the same ``content_hash``: the link once the queue item is gone.
     file_hash: str | None = None
+    #: The native slicer's blob it was uploaded from (plan 2026-10-16 Task 13):
+    #: provenance only. Nothing reads it, and the blob goes with its `native_slices` row.
+    sliced_blob_key: str | None = None
 
 
 class LibraryCopy(BaseModel):
@@ -61,7 +66,8 @@ class LibraryCopy(BaseModel):
     (Settings' ``library_folder_id``) is always replaced.
     """
 
-    #: Bambuddy library file id of the unsliced 3MF.
+    #: Library file id of the unsliced 3MF: Bambuddy's, or on a native run ScadBuddy's
+    #: own (`is_native_id`, #3818 tier A Task 4), never read in the other library.
     id: int
     #: ``None`` is the library root.
     folder_id: int | None
@@ -154,13 +160,18 @@ class BambuddyUploadStore:
         finally:
             await conn.close()
 
-    async def for_output(self, output_id: str) -> list[LibraryCopy]:
-        """The output's copies in upload order, each with its slices."""
-        return (await self.for_outputs([output_id]))[output_id]
+    async def for_output(self, output_id: str, *, native: bool = False) -> list[LibraryCopy]:
+        """The output's copies in upload order, each with its slices: Bambuddy's, or with
+        ``native`` ScadBuddy's own library's (#3818 tier A Task 4). One id space at a
+        time, by `is_native_id` (`print_library/ids.py`): a Bambuddy path never reads,
+        supersedes or deletes a native copy, nor a native run a Bambuddy one."""
+        return (await self.for_outputs([output_id], native=native))[output_id]
 
-    async def for_outputs(self, output_ids: Iterable[str]) -> dict[str, list[LibraryCopy]]:
+    async def for_outputs(
+        self, output_ids: Iterable[str], *, native: bool = False
+    ) -> dict[str, list[LibraryCopy]]:
         """:meth:`for_output` for several outputs in two queries, not two per output."""
-        return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)))
+        return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)), native)
 
     async def record(self, output_id: str, copy: LibraryCopy) -> None:
         """Record an upload, replacing the folder and target of one with the same id."""
@@ -181,6 +192,11 @@ class BambuddyUploadStore:
     async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
         """Those of ``library_file_ids`` that any output records as a copy (#1145)."""
         return await asyncio.to_thread(self._recorded, list(library_file_ids))
+
+    async def recorded_files(self, library_file_ids: Iterable[int]) -> set[int]:
+        """Those of ``library_file_ids`` that any output records, as a copy or as a sliced
+        file: what an earlier attempt's upload, left unrecorded, is not (Task 13 review I1)."""
+        return await asyncio.to_thread(self._recorded_files, list(library_file_ids))
 
     async def outputs_for_files(self, library_file_ids: Iterable[int]) -> dict[int, str]:
         """The output each of ``library_file_ids`` is a copy of, for those any output
@@ -595,14 +611,15 @@ class BambuddyUploadStore:
             ).fetchall()
         return {(row["kind"], int(row["target_id"])): row["touched_at"] for row in rows}
 
-    def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
+    def _for_outputs(self, ids: list[str], native: bool) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
+        space = "library_file_id >= %s" if native else "library_file_id < %s"
         with self._pool.connection() as conn:
             copies = conn.execute(
                 "SELECT output_id, library_file_id, folder_id, target_key, content_key"
-                " FROM output_bambuddy_uploads WHERE output_id = ANY(%s)"
-                " ORDER BY created_at, library_file_id",
-                (ids,),
+                f" FROM output_bambuddy_uploads WHERE output_id = ANY(%s) AND {space}"
+                " ORDER BY created_at, library_file_id".encode(),
+                (ids, NATIVE_ID_BASE),
             ).fetchall()
             slices = conn.execute(
                 "SELECT output_id, source_library_file_id, sliced_library_file_id, preset_key,"
@@ -689,6 +706,19 @@ class BambuddyUploadStore:
             ).fetchall()
         return {row["library_file_id"] for row in rows}
 
+    def _recorded_files(self, ids: list[int]) -> set[int]:
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT library_file_id AS id FROM output_bambuddy_uploads"
+                " WHERE library_file_id = ANY(%s)"
+                " UNION SELECT sliced_library_file_id FROM output_bambuddy_slices"
+                " WHERE sliced_library_file_id = ANY(%s)",
+                (ids, ids),
+            ).fetchall()
+        return {row["id"] for row in rows}
+
     def _outputs_for_files(self, ids: list[int]) -> dict[int, str]:
         if not ids:
             return {}
@@ -741,8 +771,9 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_slices"
-                " (output_id, source_library_file_id, sliced_library_file_id, preset_key)"
-                " SELECT %(output)s, %(source)s, %(sliced)s, %(preset)s"
+                " (output_id, source_library_file_id, sliced_library_file_id, preset_key,"
+                " sliced_blob_key)"
+                " SELECT %(output)s, %(source)s, %(sliced)s, %(preset)s, %(blob)s"
                 " WHERE EXISTS (SELECT 1 FROM output_bambuddy_uploads"
                 "  WHERE output_id = %(output)s AND library_file_id = %(source)s)"
                 " ON CONFLICT (output_id, sliced_library_file_id) DO NOTHING",
@@ -751,6 +782,7 @@ class BambuddyUploadStore:
                     "source": library_file_id,
                     "sliced": sliced.id,
                     "preset": sliced.preset_key,
+                    "blob": sliced.sliced_blob_key,
                 },
             )
 
@@ -797,11 +829,14 @@ class BambuddyUploadStore:
     def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         with self._pool.connection() as conn:
             row = conn.execute(
+                # Bambuddy's copies and slices only (#4312 review M1): the window scans
+                # Bambuddy's archives, which a native copy is never in.
                 "SELECT (SELECT min(created_at) FROM output_bambuddy_uploads"
-                "  WHERE output_id = %(output)s) AS first_upload,"
+                "  WHERE output_id = %(output)s AND library_file_id < %(base)s) AS first_upload,"
                 " (SELECT max(created_at) FROM output_bambuddy_slices"
-                "  WHERE output_id = %(output)s) AS last_slice",
-                {"output": output_id},
+                "  WHERE output_id = %(output)s AND sliced_library_file_id < %(base)s)"
+                " AS last_slice",
+                {"output": output_id, "base": NATIVE_ID_BASE},
             ).fetchone()
         if row is None or row["first_upload"] is None or row["last_slice"] is None:
             return None

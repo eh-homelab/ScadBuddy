@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
+  PrinterRow,
   AnalysisTarget,
   BatchSummary,
   FilamentOptions,
@@ -34,6 +35,7 @@ import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
+import { PRINTER_TOPICS, registryNews } from '../lib/printerRegistry'
 import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, singlePlate, withPlate } from '../lib/plateChoice'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
@@ -230,6 +232,22 @@ interface Props {
   content?: { outputIds?: readonly string[]; libraryFileIds?: readonly number[] }
 }
 
+/** No registry rows: one constant, so a render without them keeps its dependencies. */
+const NO_ROWS: PrinterRow[] = []
+/** A closed dialog follows no topic. */
+const NO_TOPICS: readonly string[] = []
+
+/**
+ * #3222 — the sequence a template's `print_settings` sets: what Default prints with when
+ * this print sets none.
+ * The backend accepts only these two spellings (`PrintSequence`, `library/catalogue.py`),
+ * so any other value is unknown.
+ */
+function templateSequence(settings: Record<string, string> | undefined): PrintSequence | null {
+  const value = settings?.['print_sequence']
+  return value === 'by layer' || value === 'by object' ? value : null
+}
+
 export function PrintPicker({
   open,
   source: given,
@@ -309,6 +327,29 @@ export function PrintPicker({
   const picker = usePrintChoices(open, source, carry)
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
+  /**
+   * #3823 — the printer registry, read with the dialog: the row that links the chosen
+   * Bambuddy printer goes out as `printer` beside `printer_id` (plan 2026-10-16 Task 10;
+   * the backend reads `printer` from Task 8, and ignores it before). A row no Bambuddy
+   * printer backs, and the LAN reaches, is listed but not choosable until the run can print over the LAN
+   * (Tasks 8 and 9). Unreadable when the dialog opens, it has no rows, and the dialog
+   * works as before, on Bambuddy ids alone. Followed while open, as Settings → Printers
+   * follows it, so a link made in another tab is the `printer` sent (#4376); a re-read
+   * that fails keeps the rows shown (`useAsync`), so it never drops `printer`.
+   */
+  const registry = useAsync(
+    async () => (open ? await api.listPrinters() : ([] as PrinterRow[])),
+    [open],
+    open ? PRINTER_TOPICS : NO_TOPICS,
+    registryNews,
+  )
+  // `registry.error` is deliberately not shown: an unreadable registry is no rows, and
+  // the dialog prints on Bambuddy ids alone.
+  const registryRows = registry.data ?? NO_ROWS
+  const registryPrinter = registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
+  // Only a row the LAN reaches and Bambuddy does not: one just created by serial reaches
+  // neither, and one linked to a Bambuddy printer is that printer's entry (#4340 review M3).
+  const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
   const { nozzles, tier, processName, bedType, overrides } = selection
   /**
    * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only
@@ -406,7 +447,12 @@ export function PrintPicker({
    * applies the printer's remembered one, so one printer's can never go out for another
    * while the new printer's choices are read (claude-review on #1043).
    */
-  const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
+  const [chosen, setChosen] = useState<{ printerId: number | null; algorithm: RackAlgorithm } | null>(null)
+  // Read for the printer it was chosen for only, in the same render the printer changes
+  // in (#4347): reset by the effect below alone, the render before that reset built a
+  // check of the new printer with the old one's algorithm, sent whenever the reset came
+  // later than the check's debounce.
+  const chosenAlgorithm = chosen !== null && chosen.printerId === printerId ? chosen.algorithm : null
   /**
    * A printer's algorithm as an earlier session's save left it, when that save landed
    * after this dialog started reading the choices (#1086 review). Shown only, never sent,
@@ -426,7 +472,17 @@ export function PrintPicker({
       ? savedAlgorithm.algorithm
       : choices?.rack_algorithm
   const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? storedAlgorithm ?? 'least_used'
-  const [rackPosition, setRackPosition] = useState<number | null>(null)
+  const [picked, setPicked] = useState<{ printerId: number | null; size: typeof size; position: number } | null>(
+    null,
+  )
+  // Read for the printer and size it was picked for only, and in Advanced mode only, as
+  // `chosenAlgorithm` (#4347): Simple mode shows no rack step, and the render that
+  // leaves Advanced must not build a check with the pick (#4361 review).
+  const { advanced } = picker
+  const rackPosition =
+    picked !== null && advanced && picked.printerId === printerId && picked.size === size
+      ? picked.position
+      : null
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
   /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
@@ -441,25 +497,27 @@ export function PrintPicker({
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
     algorithmSession.current += 1
-    setChosenAlgorithm(null)
-    setRackPosition(null)
+    setChosen(null)
+    setPicked(null)
     setAlgorithmUnsaved(false)
   }, [printerId])
-  // Simple mode shows no rack step, so a hand pick would be sent unseen (as
-  // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
-  const { advanced } = picker
-  // The same for the prime tower (#3648 review): Simple mode sends none.
+  // Clears a rack pick left from Advanced, so going back to Advanced starts with none; it
+  // no longer decides what is sent, since `rackPosition` reads no pick outside Advanced.
+  // For the prime tower it still does (#3648 review): its read is not gated, as a batch
+  // step's own tower is seeded in Simple mode (#2718 review), so this reset is what makes
+  // leaving Advanced send none.
   useEffect(() => {
     if (!advanced) {
-      setRackPosition(null)
+      setPicked(null)
       setPrimeTower(null)
     }
   }, [advanced])
+  // State clean-up only: `rackPosition` already reads no pick of another size (#4347).
   useEffect(() => {
-    setRackPosition(null)
+    setPicked(null)
   }, [size])
   function changeRackAlgorithm(next: RackAlgorithm) {
-    setChosenAlgorithm(next)
+    setChosen({ printerId, algorithm: next })
     setAlgorithmUnsaved(false)
     const session = algorithmSession.current
     const save = ++algorithmSave.current
@@ -650,6 +708,7 @@ export function PrintPicker({
     source,
     choices,
     printerId,
+    registryPrinter,
     selection: { ...selection, plate },
     plan,
     planChanged,
@@ -934,7 +993,7 @@ export function PrintPicker({
   const offered = check.current ? (check.verdict?.rack?.options ?? []) : null
   const pickOffered = rackPosition === null || offered === null || offered.some((o) => o.position === rackPosition)
   useEffect(() => {
-    if (!pickOffered) setRackPosition(null)
+    if (!pickOffered) setPicked(null)
   }, [pickOffered])
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
@@ -1054,6 +1113,7 @@ export function PrintPicker({
     if (!batch || !printChoices) return null
     const request = printRunBody({
       printerId,
+      registryPrinter,
       plan,
       printChoices,
       copies,
@@ -1106,10 +1166,10 @@ export function PrintPicker({
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
-    setRackPosition(null)
+    setPicked(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
-    setChosenAlgorithm(null)
+    setChosen(null)
     setAlgorithmUnsaved(false)
     runPrint.reset()
     picker.reset()
@@ -1293,6 +1353,12 @@ export function PrintPicker({
                             <SelectItem key={entry.id} value={String(entry.id)}>
                               {entry.name}
                               {entry.model ? ` (${entry.model})` : ''}
+                            </SelectItem>
+                          ))}
+                          {lanOnly.map((row) => (
+                            <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
+                              {row.name}
+                              {row.model ? ` (${row.model})` : ''}: not in Bambuddy, so not yet printable from here
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -1486,7 +1552,7 @@ export function PrintPicker({
                         !previewSlice.stale &&
                         !(source.kind === 'output' && picker.plates.length > 1) &&
                         previewPlate === first
-                          ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
+                          ? previewSlice.toolpathUrl
                           : null
                       }
                     />
@@ -1555,7 +1621,7 @@ export function PrintPicker({
                               position={rackPosition}
                               algorithmUnsaved={algorithmUnsaved}
                               onAlgorithm={changeRackAlgorithm}
-                              onPosition={setRackPosition}
+                              onPosition={(position) => setPicked(position === null ? null : { printerId, size, position })}
                             />
                           )}
                           <QualityStep
@@ -1584,6 +1650,7 @@ export function PrintPicker({
                           <PrintSequenceStep
                             value={printSequence}
                             onChange={setPrintSequence}
+                            inherited={given?.kind === 'output' ? templateSequence(printSettings) : null}
                             objects={check.current ? (check.verdict?.objects ?? null) : null}
                           />
 
@@ -1669,6 +1736,7 @@ export function PrintPicker({
                 })}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}
+                progress={previewSlice.progress}
                 sliceError={previewSlice.error}
               />
             </div>

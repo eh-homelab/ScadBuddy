@@ -108,6 +108,11 @@ import type {
   ActivityPage,
   PrintProgress,
   PrintersNow,
+  PrinterRow,
+  PrinterCreate,
+  PrinterPatch,
+  DiscoveredPrinter,
+  LanLink,
   QueueItem,
   ArchiveStats,
   PrintCheck,
@@ -464,6 +469,14 @@ function bambuddyUnanswered(problem: Problem): boolean {
 }
 
 const seg = encodeURIComponent
+
+/** Who sliced a background slice: the `slicer` its start answered with. */
+export type Slicer = PreviewStarted['slicer']
+
+/** A Bambuddy read's URL is as it always was; only a native one names its slicer. */
+function slicerQuery(slicer: Slicer): string {
+  return slicer === 'native' ? '?slicer=native' : ''
+}
 
 /** #2329 — a workspace file's route, each path segment encoded (under `API_BASE`). */
 const sessionFilePath = (id: string, path: string) =>
@@ -1721,21 +1734,25 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #2169 — how an output's background slice stands, and what it came to once finished. */
-  getPreviewSlice: (outputId: string, jobId: number) =>
-    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+  /**
+   * #2169 — how an output's background slice stands, and what it came to once finished.
+   * `slicer` is the one its start answered with: a native slice's id is its own
+   * slicer's, so it is read with `?slicer=native` (plan 2026-10-16 Task 14).
+   */
+  getPreviewSlice: (outputId: string, jobId: number, slicer: Slicer = 'bambuddy') =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}${slicerQuery(slicer)}`),
 
   /** #2169 — as `getPreviewSlice`, for a library file's. */
-  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
-    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
+  getLibraryPreviewSlice: (fileId: number, jobId: number, slicer: Slicer = 'bambuddy') =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}${slicerQuery(slicer)}`),
 
   /** #2072 — a finished background slice's toolpath, for the plate preview's slice views. */
-  previewToolpathUrl: (outputId: string, jobId: number) =>
-    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath`,
+  previewToolpathUrl: (outputId: string, jobId: number, slicer: Slicer = 'bambuddy') =>
+    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath${slicerQuery(slicer)}`,
 
   /** #2072 — as `previewToolpathUrl`, for a library file's. */
-  libraryPreviewToolpathUrl: (fileId: number, jobId: number) =>
-    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath`,
+  libraryPreviewToolpathUrl: (fileId: number, jobId: number, slicer: Slicer = 'bambuddy') =>
+    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath${slicerQuery(slicer)}`,
 
   /**
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
@@ -1869,6 +1886,27 @@ export const api = {
 
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+
+  // #3823 — the printer registry: one row per physical printer, keyed by serial, with
+  // its Bambuddy link and its LAN link. The LAN access code is sent once (`PUT /lan`,
+  // which tests it on the printer first) and never returned.
+  listPrinters: () => request<PrinterRow[]>('/printers'),
+  createPrinter: (body: PrinterCreate) =>
+    request<PrinterRow>('/printers', { method: 'POST', body: JSON.stringify(body) }),
+  patchPrinter: (id: string, body: PrinterPatch) =>
+    request<PrinterRow>(`/printers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deletePrinter: (id: string) => request<void>(`/printers/${seg(id)}`, { method: 'DELETE' }),
+  /** Bambuddy's active printers, each with the row linking it, if any. */
+  discoverPrinters: () => request<DiscoveredPrinter[]>('/printers/discover'),
+  linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>
+    request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
+      method: 'PUT',
+      body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
+    }),
+  unlinkPrinterBambuddy: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, { method: 'DELETE' }),
+  linkPrinterLan: (id: string, body: LanLink) =>
+    request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'PUT', body: JSON.stringify(body) }),
+  unlinkPrinterLan: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'DELETE' }),
 
   /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
   getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>

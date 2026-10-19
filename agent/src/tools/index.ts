@@ -6,6 +6,7 @@ import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
 import { farmTools } from './farm.js'
+import { printerTools } from './printers.js'
 import { fileTools } from './files.js'
 import { flowTools } from './flows.js'
 import { flowTriggerTools } from './flowTriggers.js'
@@ -24,6 +25,7 @@ import { settingsTools } from './settings.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
 import { templateTools } from './templates.js'
+import { traySpoolTools } from './traySpools.js'
 import { workspaceTools } from './workspace.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
@@ -54,6 +56,8 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...printHistoryTools,
   ...printMediaTools,
   ...farmTools,
+  ...traySpoolTools,
+  ...printerTools,
   ...browserTools,
   ...approvalTools,
   ...sessionTools,

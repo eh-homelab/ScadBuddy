@@ -38,11 +38,12 @@ from scadbuddy_durable.session.models import FollowArgs, FollowResult
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 
-# agent/src/sessions/sdkEvents.ts INPUT_MAX, SENSITIVE_KEY, REDACTED.
+# agent/src/sessions/sdkEvents.ts INPUT_MAX, SENSITIVE_KEY, REDACTED. Both regexes are
+# pinned to agent/test/fixtures/sensitive-keys.json, so neither drifts alone (#4340).
 INPUT_MAX = 4096
 SENSITIVE_KEY = re.compile(
     r"secret|token|passw(or)?d|passphrase|api[-_]?key|authori[sz]ation|credential|cookie"
-    r"|private[-_]?key",
+    r"|private[-_]?key|access[-_]?code",
     re.IGNORECASE,
 )
 REDACTED = "[redacted]"
@@ -56,6 +57,12 @@ RISK_TIERS = frozenset({"read", "write", "outward"})
 #: agent harness/ownPlugin.ts `ownPluginTierOf`: a skill is instructions, and a subagent
 #: calls only tools the session already has.
 READ_BUILTINS = frozenset({"Skill", "Agent", "Task"})
+#: The segment's images tools (runner.py ``IMAGES_SERVER``, #4185): each returns images
+#: the session already holds, so read. A classic turn has no such call to label: its
+#: images are in its prompt and its tool results.
+READ_IMAGES = frozenset(
+    {"mcp__scadbuddy_images__view_user_images", "mcp__scadbuddy_images__view_tool_images"}
+)
 
 
 def _blank(value: Any) -> Any:
@@ -80,10 +87,11 @@ def logged_input(raw: Any) -> dict[str, Any]:
 
 def risk_of(name: str, tiers: Mapping[str, str]) -> str:
     """A call's risk label: its tier, a subagent's ``mcp__scadbuddy__<tool>`` that tool's
-    (runner.py SegmentCalls), the own plugin's built-ins read, anything else outward."""
+    (runner.py SegmentCalls), the own plugin's built-ins and the images tools read,
+    anything else outward."""
     if name in tiers:
         return tiers[name]
-    if name in READ_BUILTINS:
+    if name in READ_BUILTINS or name in READ_IMAGES:
         return "read"
     if name.startswith(subagents.PREFIX):
         return tiers.get(name.removeprefix(subagents.PREFIX), "outward")

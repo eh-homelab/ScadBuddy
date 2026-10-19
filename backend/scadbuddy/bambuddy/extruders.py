@@ -273,18 +273,31 @@ def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
 
 def default_nozzles(status: PrinterStatus | None, size: NozzleSize = "0.4") -> list[NozzleChoice]:
     """What the print dialog and ``print_output`` open on when the model remembers no
-    nozzles (#1895): ``size`` on both sides, High Flow on each side that can print with
-    a High Flow nozzle of that size (its mounted one or, on the rack side, a spare in
-    the rack, as :func:`_nozzles_on` counts them), else Standard. A printer whose status
-    cannot be read gets Standard, as before."""
+    nozzles (#1895): ``size`` on both sides, and one flow for both (#4272): High Flow
+    when either side can print with a High Flow nozzle of that size (its mounted one
+    or, on the rack side, a spare in the rack, as :func:`_nozzles_on` counts them),
+    else Standard. A printer whose status cannot be read gets Standard, as before.
 
-    def flow(extruder: int) -> FlowType:
-        if status is not None and any(_nozzles_on(status, extruder, size)):
-            return "high_flow"
-        return "standard"
-
+    Never one of each: print #355 stalled with the left High Flow and the right
+    Standard. High Flow on both rather than Standard: a High Flow nozzle sliced as
+    Standard paused queue item 149 (#723), and :func:`slicer_nozzle_stats` offers the
+    slicer only the side that has one."""
+    high_flow = status is not None and any(
+        any(_nozzles_on(status, extruder, size)) for extruder in (LEFT, RIGHT)
+    )
+    flow: FlowType = "high_flow" if high_flow else "standard"
     # The dialog's order: the left extruder first (`_flows`).
-    return [NozzleChoice(size=size, flow=flow(LEFT)), NozzleChoice(size=size, flow=flow(RIGHT))]
+    return [NozzleChoice(size=size, flow=flow), NozzleChoice(size=size, flow=flow)]
+
+
+def one_flow(nozzles: Sequence[NozzleChoice]) -> list[NozzleChoice]:
+    """``nozzles`` with one flow for both sides (#4272), by :func:`default_nozzles`'
+    rule: High Flow when either side was. A choice remembered from before #4272, when
+    the defaults could give each side its own flow (print #355's printer), would
+    otherwise be refused (``mixed-flows``) until someone chose again."""
+    if len({nozzle.flow for nozzle in nozzles}) < 2:
+        return list(nozzles)
+    return [nozzle.model_copy(update={"flow": "high_flow"}) for nozzle in nozzles]
 
 
 def _found(status: PrinterStatus, nozzles: Sequence[NozzleChoice]) -> dict[int, list[bool]]:

@@ -365,18 +365,45 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     const { token } = await tokens.mint({ name: 't', tier: 'read' })
     let via: Replica = a
     const client = await connect(token, () => via)
+    // Each call well inside the test's 20 s, so a call that never answers (#4273) fails
+    // naming its count and its way, not as the test's bare timeout.
+    const call = (n: number, way: string) =>
+      client.callTool({ name: 'list_models', arguments: { limit: 100 } }, undefined, { timeout: 5_000 }).catch((err: unknown) => {
+        throw new Error(`${n} models, ${way}: ${err instanceof Error ? err.message : String(err)}`)
+      })
     // Every count up to 60: past some size each answer goes in a row, below it
     // in the NOTIFY, and the boundary is where escaping can push a chunk over.
     for (let n = 1; n <= 60; n++) {
       const listed = models(n)
       backend.use(http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json(listed)))
       via = a
-      const direct = await client.callTool({ name: 'list_models', arguments: { limit: 100 } })
+      const direct = await call(n, 'direct')
       via = b
-      const relayed = await client.callTool({ name: 'list_models', arguments: { limit: 100 } })
+      const relayed = await call(n, 'relayed')
       expect(relayed.isError, `${n} models`).toBeFalsy()
       expect(relayed.content, `${n} models`).toEqual(direct.content)
     }
+  })
+
+  it('ends an answer with an error, not as whole, when its owner stops it for the relaying replica going silent', async () => {
+    // #4384: A never hears B's beats, so it takes B for gone once the call's head has left.
+    await swap('a', () => replica({}, (payload) => JSON.parse(payload).t !== 'beat'))
+    backend.use(
+      http.get(`${BACKEND}/api/v1/models`, async () => {
+        await delay(BEAT_MS * 6)
+        return HttpResponse.json(MODELS)
+      }),
+    )
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    const res = await post(b, token, sessionOf(client), {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: { name: 'list_models', arguments: {} },
+    })
+    expect(res.status).toBe(200)
+    await expect(res.text()).rejects.toThrow(/failed while answering/)
   })
 
   it('ends a relayed answer with an error when the owner dies mid-call', async () => {

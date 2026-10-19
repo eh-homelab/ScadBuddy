@@ -14,7 +14,13 @@ if [ -n "$FAKE_HOLDER" ]; then
   # shellcheck disable=SC2016 # $$ and $1 are the held shell's own
   setsid sh -c 'echo held >&2; echo $$ > "$1"; exec sleep 30' sh "$(dirname "$out")/holder.pid" &
   # "held" and the pid are written before the CLI exits, so the test always sees one and can stop it.
-  while [ ! -s "$(dirname "$out")/holder.pid" ]; do sleep 0.05; done
+  # Bounded (2 s, inside the test's own timeout), so a setsid that fails says so (#4263).
+  tries=0
+  while [ ! -s "$(dirname "$out")/holder.pid" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 40 ] && { echo "fake: the setsid holder wrote no pid in 2 s" >&2; exit 3; }
+    sleep 0.05
+  done
 fi
 [ -n "$FAKE_QUIET" ] && sleep "$FAKE_QUIET"
 if [ -z "$FAKE_SILENT" ]; then

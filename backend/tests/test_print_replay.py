@@ -57,6 +57,14 @@ failed), both with a one-second ``SLICE_BACKOFF``.
 gone from Bambuddy as it is queued. No history above reused a slice. Recorded by the
 patched one: ``reused_slice_gone_then_sliced`` (the first ``print_enqueue`` raises
 ``SLICE_GONE``; the plate is sliced, and that slice queued).
+
+``NATIVE_SLICER_PATCH`` (plan 2026-10-16-native-slicer-rust-worker Task 13) slices a
+plate on the native slicer: ``slice_run`` and ``print_sliced_upload`` on the ``library``
+queue in place of ``print_slice_start`` and ``print_slice_wait``. Only a run planned
+native asks, so no history above records the marker. Recorded by the patched one
+(``tests/api/test_print_run_native.py``): ``native_sliced`` (sliced, uploaded and
+queued) and ``native_slicer_refused`` (the slicer refuses the plate; the run is
+recorded failed with its stderr).
 """
 
 from __future__ import annotations
@@ -109,6 +117,8 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "slice_lost_then_sliced",
         "slice_lost_every_time",
         "reused_slice_gone_then_sliced",
+        "native_sliced",
+        "native_slicer_refused",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:

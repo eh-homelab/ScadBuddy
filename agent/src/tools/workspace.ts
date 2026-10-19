@@ -11,6 +11,7 @@ import {
   workspaceOf,
   type WorkspaceRef,
   type WorkspaceSource,
+  withoutEditCall,
   workspacePath,
 } from '../workspace/store.js'
 import { readCapped } from './binary.js'
@@ -374,7 +375,7 @@ export const workspaceTools: Tool[] = [
         const after = applyEdits(before, [{ old_string, new_string, replace_all }])
         const info = await files.write(ws, file.path, new TextEncoder().encode(after), {
           mediaType: file.mediaType,
-          source: file.source ?? { tool: 'workspace_edit' },
+          source: withoutEditCall(file.source) ?? { tool: 'workspace_edit' },
           expectedSha256: expected,
         })
         return json({ status: 'written', previous_sha256: expected, ...described(info) })

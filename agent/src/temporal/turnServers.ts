@@ -267,7 +267,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // A listing shares each package first: one that fails to share (or to be stripped
       // of its http servers) is not loaded, so its servers are not offered either (#2563).
       let offered = loaded.loaded
-      // Read once: the listing and a call decide on the same root (#3523).
+      // One binding for both branches: the listing and a call decide on the same root (#3523).
       const { root, localRoot } = deps.packages!
       if (context.listing) {
         shared = []

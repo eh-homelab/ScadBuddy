@@ -21,10 +21,16 @@ type SlicePreview struct {
 	job_id *int32
 	// The print_time_seconds property
 	print_time_seconds SlicePreview_SlicePreview_print_time_secondsable
+	// The progress property
+	progress SlicePreview_SlicePreview_progressable
+	// The slicer property
+	slicer *SlicePreview_slicer
 	// The slots property
 	slots []PreviewSlotable
 	// The status property
 	status *string
+	// The warnings property
+	warnings []string
 }
 
 // SlicePreview_SlicePreview_failure composed type wrapper for classes SlicePreview_failureMember1able, string
@@ -371,6 +377,92 @@ func (m *SlicePreview_SlicePreview_print_time_seconds) SetSlicePreviewPrintTimeS
 	m.slicePreview_print_time_secondsMember1 = value
 }
 
+// SlicePreview_SlicePreview_progress composed type wrapper for classes int32, SlicePreview_progressMember1able
+type SlicePreview_SlicePreview_progress struct {
+	// Composed type representation for type int32
+	integer *int32
+	// Composed type representation for type SlicePreview_progressMember1able
+	slicePreview_progressMember1 SlicePreview_progressMember1able
+}
+
+// NewSlicePreview_SlicePreview_progress instantiates a new SlicePreview_SlicePreview_progress and sets the default values.
+func NewSlicePreview_SlicePreview_progress() *SlicePreview_SlicePreview_progress {
+	m := &SlicePreview_SlicePreview_progress{}
+	return m
+}
+
+// CreateSlicePreview_SlicePreview_progressFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSlicePreview_SlicePreview_progressFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSlicePreview_SlicePreview_progress()
+	if parseNode != nil {
+		if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSlicePreview_progressMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SlicePreview_progressMember1able); ok {
+				result.SetSlicePreviewProgressMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SlicePreview_SlicePreview_progress) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *SlicePreview_SlicePreview_progress) GetInteger() *int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SlicePreview_SlicePreview_progress) GetIsComposedType() bool {
+	return true
+}
+
+// GetSlicePreviewProgressMember1 gets the SlicePreview_progressMember1 property value. Composed type representation for type SlicePreview_progressMember1able
+// returns a SlicePreview_progressMember1able when successful
+func (m *SlicePreview_SlicePreview_progress) GetSlicePreviewProgressMember1() SlicePreview_progressMember1able {
+	return m.slicePreview_progressMember1
+}
+
+// Serialize serializes information the current object
+func (m *SlicePreview_SlicePreview_progress) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSlicePreviewProgressMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSlicePreviewProgressMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *SlicePreview_SlicePreview_progress) SetInteger(value *int32) {
+	m.integer = value
+}
+
+// SetSlicePreviewProgressMember1 sets the SlicePreview_progressMember1 property value. Composed type representation for type SlicePreview_progressMember1able
+func (m *SlicePreview_SlicePreview_progress) SetSlicePreviewProgressMember1(value SlicePreview_progressMember1able) {
+	m.slicePreview_progressMember1 = value
+}
+
 type SlicePreview_SlicePreview_failureable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetSlicePreviewFailureMember1() SlicePreview_failureMember1able
@@ -403,10 +495,20 @@ type SlicePreview_SlicePreview_print_time_secondsable interface {
 	SetSlicePreviewPrintTimeSecondsMember1(value SlicePreview_print_time_secondsMember1able)
 }
 
+type SlicePreview_SlicePreview_progressable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetInteger() *int32
+	GetSlicePreviewProgressMember1() SlicePreview_progressMember1able
+	SetInteger(value *int32)
+	SetSlicePreviewProgressMember1(value SlicePreview_progressMember1able)
+}
+
 // NewSlicePreview instantiates a new SlicePreview and sets the default values.
 func NewSlicePreview() *SlicePreview {
 	m := &SlicePreview{}
 	m.SetAdditionalData(make(map[string]any))
+	slicerValue := BAMBUDDY_SLICEPREVIEW_SLICER
+	m.SetSlicer(&slicerValue)
 	return m
 }
 
@@ -482,6 +584,26 @@ func (m *SlicePreview) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		return nil
 	}
+	res["progress"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSlicePreview_SlicePreview_progressFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProgress(val.(SlicePreview_SlicePreview_progressable))
+		}
+		return nil
+	}
+	res["slicer"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetEnumValue(ParseSlicePreview_slicer)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSlicer(val.(*SlicePreview_slicer))
+		}
+		return nil
+	}
 	res["slots"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfObjectValues(CreatePreviewSlotFromDiscriminatorValue)
 		if err != nil {
@@ -505,6 +627,22 @@ func (m *SlicePreview) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		if val != nil {
 			m.SetStatus(val)
+		}
+		return nil
+	}
+	res["warnings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("string")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]string, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*string))
+				}
+			}
+			m.SetWarnings(res)
 		}
 		return nil
 	}
@@ -535,6 +673,18 @@ func (m *SlicePreview) GetPrintTimeSeconds() SlicePreview_SlicePreview_print_tim
 	return m.print_time_seconds
 }
 
+// GetProgress gets the progress property value. The progress property
+// returns a SlicePreview_SlicePreview_progressable when successful
+func (m *SlicePreview) GetProgress() SlicePreview_SlicePreview_progressable {
+	return m.progress
+}
+
+// GetSlicer gets the slicer property value. The slicer property
+// returns a *SlicePreview_slicer when successful
+func (m *SlicePreview) GetSlicer() *SlicePreview_slicer {
+	return m.slicer
+}
+
 // GetSlots gets the slots property value. The slots property
 // returns a []PreviewSlotable when successful
 func (m *SlicePreview) GetSlots() []PreviewSlotable {
@@ -545,6 +695,12 @@ func (m *SlicePreview) GetSlots() []PreviewSlotable {
 // returns a *string when successful
 func (m *SlicePreview) GetStatus() *string {
 	return m.status
+}
+
+// GetWarnings gets the warnings property value. The warnings property
+// returns a []string when successful
+func (m *SlicePreview) GetWarnings() []string {
+	return m.warnings
 }
 
 // Serialize serializes information the current object
@@ -579,6 +735,19 @@ func (m *SlicePreview) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 			return err
 		}
 	}
+	{
+		err := writer.WriteObjectValue("progress", m.GetProgress())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetSlicer() != nil {
+		cast := (*m.GetSlicer()).String()
+		err := writer.WriteStringValue("slicer", &cast)
+		if err != nil {
+			return err
+		}
+	}
 	if m.GetSlots() != nil {
 		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetSlots()))
 		for i, v := range m.GetSlots() {
@@ -593,6 +762,12 @@ func (m *SlicePreview) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	}
 	{
 		err := writer.WriteStringValue("status", m.GetStatus())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetWarnings() != nil {
+		err := writer.WriteCollectionOfStringValues("warnings", m.GetWarnings())
 		if err != nil {
 			return err
 		}
@@ -636,6 +811,16 @@ func (m *SlicePreview) SetPrintTimeSeconds(value SlicePreview_SlicePreview_print
 	m.print_time_seconds = value
 }
 
+// SetProgress sets the progress property value. The progress property
+func (m *SlicePreview) SetProgress(value SlicePreview_SlicePreview_progressable) {
+	m.progress = value
+}
+
+// SetSlicer sets the slicer property value. The slicer property
+func (m *SlicePreview) SetSlicer(value *SlicePreview_slicer) {
+	m.slicer = value
+}
+
 // SetSlots sets the slots property value. The slots property
 func (m *SlicePreview) SetSlots(value []PreviewSlotable) {
 	m.slots = value
@@ -646,6 +831,11 @@ func (m *SlicePreview) SetStatus(value *string) {
 	m.status = value
 }
 
+// SetWarnings sets the warnings property value. The warnings property
+func (m *SlicePreview) SetWarnings(value []string) {
+	m.warnings = value
+}
+
 type SlicePreviewable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
@@ -654,13 +844,19 @@ type SlicePreviewable interface {
 	GetFilamentUsedG() SlicePreview_SlicePreview_filament_used_gable
 	GetJobId() *int32
 	GetPrintTimeSeconds() SlicePreview_SlicePreview_print_time_secondsable
+	GetProgress() SlicePreview_SlicePreview_progressable
+	GetSlicer() *SlicePreview_slicer
 	GetSlots() []PreviewSlotable
 	GetStatus() *string
+	GetWarnings() []string
 	SetFailure(value SlicePreview_SlicePreview_failureable)
 	SetFilamentChanges(value SlicePreview_SlicePreview_filament_changesable)
 	SetFilamentUsedG(value SlicePreview_SlicePreview_filament_used_gable)
 	SetJobId(value *int32)
 	SetPrintTimeSeconds(value SlicePreview_SlicePreview_print_time_secondsable)
+	SetProgress(value SlicePreview_SlicePreview_progressable)
+	SetSlicer(value *SlicePreview_slicer)
 	SetSlots(value []PreviewSlotable)
 	SetStatus(value *string)
+	SetWarnings(value []string)
 }

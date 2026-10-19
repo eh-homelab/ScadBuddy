@@ -743,6 +743,10 @@ describe('useRenderAutoRetry', () => {
     // The timed tries are spent; coming back online still tries once (#3552).
     act(() => window.dispatchEvent(new Event('online')))
     expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 1)
+    // That try fails too: it arms no timed one past the cap (#3793 review).
+    view.rerender({ error: unanswered(), values })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS * 10))
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 1)
   })
 
   it('tries again at once when the browser comes back online', () => {

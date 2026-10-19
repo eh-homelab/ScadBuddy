@@ -1,25 +1,37 @@
 #!/usr/bin/env bash
-# rust-toolchain-pin.sh [--check] [ci.yml]: the dtolnay/rust-toolchain SHA ci.yml pins
-# against the action's master. The action has no release tags, so Dependabot never moves
-# this pin (#4099); the weekly rust-toolchain-pin.yml is the reminder. Prints both SHAs;
-# with --check, exits 1 when they differ, naming the line to change. Needs gh.
+# rust-toolchain-pin.sh [--check] [workflow.yml...]: every dtolnay/rust-toolchain SHA the
+# workflows pin (default: every .github/workflows/*.y*ml) against the action's master. The
+# action has no release tags, so Dependabot never moves these pins (#4099); the weekly
+# rust-toolchain-pin.yml is the reminder. Prints master and each pin; with --check, exits
+# 1 when any differs, naming each line to change (#4264). A comment line naming the
+# action is not a pin and is skipped. Needs gh.
 set -euo pipefail
 check=0
 if [ "${1:-}" = --check ]; then check=1; shift; fi
-ci="${1:-$(cd "$(dirname "$0")/../.." && pwd)/.github/workflows/ci.yml}"
+if [ "$#" = 0 ]; then
+  root="$(cd "$(dirname "$0")/../.." && pwd)"
+  set -- "$root"/.github/workflows/*.y*ml
+fi
 
-line="$(grep -n 'dtolnay/rust-toolchain@' "$ci" | head -n 1)" || {
-  echo "no dtolnay/rust-toolchain@ pin in $ci" >&2; exit 2
-}
-lineno="${line%%:*}"
-pinned="$(grep -o 'dtolnay/rust-toolchain@[0-9a-f]\{40\}' <<<"$line" | cut -d@ -f2)" || {
-  echo "$ci:$lineno: the pin is not a full commit SHA" >&2; exit 2
+lines="$(grep -Hn 'dtolnay/rust-toolchain@' "$@" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')" || {
+  echo "no dtolnay/rust-toolchain@ pin in $* (comment lines naming it are skipped)" >&2; exit 2
 }
 master="$(gh api repos/dtolnay/rust-toolchain/commits/master --jq .sha)"
-
-echo "pinned: $pinned ($ci:$lineno)"
 echo "master: $master"
-if [ "$check" = 1 ] && [ "$pinned" != "$master" ]; then
-  echo "$ci:$lineno: dtolnay/rust-toolchain is pinned to $pinned; master is $master. Move the pin (and its 'master as of' date) in a reviewed PR." >&2
-  exit 1
-fi
+
+stale=0
+while IFS= read -r line; do
+  at="$(cut -d: -f1,2 <<<"$line")"  # file:lineno
+  pinned="$(grep -o 'dtolnay/rust-toolchain@[0-9a-f]\{40\}' <<<"$line" | cut -d@ -f2)" || {
+    echo "$at: the pin is not a full commit SHA" >&2; exit 2
+  }
+  echo "pinned: $pinned ($at)"
+  if [ "$pinned" != "$master" ]; then
+    stale=1
+    if [ "$check" = 1 ]; then
+      echo "$at: dtolnay/rust-toolchain is pinned to $pinned; master is $master. Move the pin (and its 'master as of' date) in a reviewed PR." >&2
+    fi
+  fi
+done <<<"$lines"
+
+if [ "$check" = 1 ] && [ "$stale" = 1 ]; then exit 1; fi

@@ -262,16 +262,20 @@ describe('plugin packages in a durable turn', () => {
     const signal = new AbortController().signal
     const names = (s: { servers: { name: string }[] }) => s.servers.map((x) => x.name)
     const good = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
-    const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
-    expect(names(listed)).toEqual(['plugin_notes_local'])
-    // A root that is a file: the copy cannot be made.
-    const file = path.join(good, 'not-a-dir')
-    await writeFile(file, '')
-    for (const root of [file, undefined]) {
-      const failed = await turnServers({ packages: { load, root, localRoot: good, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
-      expect(failed.packages).toEqual([])
-      expect(names(failed)).toEqual([])
-      expect(failed.problems.join('\n')).toContain('plugin package notes was not loaded')
+    try {
+      const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
+      expect(names(listed)).toEqual(['plugin_notes_local'])
+      // A root that is a file: the copy cannot be made.
+      const file = path.join(good, 'not-a-dir')
+      await writeFile(file, '')
+      for (const root of [file, undefined]) {
+        const failed = await turnServers({ packages: { load, root, localRoot: good, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
+        expect(failed.packages).toEqual([])
+        expect(names(failed)).toEqual([])
+        expect(failed.problems.join('\n')).toContain('plugin package notes was not loaded')
+      }
+    } finally {
+      await rm(good, { recursive: true, force: true })
     }
   })
 

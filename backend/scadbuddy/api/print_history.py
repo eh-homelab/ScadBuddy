@@ -230,6 +230,9 @@ class PrintTimelapse(_Response):
     poster_url: str
     #: Its stills and Bambuddy's probe of it (`TimelapseFrames`), read after the detail.
     frames_url: str
+    #: The name to save it under, with its own container's extension: Bambuddy keeps what
+    #: the printer recorded, which is not always an MP4 (#3107).
+    filename: str
 
 
 class TimelapseFrames(_Response):
@@ -1055,6 +1058,13 @@ def _frame_url(archive_id: int, index: int, timelapse_path: str) -> str:
     return _prints_url(archive_id, f"timelapse/frames/{index}?v={version}")
 
 
+def _video_suffix(path: str) -> str:
+    """The timelapse file's own extension, lower-cased; ``.mp4`` when it has none a file
+    name can carry."""
+    suffix = PurePosixPath(path).suffix.lower()
+    return suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else ".mp4"
+
+
 def _media(link: LinkedPrint, archive: ArchiveDetail, added: list[Attachment]) -> PrintMedia:
     timelapse = None
     if archive.timelapse_path is not None:
@@ -1062,6 +1072,7 @@ def _media(link: LinkedPrint, archive: ArchiveDetail, added: list[Attachment]) -
             url=_prints_url(archive.id, "timelapse"),
             poster_url=_frame_url(archive.id, 0, archive.timelapse_path),
             frames_url=_prints_url(archive.id, "timelapse/frames"),
+            filename=f"print-{archive.id}-timelapse{_video_suffix(archive.timelapse_path)}",
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
     # A photo added in ScadBuddy is in the archive's photos too; it is listed once, as

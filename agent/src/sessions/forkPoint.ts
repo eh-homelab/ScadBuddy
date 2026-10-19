@@ -79,6 +79,22 @@ export async function forkHistory(events: Pick<EventLog, 'read'>, id: string, up
 }
 
 /**
+ * The history through the last event of the calls `ids` (#4173): a child that resumes
+ * at its parent's paused calls, with their results, has the conversation up to them. What
+ * the parent streamed after them never committed, so the child's agent never had it.
+ */
+export function historyThroughCalls(history: readonly ServerEvent[], ids: readonly string[]): ServerEvent[] {
+  const calls = new Set(ids)
+  let end = history.length - 1
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i]!
+    if ((e.type === 'tool.call' || e.type === 'tool.result') && calls.has(e.id)) break
+    end = i - 1
+  }
+  return end < 0 ? [...history] : history.slice(0, end + 1)
+}
+
+/**
  * The blobs (blobs.ts) the events name: a tool result's images, and the images a user sent
  * with a turn and their previews (#2479). What a fork copies into the child (#2150), and nothing else.
  */

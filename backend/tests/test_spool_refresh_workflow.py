@@ -119,6 +119,9 @@ async def test_the_real_activities_isolate_each_provider(client: Client, breaks:
                 raise RuntimeError("the provider is down")
             return [SpoolSnapshot(record_id="1")]
 
+        def printer_key(self, row: object) -> str | None:
+            return None
+
     class Store:
         def __init__(self) -> None:
             self.refreshed: list[str] = []

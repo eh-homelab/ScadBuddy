@@ -96,6 +96,10 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'slice-reused': 'text-subtle',
   // #2722 — the chosen spools mix material families: a warning, never a refusal.
   'mixed-materials': 'text-warn',
+  // #4272 — High Flow on one side and Standard on the other: refused.
+  'mixed-flows': 'text-warn',
+  // #4272 — a Track Switch inlet feeding both extruders, by a side chosen by hand.
+  'inlet-shared': 'text-warn',
 }
 
 /**

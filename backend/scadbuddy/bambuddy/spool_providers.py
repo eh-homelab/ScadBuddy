@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.filaments import normalise_colour
 from scadbuddy.bambuddy.models import Spool, SpoolAssignment
 from scadbuddy.core.components import Components, Core
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import (
     SpoolLocation,
     SpoolSnapshot,
@@ -93,6 +94,12 @@ class BambuddyProvider:
                 assignments = []
         where = {a.spool_id: location(a) for a in assignments}
         return [snapshot(spool, where.get(spool.id)) for spool in spools]
+
+    def printer_key(self, row: PrinterRow) -> str | None:
+        """The registry row's linked Bambuddy printer, as `location` names it."""
+        if row.bambuddy_printer_id is None:
+            return None
+        return f"bambuddy:{row.bambuddy_printer_id}"
 
 
 def _build(core: Core, components: Components) -> SpoolProvider:

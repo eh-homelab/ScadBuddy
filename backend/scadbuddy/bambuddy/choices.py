@@ -9,10 +9,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, cached_catalogue
+from scadbuddy.bambuddy.catalogue import (
+    PresetChoice,
+    _Catalogue,
+    cached_catalogue,
+)
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
-from scadbuddy.bambuddy.extruders import default_nozzles
+from scadbuddy.bambuddy.extruders import default_nozzles, one_flow
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.hardware import (
@@ -40,6 +44,8 @@ from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
+from scadbuddy.slicing.catalogue import catalogue_for
+from scadbuddy.slicing.profiles import Profiles
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +89,9 @@ class ChoicesView(BaseModel):
     printers: list[Printer] = Field(default_factory=list)
     nozzle_sizes: list[str] = Field(default_factory=lambda: list(SIZES))
     installed: list[InstalledNozzle] = Field(default_factory=list)
-    #: What the dialog opens on when the model remembers no nozzles (#1895): High Flow
-    #: on each side that has a High Flow nozzle of the size, else Standard.
+    #: What the dialog opens on when the model remembers no nozzles (#1895): one flow
+    #: for both sides (#4272), High Flow when either side has a High Flow nozzle of the
+    #: size, else Standard.
     default_nozzles: list[NozzleChoice] = Field(default_factory=lambda: default_nozzles(None))
     tiers: dict[str, list[TierOption]] = Field(default_factory=dict)
     processes: dict[str, list[str]] = Field(default_factory=dict)
@@ -142,6 +149,7 @@ async def choices_for(
     # bare hash without saying so (#3816 review): None only when there is no KEK.
     catalogue_key: bytes | None,
     rack: RackUsage | None = None,
+    native: Profiles | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
@@ -152,8 +160,15 @@ async def choices_for(
     still answers its 404 or 422, though the printers have been read beside it by then:
     a few wasted reads on a rare path, for not waiting on the file every time. The
     rack's state is recorded by the second wave, so a failed catalogue read raises after
-    it is written, not before (#2907)."""
-    presets = asyncio.ensure_future(cached_catalogue(client, cache, name_key=catalogue_key))
+    it is written, not before (#2907). With ``native`` (the image's profiles) the
+    catalogue is theirs (``slicing/catalogue.py``), and no preset is read from Bambuddy."""
+    presets = asyncio.ensure_future(
+        # A native run's presets are the image's own: nothing read from Bambuddy, and
+        # nothing kept under `cache` (#3818 tier A).
+        catalogue_for(None, native=native)
+        if native is not None
+        else cached_catalogue(client, cache, name_key=catalogue_key)
+    )
     try:
         return await _choices(
             client,
@@ -253,7 +268,13 @@ async def _choices(
         bed_type=bed,
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
-        model_choices=remembered or ModelPrintChoices(),
+        # One flow, as the resolver requires (#4272): a pair remembered from before it
+        # opens the dialog and print_output on what would print, not on a refusal.
+        model_choices=(
+            remembered.model_copy(update={"nozzles": one_flow(remembered.nozzles)})
+            if remembered is not None
+            else ModelPrintChoices()
+        ),
         rack_algorithm=settings.rack_algorithm(printer_id),
         sliced=(ready.sliced_profile or SlicedProfile()) if ready.is_sliced else None,
     )

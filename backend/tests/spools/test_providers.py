@@ -32,6 +32,9 @@ class Provider:
     async def records(self):
         return [SpoolSnapshot(record_id="1")]
 
+    def printer_key(self, row):
+        return None
+
 
 SPOOL_PROVIDERS = [{builds}]
 """

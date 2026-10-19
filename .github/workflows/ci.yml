@@ -599,7 +599,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17
+        image: mirror.gcr.io/library/postgres:17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -677,6 +677,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # `type=gha` only because this is a GitHub-hosted runner (see the header
       # of this file). Its own `scope` so this job and `image`, which run in
@@ -740,7 +743,7 @@ jobs:
     timeout-minutes: 35
     services:
       postgres:
-        image: postgres:17
+        image: mirror.gcr.io/library/postgres:17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -825,6 +828,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # The stage copies the agent's tool manifest from `agent-build` (5e), so
       # it also reads `scope=agent`, whose mode=max index holds that chain.
@@ -884,7 +890,7 @@ jobs:
     # too, since the app will not start without it.
     services:
       postgres:
-        image: postgres:17
+        image: mirror.gcr.io/library/postgres:17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -904,6 +910,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # --target test, and --load so it lands in the local docker daemon.
       #
@@ -1229,7 +1238,7 @@ jobs:
         group: [1, 2, 3, 4]
     services:
       postgres:
-        image: postgres:17
+        image: mirror.gcr.io/library/postgres:17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -1267,6 +1276,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Build the test image
         uses: docker/build-push-action@v7
@@ -1466,6 +1478,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # Read-only cache. The entries it hits were written by an EARLIER run's
       # `image` job (mode=max exports every `base` layer): this job does not
@@ -1673,6 +1688,9 @@ jobs:
         # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # Its own `scope=slicer`, which build-image.yml's `slicer` job writes. The
       # build already runs `scadbuddy-slicer --check-cli` as root; the two runs

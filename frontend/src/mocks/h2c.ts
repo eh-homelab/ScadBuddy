@@ -99,6 +99,7 @@ export function h2cFilaments(printerId: number | null): FilamentOptions {
     : inlandBlack
   return {
     library_file_id: H2C_FILE,
+    source: 'inventory',
     printer_id: printerId,
     printer_name: '3DP-31B-598',
     track_switch: true,
@@ -167,13 +168,14 @@ export function h2cPlan(request: PrintRunRequest): NozzlePlan {
 
 /** What a background slice of `request` comes to: one change per swap of nozzle. */
 export function h2cSlice(jobId: number, request: PrintRunRequest, done: boolean): SlicePreview {
-  if (!done) return { job_id: jobId, status: 'running', slots: [] }
+  if (!done) return { job_id: jobId, status: 'running', slots: [], slicer: 'bambuddy' }
   const plan = h2cPlan(request)
   const oneSide = new Set(plan.slots?.map((slot) => slot.side)).size === 1
   const highFlow = plan.left_flow === 'high_flow'
   return {
     job_id: jobId,
     status: 'completed',
+    slicer: 'bambuddy',
     print_time_seconds: highFlow ? 2843 : 3961,
     filament_used_g: oneSide ? 21.7 : 15.5,
     slots: (plan.slots ?? []).map((slot) => ({

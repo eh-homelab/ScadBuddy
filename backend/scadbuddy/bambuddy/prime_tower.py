@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, model_validator
 
-from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
+from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.core.problems import ApiError
@@ -87,7 +87,7 @@ def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:
 
 
 async def prime_tower_warnings(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     process: PresetRef | None,
     choice: PrimeTowerChoice | None,
     *,
@@ -102,7 +102,7 @@ async def prime_tower_warnings(
     if not wanted or process is None:
         return []
     try:
-        answer = await (read or client.preset_values)(process)
+        answer = await preset_reader(client, read)(process)
     except ApiError:
         return []
     if not answer.resolved:

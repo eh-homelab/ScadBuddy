@@ -42,6 +42,8 @@ RenderKind = Literal["render", "arrange"]
 RenderStage = Literal[
     "source", "render", "split", "solids", "paint", "thumbnail", "write", "recolour"
 ]
+#: How a native slice ended (`native_slices.status`).
+NativeSliceOutcome = Literal["completed", "failed", "cancelled"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
@@ -66,6 +68,9 @@ TraceRelayOutcome = Literal[
 # A render is bounded by SCADBUDDY_RENDER_TIMEOUT (120 s by default) per openscad
 # pass, and a multi-colour job makes one pass per colour, so the tail runs long.
 RENDER_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 240, 480, 900)
+#: A native slice: the slicer queue's wait (up to two hours) and four `slice_plate`
+#: attempts of up to 30 minutes, past `RENDER_BUCKETS`' 15 minutes (Task 14/15 review M3).
+SLICE_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 16200)
 HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
 
 
@@ -291,6 +296,17 @@ class Metrics:
             registry=r,
         )
 
+        # A native slice, from its start to its record (plan 2026-10-16 Task 15): what
+        # the print dialog waits for on `slicer_backend` `native`.
+        self.native_slice_duration = Histogram(
+            "scadbuddy_native_slice_seconds",
+            "Time from a native slice's start to its record, by outcome"
+            " (completed, failed, cancelled).",
+            ["outcome"],
+            buckets=SLICE_BUCKETS,
+            registry=r,
+        )
+
         # The content store under the blob store (spec 2026-09-27 §6.2, #426).
         self.store_ops = Counter(
             "scadbuddy_store_operations_total",
@@ -430,6 +446,8 @@ class Metrics:
                 self.render_duration.labels(kind, outcome)
         for stage in get_args(RenderStage):
             self.stage_duration.labels(stage)
+        for slice_outcome in get_args(NativeSliceOutcome):
+            self.native_slice_duration.labels(slice_outcome)
         for operation in get_args(StoreOperation):
             self.store_errors.labels(operation)
         for settle_pass in get_args(SettlePass):

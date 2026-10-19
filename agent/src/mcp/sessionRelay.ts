@@ -542,7 +542,9 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           controller.signal.removeEventListener('abort', cancel)
         }
       }
-      await send(lost ? { t: 'end', req, to, error: true } : { t: 'end', req, to })
+      // Stopped (a send lost, the relaying replica silent or cancelling): never whole, or a
+      // client still reading takes a cut-off SSE body for a finished one and waits on (#4384).
+      await send(lost || controller.signal.aborted ? { t: 'end', req, to, error: true } : { t: 'end', req, to })
     } catch (err) {
       if (!controller.signal.aborted) this.#failed(err)
       if (!headSent) {

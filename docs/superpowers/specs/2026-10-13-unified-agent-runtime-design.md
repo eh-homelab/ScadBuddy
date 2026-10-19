@@ -661,7 +661,13 @@ never did (`questions/service.ts:34-38`).
   the only reader of the column. The others only name the table in comments, or delete
   from it (`forget.ts:88`).
 - **Forgetting becomes crypto-shredding.** After the key row is deleted, entries in
-  Postgres backups are unreadable too. A migration seals the existing rows (plan Task 3.2).
+  Postgres backups are unreadable too. A migration seals the existing rows (plan Task 3.2),
+  clearing `entry` in the same UPDATE (`agent/src/sessions/sealBackfill.ts`). A backup taken
+  before that backfill ran still holds those rows in plaintext, until it ages out of
+  retention.
+- **Out of scope: a dropped or truncated row.** Each row's AAD names its own `uuid` or `id`,
+  so rows cannot be swapped, but someone with write access to the database can still delete
+  entries from the middle or the end of a transcript undetected (#3440).
 - **What never enters Temporal.** The transcript is not in workflow state, so no Temporal
   payload carries it. Payloads that do carry content (the message text, the gate entries,
   a continuation's tool result) stay sealed by the codec as today.
@@ -809,8 +815,8 @@ was already true for classic, and for durable's retried segments.
 
 ## 8. Background tasks as workflows
 
-Another agent is adding Claude Code's background built-ins (#2393; local branch
-`feat/background-builtins`). That branch leaves `CronCreate`, `CronDelete`, `CronList`,
+When this spec was written, Claude Code's background built-ins were being added (#2393,
+since merged as #2746). That work left `CronCreate`, `CronDelete`, `CronList`,
 `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification` out of durable
 sessions, because they "only work inside one Claude Code process". The unified runtime
 gives them a single home:

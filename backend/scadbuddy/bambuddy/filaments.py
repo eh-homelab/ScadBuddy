@@ -41,8 +41,10 @@ import asyncio
 import logging
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Literal, Protocol
+from uuid import UUID
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -53,13 +55,15 @@ from scadbuddy.bambuddy.models import (
     FilamentRequirements,
     NozzleInfo,
     Printer,
+    PrinterStatus,
     SlotChoice,
     SlotMaterial,
     Spool,
     SpoolAssignment,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.print_library.reads import LibraryReads, reads_for
+from scadbuddy.print_library.reads import LibraryReads, reads_for, served_reads
+from scadbuddy.spools.models import Overlay, SpoolSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +83,8 @@ WarningKind = Literal[
     "no-preset",
     "no-fan-out",
     "mixed-sizes",
+    # #4272 — High Flow on one side and Standard on the other: refused.
+    "mixed-flows",
     "no-process",
     "not-installed",
     "plate-differs",
@@ -113,6 +119,8 @@ WarningKind = Literal[
     "slice-reused",
     # #2722 — the chosen spools mix material families.
     "mixed-materials",
+    # #4272 — a Track Switch inlet feeds both extruders, by a side chosen by hand.
+    "inlet-shared",
 ]
 
 
@@ -155,8 +163,19 @@ class SpoolOption(BaseModel):
     #: The spool's label weight in grams, for "about half full" (#2164); None unknown.
     label_weight_g: int | None = None
     #: Not a spool: what is in a filled tray Bambuddy has no spool for (#2164,
-    #: ``trays.tray_option``), under a negative id, with no weight tracked.
+    #: ``trays.tray_option``), under a negative id, with no weight tracked. On a native
+    #: run every choice is one (``trays.loaded_trays``, #3818).
     tray_only: bool | None = None
+    #: The tray, as a person reads it ("AMS-A slot 1", "HT-A", "External"), on a native
+    #: run's tray choices only.
+    label: str | None = None
+    #: What the AMS says is left, in percent: an RFID spool's ``remain``; ``None`` for an
+    #: untagged one, which reports -1.
+    remain_percent: int | None = None
+    #: The physical spool in the tray, and each spool provider's record of it, from the
+    #: overlay (`spools.store.SpoolStore.overlay`, plan 2026-10-18 D1); a native run only.
+    physical_spool_id: UUID | None = None
+    records: dict[str, SpoolSnapshot] = Field(default_factory=dict)
 
 
 class UnknownTray(BaseModel):
@@ -245,6 +264,12 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's filled trays with no spool assigned (#2164): the dialog
     #: asks which spool each holds. Each is also offered in ``spools`` as itself.
     trays: list[UnknownTray] = Field(default_factory=list)
+    #: Where ``spools`` came from: Bambuddy's inventory, or (a native run, #3818) the
+    #: printer's loaded trays with the spool providers' records over them.
+    source: Literal["inventory", "trays"] = "inventory"
+    #: One sentence per spool provider whose records are stale or missing, on a native
+    #: run: those records are left out and the trays shown alone.
+    overlay_notes: list[str] = Field(default_factory=list)
 
 
 class QueueFilaments(BaseModel):
@@ -451,11 +476,34 @@ def build_options(
         )
 
     options.sort(key=_display_order(printer.id if printer else None))
-    suggested = suggest(requirements, options, printer_id=printer.id if printer else None)
-    built = FilamentOptions(
+    return _options(
         library_file_id=library_file_id,
+        options=options,
+        requirements=requirements,
         printer_id=printer.id if printer else None,
         printer_name=printer.name if printer else None,
+    )
+
+
+def _options(
+    *,
+    library_file_id: int | None,
+    options: list[SpoolOption],
+    requirements: list[SlotNeed],
+    printer_id: int | None,
+    printer_name: str | None,
+    source: Literal["inventory", "trays"] = "inventory",
+    notes: list[str] | None = None,
+) -> FilamentOptions:
+    """The dialog's answer over ``options``, already in display order: each slot's
+    colour matches, the opening selection and its warnings."""
+    suggested = suggest(requirements, options, printer_id=printer_id)
+    built = FilamentOptions(
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        printer_name=printer_name,
+        source=source,
+        overlay_notes=notes or [],
         slots=[
             slot.model_copy(
                 update={
@@ -913,7 +961,7 @@ def plates_named(plates: Sequence[int]) -> str:
 
 
 async def gather_plate_options(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     *,
     library_file_id: int | None,
     printer_id: int | None = None,
@@ -923,6 +971,10 @@ async def gather_plate_options(
     inventory: Inventory | None = None,
     known: Callable[[int | None], FilamentRequirements] | None = None,
     native: LibraryReads | None = None,
+    trays_from: PrinterStatus | None = None,
+    overlay: Overlay | None = None,
+    provider_labels: Mapping[str, str] | None = None,
+    now: datetime | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -934,7 +986,30 @@ async def gather_plate_options(
     ``inventory`` is the spools and assignments when the caller has read them already.
     ``known`` answers each plate's slots in place of Bambuddy's ``filament-requirements``
     when they were read from the file itself (#2550). A native file's (#3827) are read
-    from ``native``: the empty requirement, so its slots read as unknown."""
+    from ``native``: the empty requirement, so its slots read as unknown.
+
+    ``trays_from`` (a native run, #3818 tier A, plan 2026-10-18 D1) replaces the inventory,
+    the printer and its inventory-remain with the printer's loaded trays from its LAN
+    report, ``overlay`` (`SpoolStore.overlay`, a Postgres read) laid over them; no client
+    is needed then, and none is read. ``provider_labels`` name the providers in the
+    overlay's notes, and ``now`` is when the overlay was read."""
+    if trays_from is not None:
+        return await _tray_plate_options(
+            client,
+            library_file_id=library_file_id,
+            printer_id=printer_id,
+            plate_ids=plate_ids,
+            fallback_colours=fallback_colours,
+            own_colours=own_colours,
+            known=known,
+            native=native,
+            status=trays_from,
+            overlay=overlay,
+            labels=provider_labels or {},
+            now=now,
+        )
+    if client is None:
+        raise TypeError("the inventory is Bambuddy's: reading it needs a client")
     spools, assignments = inventory if inventory is not None else await read_inventory(client)
 
     answers = await asyncio.gather(
@@ -973,8 +1048,73 @@ async def gather_plate_options(
     ]
 
 
+async def _tray_plate_options(
+    client: BambuddyClient | None,
+    *,
+    library_file_id: int | None,
+    printer_id: int | None,
+    plate_ids: Sequence[int | None],
+    fallback_colours: list[str] | None,
+    own_colours: list[str] | None,
+    known: Callable[[int | None], FilamentRequirements] | None,
+    native: LibraryReads | None,
+    status: PrinterStatus,
+    overlay: Overlay | None,
+    labels: Mapping[str, str],
+    now: datetime | None,
+) -> list[FilamentOptions]:
+    # Here, not at the top: `trays` builds its choices from this module's models.
+    from scadbuddy.bambuddy.trays import loaded_trays
+
+    answers = await asyncio.gather(
+        *(
+            _requirements(
+                client, library_file_id, plate, fallback_colours, own_colours, known, native
+            )
+            for plate in plate_ids
+        ),
+        return_exceptions=True,
+    )
+    per_plate: list[list[SlotNeed]] = [settled(answer) for answer in answers]
+    # The report's own id: the Bambuddy printer's when the row links one, else 0
+    # (`printers.status.status_from_report`); every tray is loaded "here".
+    here = printer_id if printer_id is not None else status.id
+    options = loaded_trays(status, here, status.name, overlay)
+    notes = overlay_notes(overlay, labels, now=now) if overlay is not None else []
+    return [
+        _options(
+            library_file_id=library_file_id,
+            options=[option.model_copy() for option in options],
+            requirements=requirements,
+            printer_id=here,
+            printer_name=status.name,
+            source="trays",
+            notes=notes,
+        )
+        for requirements in per_plate
+    ]
+
+
+def overlay_notes(
+    overlay: Overlay, labels: Mapping[str, str], *, now: datetime | None = None
+) -> list[str]:
+    """One sentence per provider the overlay left out: when it last answered, or that it
+    never has. A time today is ``14:02 UTC``; an older one carries its date."""
+    notes: list[str] = []
+    for provider, refreshed in overlay.stale.items():
+        label = labels.get(provider, provider)
+        if refreshed is None:
+            notes.append(f"No spool records from {label} yet; showing the trays only.")
+            continue
+        when = refreshed.astimezone(UTC)
+        same_day = now is not None and now.astimezone(UTC).date() == when.date()
+        stamp = when.strftime("%H:%M UTC" if same_day else "%Y-%m-%d %H:%M UTC")
+        notes.append(f"{label}'s spool records are from {stamp}; showing the trays only.")
+    return notes
+
+
 async def _requirements(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     library_file_id: int | None,
     plate_id: int | None,
     fallback_colours: list[str] | None,
@@ -999,9 +1139,12 @@ async def _requirements(
                 f"plate {plate_id}'s slots were neither read from the file nor named by a"
                 " library file",
             )
-        answer = await reads_for(library_file_id, client, native).filament_requirements(
-            library_file_id, plate_id=plate_id
+        reads = (
+            served_reads(library_file_id, None, native)
+            if client is None
+            else reads_for(library_file_id, client, native)
         )
+        answer = await reads.filament_requirements(library_file_id, plate_id=plate_id)
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,

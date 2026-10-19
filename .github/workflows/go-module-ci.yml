@@ -220,6 +220,17 @@ jobs:
             exit 1
           fi
 
+      # A builder of its own, so the golang base comes through the Docker Hub
+      # mirror as every other image build's does (#3370, #4012).
+      - name: Set up Docker Buildx
+        if: ${{ !cancelled() && inputs.run == 'true' }}
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
       # Each CLI's image (tools/go/<m>/Dockerfile, the repo root as context),
       # built and run once, as build-go-image.yml will publish it (amd64, the
       # only platform it publishes). Every CLI must have a Dockerfile, as there.
@@ -231,7 +242,7 @@ jobs:
             [ -f "$d/main.go" ] || continue
             name=$(basename "$d")
             echo "::group::${name} image"
-            docker build -f "$d/Dockerfile" -t "go-$name:ci" .
+            docker buildx build --load -f "$d/Dockerfile" -t "go-$name:ci" .
             docker run --rm "go-$name:ci" --help
             echo "::endgroup::"
           done

@@ -36,7 +36,8 @@ export const RESOURCE_TYPES = [
   'library',
   'font',
   // Stored settings and remembered choices, by what they are for (`print_options:<scope>[:<key>]`,
-  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`).
+  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`), and a
+  // registry printer (`printer:<uuid>`, #3823).
   'setting',
   // Bambuddy's own: a project, a library file, a print archive (its id, not a queue item).
   'project',
@@ -229,6 +230,12 @@ function libraryPin(action: ResourceAction | ((result: unknown) => ResourceActio
 const pinned = libraryPin((result) => (field(result, 'pinned_before') === false ? 'created' : 'modified'))
 
 /** A stored setting, by what it is for. */
+/** A registry printer's setting id (`printer:<uuid>`), or null without one. */
+function registryPrinter(id: unknown): string | null {
+  const printer = str(id)
+  return printer ? `printer:${printer}` : null
+}
+
 function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
   return id ? [{ type: 'setting', id, action: 'modified', ...extra }] : []
 }
@@ -416,6 +423,13 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     if (file) return setting(`print_choices:library:${file}`, { model: null })
     return setting(slug ? `print_choices:${slug}` : null, { model: slug })
   },
+  // The printer registry (#3823): a row is configuration, recorded by its id, never its serial.
+  create_printer: (_input, result) => setting(registryPrinter(field(result, 'id')), { action: 'created' }),
+  update_printer: (input) => setting(registryPrinter(input.printer)),
+  link_printer_bambuddy: (input) => setting(registryPrinter(input.printer)),
+  unlink_printer_bambuddy: (input) => setting(registryPrinter(input.printer)),
+  unlink_printer_lan: (input) => setting(registryPrinter(input.printer)),
+  delete_printer: (input) => setting(registryPrinter(input.printer), { action: 'deleted' }),
   remember_printer_bed_type: (input) => {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)
@@ -498,6 +512,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #2686: a library folder is no recorded resource kind.
   'create_library_folder',
   'update_library_folder',
+  // #3818: a tray's spool link is no recorded resource kind either (ScadBuddy's
+  // tray_spool_links; the spool and its providers' records are unchanged).
+  'link_tray_spool',
+  'unlink_tray_spool',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

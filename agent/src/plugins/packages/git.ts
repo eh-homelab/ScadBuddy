@@ -45,6 +45,15 @@ export interface RepoFetcher {
   specialPaths(checkout: Checkout, subpath: string): Promise<string[]>
 }
 
+/**
+ * `text` with every URL's userinfo removed. A source URL never carries one (source.ts
+ * refuses it), but git's error is logged at start and shown in the session (#4259), so
+ * what git prints is not trusted to keep to that.
+ */
+export function withoutUserinfo(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"]*@/gi, '$1')
+}
+
 export class FetchError extends Error {
   override name = 'FetchError'
 }
@@ -118,7 +127,7 @@ export class GitFetcher implements RepoFetcher {
       const e = err as { stderr?: string; killed?: boolean; code?: unknown; message: string }
       if (e.code === 'ENOENT') throw new FetchError('git is not installed in the agent image')
       if (e.killed) throw new FetchError(`git ${args[0]} timed out after ${this.timeoutMs} ms`)
-      const detail = (e.stderr ?? e.message).trim().split('\n').slice(-3).join(' ').slice(0, 500)
+      const detail = withoutUserinfo((e.stderr ?? e.message).trim().split('\n').slice(-3).join(' ')).slice(0, 500)
       throw new FetchError(`git ${args[0]} failed: ${detail}`)
     }
   }

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A render, the print dialog, its background slice, the print and its follow make no Bambuddy call when the run is native (`store_backend=s3`, `library_backend=native`, `slicer_backend=native`, the printer's path `native`), whether or not `bambuddy_url` is set. Bambuddy stays configured and selectable; the hot path never waits on it.
+**Goal:** A render, the print dialog, its background slice, the print and its follow make no Bambuddy call when the run is native (`store_backend=s3`, `library_backend=native`, `slicer_backend=native`, the printer's path `native`), whether or not `bambuddy_url` is set. A run on `store_backend=bambuddy` with the rest native takes the same print path (D2), but its store still reads and writes Bambuddy's library, so the zero-call promise (AC1) is made for `s3` only. Bambuddy stays configured and selectable; the hot path never waits on it.
 
 **Architecture:** One predicate, `hot_path_native`, decides per run whether the print path may build a `BambuddyClient` at all; on a native run it passes `client=None` everywhere, and mypy then finds every call that still needs one. What those calls did is replaced by things ScadBuddy already owns or that the in-flight plans build: the preset catalogue and values from the image's BBL profiles (`slicing/profiles.py`), the laid-out per-print copy in the native library (`print_library/`), the destination as a native library folder, the filament choices as the printer's loaded trays from its MQTT report (`printer_reports`, plan 3a) with an overlay of spool-provider records cached in Postgres (Bambuddy's refreshed by a Schedule of its own, never inline), the `ams_mapping`/`ams_mapping2` and the H2C's `nozzle_mapping` computed from the plan, and the follow from the report. Bambuddy's projects, archives and queue stay on the Bambuddy path, untouched. Proof is a backend test that fails on any `bambuddy.*` client span or any HTTP request to the configured Bambuddy URL during a native render-to-follow run, a mocked e2e walk of the dialog with Bambuddy unconfigured, a real-stack e2e against a recorder that fails on any request, and a prod checklist read off Tempo.
 
@@ -33,7 +33,7 @@
 
 ### D2. Which runs are native
 
-`hot_path_native(settings, printer)` is true when `settings.slicer_backend == "native"`, `settings.library_backend == "native"`, `settings.store_backend in ("s3", "bambuddy")` and the printer row's resolved path (plan 3a Task 8) is `native`. Anything else is today's Bambuddy path, unchanged. `store_backend=bambuddy` still counts: its library calls are the store's, outside the print path, and §1.1's render goal is tier 1's (`store_backend=s3`); the acceptance tests run on `s3`.
+`hot_path_native(settings, path)` (Task 9's signature) is true when `settings.slicer_backend == "native"`, `settings.library_backend == "native"`, `settings.store_backend in ("s3", "bambuddy")` and `path`, the printer row's resolved path (plan 3a Task 8), is `native`. Anything else is today's Bambuddy path, unchanged. `store_backend=bambuddy` still counts: its library calls are the store's, outside the print path, and §1.1's render goal is tier 1's (`store_backend=s3`); the acceptance tests run on `s3`.
 
 ### D3. A native run never builds a client
 
@@ -55,13 +55,13 @@ Confirmed by the user, 2026-10-18. A native run files its laid-out copy in the n
 
 The H2C's hotend rack is chosen per filament group, and the sliced file does not say which rack position a group prints from. What the G-code carries is the tool changes and which *extruder* each filament prints on (the plate's `filament_map`/`nozzle_group_result`, which Bambu Studio's slice writes and its print dialog reads, `src/slic3r/GUI/DeviceCore/DevMappingNozzle.cpp` `CtrlGetAutoNozzleMappingV0/V1` at v02.08.02.61; in the 3MF, `slice_info.config`'s `<filament id group_id …>` and `<nozzle id extruder_id>`, as Bambuddy's tests write them, `backend/tests/integration/test_scheduler_nozzle_rack_dispatch_1784.py` at `0d427510`). What the print command must add is the rack-slot-to-filament mapping: `project_file`'s `nozzle_mapping`, one physical nozzle id per filament slot (the fixed hotend `1`, rack positions `16`–`21`, `-1` unused), 32 entries on an H2C (Bambuddy `backend/app/services/bambu_mqtt.py:351-405` `_RACK_NOZZLE_IDS`, `_RACK_WIRE_SLOTS`, `_FIXED_NOZZLE_ID`, measured by its maintainer on an H2C 2026-08-13/14 and recorded there; `resolve_rack_plan_mapping` `:575` builds it from a per-group position pick, which is what ScadBuddy sends Bambuddy as `nozzle_rack_choice`, `bambuddy/dispatch.py:278-311`). Bambu Studio itself gets the mapping by asking the printer (`print.get_auto_nozzle_mapping`, request and reply shapes in `DevMappingNozzle.cpp`) and sends it back as `nozzle_mapping` (`PrintJob.cpp:262`, `SelectMachine.cpp:3322-3323`); the MQTT encoding of the parameters is inside Bambu's closed networking plugin (`src/slic3r/Utils/bambu_networking.hpp:237-240` declares only the strings), which is why Task 8 measures the wire before anything is built on it.
 
-So Task 8 measures first, with the user at the printer, then the LAN path sends `nozzle_mapping` from ScadBuddy's own rack pick (`rack_chooser`, `print_run.py:578`). No refusal ships. **Decide then:** only if the measurement finds the printer cannot be told the mapping over LAN does the plan choose a fallback (refuse with a reason, let the firmware pick as Bambuddy does when it cannot resolve one, `bambu_mqtt.py` `resolve_rack_nozzle_mapping` docstring, or hand the run to Bambuddy); that choice goes to the user with the measurement.
+So Task 8 measures first, with the user at the printer, then the LAN path sends `nozzle_mapping` from ScadBuddy's own rack pick (`rack_chooser`, `print_run.py:578-670` at `7613580bf`). No refusal ships. **Decide then:** only if the measurement finds the printer cannot be told the mapping over LAN does the plan choose a fallback (refuse with a reason, let the firmware pick as Bambuddy does when it cannot resolve one, `bambu_mqtt.py` `resolve_rack_nozzle_mapping` docstring, or hand the run to Bambuddy); that choice goes to the user with the measurement.
 
 ## Acceptance criteria and the layer each lives in
 
 | # | Criterion | Layer |
 |---|---|---|
-| AC1 | A native render → dialog → background slice → print → follow makes zero `bambuddy.*` client spans and zero HTTP requests to `bambuddy_url`, with Bambuddy configured | backend acceptance test (Task 9); real-stack e2e with a failing recorder (Task 13); prod Tempo check (Task 14) |
+| AC1 | On `store_backend=s3`, a native render → dialog → background slice → print → follow makes zero `bambuddy.*` client spans and zero HTTP requests to `bambuddy_url`, with Bambuddy configured (on `store_backend=bambuddy` the store's own calls remain, D2) | backend acceptance test (Task 9); real-stack e2e with a failing recorder (Task 13); prod Tempo check (Task 14) |
 | AC2 | The same run works with `bambuddy_url` unset, and the app starts | backend acceptance test (Task 10); real-stack e2e second pass (Task 13) |
 | AC3 | The dialog shows the native slice's progress bar and its result | mocked e2e (Task 11); real-stack e2e (Task 13) |
 | AC4 | Filament choices are the printer's loaded trays with the providers' cached records over them; the chosen trays reach `ams_mapping`/`ams_mapping2` | unit (Tasks 6a, 6c, 7); backend acceptance (Task 9, the fake printer's recorded `project_file`); real-stack e2e (Task 13, the fake printer's record) |
@@ -363,7 +363,8 @@ Inventory finding 2, re-read: `PrintPipeline.file_to_print` (`bambuddy/print_sou
   CREATE TABLE physical_spools (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tray_uuid text UNIQUE,              -- the AMS's spool UUID; NULL when untagged (all zeros is never stored)
-    tag_uid text UNIQUE,                -- the RFID tag's UID last read; NULL when untagged
+    tag_uid text,                       -- the RFID tag's UID last read; NULL when untagged. Not UNIQUE:
+                                        -- a Bambu spool has a tag on each side, two tag_uids, one tray_uuid
     material text, colour text, tray_info_idx text,   -- as last seen in a tray or set when linked
     created_at timestamptz NOT NULL DEFAULT now(),
     last_seen_at timestamptz
@@ -415,7 +416,7 @@ Inventory finding 2, re-read: `PrintPipeline.file_to_print` (`bambuddy/print_sou
   # spools/store.py
   class SpoolStore:
       async def replace_records(self, provider: str, snapshots: list[SpoolSnapshot], at: datetime) -> None
-          # one transaction: upsert each record; link by tray_uuid, else tag_uid, to physical_spools (creating
+          # one transaction: upsert each record; link by tray_uuid, else (no tray_uuid) tag_uid, to physical_spools (creating
           # the physical spool for a provider record carrying a tag we have never seen), linked_by='rfid';
           # keep an existing 'manual' link; delete the provider's rows not in snapshots; set the refresh row
       async def failed(self, provider: str, at: datetime, failure: str) -> None   # the rows stay; the note says so
@@ -433,7 +434,7 @@ Inventory finding 2, re-read: `PrintPipeline.file_to_print` (`bambuddy/print_sou
   SPOOL_OVERLAY_STALE = timedelta(minutes=30)
   ```
 
-- [ ] **Step 1: Write the failing tests** — `replace_records` links an RFID record to the physical spool its `tray_uuid` names, keeps a manual link across a refresh, and drops a record the provider no longer lists; two providers' records of one tray's spool both appear in `overlay(...).records` (1:N); an all-zero `tray_uuid` or `tag_uid` is stored as `NULL`; a manual link is dropped when the tray's fingerprint changes; `overlay` leaves out a provider refreshed 31 minutes ago and names it in `stale`; `discover_providers` refuses two providers named alike (a test package with two `spool_providers.py`, as `tests/test_components.py` builds features).
+- [ ] **Step 1: Write the failing tests** — `replace_records` links an RFID record to the physical spool its `tray_uuid` names, keeps a manual link across a refresh, and drops a record the provider no longer lists; two providers' records of one tray's spool both appear in `overlay(...).records` (1:N); an all-zero `tray_uuid` or `tag_uid` is stored as `NULL`; two records of one spool, one per side's tag (different `tag_uid`s, one `tray_uuid`), link to one physical spool (measure it first: read both sides of one spool in the AMS and record the two reports' `tag_uid`/`tray_uuid` in the test's docstring, #4182); a manual link is dropped when the tray's fingerprint changes; `overlay` leaves out a provider refreshed 31 minutes ago and names it in `stale`; `discover_providers` refuses two providers named alike (a test package with two `spool_providers.py`, as `tests/test_components.py` builds features).
 - [ ] **Step 2: Run them to verify they fail** — `cd backend && uv run --frozen pytest tests/spools -v`.
 - [ ] **Step 3: Implement** (the migration a NEW file named by `date -u` when created).
 - [ ] **Step 4: Run** Step 2's command and `uv run --frozen mypy` → PASS.
@@ -531,7 +532,7 @@ What the wire carries, from two sources that agree with each other and disagree 
 **Files:**
 - Create: `backend/tests/printers/sniff.py` (a capture script over 3a Task 4's `LanPrinter`), `backend/tests/printers/test_rack_live.py` (marker `requires_printer`, 3a Task 4's), `backend/tests/printers/fixtures/rack-project-file.json` and `rack-auto-nozzle-mapping.json` (captures, serial redacted)
 - Create: `backend/scadbuddy/printers/nozzle_mapping.py`
-- Modify: `backend/scadbuddy/printers/lan.py` (3a Task 4's `ProjectFile` gains `nozzle_mapping: list[int] | None = None`, omitted from the command when `None`), `backend/scadbuddy/printers/print_activities.py` (3a Task 9's `lan_print` input gains `nozzle_mapping`), `backend/scadbuddy/bambuddy/print_run.py` (the rack pick on a native run reads the status from the report, never `client.printer_status`, `rack_chooser` `:615`), `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §2 (a row per measured fact)
+- Modify: `backend/scadbuddy/printers/lan.py` (3a Task 4's `ProjectFile` gains `nozzle_mapping: list[int] | None = None`, omitted from the command when `None`), `backend/scadbuddy/printers/print_activities.py` (3a Task 9's `lan_print` input gains `nozzle_mapping`), `backend/scadbuddy/bambuddy/print_run.py` (the rack pick on a native run reads the status from the report, never `client.printer_status`: `rack_chooser` `:578-670`, its status read `:615`), `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §2 (a row per measured fact)
 - Test: `backend/tests/printers/test_nozzle_mapping.py`, `backend/tests/test_print_native_workflow.py` (3a Task 9's, a rack case)
 
 **Interfaces:**
@@ -570,6 +571,12 @@ What the wire carries, from two sources that agree with each other and disagree 
 **Files:**
 - Create: `backend/scadbuddy/printers/hot_path.py`
 - Modify: `backend/scadbuddy/bambuddy/client.py` (`maybe_client` beside `client_for` `:1511`), `backend/scadbuddy/bambuddy/print_run.py` (`prepare_run` `:1228`, `plan_run` `:1552`, `check_print` `:758`, `_hardware_warnings` `:2042`: `client: BambuddyClient | None`; on `None` the last-bed-type read `:2058` is skipped, as an unreadable archive list already is), `backend/scadbuddy/bambuddy/choices.py` (`choices_for` `:133`: the printers from the registry and the status from the report on a native run, D4), `backend/scadbuddy/bambuddy/printers_now.py` (3a Task 6's version: LAN report first, D4), `backend/scadbuddy/bambuddy/preview.py` (`start_preview` `:89`: client optional), `backend/scadbuddy/workflows/print_activities.py` (`check` `:207`, `plan` `:268`, `record` `:376`, `_keep_slice_hash` `:396`, `finish` `:437`: `maybe_client`), `backend/scadbuddy/api/deps.py` (`read_progress`/`read_library` `:390-406`) and `backend/scadbuddy/worker.py` (`:915-922`): the readers built outside `client_for`, with `maybe_client`, so a `route="lan"` follow (3a Task 9) never opens one; `backend/scadbuddy/bambuddy/progress.py` (`progress_for` `:377`, `library_progress` `:443`: `client: BambuddyClient | None`)
+- Modify, handed over by Tasks 4 and 5 (#4312 review M6, M7):
+  - `PrintDeps.native_run` (`workflows/print_activities.py`), always False until this task: set it from `hot_path_native`, in the API's in-process `PrintDeps` (`main.py` `_run_print_worker`) and the print worker's (`worker.py` `build_print_deps`).
+  - `prepare_run(native=)`: pass the native library from `check_print` (`print_run.py`, the dialog's check) and from `bambuddy/preview.py` (`start_preview`), not only from `print_check`, or a native folder id reaches `require_destination_folder` there.
+  - `plan_run`: on a native run, call `native_destination(native, folder_id=request.folder_id, title=<the output's template title>)` (`print_library/copies.py`; `None` for a library file) and pass the result to `file_to_print(..., native_copy=True, printer_model=<the registry row's model>)`. Never call `planned_project`: it falls back to `resolve_project`, a Bambuddy read, whenever `prepared.project` is `None`.
+  - The misuse guards (`print_source.py` `_misuse`, `send.target_for`) are 500 `ApiError`s, which the plan activity raises as non-retryable. One the predicate can reach, such as a native run's Bambuddy-range source, is refused at the check instead, as a 422.
+  - `reads.py`'s `served_reads` and `reads_of` still raise `TypeError` when there is neither a client nor a native library. Once the client is optional, make them `_misuse` too.
 - Test: `backend/tests/api/test_hot_path_native.py` (`requires_postgres`, `requires_temporal`)
 
 **Interfaces:**
@@ -770,7 +777,7 @@ No compose file exists in the repo today (`git ls-files | grep -i compose` lists
 - [ ] **Step 1: The doc and spec edits, and the agent descriptions.** Run `bash .github/scripts/lint-plugin.sh && cd agent && pnpm lint && pnpm test`.
 - [ ] **Step 2: File the follow-ups** with `gh issue create --repo eh-homelab/ScadBuddy`, each `Refs #3818`: the per-print native copy's lifetime (Task 4 never deletes), the native spool provider (tier B: its records, consumption from `used_g`, and its editor), `output_last_prints` for a LAN print (§6.3 says it is kept either way; 3a Task 9 records no queue item), and Bambuddy `local` presets on the native path (D5).
 - [ ] **Step 3: Commit** — `git add docs README.md CLAUDE.md agent && git commit -m "docs: the native hot path, its decisions and its checks (#3818)"`
-- [ ] **Step 4: Hand the checklist to the fleet's exploratory testing session** on https://github.com/WonderForgeLabs/WonderForgeLabs/discussions/66, as #3820's cut-over was: a comment with the checklist above, the release tag, and "report on #3818". `gh api graphql -f query='mutation($id:ID!,$body:String!){addDiscussionComment(input:{discussionId:$id,body:$body}){comment{url}}}' -f id=<discussion node id> -f body=@checklist.md` (the node id from `gh api graphql -f query='{repository(owner:"WonderForgeLabs",name:"WonderForgeLabs"){discussion(number:66){id}}}'`).
+- [ ] **Step 4: Hand the checklist to the fleet's exploratory testing session** on https://github.com/orgs/WonderForgeLabs/discussions/66, as #3820's cut-over was: a comment with the checklist above, the release tag, and "report on #3818". `gh api graphql -f query='mutation($id:ID!,$body:String!){addDiscussionComment(input:{discussionId:$id,body:$body}){comment{url}}}' -f id=<discussion node id> -f body=@checklist.md` (the node id from `gh api graphql -f query='{repository(owner:"WonderForgeLabs",name:"WonderForgeLabs"){discussion(number:66){id}}}'`).
 
 ---
 
