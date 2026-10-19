@@ -187,10 +187,13 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
 
   it('beats for every activity, so one that outlives its heartbeat timeout completes (#4261)', async () => {
     // No beat of its own: only the worker's interceptor (heartbeatingActivities) keeps it alive.
+    // Without it in Worker.create's interceptors, the call fails with `TimeoutFailure: activity
+    // Heartbeat timeout` after 1 s. Its name is its own, so no other poller on `agent-tools` takes it.
+    const slow = `slow-${randomUUID()}`
     const agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
-      activities: { slow: async () => (await sleep(4_000), 'done') },
+      activities: { [slow]: async () => (await sleep(4_000), 'done') },
       activityHeartbeatMs: 200,
     })
     const caller = await Worker.create({
@@ -204,7 +207,7 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
         env.client.workflow.execute('callBeating', {
           workflowId: `beating-${randomUUID()}`,
           taskQueue: 'heartbeat-standin',
-          args: ['slow', 1_000],
+          args: [slow, 1_000],
         }),
       )
       expect(result).toBe('done')
