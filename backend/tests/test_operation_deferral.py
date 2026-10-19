@@ -195,6 +195,8 @@ async def _workflow_tasks_reach(client: Client, queue: str, build_id: str) -> No
                 await asyncio.sleep(0.05)
                 for event in (await handle.fetch_history()).events:
                     # Both builds register the probe's kind, so its task never defers.
+                    # A task that only times out is retried, and may still complete on a
+                    # loaded runner: that is left to the outer timeout, not failed here.
                     assert event.event_type != EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED, (
                         "a probe's workflow task failed"
                     )
