@@ -906,8 +906,13 @@ workers restart.
     `exported_namespace`. A port another process holds leaves a worker without them
     (logged once at start) rather than stopping it. The renders dashboard's "Worker
     Temporal tasks" panel charts them for the render, print and projects workers. Of the
-    SDK's `temporal_*` series, each ServiceMonitor keeps only the three histograms that
-    panel reads.
+    SDK's `temporal_*` series, each of the three ServiceMonitors keeps only the three
+    histograms that panel reads, and clusters'
+    [`check-scadbuddy-keep-lists.sh`](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/.github/scripts/check-scadbuddy-keep-lists.sh)
+    keeps their lists in step
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml),
+    [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml),
+    [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml)).
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
