@@ -54,6 +54,7 @@ async def test_the_worker_tells_its_workflows_what_it_serves(flows: Flows) -> No
         i for i in worker.config()["interceptors"] if isinstance(i, RegisteredActivities)
     ]
     assert registered.host_functions == HOST_FUNCTION_NAMES
+    assert registered.names is not None
     assert {"flow_entry_timeout", "flow_record"} <= registered.names
 
 
