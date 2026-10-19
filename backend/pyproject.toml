@@ -37,7 +37,7 @@ dependencies = [
     # Imported directly for the error an unresolvable `$ref` raises (flow_tools `_answer`).
     "referencing>=0.28",
     "regex>=2024.11.6",
-    "aiobotocore>=2.21,<3",
+    "aiobotocore>=2.21,<4",
     "aiomqtt>=2.3,<3",
 ]
 
