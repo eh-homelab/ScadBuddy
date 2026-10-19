@@ -83,7 +83,7 @@ impl std::fmt::Display for TransferError {
             Self::Expired => write!(f, "transfer url expired"),
             Self::Missing => write!(f, "object not found (404)"),
             Self::Refused(code) => write!(f, "transfer refused ({code})"),
-            Self::InvalidHeader(why) => write!(f, "{why}"),
+            Self::InvalidHeader(why) => write!(f, "invalid transfer header: {why}"),
             Self::Status(code) => write!(f, "unexpected status {code}"),
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Http(e) => write!(f, "http: {e}"),
