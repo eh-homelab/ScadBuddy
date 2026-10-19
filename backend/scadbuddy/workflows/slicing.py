@@ -59,8 +59,9 @@ with workflow.unsafe.imports_passed_through():
 #: One ``slice_plate`` attempt's start-to-close.
 SLICE_TIMEOUT = timedelta(minutes=30)
 #: "Retries three times" (spec §5.5, Ruling C4): a worker shutdown and a heartbeat
-#: timeout take attempts too. An attempt the worker ends as cancelled with no cancel
-#: asked of it is not taken by the server, so it ends at the heartbeat timeout (#4403).
+#: timeout take attempts too, and a shutdown's retry starts about at once: Rust core
+#: reports a cancel for its worker's shutdown as a retryable `WorkerShutdown` failure
+#: (temporalio-sdk-core 0.10.0 `worker/activities.rs`), not as a cancel.
 SLICE_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=4)
 #: The prepare downloads a whole copy from Bambuddy: its upload timeout (180 s,
 #: ``DEFAULT_UPLOAD_TIMEOUT``) and a margin, as ``printing.py`` ``PLAN_TIMEOUT``.
