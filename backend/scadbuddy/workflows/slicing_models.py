@@ -38,8 +38,8 @@ class SliceWorkflowInput(BaseModel):
     slicer_queue: str
     #: `SLICER_WAIT`; a test names a shorter one.
     slicer_wait: timedelta = SLICER_WAIT
-    #: `SLICE_HEARTBEAT`; a test names a shorter one (#4403), since an attempt the worker
-    #: ends as cancelled waits it out.
+    #: `SLICE_HEARTBEAT`; a test names a shorter one (#4403): an attempt a Python fake ends
+    #: as cancelled, with no cancel asked of it, is not taken by the server and waits it out.
     slice_heartbeat: timedelta = SLICE_HEARTBEAT
     #: The copy's ``file_hash`` the start named the execution by (Task 12 review M6):
     #: other bytes under the id are refused. None when the library stated none.
