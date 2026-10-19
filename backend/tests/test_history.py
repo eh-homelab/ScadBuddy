@@ -30,7 +30,7 @@ from scadbuddy.library.history import (
     subject_line,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
-from scadbuddy.render.jobs import export_revision, prune_revision_exports
+from scadbuddy.render.jobs import _STAGING_TRIES, export_revision, prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
 
@@ -1196,6 +1196,8 @@ def test_an_export_the_prune_races_every_time_fails_and_leaves_no_staging(
     def racing(self: Path, *args: Any, **kwargs: Any) -> None:
         if self.parent == directory.parent and self != directory:
             raced.append(self)
+            # The parent is made, as in the race, so the check below reads a real one.
+            mkdir(self.parent, parents=True, exist_ok=True)
             raise FileNotFoundError(2, "No such file or directory", str(self))
         mkdir(self, *args, **kwargs)
 
@@ -1207,8 +1209,8 @@ def test_an_export_the_prune_races_every_time_fails_and_leaves_no_staging(
     with pytest.raises(FileNotFoundError):
         export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
 
-    assert len(raced) == 3
-    assert not directory.parent.exists() or not list(directory.parent.iterdir())
+    assert len(raced) == _STAGING_TRIES
+    assert list(directory.parent.iterdir()) == []
 
 
 def test_two_pods_exporting_one_revision_never_share_a_staging_directory(
