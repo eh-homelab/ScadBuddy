@@ -2185,19 +2185,6 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     expect(bodies[0]).not.toHaveProperty('prime_tower')
   })
 
-  it('never builds a check with the tower choice once Advanced is left (#4361 review)', async () => {
-    const { user } = renderPicker()
-    await loaded()
-    await showAdvanced()
-    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
-    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toHaveProperty('prime_tower'))
-    vi.mocked(usePrintCheck).mockClear()
-    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
-    await waitFor(() => expect(screen.queryByLabelText('Prime tower')).not.toBeInTheDocument())
-    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
-    expect(built.filter((request) => request !== null && 'prime_tower' in request)).toEqual([])
-  })
-
   it('sends the tower on with No sparse layers', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()

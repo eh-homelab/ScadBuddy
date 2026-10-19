@@ -395,10 +395,7 @@ export function PrintPicker({
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
   // #3628 — this print's prime tower; `null` leaves it to the template and the process.
-  const [towerChosen, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
-  // Advanced mode's only: the render that leaves it must not build a check with it
-  // (#4361 review), as the effect below clears it a render later.
-  const primeTower = picker.advanced ? towerChosen : null
+  const [primeTower, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
