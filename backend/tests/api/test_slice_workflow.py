@@ -265,6 +265,27 @@ def test_a_slice_completes_and_holds_its_blob(slice_client: TestClient, slicer: 
     }
 
 
+def _slice_seconds(client: TestClient) -> dict[str, float]:
+    """``scadbuddy_native_slice_seconds_count`` by outcome, from the API's scrape."""
+    found: dict[str, float] = {}
+    for line in _state(client).metrics.exposition().decode().splitlines():
+        if line.startswith("scadbuddy_native_slice_seconds_count{"):
+            labels, value = line.rsplit(" ", 1)
+            found[labels.split('outcome="', 1)[1].split('"', 1)[0]] = float(value)
+    return found
+
+
+def test_a_slice_is_timed_by_its_outcome(slice_client: TestClient, slicer: FakeSlicer) -> None:
+    """Task 15: the printing dashboard's "Slice duration" reads this."""
+    assert _slice_seconds(slice_client) == {"completed": 0, "failed": 0, "cancelled": 0}
+    assert _slice(slice_client).status == "completed"
+    slicer.refuse_plate = True
+    assert _slice(slice_client, plan=PLAN.model_copy(update={"bed_type": "Cool Plate"})).status == (
+        "failed"
+    )
+    assert _slice_seconds(slice_client) == {"completed": 1, "failed": 1, "cancelled": 0}
+
+
 def test_a_held_blob_survives_the_blob_sweep(slice_client: TestClient, slicer: FakeSlicer) -> None:
     row = _slice(slice_client)
     assert row.status == "completed" and row.sliced_blob_key is not None

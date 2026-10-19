@@ -152,25 +152,28 @@ class NativeSliceStore:
         sliced_blob_key: str | None,
         failure: str | None,
         warnings: list[str],
-    ) -> None:
+    ) -> float | None:
         """A slice that did not complete drops its holds in the same transaction: its
         blobs serve nothing (`reusable` reads completed rows), and a later execution
-        holds them again (review I1)."""
+        holds them again (review I1). The seconds since its start, or None for a row
+        that is gone."""
 
-        def run() -> None:
+        def run() -> float | None:
             with self._pool.connection() as conn, conn.transaction():
-                conn.execute(
+                row = conn.execute(
                     "UPDATE native_slices SET status = %s, sliced_blob_key = %s, failure = %s,"
-                    " warnings = %s, finished_at = now() WHERE id = %s",
+                    " warnings = %s, finished_at = now() WHERE id = %s"
+                    " RETURNING EXTRACT(EPOCH FROM finished_at - started_at)::float8 AS took",
                     (status, sliced_blob_key, failure, Jsonb(warnings), slice_id),
-                )
+                ).fetchone()
                 if status != "completed":
                     conn.execute(
                         "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
                         (HOLDER, str(slice_id)),
                     )
+            return None if row is None else float(row["took"])
 
-        await asyncio.to_thread(run)
+        return await asyncio.to_thread(run)
 
     async def lost(self, older_than: timedelta) -> list[NativeSlice]:
         """Rows whose execution started them more than ``older_than`` ago and that read

@@ -14,7 +14,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, aclosing
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import status
 from temporalio import activity
@@ -249,7 +249,7 @@ class SliceActivities:
     async def slice_record(self, input: SliceRecordInput) -> SliceWorkflowResult:
         if input.cancelled:
             failure = input.failure or "The slice was cancelled."
-            await self.slicing.store.finish(
+            await self._finish(
                 input.slice_id,
                 status="cancelled",
                 sliced_blob_key=None,
@@ -286,8 +286,28 @@ class SliceActivities:
             failure_status=input.failure_status,
         )
 
+    async def _finish(
+        self,
+        slice_id: int,
+        *,
+        status: Literal["completed", "failed", "cancelled"],
+        sliced_blob_key: str | None,
+        failure: str | None,
+        warnings: list[str],
+    ) -> None:
+        """The row finished, and timed into ``scadbuddy_native_slice_seconds``."""
+        took = await self.slicing.store.finish(
+            slice_id,
+            status=status,
+            sliced_blob_key=sliced_blob_key,
+            failure=failure,
+            warnings=warnings,
+        )
+        if took is not None:
+            self.slicing.core.metrics.native_slice_duration.labels(status).observe(took)
+
     async def _completed(self, slice_id: int, key: str, warnings: list[str]) -> SliceWorkflowResult:
-        await self.slicing.store.finish(
+        await self._finish(
             slice_id, status="completed", sliced_blob_key=key, failure=None, warnings=warnings
         )
         return SliceWorkflowResult(
@@ -302,7 +322,7 @@ class SliceActivities:
         refused: bool = False,
         failure_status: int | None = None,
     ) -> SliceWorkflowResult:
-        await self.slicing.store.finish(
+        await self._finish(
             slice_id, status="failed", sliced_blob_key=None, failure=failure, warnings=[]
         )
         return SliceWorkflowResult(

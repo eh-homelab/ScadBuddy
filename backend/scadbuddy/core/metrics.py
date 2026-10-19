@@ -42,6 +42,8 @@ RenderKind = Literal["render", "arrange"]
 RenderStage = Literal[
     "source", "render", "split", "solids", "paint", "thumbnail", "write", "recolour"
 ]
+#: How a native slice ended (`native_slices.status`).
+NativeSliceOutcome = Literal["completed", "failed", "cancelled"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
@@ -291,6 +293,17 @@ class Metrics:
             registry=r,
         )
 
+        # A native slice, from its start to its record (plan 2026-10-16 Task 15): what
+        # the print dialog waits for on `slicer_backend` `native`.
+        self.native_slice_duration = Histogram(
+            "scadbuddy_native_slice_seconds",
+            "Time from a native slice's start to its record, by outcome"
+            " (completed, failed, cancelled).",
+            ["outcome"],
+            buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+
         # The content store under the blob store (spec 2026-09-27 §6.2, #426).
         self.store_ops = Counter(
             "scadbuddy_store_operations_total",
@@ -430,6 +443,8 @@ class Metrics:
                 self.render_duration.labels(kind, outcome)
         for stage in get_args(RenderStage):
             self.stage_duration.labels(stage)
+        for slice_outcome in get_args(NativeSliceOutcome):
+            self.native_slice_duration.labels(slice_outcome)
         for operation in get_args(StoreOperation):
             self.store_errors.labels(operation)
         for settle_pass in get_args(SettlePass):
