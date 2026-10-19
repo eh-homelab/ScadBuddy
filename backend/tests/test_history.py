@@ -1154,6 +1154,36 @@ def test_pruning_leaves_an_absent_cache_alone(tmp_path: Path) -> None:
     assert prune_revision_exports(DataPaths(tmp_path / "nothing"), ttl=1.0) == []
 
 
+def test_an_export_survives_the_prune_taking_its_slug_directory_mid_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4400: the prune removes a slug directory it emptied. Landing between `mkdir`
+    making that parent and the staging leaf, it failed the export with
+    FileNotFoundError (CI, #4398). The staging directory is made again."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    mkdir = Path.mkdir
+    raced: list[Path] = []
+
+    def racing(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.parent == directory.parent and self != directory and not raced:
+            raced.append(self)
+            mkdir(self.parent, parents=True, exist_ok=True)
+            self.parent.rmdir()  # the prune, between the parent and the leaf
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        mkdir(self, *args, **kwargs)
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "mkdir", racing)
+    export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert raced
+    assert (directory / "model.scad").is_file()
+
+
 def test_two_pods_exporting_one_revision_never_share_a_staging_directory(
     tmp_path: Path,
 ) -> None:

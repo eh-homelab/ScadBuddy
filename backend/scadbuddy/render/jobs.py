@@ -969,6 +969,25 @@ def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = 
     return removed
 
 
+#: How often the staging directory is made again after the prune took its parent.
+_STAGING_TRIES = 3
+
+
+def _make_staging(staging: Path) -> None:
+    """``staging`` and its parents, made again when the prune took the slug directory
+    mid-make (#4400). `prune_revision_exports` calls ``rmdir`` on a slug directory it
+    emptied; landing between ``mkdir`` making the parent and the leaf, it fails the
+    leaf with ``FileNotFoundError``. Once the staging directory is in the slug
+    directory, that ``rmdir`` cannot take it, so only this make is exposed."""
+    for attempt in range(_STAGING_TRIES):
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            return
+        except FileNotFoundError:
+            if attempt == _STAGING_TRIES - 1:
+                raise
+
+
 def export_revision(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
     """Export beside the destination, then move it into place.
 
@@ -984,6 +1003,7 @@ def export_revision(history: ModelHistory, slug: str, version: str, directory: P
     """
     staging = directory.with_name(f"{directory.name}.{uuid.uuid4().hex}")
     try:
+        _make_staging(staging)
         history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)
         try:
