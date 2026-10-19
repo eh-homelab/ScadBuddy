@@ -615,8 +615,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
 - **No volume.** It does not mount `scadbuddy-data` and runs no template code. It reads an
   output's record, its stored `model.3mf` and the names taken from the model's files from
   the API's cluster-internal routes (`/api/v1/internal/outputs/…`, and a native library
-  file's record, plates and bytes from `/api/v1/internal/library/…`, #3827; neither in
-  the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
+  file's record, plates and bytes from `/api/v1/internal/library/…`, #3827, where a
+  native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
   like the rest of the API they have no auth today, so whoever reaches the API reaches
   them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in

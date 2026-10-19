@@ -388,6 +388,21 @@ class NativeLibrary:
             raise _folder_not_found(folder_id)
         return found
 
+    async def per_print_files(self, folder_id: int | None) -> list[LibraryListRow]:
+        """`NativeCopies.per_print_files`: no ``output_id``, not ``filed``."""
+        rows = await self.library_listing(folder_id=folder_id)
+        own = {
+            f.id
+            for f in await asyncio.to_thread(self.rows.files, folder_id)
+            if f.output_id is None and not f.filed
+        }
+        return [row for row in rows if row.id in own]
+
+    async def template_folder(self, name: str) -> NativeFolder:
+        """The top-level folder ``name`` the filing uses (`filing.file_output`), found or
+        made once however many callers race (#3818 tier A Task 5)."""
+        return await asyncio.to_thread(self.rows.template_folder, name)
+
     async def create_folder(self, name: str, parent_id: int | None) -> NativeFolder:
         await self._folder_must_exist(parent_id)
         try:

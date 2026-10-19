@@ -87,6 +87,7 @@ from scadbuddy.bambuddy.projects import (
     ProjectChoices,
     ProjectRequest,
     ProjectView,
+    _destination_folders,
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
@@ -109,6 +110,8 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
@@ -1240,8 +1243,34 @@ async def get_progress(
     return progress
 
 
+#: Asks for a native print's destinations (#3818 tier A Task 5, D6).
+NativeQuery = Annotated[
+    bool,
+    Query(
+        description="A print on the native path: ScadBuddy's own library folders, no projects,"
+        " and Bambuddy is not asked"
+    ),
+]
+
+
+async def _serving_native(library: PrintLibraryDep) -> NativeLibrary:
+    native = await library.serving_native()
+    if native is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "ScadBuddy's own library does not serve (library_backend is bambuddy), so a"
+            " native print has no destinations",
+        )
+    return native
+
+
 @router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects and folders")
-async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectChoices:
+async def get_projects(
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    library: PrintLibraryDep,
+    native: NativeQuery = False,
+) -> ProjectChoices:
     """Every Bambuddy project, with the library folder that belongs to it (#79), and
     every library folder of no project, a destination of its own (#3651).
 
@@ -1253,6 +1282,13 @@ async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectC
     """
     settings = store.load()
     touches = await uploads.destination_touches()
+    if native:
+        # D6: a native print is filed in a native folder; projects are Bambuddy's.
+        folders = await (await _serving_native(library)).folders()
+        return ProjectChoices(
+            folders=_destination_folders(folders, touches, None),
+            sort=settings.destination_sort,
+        )
     async with client_for(settings) as client:
         return await describe_projects(
             client,
@@ -1278,10 +1314,14 @@ async def get_default_project(
     outputs: OutputsDep,
     output_id: Annotated[list[str] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
     library_file_id: Annotated[list[int] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
+    native: NativeQuery = False,
 ) -> DefaultDestination:
     """The project a print or Generate of these outputs and library files opens on
     (#3651): the one project they are all in already, else the Settings default
-    (``last_project_id``, #3188), else none. ``reason`` says which."""
+    (``last_project_id``, #3188), else none. ``reason`` says which. A native print has
+    no project (D6): none, with nothing asked of Bambuddy."""
+    if native:
+        return DefaultDestination()
     metas = [require_output(outputs, one) for one in dict.fromkeys(output_id or [])]
     settings = store.load()
     async with client_for(settings) as client:

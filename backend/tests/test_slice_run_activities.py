@@ -5,8 +5,9 @@ libraries."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, BinaryIO
@@ -219,3 +220,51 @@ async def test_the_sliced_upload_beats_while_it_uploads(
     )
 
     assert beats
+
+
+async def test_a_native_sliced_upload_left_unanswered_is_taken(tmp_path: Path) -> None:
+    """#3818 tier A Task 4: once the copy lives natively, the sliced upload's by-bytes
+    lookup of an earlier attempt (Task 13 review I1) holds there too: an unrecorded file
+    of that name, size and sha256 in the copy's folder is taken, never uploaded twice;
+    one any subject records, or of other bytes, is not."""
+    digest = hashlib.sha256(b"sliced").hexdigest()
+    name = "demo-elan.plate2.gcode.3mf"
+    left, recorded, other, older = COPY + 30, COPY + 20, COPY + 25, COPY + 40
+
+    class Listed(_Native):
+        async def per_print_files(self, folder_id: int | None) -> list[Any]:
+            assert folder_id == NATIVE_ID_BASE + 3
+            # Made after the attempt was scheduled (the environment's is the epoch), but
+            # `older`: newest by id, yet older than the run, so never taken (re-review N-a).
+            made = datetime(2026, 10, 19)
+            rows = [
+                SimpleNamespace(id=i, filename=name, file_size=6, created_at=made)
+                for i in (recorded, other, left)
+            ]
+            return [
+                *rows,
+                SimpleNamespace(id=older, filename=name, file_size=6, created_at=datetime(1, 1, 1)),
+            ]
+
+        async def library_file(self, file_id: int) -> Any:
+            if file_id == COPY:
+                return await super().library_file(file_id)
+            hashes = {left: digest, recorded: digest, other: "f" * 64, older: digest}
+            return SimpleNamespace(id=file_id, filename=name, file_hash=hashes[file_id])
+
+    class Uploads:
+        async def recorded_files(self, ids: list[int]) -> set[int]:
+            return {recorded} & set(ids)
+
+    native = Listed()
+    run = _activities(tmp_path, native=native)
+    run._uploads = lambda: Uploads()  # type: ignore[assignment]
+    planned = PlannedRun.model_construct(library_file_id=COPY, folder_id=NATIVE_ID_BASE + 3)
+    sliced = NativeSliced(slice_id=1, preset_key="k", sliced_blob_key="native-slice-1")
+
+    uploaded = await ActivityEnvironment().run(
+        run.print_sliced_upload, SlicedUploadInput(planned=planned, plate_id=2, sliced=sliced)
+    )
+
+    assert uploaded == left
+    assert native.uploads == []

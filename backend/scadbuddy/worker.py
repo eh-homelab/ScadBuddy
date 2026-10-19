@@ -1011,7 +1011,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     links = PrintLinkStore(pool)
     outputs = RemoteOutputs(settings.api_internal_url)
     # Asked of the API whichever library serves: on ``bambuddy`` it answers every native
-    # id with the 404 of a file not found.
+    # id with the 404 of a file not found. A native run's copy is written through it too
+    # (#3818 tier A Task 4).
     library = RemoteLibrary(settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT))
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)

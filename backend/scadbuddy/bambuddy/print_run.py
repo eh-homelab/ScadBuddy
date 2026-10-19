@@ -129,7 +129,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, require_native_folder
+from scadbuddy.print_library.reads import LibraryReads, NativeCopies
 from scadbuddy.rack.rank import (
     RackCandidate,
     RackGroup,
@@ -1261,6 +1262,7 @@ async def prepare_run(
     rack: RackUsage | None = None,
     refuse_manual_pick: bool = True,
     project: ResolvedProject | None = None,
+    native: NativeCopies | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -1273,8 +1275,16 @@ async def prepare_run(
     :func:`execute_run`, because only a library file answers those. A manual rack
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
+
+    ``native`` is ScadBuddy's own library on a native run (#3818 tier A Task 5, D6): a
+    project is refused and the folder is checked there, never in Bambuddy.
     """
-    if request.folder_id is not None:
+    if native is not None:
+        if request.project_id is not None:
+            raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
+        if request.folder_id is not None:
+            await require_native_folder(native, request.folder_id)
+    elif request.folder_id is not None:
         await require_destination_folder(client, request.folder_id, settings.library_folder_id)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()

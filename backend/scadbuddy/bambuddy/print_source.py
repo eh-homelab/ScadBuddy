@@ -21,6 +21,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from typing import BinaryIO, Protocol
 
@@ -63,8 +64,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, ensure_native_copy
 from scadbuddy.print_library.ids import is_native_id
-from scadbuddy.print_library.reads import LibraryReads, reads_of
+from scadbuddy.print_library.reads import LibraryReads, NativeCopies, reads_of
 from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
 from scadbuddy.render.objects3mf import check_stl
 from scadbuddy.render.read_budget import ReadBudget
@@ -135,7 +137,7 @@ class PrintSource(Protocol):
         ...
 
     async def recorded_slice(
-        self, client: BambuddyClient, library_file_id: int, preset_key: str
+        self, client: BambuddyClient | None, library_file_id: int, preset_key: str
     ) -> int | None:
         """A slice ScadBuddy already made of copy ``library_file_id`` with these presets
         (:meth:`record`) that Bambuddy still has, newest first: queued in place of
@@ -148,7 +150,7 @@ class PrintSource(Protocol):
         the spools chosen now."""
         ...
 
-    async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
+    async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None:
         """The 3MF to lay out and slice: the one thing that differs between an output
         and a library file (#1752). ``None`` when there are no bytes to lay out: a
         library file past :data:`MAX_DOWNLOAD_BYTES`, or an STL that holds no mesh,
@@ -175,7 +177,7 @@ class PrintSource(Protocol):
 
     async def file_to_print(
         self,
-        client: BambuddyClient,
+        client: BambuddyClient | None,
         *,
         printer_id: int,
         nozzle_size: str,
@@ -186,7 +188,16 @@ class PrintSource(Protocol):
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
         tray_colours: Mapping[int, str] | None = None,
-    ) -> PrintFile: ...
+        native_copy: bool = False,
+        printer_model: str | None = None,
+        attempt_since: datetime | None = None,
+    ) -> PrintFile:
+        """The library file the run slices: laid out for the printer and copied into
+        Bambuddy's library, or with ``native_copy`` into ScadBuddy's own (#3818 tier A
+        Task 4), which needs no ``client`` and lays out for ``printer_model``.
+        ``attempt_since`` is when the run's first attempt was scheduled: only a native
+        upload made since then is an earlier attempt's (#4312 re-review N-a)."""
+        ...
 
     async def record(
         self,
@@ -210,6 +221,13 @@ class PrintSource(Protocol):
         """After a print into a project: what the next Generate into it lays its file
         out for (#317), its nozzle plan too (#2166)."""
         ...
+
+
+def _misuse(message: str) -> ApiError:
+    """A caller's mistake the print activities reach: an `ApiError`, which they raise as
+    non-retryable (`raised_as`), so it fails the run once rather than being retried to
+    the end of the policy as a `TypeError` would (#4312 review M6)."""
+    return ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, message)
 
 
 MAX_RECORDED_SLICES = 3
@@ -237,9 +255,10 @@ class _Fetching(Protocol):
     sends: PrintLinkStore | None
     prints: OutputPrintStore | None
     stem: str | None
+    native: NativeCopies | None
     _fetched: _Fetched | None
 
-    async def fetch_3mf(self, client: BambuddyClient) -> bytes | None: ...
+    async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None: ...
 
 
 @dataclass(frozen=True)
@@ -252,19 +271,22 @@ class _Fetched:
 
 
 async def _spool_colours(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     colours: list[str],
     plan: FilamentPlan,
     trays: Mapping[int, str] | None = None,
 ) -> list[str] | None:
     """One colour per filament of the file: the chosen spool's, or the file's own for a
     slot with no spool (#476). ``None`` when no spool is chosen at all, which leaves the
-    file in its own colours."""
+    file in its own colours. Without a ``client`` (a native run, #3818) only trays are
+    chosen, so Bambuddy's spools are not read."""
     if not plan.slots:
         return None
-    rgba: dict[int, str | None] = {
-        spool.id: normalise_colour(spool.rgba) for spool in await client.spools()
-    }
+    rgba: dict[int, str | None] = (
+        {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
+        if client is not None
+        else {}
+    )
     # A tray chosen for itself (#2164) prints in the tray's colour.
     rgba.update(trays or {})
     return [
@@ -322,16 +344,19 @@ class PrintPipeline:
     prints: OutputPrintStore | None = None
     #: Names a copy uploaded into a project's folder (``project_filename``, #317).
     stem: str | None = None
+    #: ScadBuddy's own library, where a native run's copy goes (#3818 tier A Task 4):
+    #: `NativeLibrary` in the API's process, `RemoteLibrary` on the print worker.
+    native: NativeCopies | None = None
     _fetched: _Fetched | None = field(default=None, init=False, repr=False, compare=False)
 
-    async def _fetch(self: _Fetching, client: BambuddyClient) -> _Fetched:
+    async def _fetch(self: _Fetching, client: BambuddyClient | None) -> _Fetched:
         if self._fetched is None:
             payload = await self.fetch_3mf(client)
             stated = payload is not None and await asyncio.to_thread(nozzles_stated, payload)
             self._fetched = _Fetched(payload, stated)
         return self._fetched
 
-    def _printable(self: _Fetching, client: BambuddyClient) -> Printable:
+    def _printable(self: _Fetching, client: BambuddyClient | None) -> Printable:
         async def fetch() -> bytes:
             fetched = await PrintPipeline._fetch(self, client)
             if fetched.payload is None:
@@ -360,7 +385,7 @@ class PrintPipeline:
         return (await PrintPipeline._fetch(self, client)).payload
 
     async def recorded_slice(
-        self: _Fetching, client: BambuddyClient, library_file_id: int, preset_key: str
+        self: _Fetching, client: BambuddyClient | None, library_file_id: int, preset_key: str
     ) -> int | None:
         uploads = self.uploads
         if uploads is None:
@@ -375,8 +400,13 @@ class PrintPipeline:
         # gone, or whose id now holds another file, is forgotten as it is found
         # (#2955), so the next reprint does not read it again.
         for sliced in known[:MAX_RECORDED_SLICES]:
+            # Each id in its own library (Review Focus 2): a native copy's slice is a
+            # native file (`print_sliced_upload`), never asked of Bambuddy.
+            reads: LibraryReads | None = self.native if is_native_id(sliced.id) else client
+            if reads is None:
+                continue
             try:
-                file = await client.library_file(sliced.id)
+                file = await reads.library_file(sliced.id)
             except ApiError as error:
                 # Deleted in Bambuddy since, or unreadable: only a slice saved, so the
                 # print slices again rather than fail over it.
@@ -387,7 +417,11 @@ class PrintPipeline:
                 if error.status == status.HTTP_404_NOT_FOUND:
                     await _forget_slice(uploads, self.subject.run_subject, sliced.id)
                 continue
-            if is_sliced(file.file_type) and file.file_hash == sliced.file_hash:
+            # A native id is never reissued, so the recorded hash alone is the check
+            # (#4312 review I2): a native slice is typed `gcode.3mf` by its name (#4207,
+            # 19db20ab1), but one uploaded before that read as a plain 3MF.
+            sliced_kind = is_native_id(sliced.id) or is_sliced(file.file_type)
+            if sliced_kind and file.file_hash == sliced.file_hash:
                 return sliced.id
             logger.info(
                 "a recorded slice's id now holds another file; it is not reused",
@@ -412,7 +446,7 @@ class PrintPipeline:
 
     async def file_to_print(
         self: _Fetching,
-        client: BambuddyClient,
+        client: BambuddyClient | None,
         *,
         printer_id: int,
         nozzle_size: str,
@@ -423,8 +457,29 @@ class PrintPipeline:
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
         tray_colours: Mapping[int, str] | None = None,
+        native_copy: bool = False,
+        printer_model: str | None = None,
+        attempt_since: datetime | None = None,
     ) -> PrintFile:
         uploads, settings = PrintPipeline._stores(self)
+        if native_copy:
+            return await PrintPipeline._native_file_to_print(
+                self,
+                client,
+                printer_id=printer_id,
+                nozzle_size=nozzle_size,
+                plan=plan,
+                project_id=project_id,
+                folder_id=folder_id,
+                nozzle_stats=nozzle_stats,
+                nozzle_volume_type=nozzle_volume_type,
+                filament_map=filament_map,
+                tray_colours=tray_colours,
+                printer_model=printer_model,
+                attempt_since=attempt_since,
+            )
+        if client is None:
+            raise _misuse("a copy in Bambuddy's library needs a Bambuddy client")
         # A project's folder replaces the one from Settings for this send, which is what
         # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload,
         # because the copy is looked up by (folder, target): a project gets a copy of its
@@ -463,6 +518,66 @@ class PrintPipeline:
             target=target,
             folder_id=folder_id,
             stem=self.stem,
+        )
+        return PrintFile(file_id, folder_id)
+
+    async def _native_file_to_print(
+        self: _Fetching,
+        client: BambuddyClient | None,
+        *,
+        printer_id: int,
+        nozzle_size: str,
+        plan: FilamentPlan,
+        project_id: int | None,
+        folder_id: int | None,
+        nozzle_stats: list[str] | None,
+        nozzle_volume_type: list[str] | None,
+        filament_map: FilamentMap | None,
+        tray_colours: Mapping[int, str] | None,
+        printer_model: str | None,
+        attempt_since: datetime | None,
+    ) -> PrintFile:
+        """:meth:`file_to_print` on a native run (#3818 tier A Task 4): the copy is laid
+        out as Bambuddy's is, for ``printer_model`` with no printer list read, and goes
+        into ScadBuddy's own library (`ensure_native_copy`), into ``folder_id`` or the
+        top level. A native library file with nothing to lay out is printed as it is: the
+        native slicer reads it where it is, so it needs no copy at all."""
+        uploads, settings = PrintPipeline._stores(self)
+        native = self.native
+        if native is None:
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "a native print needs ScadBuddy's own library, which does not serve here",
+            )
+        if project_id is not None:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, NATIVE_PROJECT_REFUSAL)
+        own_id = self.file_id if isinstance(self, LibrarySource) else None
+        if own_id is not None and not is_native_id(own_id):
+            raise _misuse(f"library file {own_id} is Bambuddy's: a native print has none")
+        fetched = await PrintPipeline._fetch(self, client)
+        if fetched.payload is None:
+            if own_id is None:
+                raise ApiError(status.HTTP_409_CONFLICT, f"{self.subject.key} has no 3MF to print")
+            return PrintFile(own_id, folder_id)
+        target = await target_for(
+            None,
+            settings,
+            printer_id=printer_id,
+            nozzle_diameter=nozzle_size,
+            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
+            nozzle_stats=nozzle_stats,
+            nozzle_volume_type=nozzle_volume_type,
+            filament_map=filament_map,
+            model=printer_model,
+        )
+        file_id = await ensure_native_copy(
+            native,
+            uploads,
+            PrintPipeline._printable(self, client),
+            target=target,
+            folder_id=folder_id,
+            source_id=own_id,
+            attempt_since=attempt_since,
         )
         return PrintFile(file_id, folder_id)
 
@@ -596,7 +711,7 @@ class OutputSource(PrintPipeline):
         payload = await self._own_3mf()
         return [plate.index for plate in plates_of(io.BytesIO(payload))]
 
-    async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
+    async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None:
         return await self._own_3mf()
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
@@ -750,7 +865,7 @@ class LibrarySource(PrintPipeline):
     @classmethod
     async def load(
         cls,
-        client: BambuddyClient,
+        client: BambuddyClient | None,
         file_id: int,
         *,
         uploads: BambuddyUploadStore | None = None,
@@ -759,6 +874,7 @@ class LibrarySource(PrintPipeline):
         filaments: FilamentReader | None = None,
         read_own: bool = False,
         files: LibraryReads | None = None,
+        native: NativeCopies | None = None,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read. The
@@ -768,7 +884,7 @@ class LibrarySource(PrintPipeline):
         the one its print uploads (:meth:`fetch_3mf`): where there is no cache to read,
         as in the print worker, which mounts no volume. ``files`` is where the file itself
         is read, when not from Bambuddy (#3827)."""
-        reads: LibraryReads = files or client
+        reads = reads_of(files, client)
         file = await reads.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
@@ -783,6 +899,7 @@ class LibrarySource(PrintPipeline):
             sends=sends,
             stem=_file_stem(file.filename),
             files=files,
+            native=native,
         )
         if filaments is None and read_own:
             filaments = partial(source._own_filaments, client)
@@ -808,7 +925,7 @@ class LibrarySource(PrintPipeline):
         return source
 
     async def _own_filaments(
-        self, client: BambuddyClient, file: LibraryFile
+        self, client: BambuddyClient | None, file: LibraryFile
     ) -> LocalFilaments | None:
         """The slots read from the bytes this source prints, downloaded once and kept for
         the print (:meth:`PrintPipeline._fetch`); ``None`` for a file they cannot be read
@@ -920,7 +1037,7 @@ class LibrarySource(PrintPipeline):
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
 
-    async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
+    async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None:
         """The file's bytes, an STL wrapped in a 3MF of ScadBuddy's own (#1752). None for
         a sliced file, which is queued as it is (#2671)."""
         if self.is_sliced:
