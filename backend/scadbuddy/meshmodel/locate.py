@@ -59,7 +59,9 @@ def _nearness(
 def _winding_number(point: np.ndarray, triangles: np.ndarray) -> float:
     """The triangles' generalised winding number about ``point``: each one's solid angle
     seen from it (Van Oosterom and Strackee's formula), summed over 4π. About 1 inside a
-    closed mesh wound outward, 0 outside it (Jacobson, Kavan and Sorkine-Hornung,
+    closed mesh wound outward, 0 outside it, and one more for each further mesh of the
+    triangles that also holds it (an object's printed parts may overlap: still inside,
+    past one half) (Jacobson, Kavan and Sorkine-Hornung,
     "Robust Inside-Outside Segmentation using Generalized Winding Numbers", 2013,
     https://igl.ethz.ch/projects/winding-number/)."""
     a, b, c = (triangles[:, i] - point for i in range(3))

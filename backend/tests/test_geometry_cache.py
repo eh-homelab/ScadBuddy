@@ -18,6 +18,7 @@ from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Add,
+    Custom,
     Exposed,
     Joint,
     Part,
@@ -159,6 +160,23 @@ def test_a_colour_that_prints_nothing_is_no_class_and_no_part_of_the_key(
     first = scene("#123456", "#654321")
     assert scene_classes(first) == ["#FF0000", "#00FF00"]
     assert _key(tmp_path, first) == _key(tmp_path, scene("#ABCDEF", "#FEDCBA"))
+
+
+def test_a_custom_ops_colour_that_equals_a_class_is_still_its_own_text(
+    tmp_path: Path,
+) -> None:
+    """A custom op's own ``color("#…")`` that equals a class is classed in the source, but
+    its text is in the key's objects as written, so classing never makes two ops one
+    key. It can only cost a miss: once the parts around it are recoloured, its literal
+    is no class, and the key is another."""
+
+    def scene(named: str, body: str = "#FF0000", trim: str = "#00FF00") -> Scene:
+        return _with(_scene(body, trim), ops=[Custom(scad=f'color("{named}") children();')])
+
+    red, green = scene("#FF0000"), scene("#00FF00")
+    assert _key(tmp_path / "red", red) != _key(tmp_path / "green", green)
+    recoloured = scene("#FF0000", "#0000FF", "#ABCDEF")
+    assert _key(tmp_path / "red", red) != _key(tmp_path / "recoloured", recoloured)
 
 
 def test_an_op_without_a_colour_is_in_its_objects_default_class(tmp_path: Path) -> None:

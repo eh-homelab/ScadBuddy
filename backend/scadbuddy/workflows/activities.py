@@ -585,7 +585,9 @@ class RenderActivities:
         try:
             layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
         except (FileNotFoundError, ValueError) as error:
-            # As unreusable: every retry would read the same file (#3449).
+            # As unreusable: every retry would read the same file (#3449). Its
+            # `piece.json` was found just above, so the volume is there and only the
+            # layout is missing or unreadable (an older or partial publish).
             logger.warning(
                 "the geometry's source layout is unreadable; rendering the piece",
                 extra={"piece_key": req.piece_key, "error": type(error).__name__},

@@ -24,9 +24,9 @@ from scadbuddy.library.presets import (
     MAX_PRESET_TAG,
     MAX_PRESET_TAGS,
     MAX_PRESETS,
-    PRESET_LOCK_PREFIX,
     ParamPresetCreate,
     PresetStore,
+    preset_lock_key,
 )
 from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
@@ -653,7 +653,7 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
             mine, other = (
                 conn.execute(
                     "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
-                    (f"{PRESET_LOCK_PREFIX}{model_id}",),
+                    (preset_lock_key(model_id),),
                 ).fetchone()
                 for model_id in ("m", "n")
             )
@@ -678,7 +678,7 @@ def test_keep_only_reads_the_kept_names_and_trims_every_preset_under_the_lock(
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             row = conn.execute(
                 "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
-                (f"{PRESET_LOCK_PREFIX}m",),
+                (preset_lock_key("m"),),
             ).fetchone()
             assert row is not None
             held.append(row[0])
@@ -720,7 +720,7 @@ def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(
                     " WHERE datname = current_database())"
                     " AND ((classid::bigint << 32) | objid::bigint)"
                     " = hashtextextended(%s, 0)",
-                    (f"{PRESET_LOCK_PREFIX}m",),
+                    (preset_lock_key("m"),),
                 ).fetchone()
                 if row is not None and row[0]:
                     return True
