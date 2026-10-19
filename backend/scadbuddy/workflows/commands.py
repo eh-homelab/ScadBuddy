@@ -20,7 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio.api.common.v1 import WorkflowExecution
-from temporalio.api.enums.v1 import EventType
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
 from temporalio.api.errordetails.v1 import (
     MultiOperationExecutionFailure,
     NamespaceNotFoundFailure,
@@ -196,15 +196,27 @@ async def deferred_kind(client: Client, id: str) -> bool:
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
                         return False
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
-                        failure = event.workflow_task_failed_event_attributes.failure
-                        return failure.application_failure_info.type == DEFERRED_KIND
+                        attributes = event.workflow_task_failed_event_attributes
+                        kind = attributes.failure.application_failure_info.type
+                        if kind == DEFERRED_KIND:
+                            return True
+                        # What it failed with instead: the type and the cause only, never
+                        # the message, which can carry the workflow's values.
+                        logger.warning(
+                            "command %s: its newest workflow task failure is %r, cause %s,"
+                            " not a deferral",
+                            id,
+                            kind,
+                            WorkflowTaskFailedCause.Name(attributes.cause),
+                        )
+                        return False
                 token = page.next_page_token
                 if not token:
                     return False
     except Exception as e:
-        logger.debug("command %s: could not read its history to tell a deferral: %r", id, e)
+        logger.warning("command %s: could not read its history to tell a deferral: %r", id, e)
         return False
-    logger.debug("command %s: no workflow task event in its newest %d pages", id, NOT_READY_PAGES)
+    logger.warning("command %s: no workflow task event in its newest %d pages", id, NOT_READY_PAGES)
     return False
 
 
