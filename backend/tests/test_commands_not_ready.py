@@ -101,18 +101,20 @@ async def test_only_a_deferred_kind_is_still_accepting(
         workflow_runner=UnsandboxedWorkflowRunner(),
     ):
         id = await _failing(client, workflow_name, queue)
-        with pytest.raises(answer):
-            await start_command(
-                client,
-                workflow_name,
-                None,
-                id=id,
-                task_queue=queue,
-                update="accepted",
-                result_type=str,
-                reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
-            )
-        await client.get_workflow_handle(id).terminate()
+        try:
+            with pytest.raises(answer):
+                await start_command(
+                    client,
+                    workflow_name,
+                    None,
+                    id=id,
+                    task_queue=queue,
+                    update="accepted",
+                    result_type=str,
+                    reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                )
+        finally:
+            await _terminate(client, id)
 
 
 async def _start(client: Client, id: str, queue: str) -> None:
@@ -217,6 +219,35 @@ async def test_another_failure_is_no_deferral_and_says_what_it_was(
     ]
 
 
+def _task(event_type: EventType.ValueType) -> HistoryEvent:
+    return HistoryEvent(event_type=event_type)
+
+
+async def test_a_task_completed_since_the_refusal_is_still_accepting() -> None:
+    """#4320: the refusal said the task was failing, and by the history read it has
+    completed (the new build took it, its first activation slow under load). Nothing is
+    stuck: the same request sent again is accepted."""
+    completed = [
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED),
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_STARTED),
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_SCHEDULED),
+        _task_failed(DEFERRED_KIND),
+    ]
+    client = SimpleNamespace(namespace="default", workflow_service=_Pages(completed))
+    assert await deferred_kind(cast(Client, client), "op-x")
+
+
+async def test_a_task_timed_out_since_its_last_completion_is_no_deferral() -> None:
+    """A task timing out (no failure of its own to read) above a completed one is not
+    taken for the recovery #4320's is: nothing says it waits for a build."""
+    timed_out = [
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT),
+        _task(EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED),
+    ]
+    client = SimpleNamespace(namespace="default", workflow_service=_Pages(timed_out))
+    assert not await deferred_kind(cast(Client, client), "op-x")
+
+
 async def test_a_history_of_only_signals_is_no_deferral() -> None:
     """The read stops after `NOT_READY_PAGES` pages and answers no."""
     service = _Pages(*[_signals(NOT_READY_EVENTS)] * (NOT_READY_PAGES + 2))
@@ -251,10 +282,15 @@ async def test_a_history_that_cannot_be_read_is_refused(
                 await _start(client, id, queue)
         finally:
             monkeypatch.undo()
-            # An execution already closed must not hide the assertion's own failure; any
-            # other refusal (a lost connection, a permission) still fails the test.
-            try:
-                await client.get_workflow_handle(id).terminate()
-            except RPCError as error:
-                if not execution_gone(error):
-                    raise
+            await _terminate(client, id)
+
+
+async def _terminate(client: Client, id: str) -> None:
+    """End ``id`` after its test. An execution already closed must not hide the
+    assertion's own failure; any other refusal (a lost connection, a permission) still
+    fails the test."""
+    try:
+        await client.get_workflow_handle(id).terminate()
+    except RPCError as error:
+        if not execution_gone(error):
+            raise

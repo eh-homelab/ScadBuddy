@@ -28,7 +28,7 @@ from scadbuddy.library.presets import MAX_PRESETS
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import follow_operation
-from tests.support.operations import press
+from tests.support.operations import accepted, press
 
 SOURCE = "cube(10);\n"
 
@@ -349,7 +349,13 @@ def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_name
         return await create(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_create", slow_for_slow)
-    slow = client.post("/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=press())
+    # Past its 1 s a loaded shard may not have written the record yet: the 503 says send
+    # it again, and the re-send with its key finds the record running (#4364).
+    slow = accepted(
+        lambda key: client.post(
+            "/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=key
+        )
+    )
     assert slow.status_code == 202, slow.text
     quick = client.post(
         "/api/v1/models",
