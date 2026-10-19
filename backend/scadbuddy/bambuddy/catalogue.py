@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
 )
 from scadbuddy.core.secrets import Kek
+from scadbuddy.slicing.profiles import Profiles
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class PresetChoice(BaseModel):
     filament_type: str | None = None
     filament_colour: str | None = None
     compatible_printers: list[str] = Field(default_factory=list)
+    filament_id: str | None = None
 
 
 def _local_list(raw: str | None) -> list[str]:
@@ -97,6 +99,10 @@ class _Catalogue:
     printer: list[PresetChoice]
     process: list[PresetChoice]
     filament: list[PresetChoice]
+    #: Set only on the image's own catalogue (``slicing/catalogue.py``
+    #: ``native_catalogue``, #3818): each field's ``setting_id -> name``, which is what
+    #: a ``cloud`` ref resolves by there. ``None`` on Bambuddy's, whose refs are its own.
+    native_setting_ids: dict[str, dict[str, str]] | None = None
 
     def names(self) -> dict[tuple[str, str], str]:
         """``(source, id) -> name``, for resolving the refs a pipeline carries."""
@@ -151,6 +157,20 @@ _ADAPTER = TypeAdapter(_Catalogue)
 
 #: The public name for the catalogue a public caller holds (#3585 review).
 Catalogue = _Catalogue
+
+
+async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | None) -> Catalogue:
+    """The catalogue a run resolves against: the image's BBL profiles when ``native`` is
+    given (no Bambuddy call, #3818 tier A), else Bambuddy's, read fresh as
+    :func:`read_catalogue` reads it."""
+    if native is not None:
+        # Here, not at the top: slicing.catalogue builds on this module's _Catalogue.
+        from scadbuddy.slicing.catalogue import native_catalogue
+
+        return await asyncio.to_thread(native_catalogue, native)
+    if client is None:
+        raise ValueError("the preset catalogue needs a Bambuddy client or the native profiles")
+    return await _catalogue(client)
 
 
 async def read_catalogue(client: BambuddyClient) -> Catalogue:

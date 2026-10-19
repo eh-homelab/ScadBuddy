@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
     Tier,
 )
+from scadbuddy.slicing.catalogue import catalogue_native_ref
 
 #: The nozzle types moved to ``models`` so the settings store can remember them; they
 #: are re-exported here, where every caller already imports them from.
@@ -149,6 +150,19 @@ def _fits(rows: list[PresetChoice], prefix: str, printer: str) -> PresetRef | No
             for row in rows
             if (row.name == prefix or row.name.startswith(f"{prefix} "))
             and printer in row.compatible_printers
+        ]
+    )
+
+
+def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) -> PresetRef | None:
+    """The preset whose ``filament_id`` is a tray's ``tray_info_idx`` and which declares
+    ``printer``: one per printer and nozzle in the BBL tree (``slicing/catalogue.py``).
+    Only the image's catalogue carries ``filament_id``; Bambuddy's rows never match."""
+    return _best(
+        [
+            row
+            for row in rows
+            if row.filament_id == filament_id and printer in row.compatible_printers
         ]
     )
 
@@ -273,6 +287,22 @@ def resolve(
             )
             continue
         ref = choices.filament_overrides.get(slot.slot_id)
+        if ref is not None and catalogue.native_setting_ids is not None:
+            # A native run slices with the image's presets only (#3818 D5): a cloud ref
+            # is the preset its setting_id names there, and Bambuddy's own are refused.
+            native = catalogue_native_ref(catalogue, ref, "filament")
+            if native is None:
+                errors.append(
+                    FilamentWarning(
+                        kind="no-preset",
+                        slot_id=slot.slot_id,
+                        message=f"The preset {ref.id} chosen for slot {slot.slot_id} is "
+                        f"Bambuddy's ({ref.source}); a native print uses Bambu Studio's own "
+                        "presets: pick one under Advanced.",
+                    )
+                )
+                continue
+            ref = native
         if ref is not None:
             # Checked like every other preset (PR #335 review 2): an override left from
             # an earlier nozzle size, or since deleted in Bambuddy, would otherwise only
@@ -288,7 +318,10 @@ def resolve(
                     )
                 )
                 continue
-        else:
+        elif option.spool_id < 0 and option.slicer_filament:
+            # A tray chosen for itself: its tray_info_idx is the BBL preset's filament_id.
+            ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
+        if ref is None:
             own = [
                 row.slicer_filament
                 for row in spool_presets.get(option.spool_id, [])

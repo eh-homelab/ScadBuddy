@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
+from scadbuddy.bambuddy.catalogue import _Catalogue, catalogue_for
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
@@ -1341,7 +1341,7 @@ async def prepare_run(
     # library. Slot errors need the plate's slots, which only a library file answers,
     # so those are still found after the upload, by `resolve` in `execute_run`. It is
     # two GETs, the same the dialog's own choices read makes to open (`choices.py`).
-    catalogue = await _catalogue(client)
+    catalogue = await catalogue_for(client, native=None)
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
@@ -1627,7 +1627,7 @@ async def plan_run(
     printer_id = prepared.printer_id
     printer_status = prepared.printer_status
     choices = request.choices
-    catalogue = await _catalogue(client)
+    catalogue = await catalogue_for(client, native=None)
     process = process_preset_for(choices, catalogue)
     # #717: a profile that cannot apply is skipped with a warning, never refused.
     # One read of the preset's values for the profiles and the supports (#2804 review).

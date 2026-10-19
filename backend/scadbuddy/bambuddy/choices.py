@@ -9,7 +9,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, cached_catalogue
+from scadbuddy.bambuddy.catalogue import (
+    PresetChoice,
+    _Catalogue,
+    cached_catalogue,
+    catalogue_for,
+)
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles
@@ -40,6 +45,7 @@ from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
+from scadbuddy.slicing.profiles import Profiles
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +148,7 @@ async def choices_for(
     # bare hash without saying so (#3816 review): None only when there is no KEK.
     catalogue_key: bytes | None,
     rack: RackUsage | None = None,
+    native: Profiles | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
@@ -152,8 +159,15 @@ async def choices_for(
     still answers its 404 or 422, though the printers have been read beside it by then:
     a few wasted reads on a rare path, for not waiting on the file every time. The
     rack's state is recorded by the second wave, so a failed catalogue read raises after
-    it is written, not before (#2907)."""
-    presets = asyncio.ensure_future(cached_catalogue(client, cache, name_key=catalogue_key))
+    it is written, not before (#2907). With ``native`` (the image's profiles) the
+    catalogue is theirs (``slicing/catalogue.py``), and no preset is read from Bambuddy."""
+    presets = asyncio.ensure_future(
+        # A native run's presets are the image's own: nothing read from Bambuddy, and
+        # nothing kept under `cache` (#3818 tier A).
+        catalogue_for(None, native=native)
+        if native is not None
+        else cached_catalogue(client, cache, name_key=catalogue_key)
+    )
     try:
         return await _choices(
             client,

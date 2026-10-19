@@ -306,6 +306,17 @@ class Profiles:
             return index.names[ref_or_name]
         return ref_or_name if ref_or_name in index.paths else None
 
+    def documents(self, kind: Kind) -> dict[str, dict[str, Any]]:
+        """Every ``kind`` preset ``BBL.json`` lists, by name, as its own file holds it
+        (``inherits`` not applied): each file read once, for a caller that flattens the
+        whole tree (:func:`~scadbuddy.slicing.catalogue.native_catalogue`)."""
+        docs: dict[str, dict[str, Any]] = {}
+        for name in self._index(kind).paths:
+            doc = self._load(kind, name)
+            if doc is not None:
+                docs[name] = doc
+        return docs
+
     def _flat(self, kind: Kind, ref_or_name: str) -> Flat:
         name = self.find(kind, ref_or_name)
         if name is None:
