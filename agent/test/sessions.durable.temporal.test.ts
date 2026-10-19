@@ -490,10 +490,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const other = (await m.start(agentA, { origin: 'mcp', prompt: 'hello' })).session
     await env.client.workflow.getHandle(sessionWorkflowId(other.id)).signal('hold_cancel')
     const handing = m.handoff(other.id, browser, browser)
-    // The owner change is committed before cancel_input is sent: while it waits, the
-    // row is the new owner's and holds no lock (NOWAIT throws if locked).
+    // The owner change is committed before cancel_input is sent: while it waits (1 s,
+    // unanswered), the row is the new owner's and the handoff holds no lock on it. NOWAIT
+    // throws if locked; a probe may still meet the row's own turn appending an event for a
+    // few ms, so only a lock held across every probe of the wait counts.
     await new Promise((r) => setTimeout(r, 300))
-    const [row] = await db.sql.begin((tx) => tx`SELECT owner_id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
+    let row: { owner_id: string } | undefined
+    for (let probe = 0; probe < 10 && !row; probe++) {
+      ;[row] = await db.sql
+        .begin((tx) => tx<{ owner_id: string }[]>`SELECT owner_id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
+        .catch(async (err: { code?: string }) => {
+          if (err.code !== '55P03') throw err
+          await new Promise((r) => setTimeout(r, 50))
+          return []
+        })
+    }
     expect(row?.owner_id).toBe(browser.id)
     // A cancel that goes unanswered neither fails nor undoes the handoff.
     expect((await handing).owner).toEqual(browser)
