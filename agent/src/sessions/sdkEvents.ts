@@ -63,9 +63,11 @@ export const INPUT_MAX = 4096
 
 /**
  * Argument names whose values are never logged. Matched against every key at
- * any depth of a tool.call input.
+ * any depth of a tool.call input. `access_code` is a printer's LAN code (#3823,
+ * link_printer_lan).
  */
-export const SENSITIVE_KEY = /secret|token|passw(or)?d|passphrase|api[-_]?key|authori[sz]ation|credential|cookie|private[-_]?key/i
+export const SENSITIVE_KEY =
+  /secret|token|passw(or)?d|passphrase|api[-_]?key|authori[sz]ation|credential|cookie|private[-_]?key|access[-_]?code/i
 
 export const REDACTED = '[redacted]'
 

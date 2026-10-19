@@ -62,6 +62,20 @@ the `customize` skill first. `GET /api/v1/outputs/{output_id}/plates` lists its
 plates, and ScadBuddy's own renders always have one plate (`backend/openapi.json`,
 that route's description).
 
+### Printers and their paths
+
+ScadBuddy keeps a printer registry, one row per physical printer keyed by its
+serial (`backend/scadbuddy/api/printers.py`; plan
+`docs/superpowers/plans/2026-10-16-printer-identity-native-path.md`). A row links
+the Bambuddy printer it is, a LAN connection, or both, and `preferred_path` says
+how a print reaches it: `native` over the LAN, `bambuddy` through Bambuddy, `auto`
+the LAN when it answers. `list_printers` and `discover_printers` read it;
+`link_printer_lan` takes the printer's 8-digit access code once, tests it on the
+printer, and never returns it (ask the user to type it in Settings > Printers
+rather than in chat). The print tools still take the Bambuddy `printer_id`, so a
+printer the registry reaches only over the LAN cannot be printed to from here yet;
+`get_printers_now` lists both ids and says which link answered (`path`).
+
 ## 2. Assemble the request
 
 The print dialog reads everything it offers in one call,
