@@ -9,8 +9,9 @@ import { event, type ServerEvent } from './protocol.js'
 // finish_turn's, run by `session-<id>`. A claim is left with no turn behind it when the
 // workflow ends (terminated, failed, reset) before finish_turn runs, or when a kept
 // claim's update-with-start never reached Temporal, so the workflow was never started.
-// Every later send is then refused `busy`. Each pass, a durable row `running` with no
-// write for `graceMs` is described; when its workflow is closed, not found, or open
+// Every later send is then refused `busy`. Each pass, a durable row `running`, or parked
+// on a call (`waiting_approval`, `waiting_input`: a gone workflow answers neither, #4133),
+// with no write for `graceMs` is described; when its workflow is closed, not found, or open
 // but holding no turn (its `turn` Query: the kept claim's Update never reached it,
 // #2078), the turn's end is written as finish_turn writes a failed turn (a
 // `turn_failed` error, then the status), but to `idle`: the next send either starts or
@@ -46,6 +47,9 @@ const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
   removed: "the turn never started: the session's workflow is gone (it ended and was removed); continue in a new chat",
 }
 
+/** A durable row's statuses while it holds a turn: running, or parked on one of its calls. */
+const TURN_STATUSES = ['running', 'waiting_approval', 'waiting_input']
+
 /** A `running` row as read: its claim (`event_seq`) and how far its workflow's output got. */
 export type RunningRow = { id: string; event_seq: string; durable_offset: string }
 
@@ -69,7 +73,7 @@ export async function endLostTurn(
   const done = await sql.begin(async (tx) => {
     const [claimed] = await tx`
       UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
-      WHERE id = ${row.id} AND mode = 'durable' AND status IN ('running', 'waiting_approval', 'waiting_input')
+      WHERE id = ${row.id} AND mode = 'durable' AND status IN ${tx(TURN_STATUSES)}
         AND event_seq = ${row.event_seq}
       RETURNING id`
     return claimed ? await events.append(row.id, tail, tx) : undefined
@@ -116,7 +120,7 @@ export class DurableRunningSweep {
     const { sql, events } = this.#deps
     const page = (after: string) => sql<RunningRow[]>`
       SELECT id, event_seq, durable_offset FROM ai_sessions
-      WHERE mode = 'durable' AND status = 'running' AND id::text > ${after}
+      WHERE mode = 'durable' AND status IN ${sql(TURN_STATUSES)} AND id::text > ${after}
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
       ORDER BY id::text LIMIT ${this.#batch}`
     let rows = await page(this.#after)
