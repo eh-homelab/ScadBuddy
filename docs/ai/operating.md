@@ -55,6 +55,19 @@ covers the same ground more briefly.
   attention request with `on_timeout: 'wait'`, which otherwise waits up to a day
   (`WAIT_CEILING_S`, [`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts))
   while holding the session's lease and its Claude Code process (#1220).
+- **Activity heartbeats across a rollout.** Since #4200 every activity on the agent's
+  Temporal worker beats every 10 s (`heartbeatingActivities` in
+  [`agent/src/temporal/worker.ts`](../../agent/src/temporal/worker.ts)), and a flow's
+  calls to the agent take a 30 s heartbeat timeout
+  ([`backend/scadbuddy/workflows/flow_tools.py`](../../backend/scadbuddy/workflows/flow_tools.py)
+  `_agent_heartbeat`). An agent replica from before #4200 sends no beats, and
+  `agent-tools` is unversioned, so while one still polls (during the API Deployment's
+  rolling update, or after rolling the agent back past #4200) any attempt may land on
+  it. A `turn_tool_tier` whose three attempts all missed their beats is asked once more
+  with no heartbeat timeout (#4262), so it cannot fail the run's tier check for that;
+  it only takes longer. A flow's tool calls have no such fallback: one slower than 30 s
+  that lands on an old replica times out, a read up to three times and a write at once,
+  and the script sees the error (`flow_session_check` retries without limit).
 
 ### 1.1 Routing the UI's origin to the agent
 
