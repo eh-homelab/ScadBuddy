@@ -589,14 +589,16 @@ class RenderActivities:
             # `piece.json` was found just above, so the volume is there and only the
             # layout is missing or unreadable (an older or partial publish).
             logger.warning(
-                "the geometry's source layout is unreadable; rendering the piece",
+                "the geometry's source layout is missing or unreadable; forgetting the"
+                " geometry and rendering the piece",
                 extra={"piece_key": req.piece_key, "error": type(error).__name__},
             )
             layout = None
         except OSError as error:
             # Perhaps the volume's blip: a miss for this render only, the row kept.
             logger.warning(
-                "could not read the geometry's source layout; rendering the piece",
+                "could not read the geometry's source layout this time; keeping the"
+                " geometry and rendering the piece",
                 extra={"piece_key": req.piece_key, "error": type(error).__name__},
             )
             return None

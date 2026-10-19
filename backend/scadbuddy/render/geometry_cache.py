@@ -138,9 +138,13 @@ def _classed_source(source: str, classes: Sequence[str]) -> str:
     written by whichever compiler last compiled the scene, and nothing compiles it again
     on a deploy (#3448)."""
 
+    index: dict[str, int] = {}
+    for number, colour in enumerate(classes):
+        index.setdefault(colour.upper(), number)
+
     def classed(match: re.Match[str]) -> str:
-        colour = match.group(1)
-        return f"color({classes.index(colour)})" if colour in classes else match.group(0)
+        number = index.get(match.group(1).upper())
+        return match.group(0) if number is None else f"color({number})"
 
     return _COLOUR_CALL.sub(classed, source)
 

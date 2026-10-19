@@ -41,7 +41,9 @@ def _nearness(
 
     Not the side of the nearest triangle: where the nearest feature is an edge or a
     corner, several triangles are as near, and on a thin wall their faces turn nearly
-    opposite ways, so one of them says inside a point that is not (#3749)."""
+    opposite ways, so one of them says inside a point that is not (#3749). The number is
+    an integer only for closed meshes: about an open or non-manifold part it is
+    fractional, and the answer there approximate, as the open mesh's own inside is."""
     triangles = np.concatenate(
         [
             np.asarray(mesh.vertices, dtype=float)[np.asarray(mesh.faces)] @ m.T + t
