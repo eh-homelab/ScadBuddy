@@ -25,6 +25,8 @@ SLICE_REFUSED = "SliceRefused"
 #: How long ``slice_plate`` waits for a slicer worker to take it (review M2): past
 #: `TRANSFER_TTL` a worker would find its URLs expired anyway.
 SLICER_WAIT = TRANSFER_TTL
+#: Spec §5.2; the worker beats every 10 s.
+SLICE_HEARTBEAT = timedelta(seconds=60)
 
 
 class SliceWorkflowInput(BaseModel):
@@ -36,6 +38,9 @@ class SliceWorkflowInput(BaseModel):
     slicer_queue: str
     #: `SLICER_WAIT`; a test names a shorter one.
     slicer_wait: timedelta = SLICER_WAIT
+    #: `SLICE_HEARTBEAT`; a test names a shorter one (#4403), since an attempt the worker
+    #: ends as cancelled waits it out.
+    slice_heartbeat: timedelta = SLICE_HEARTBEAT
     #: The copy's ``file_hash`` the start named the execution by (Task 12 review M6):
     #: other bytes under the id are refused. None when the library stated none.
     copy_sha256: str | None = None
