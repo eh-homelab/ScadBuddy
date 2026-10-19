@@ -35,7 +35,9 @@ from scadbuddy.bambuddy.dispatch import (
 )
 from scadbuddy.bambuddy.errors import is_transient, not_configured
 from scadbuddy.bambuddy.extruders import (
+    LEFT,
     RACK_SIDE,
+    RIGHT,
     VOLUME_TYPE,
     high_flow_warning,
     high_flow_warnings,
@@ -86,7 +88,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolFilamentPreset,
 )
-from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan_inputs
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
@@ -909,6 +911,7 @@ async def check_print(
                     printer_name=prepared.printer_name,
                     status=prepared.printer_status,
                     nozzle_plan=nozzle_plan,
+                    one_plate=len(await source.plate_ids(client)) <= 1,
                 )
                 if inventory is not None
                 else []
@@ -979,6 +982,7 @@ def plan_warnings(
     printer_name: str | None,
     status: PrinterStatus | None,
     nozzle_plan: NozzlePlan | None = None,
+    one_plate: bool = True,
 ) -> list[FilamentWarning]:
     """What the chosen spools themselves say, for Checks (#2722): a spool not loaded in
     this printer, in the picker's own words, and a plan that mixes material families.
@@ -1056,6 +1060,74 @@ def plan_warnings(
                 ),
             )
         )
+    if nozzle_plan is not None:
+        found += inlet_warnings(
+            nozzle_plan,
+            plan_inputs(plan, spools, assignments, status, printer_id),
+            kept=one_plate,
+        )
+    return found
+
+
+#: The Track Switch inlet that rests on each side (``extruders.FTS_INLET_EXTRUDER``).
+_INLET_ON = {LEFT: "A", RIGHT: "B"}
+_SIDE_WORD = {"L": "left", "R": "right"}
+
+
+def inlet_warnings(
+    nozzle_plan: NozzlePlan, filaments: list[PlanInput], *, kept: bool = True
+) -> list[FilamentWarning]:
+    """#4272: a Track Switch inlet feeding both extruders in one print. Print #355
+    stalled so: the switch flipped inlet A between the extruders at every colour change.
+    The plan keeps each inlet on its own side (``nozzle_plan``), so only a side chosen by
+    hand splits one; each spool printing away from its inlet's side is named, with the
+    inlet to move it to.
+
+    Not ``kept`` (a file of more than one plate, whose map cannot be pinned,
+    :attr:`NozzlePlan.keeps_sides`), the slicer regroups the filaments itself, so an
+    inlet holding two or more spools may be split whatever the plan says: said too."""
+    if not nozzle_plan.track_switch or len(nozzle_plan.sides) < 2:
+        return []
+    rests = {filament.slot_id: filament.rests for filament in filaments}
+    found: list[FilamentWarning] = []
+    for rest, inlet in _INLET_ON.items():
+        on_inlet = [slot for slot in nozzle_plan.slots if rests.get(slot.slot_id) == rest]
+        if not kept and len(on_inlet) > 1:
+            other = _INLET_ON[RIGHT if rest == LEFT else LEFT]
+            names = ", ".join(slot.name for slot in on_inlet[:-1]) + f" and {on_inlet[-1].name}"
+            found.append(
+                FilamentWarning(
+                    kind="inlet-shared",
+                    message=(
+                        f"This file has more than one plate, so the slicer groups the "
+                        f"filaments itself and may put {names}, all fed through Track "
+                        f"Switch inlet {inlet}, on different extruders. The switch would "
+                        f"then move inlet {inlet} between them at every colour change, "
+                        f"which can stall the print: print one plate at a time, or move "
+                        f"all but one of them to an AMS on inlet {other}."
+                    ),
+                )
+            )
+            continue
+        home = [slot for slot in on_inlet if slot.side == side_of(rest)]
+        away = [slot for slot in on_inlet if slot.side != side_of(rest)]
+        if not home or not away:
+            continue
+        other = _INLET_ON[RIGHT if rest == LEFT else LEFT]
+        for slot in away:
+            found.append(
+                FilamentWarning(
+                    kind="inlet-shared",
+                    message=(
+                        f"{slot.name} prints on the {_SIDE_WORD[slot.side]} but is fed "
+                        f"through Track Switch inlet {inlet}, which also feeds "
+                        f"{home[0].name} on the {_SIDE_WORD[home[0].side]}. The switch "
+                        f"would move inlet {inlet} between the extruders at every colour "
+                        f"change, which can stall the print: move {slot.name} to an AMS on "
+                        f"inlet {other}, or print it on the {_SIDE_WORD[home[0].side]}."
+                    ),
+                )
+            )
     return found
 
 
@@ -1679,13 +1751,14 @@ async def plan_run(
     # No second round trip: `read` (values_for) answers again what supports just read.
     tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
     tower_dropped = template_keys_dropped(request.prime_tower)
-    # A side chosen by hand is kept only in a file of one plate (#3955 review): the map
-    # it pins is read by a slice of the whole file, which for more plates prints them all.
+    # The plan's sides (one chosen by hand, or each Track Switch inlet's, #4272) are
+    # kept only in a file of one plate (#3955 review): the map it pins is read by a slice
+    # of the whole file, which for more plates prints them all.
     filament_map = _filament_map(
         nozzle_plan,
         len(source.colours),
         one_plate=nozzle_plan is not None
-        and nozzle_plan.by_hand
+        and nozzle_plan.keeps_sides
         and len(await source.plate_ids(client)) <= 1,
     )
     printed = await source.file_to_print(

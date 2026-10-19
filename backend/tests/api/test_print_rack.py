@@ -601,20 +601,18 @@ def test_a_high_flow_choice_on_the_rack_side_is_judged_as_high_flow(
 
 
 @respx.mock
-def test_a_high_flow_choice_on_the_left_only_leaves_the_rack_side_standard(
+def test_a_standard_choice_refuses_a_high_flow_rack_position(
     client: TestClient, model: str
 ) -> None:
-    """The dialog lists the left first: High Flow there says nothing of the rack side."""
+    """The rack side is sliced Standard, so a High Flow hotend picked from the rack is
+    refused. One flow is chosen for both sides (#4272)."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
-    left_only = {
-        "nozzles": [{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}],
-        "tier": "standard",
-    }
+    standard = {"nozzles": [{"size": "0.4", "flow": "standard"}], "tier": "standard"}
 
     response = client.post(
-        f"/api/v1/print/outputs/{output_id}/check", json={**body(**left_only), "rack_position": 3}
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**standard), "rack_position": 3}
     )
 
     assert response.status_code == 200, response.text
