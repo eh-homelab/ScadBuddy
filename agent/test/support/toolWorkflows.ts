@@ -12,3 +12,17 @@ export async function callTool(name: string, input: unknown, toolUseId: string):
   })
   return tools[name]!(input)
 }
+
+/**
+ * A call under a heartbeat timeout shorter than the activity runs (#4261): it completes only
+ * if the worker beats for an activity that never beats itself.
+ */
+export async function callUnderHeartbeat(name: string, heartbeatTimeout: string): Promise<unknown> {
+  const tools = proxyActivities<Record<string, () => Promise<unknown>>>({
+    taskQueue: 'agent-tools',
+    startToCloseTimeout: '1 minute',
+    heartbeatTimeout,
+    retry: { maximumAttempts: 1 },
+  })
+  return tools[name]!()
+}

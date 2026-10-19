@@ -1,11 +1,14 @@
 import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
+import { WorkflowFailedError } from '@temporalio/client'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
+import { SESSION_TURN_ACTIVITY } from '../src/temporal/session/names.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { defineTool, json } from '../src/tools/registry.js'
@@ -179,6 +182,38 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
       expect(all.toString('latin1')).toContain(image!.name)
       expect(all.includes(bytes.subarray(0, 8))).toBe(false)
       expect(all.toString('latin1')).not.toContain(PNG.slice(0, 24))
+    } finally {
+      await agent.stop()
+    }
+  }, 120_000)
+
+  it('beats for every activity it runs, so one that never beats outlives a short heartbeat timeout (#4261)', async () => {
+    // 4 s of work under a 2 s heartbeat timeout: only the worker's own beats keep it alive.
+    // `session_turn`, which the interceptor leaves alone, is the control: it times out.
+    const slow = () => sleep(4_000).then(() => 'done')
+    const agent = AgentWorker.start({
+      address: env.address,
+      namespace: 'default',
+      activities: { slow, [SESSION_TURN_ACTIVITY]: slow },
+      activityHeartbeatMs: 500,
+    })
+    const caller = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: 'heartbeat-standin',
+      workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
+    })
+    const call = (name: string) =>
+      env.client.workflow.execute('callUnderHeartbeat', {
+        workflowId: `heartbeat-${randomUUID()}`,
+        taskQueue: 'heartbeat-standin',
+        args: [name, '2 seconds'],
+      })
+    try {
+      await agent.running()
+      await caller.runUntil(async () => {
+        await expect(call('slow')).resolves.toBe('done')
+        await expect(call(SESSION_TURN_ACTIVITY)).rejects.toThrow(WorkflowFailedError)
+      })
     } finally {
       await agent.stop()
     }

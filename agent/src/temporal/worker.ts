@@ -73,6 +73,8 @@ export type AgentWorkerOptions = {
    * current version, which a versioned worker needs before it takes new workflows.
    */
   deployment?: { name: string; buildId: string }
+  /** How often its activities beat (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
+  activityHeartbeatMs?: number
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
   shutdownGraceMs?: number
@@ -172,7 +174,7 @@ export class AgentWorker {
           taskQueue: options.taskQueue ?? TASK_QUEUE,
           ...(options.identity !== undefined ? { identity: options.identity } : {}),
           activities: options.activities,
-          interceptors: { activity: [heartbeatingActivities()] },
+          interceptors: { activity: [heartbeatingActivities(options.activityHeartbeatMs)] },
           ...options.workflows,
           ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
           ...(options.deployment
