@@ -23,6 +23,7 @@ from scadbuddy.operations.activity import row_of
         ("library_remove", "scad-library:123", "Library remove 123"),
         # A removal recorded before #4001 shared `library:`; all digits read as a file.
         ("library_remove", "library:BOSL2", "Library remove BOSL2"),
+        ("library_remove", "library:123", "Library remove #123"),
         ("print", "output:abc", "Print output:abc"),
     ],
 )
