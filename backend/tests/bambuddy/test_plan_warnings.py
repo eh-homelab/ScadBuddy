@@ -257,7 +257,7 @@ def test_a_file_of_more_plates_warns_of_an_inlet_with_two_spools() -> None:
     [warning] = inlet_warnings(_sides("L", "L", "R"), _resting(LEFT, LEFT, RIGHT), kept=False)
 
     assert warning.kind == "inlet-shared"
-    assert "may put Glow and Black, all fed through Track Switch inlet A" in warning.message
+    assert "may put Glow and Black, both fed through Track Switch inlet A" in warning.message
     assert "print one plate at a time" in warning.message
     # Kept (one plate, pinned), the same plan says nothing.
     assert inlet_warnings(_sides("L", "L", "R"), _resting(LEFT, LEFT, RIGHT)) == []

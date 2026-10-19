@@ -16,7 +16,7 @@ from scadbuddy.bambuddy.catalogue import (
 )
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
-from scadbuddy.bambuddy.extruders import default_nozzles
+from scadbuddy.bambuddy.extruders import default_nozzles, one_flow
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.hardware import (
@@ -89,8 +89,9 @@ class ChoicesView(BaseModel):
     printers: list[Printer] = Field(default_factory=list)
     nozzle_sizes: list[str] = Field(default_factory=lambda: list(SIZES))
     installed: list[InstalledNozzle] = Field(default_factory=list)
-    #: What the dialog opens on when the model remembers no nozzles (#1895): High Flow
-    #: on each side that has a High Flow nozzle of the size, else Standard.
+    #: What the dialog opens on when the model remembers no nozzles (#1895): one flow
+    #: for both sides (#4272), High Flow when either side has a High Flow nozzle of the
+    #: size, else Standard.
     default_nozzles: list[NozzleChoice] = Field(default_factory=lambda: default_nozzles(None))
     tiers: dict[str, list[TierOption]] = Field(default_factory=dict)
     processes: dict[str, list[str]] = Field(default_factory=dict)
@@ -267,7 +268,13 @@ async def _choices(
         bed_type=bed,
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
-        model_choices=remembered or ModelPrintChoices(),
+        # One flow, as the resolver requires (#4272): a pair remembered from before it
+        # opens the dialog and print_output on what would print, not on a refusal.
+        model_choices=(
+            remembered.model_copy(update={"nozzles": one_flow(remembered.nozzles)})
+            if remembered is not None
+            else ModelPrintChoices()
+        ),
         rack_algorithm=settings.rack_algorithm(printer_id),
         sliced=(ready.sliced_profile or SlicedProfile()) if ready.is_sliced else None,
     )

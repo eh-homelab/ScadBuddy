@@ -1095,12 +1095,13 @@ def inlet_warnings(
         if not kept and len(on_inlet) > 1:
             other = _INLET_ON[RIGHT if rest == LEFT else LEFT]
             names = ", ".join(slot.name for slot in on_inlet[:-1]) + f" and {on_inlet[-1].name}"
+            every = "both" if len(on_inlet) == 2 else "all"
             found.append(
                 FilamentWarning(
                     kind="inlet-shared",
                     message=(
                         f"This file has more than one plate, so the slicer groups the "
-                        f"filaments itself and may put {names}, all fed through Track "
+                        f"filaments itself and may put {names}, {every} fed through Track "
                         f"Switch inlet {inlet}, on different extruders. The switch would "
                         f"then move inlet {inlet} between them at every colour change, "
                         f"which can stall the print: print one plate at a time, or move "
