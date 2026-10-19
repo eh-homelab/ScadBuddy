@@ -437,8 +437,9 @@ export function PrintPicker({
   // Read for the printer and size it was picked for only, and in Advanced mode only, as
   // `chosenAlgorithm` (#4347): Simple mode shows no rack step, and the render that
   // leaves Advanced must not build a check with the pick (#4361 review).
+  const { advanced } = picker
   const rackPosition =
-    picked !== null && picker.advanced && picked.printerId === printerId && picked.size === size
+    picked !== null && advanced && picked.printerId === printerId && picked.size === size
       ? picked.position
       : null
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
@@ -459,9 +460,7 @@ export function PrintPicker({
     setPicked(null)
     setAlgorithmUnsaved(false)
   }, [printerId])
-  // Simple mode shows no rack step, so a hand pick would be sent unseen (as
-  // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
-  const { advanced } = picker
+  // Clears a pick left from Advanced, which `rackPosition` already reads as none.
   // The same for the prime tower (#3648 review): Simple mode sends none.
   useEffect(() => {
     if (!advanced) {
