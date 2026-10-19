@@ -112,6 +112,18 @@ def gate() -> Iterator[Gate]:
     opened.open()  # never leave a run parked in the background
 
 
+def follow_until_answered(client: TestClient, url: str, *, tries: int = 10) -> httpx.Response:
+    """Follow an accepting run's ``url`` until it answers more than 202. A follow waits
+    `FOLLOW_WAIT` and answers 202 while the Update still runs, as on a loaded CI runner:
+    a client follows again."""
+    answered: httpx.Response = client.post(url)
+    for _ in range(tries):
+        if answered.status_code != 202:
+            break
+        answered = client.post(url)
+    return answered
+
+
 def start(client: TestClient, output_id: str, request: dict[str, Any]) -> httpx.Response:
     response: httpx.Response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
     return response
@@ -1358,13 +1370,7 @@ def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
         assert still.status_code == 202, still.text
     finally:
         held.set()
-    # A follow waits `FOLLOW_WAIT` (1 s here) and answers 202 while the Update is still
-    # running, as on a loaded CI runner: follow again, as a client does.
-    answered = client.post(accepting["follow_url"])
-    for _ in range(10):
-        if answered.status_code != 202:
-            break
-        answered = client.post(accepting["follow_url"])
+    answered = follow_until_answered(client, accepting["follow_url"])
 
     assert answered.status_code == 200, answered.text
     run = answered.json()
@@ -1535,11 +1541,7 @@ def test_a_followed_run_the_check_refuses_answers_the_refusal(
         assert posted.status_code == 202, posted.text
     finally:
         held.set()
-    answered = client.post(posted.json()["follow_url"])
-    for _ in range(10):
-        if answered.status_code != 202:
-            break
-        answered = client.post(posted.json()["follow_url"])
+    answered = follow_until_answered(client, posted.json()["follow_url"])
 
     assert answered.status_code == 422, answered.text
     assert "has no printer 1" in answered.json()["detail"]

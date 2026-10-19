@@ -106,6 +106,39 @@ it('starts a signalled read anyway once the read in flight has stalled', async (
   }
 })
 
+// #4318 review — unmounted while a signal waits on a read that never answers: nothing
+// is left pending, not the stall timer, and not the wait itself (#4327 review): it is
+// settled, so the read that never answers holds nothing.
+it('leaves no timer or wait behind when unmounted while a signal waits on a read', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: false })
+  try {
+    const { load, resolvers } = deferred<number>()
+    const { unmount } = renderHook(() => useAsync(load, [], ['models']))
+    await act(async () => resolvers[0]?.(0))
+    await act(async () => signals[0]?.('resync'))
+    // Past the spacing, so the next signal's wait is on the read in flight: its stall timer.
+    await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_MIN_MS))
+    const race = vi.spyOn(Promise, 'race')
+    await act(async () => signals[0]?.('resync'))
+    // The hook's own race, and only it: another caller of Promise.race here (React, msw)
+    // fails the test rather than leaving it watching the wrong promise.
+    expect(race).toHaveBeenCalledTimes(1)
+    const wait = race.mock.results[0]?.value as Promise<unknown>
+    race.mockRestore()
+    let settled = false
+    void wait.then(() => (settled = true))
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    await act(async () => {})
+    expect(settled).toBe(true)
+    await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_STALL_MS * 2))
+    expect(resolvers).toHaveLength(2)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 // #4165 — an effect replayed in place (here `<Activity>` hiding and showing the view;
 // StrictMode and Fast Refresh do the same) must leave the hook hearing its topics.
 it('hears its topics again after its effects are torn down and replayed in place', async () => {
@@ -126,6 +159,32 @@ it('hears its topics again after its effects are torn down and replayed in place
   const before = resolvers.length
   await act(async () => signals.at(-1)?.('resync'))
   await waitFor(() => expect(resolvers.length).toBeGreaterThan(before))
+})
+
+// #4291 review — the same replay, with the read in flight answering only once the view
+// is shown again: the wait from before the teardown starts nothing beside the replay's.
+it('starts no read for a wait left from before its effects were replayed', async () => {
+  const { load, resolvers } = deferred<number>()
+  let mode: 'visible' | 'hidden' = 'visible'
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(Activity, { mode, children })
+  const { rerender } = renderHook(() => useAsync(load, [], ['models']), { wrapper })
+  await act(async () => resolvers[0]?.(0))
+  await act(async () => signals.at(-1)?.('resync'))
+  expect(resolvers).toHaveLength(2)
+  // Past the spacing, so this signal's wait is on the read in flight, not on a timer
+  // the teardown clears.
+  await act(() => new Promise((r) => setTimeout(r, SIGNAL_READ_MIN_MS + 50)))
+  await act(async () => signals.at(-1)?.('resync'))
+  mode = 'hidden'
+  rerender()
+  mode = 'visible'
+  rerender()
+  const before = resolvers.length
+  await act(async () => resolvers[1]?.(1))
+  expect(resolvers).toHaveLength(before)
+  // The replay's own signal reads once.
+  await act(async () => signals.at(-1)?.('resync'))
+  await waitFor(() => expect(resolvers).toHaveLength(before + 1))
 })
 
 it('keeps the data on screen, not loading, while a refresh is in flight', async () => {

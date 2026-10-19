@@ -13,8 +13,8 @@ from typing import cast
 
 import pytest
 from temporalio import workflow
-from temporalio.api.enums.v1 import EventType
-from temporalio.api.failure.v1 import ApplicationFailureInfo, Failure
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
+from temporalio.api.failure.v1 import ApplicationFailureInfo, Failure, TimeoutFailureInfo
 from temporalio.api.history.v1 import (
     History,
     HistoryEvent,
@@ -27,6 +27,7 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.workflows.commands import (
@@ -36,6 +37,7 @@ from scadbuddy.workflows.commands import (
     CommandStillAcceptingError,
     TemporalRefusedError,
     deferred_kind,
+    execution_gone,
     start_command,
 )
 from scadbuddy.workflows.operation import UnregisteredKindError
@@ -168,6 +170,53 @@ async def test_a_deferral_under_a_page_of_signals_is_still_found() -> None:
     assert service.tokens == [b"", b"1"]
 
 
+async def test_another_failure_is_no_deferral_and_says_what_it_was(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failure that is not a deferral answers no, and the warning names its kind and
+    cause (#4320), a cause newer than the protos included: its number, not a failed read."""
+    timed_out = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(timeout_failure_info=TimeoutFailureInfo()),
+            cause=WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_RESET_STICKY_TASK_QUEUE,
+        ),
+    )
+    newer = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(application_failure_info=ApplicationFailureInfo(type="Other")),
+            cause=cast(WorkflowTaskFailedCause.ValueType, 999),
+        ),
+    )
+    empty = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(failure=Failure()),
+    )
+    untyped = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(application_failure_info=ApplicationFailureInfo())
+        ),
+    )
+    caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
+    for event in (timed_out, newer, empty, untyped):
+        client = SimpleNamespace(namespace="default", workflow_service=_Pages([event]))
+        assert not await deferred_kind(cast(Client, client), "op-x")
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "command op-x: its newest workflow task failure is timeout_failure_info, cause"
+        " WORKFLOW_TASK_FAILED_CAUSE_RESET_STICKY_TASK_QUEUE, not a deferral",
+        "command op-x: its newest workflow task failure is application_failure_info"
+        " 'Other', cause 999, not a deferral",
+        "command op-x: its newest workflow task failure is a failure with no info, cause"
+        " WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
+        # An application failure with no type is the one line that still shows ''.
+        "command op-x: its newest workflow task failure is application_failure_info '',"
+        " cause WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
+    ]
+
+
 async def test_a_history_of_only_signals_is_no_deferral() -> None:
     """The read stops after `NOT_READY_PAGES` pages and answers no."""
     service = _Pages(*[_signals(NOT_READY_EVENTS)] * (NOT_READY_PAGES + 2))
@@ -202,4 +251,10 @@ async def test_a_history_that_cannot_be_read_is_refused(
                 await _start(client, id, queue)
         finally:
             monkeypatch.undo()
-            await client.get_workflow_handle(id).terminate()
+            # An execution already closed must not hide the assertion's own failure; any
+            # other refusal (a lost connection, a permission) still fails the test.
+            try:
+                await client.get_workflow_handle(id).terminate()
+            except RPCError as error:
+                if not execution_gone(error):
+                    raise
