@@ -738,7 +738,9 @@ def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(
     store.keep_only("m", kept)
     saving[0].join(10)
 
-    assert waited == [(True, False)], "the save waited for the trim's lock"
+    # (seen waiting in pg_locks, saved before the trim let go): (False, True) is a save
+    # that never waited; (False, False) one that neither waited nor finished in 10 s.
+    assert waited == [(True, False)], f"the save waited for the trim's lock: {waited}"
     assert saved.is_set()
     after = {p.name: p.params for p in store.saved_presets("m")}
     assert after == {"Tall": {"width": 2}, "New": {"width": 7}}

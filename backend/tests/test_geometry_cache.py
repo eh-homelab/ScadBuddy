@@ -494,7 +494,7 @@ async def test_a_scene_in_other_colours_is_recoloured_without_rendering(
 
 
 @pytest.mark.requires_postgres
-@pytest.mark.parametrize("source", ["painted", "missing", "corrupt"])
+@pytest.mark.parametrize("source", ["painted", "missing", "corrupt", "shapeless"])
 async def test_an_unreusable_source_is_rendered_again_and_forgotten(
     geometry_acts: tuple[RenderActivities, str, GeometryIndex], source: str
 ) -> None:
@@ -512,8 +512,10 @@ async def test_an_unreusable_source_is_rendered_again_and_forgotten(
         path.write_text(json.dumps(layout))
     elif source == "missing":
         path.unlink()
-    else:
+    elif source == "corrupt":
         path.write_text("{not json")
+    else:
+        path.write_text("{}")  # JSON, but no layout
 
     second = _piece(acts, 2, _scene("#0000FF"), width=12)
     prepared = await env.run(acts.prepare, second)

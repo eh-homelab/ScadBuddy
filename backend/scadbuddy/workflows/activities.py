@@ -584,16 +584,17 @@ class RenderActivities:
             return None
         try:
             layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
-        except (FileNotFoundError, ValueError) as error:
+            usable = reusable(layout, row.colours)
+        except (FileNotFoundError, ValueError, KeyError, TypeError) as error:
             # As unreusable: every retry would read the same file (#3449). Its
             # `piece.json` was found just above, so the volume is there and only the
-            # layout is missing or unreadable (an older or partial publish).
+            # layout is missing, unreadable or not a layout (an older or partial publish).
             logger.warning(
                 "the geometry's source layout is missing or unreadable; forgetting the"
                 " geometry and rendering the piece",
                 extra={"piece_key": req.piece_key, "error": type(error).__name__},
             )
-            layout = None
+            usable = False
         except OSError as error:
             # Perhaps the volume's blip: a miss for this render only, the row kept.
             logger.warning(
@@ -602,7 +603,7 @@ class RenderActivities:
                 extra={"piece_key": req.piece_key, "error": type(error).__name__},
             )
             return None
-        if layout is None or not reusable(layout, row.colours):
+        if not usable:
             # Forgotten, or every later recolour of this geometry fetches it again only
             # to refuse it again (#3449). `finish_piece` records no such row now; one an
             # older build recorded is dropped here.
@@ -787,7 +788,7 @@ class RenderActivities:
                     prepared.colours,
                     main.model_dump(mode="json"),
                 )
-            except (psycopg.Error, OSError, ValueError) as error:
+            except (psycopg.Error, OSError, ValueError, KeyError, TypeError) as error:
                 logger.warning(
                     "could not record the piece's geometry",
                     extra={"piece_key": req.piece_key, "error": type(error).__name__},

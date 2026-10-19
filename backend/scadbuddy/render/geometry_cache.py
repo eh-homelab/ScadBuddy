@@ -9,11 +9,10 @@ piece cache.
 
 `geometry_key` hashes the scene's objects with each colour replaced by its *class*,
 the place it first appears in the scene (`scene_classes`), and the ``model.scad`` that
-is rendered, classed the same way (so the same scene compiled by another `compile_scene`
-is another key), with
-the meshes' and paint codes' contents, the template file, the libraries and the
-parameters. Recolouring a
-part is a scene edit, a new revision and a new piece key, but the same geometry key
+is rendered, classed the same way (so the same scene compiled by another
+`compile_scene` is another key), with the meshes' and paint codes' contents, the
+template file, the libraries and the parameters. Recolouring a part is a scene edit, a
+new revision and a new piece key, but the same geometry key
 while the colours that are equal stay equal: the piece is then the first one's meshes
 with each class's colour swapped (`recolour_piece`), followed by the ordinary finish
 stage (the covers and the 3MF) in its own colours. Only the files a piece's colours are
