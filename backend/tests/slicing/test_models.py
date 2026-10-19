@@ -59,6 +59,7 @@ def test_vectors_round_trip() -> None:
                 arrange="auto",
                 allow_newer_file=False,
                 debug=3,
+                filament_colours=["#FF0000"],
             ),
         ],
         "progress": [

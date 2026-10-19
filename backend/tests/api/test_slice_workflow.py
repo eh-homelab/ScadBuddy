@@ -257,7 +257,9 @@ def test_a_slice_completes_and_holds_its_blob(slice_client: TestClient, slicer: 
     machine, process, *filaments = (json.loads(doc) for doc in downloaded[1:])
     assert machine["name"] == "Test Printer 0.4 nozzle" and process["name"] == "leaf"
     assert process["curr_bed_type"] == "Textured PEI Plate" and len(filaments) == 2
-    presets = {f"slice-{hashlib.sha256(doc).hexdigest()}" for doc in downloaded[1:]}
+    # The slots' colours reach the CLI, which keeps the prime tower by them (#3962).
+    assert slicer.inputs[-1].filament_colours == ["#FF0000", "#00FF00"]
+    presets ={f"slice-{hashlib.sha256(doc).hexdigest()}" for doc in downloaded[1:]}
     assert _holds(slice_client, row) == {
         row.sliced_blob_key,
         f"slice-{row.input_sha256}",

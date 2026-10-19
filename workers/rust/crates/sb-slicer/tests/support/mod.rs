@@ -89,6 +89,7 @@ pub fn input(base: &str) -> SlicePlateInput {
         arrange: Arrange::No,
         allow_newer_file: true,
         debug: 1,
+        filament_colours: Vec::new(),
     }
 }
 

@@ -61,6 +61,8 @@ class FakeSlicer:
         #: The sliced 3MF it uploads.
         self.sliced = SLICED
         self.calls = 0
+        #: Each call's input, as the slicer worker got it.
+        self.inputs: list[SlicePlateInput] = []
         #: What each successful call downloaded: the input 3MF, then each preset.
         self.downloads: list[list[bytes]] = []
 
@@ -78,6 +80,7 @@ class FakeSlicer:
     @activity.defn(name="slice_plate")
     async def slice_plate(self, input: SlicePlateInput) -> SlicePlateOutput:
         self.calls += 1
+        self.inputs.append(input)
         if self.expire_times > 0:
             self.expire_times -= 1
             raise ApplicationError("expired", type=TRANSFER_REFUSED, non_retryable=True)

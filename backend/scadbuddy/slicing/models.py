@@ -63,6 +63,11 @@ class SlicePlateInput(BaseModel):
     arrange: Literal["no", "yes", "auto"] = "no"
     allow_newer_file: bool = True
     debug: int = Field(default=1, ge=0, le=5)
+    #: Each slot's colour (``#RRGGBB``), in slot order, passed as ``--filament-colour``.
+    #: Without it the CLI turns the prime tower off whenever every slot loads a preset
+    #: of one name (``BambuStudio.cpp`` ``disable_wipe_tower_after_mapping`` at
+    #: v02.08.02.61), however many colours the plate prints (#3962).
+    filament_colours: list[str] = Field(default_factory=list)
 
 
 class SliceProgress(BaseModel):

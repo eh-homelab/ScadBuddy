@@ -28,6 +28,7 @@ async fn the_cli_never_sees_the_workers_other_variables() {
         arrange: Arrange::No,
         allow_newer_file: false,
         debug: 1,
+        filament_colours: &[],
         keepalive: KEEPALIVE,
     };
     let outcome = run(req, |_| {}, CancellationToken::new()).await.unwrap();
