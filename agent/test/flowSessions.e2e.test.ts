@@ -24,7 +24,7 @@ import { turnToolActivities } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { durableHealthPort } from './support/durableHealth.js'
+import { durableHealthPort, notStarted } from './support/durableHealth.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
@@ -274,7 +274,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
             .then((r) => r.json() as Promise<{ worker?: string }>)
             .catch(() => undefined)
       if (status?.worker === 'running' && lines.includes('{"ready": true}')) break
-      if (Date.now() > deadline) throw new Error(`the workers did not start: ${durable.log()}\n${projects.log()}`)
+      if (Date.now() > deadline) throw notStarted('the workers', port, `${durable.log()}\n${projects.log()}`)
       await new Promise((r) => setTimeout(r, 500))
     }
   }, 300_000)

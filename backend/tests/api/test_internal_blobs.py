@@ -304,11 +304,32 @@ def test_mint_get_off_s3_is_the_internal_route(tmp_path: Path, pool: Pool) -> No
     assert set(url.headers) == {TRANSFER_HEADER}
 
 
-def test_without_a_content_store_both_routes_are_404(client: TestClient) -> None:
+@pytest.fixture
+def local_client(settings: Settings, kek_file: Path) -> Iterator[TestClient]:
+    with TestClient(
+        create_app(
+            settings.model_copy(update={"secret_key_file": kek_file, "api_internal_url": INTERNAL})
+        )
+    ) as client:
+        yield client
+
+
+def test_without_a_token_the_backend_is_not_told(local_client: TestClient) -> None:
+    """No store (`store_backend` local) answers a tokenless request as S3 does: 403."""
+    assert _state(local_client).store.content is None
     key = "slice-" + "e" * 64
-    assert _get(client, f"{INTERNAL_BLOBS}/{key}", {}).status_code == 404
+    assert _get(local_client, f"{INTERNAL_BLOBS}/{key}", {}).status_code == 403
     pending = f"{PENDING_PREFIX}{'0' * 32}"
-    assert _upload(client, f"{INTERNAL_BLOBS}/{pending}", {}, b"x").status_code == 404
+    assert _upload(local_client, f"{INTERNAL_BLOBS}/{pending}", {}, b"x").status_code == 403
+
+
+def test_without_a_content_store_a_valid_token_is_404(local_client: TestClient) -> None:
+    key = "slice-" + "e" * 64
+    get = _get(local_client, f"{INTERNAL_BLOBS}/{key}", _signed(local_client, "GET", key))
+    assert get.status_code == 404
+    pending = f"{PENDING_PREFIX}{'0' * 32}"
+    headers = _signed(local_client, "PUT", pending)
+    assert _upload(local_client, f"{INTERNAL_BLOBS}/{pending}", headers, b"x").status_code == 404
 
 
 def test_transfer_puts_prune(pool: Pool) -> None:

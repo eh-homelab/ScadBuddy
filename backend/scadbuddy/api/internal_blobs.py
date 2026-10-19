@@ -3,10 +3,11 @@
 `TransferUrl`s `slicing/transfer.py` mints. Not a client API: hidden from the schema.
 
 Each request carries a token for its one method and key (`slicing/transfer_token.py`),
-checked before the key is looked at, so a token never probes a key it was not minted
-for. A missing, malformed, tampered or expired one is 403 (nothing to challenge, so not
-401), which the worker does not retry. Without a content store (`store_backend` local)
-both routes answer 404. Neither ever redirects: the worker follows none. Never log the
+checked before the key or the store is looked at, so a token never probes a key it was
+not minted for and a caller without one cannot tell which `store_backend` is in use. A
+missing, malformed, tampered or expired one is 403 (nothing to challenge, so not 401),
+which the worker does not retry. Without a content store (`store_backend` local) a valid
+token's request is 404. Neither ever redirects: the worker follows none. Never log the
 header."""
 
 from __future__ import annotations
@@ -70,8 +71,8 @@ def _check(state: StateDep, token: str | None, *, method: Method, key: str) -> N
 
 @router.get("/{key:path}", response_class=StreamingResponse)
 async def get_blob(key: str, state: StateDep, token: TokenHeader = None) -> StreamingResponse:
-    content = _content(state, key)
     _check(state, token, method="GET", key=key)
+    content = _content(state, key)
     stat = await content.stat(key)
     if stat is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"blob {key} not found", key=key)
@@ -86,8 +87,8 @@ async def get_blob(key: str, state: StateDep, token: TokenHeader = None) -> Stre
 async def put_blob(
     key: str, request: Request, state: StateDep, token: TokenHeader = None
 ) -> Response:
-    content = _content(state, key)
     _check(state, token, method="PUT", key=key)
+    content = _content(state, key)
     if not key.startswith(PENDING_PREFIX):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"blob {key} not found", key=key)
     await asyncio.to_thread(content.spool.mkdir, parents=True, exist_ok=True)
