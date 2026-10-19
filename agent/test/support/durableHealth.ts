@@ -12,13 +12,15 @@ export function durableHealthPort(log: string): number | undefined {
 
 /**
  * The error for a sidecar that did not start in time. When its port line was never read,
- * it says so: a `format=` given to `basicConfig` in agent-durable's `__main__.py` stops
- * durableHealthPort matching, and the start would otherwise only look slow.
+ * it says so: either the sidecar never got that far (a long uv sync), or a `format=` given
+ * to `basicConfig` in agent-durable's `__main__.py` stops durableHealthPort matching, and
+ * the start would otherwise only look slow.
  */
 export function notStarted(what: string, port: number | undefined, log: string): Error {
   const unread =
     port === undefined
-      ? ' (its health port line was never read: durableHealthPort in agent/test/support/durableHealth.ts matches `INFO:scadbuddy_durable:health on port N`)'
+      ? ' (its health port line was never read: the sidecar never got that far, or durableHealthPort in ' +
+        'agent/test/support/durableHealth.ts no longer matches its `INFO:scadbuddy_durable:health on port N`)'
       : ''
   return new Error(`${what} did not start${unread}: ${log}`)
 }
