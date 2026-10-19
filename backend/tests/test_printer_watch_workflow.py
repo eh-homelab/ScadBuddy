@@ -156,9 +156,15 @@ async def test_watch_writes_reports_and_emits_on_change(
             got = reports.get(pid)
             return None if got is None else got[0]
 
+        def announced_now() -> list[PrinterEvent]:
+            return [event for event in bus.events if isinstance(event, PrinterEvent)]
+
         await _until(lambda: (latest() or {}).get("mc_percent") == 2)
+        # The announcement follows its write, so it may land a moment later.
+        await _until(lambda: len(announced_now()) >= 2)
+        await asyncio.sleep(0.2)  # and no third
         assert latest() == {"gcode_state": "RUNNING", "mc_percent": 2, "wifi_signal": "-45dBm"}
-        announced = [event for event in bus.events if isinstance(event, PrinterEvent)]
+        announced = announced_now()
         assert [(e.kind, e.printer_id) for e in announced] == [("printer.report", pid)] * 2
         assert lan.connects == 1 and lan.hosts == ["10.0.0.9"]
 
