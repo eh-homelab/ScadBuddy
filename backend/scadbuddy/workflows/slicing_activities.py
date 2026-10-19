@@ -475,7 +475,7 @@ class RunActivities:
 
     @activity.defn(name=SLICED_UPLOAD_ACTIVITY)
     async def print_sliced_upload(self, input: SlicedUploadInput) -> int:
-        """The sliced blob beside the copy, as ``<copy stem>.plate<N>.sliced.3mf``: in
+        """The sliced blob beside the copy, as ``<copy stem>.plate<N>.gcode.3mf``: in
         Bambuddy's library for a Bambuddy copy, whose queue then takes it, or the native
         library's for a native one. The library file id ``print_enqueue`` queues. It
         beats (review I1): a sliced 3MF carries its G-code. In either library an earlier
@@ -568,7 +568,10 @@ class RunActivities:
 
 
 def _sliced_name(copy_filename: str, input: SlicedUploadInput) -> str:
-    return f"{PurePath(copy_filename).stem}.plate{input.plate_id}.sliced.3mf"
+    """``.gcode.3mf``, as Bambuddy's own slices are named: both libraries type a file
+    by its name (`print_library/store.py` `file_type_of`; Bambuddy's ``file_type``), so
+    a sliced file is listed as sliced and printed as it is, never sliced again."""
+    return f"{PurePath(copy_filename).stem}.plate{input.plate_id}.gcode.3mf"
 
 
 def slice_activities(

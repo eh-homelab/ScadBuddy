@@ -51,7 +51,7 @@ from tests.support.operations import press
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
 HISTORIES = Path(__file__).parents[1] / "fixtures" / "print_run_histories"
-#: The first sliced file Bambuddy's fake library answers an upload of a ``.sliced.3mf``
+#: The first sliced file Bambuddy's fake library answers an upload of a ``.gcode.3mf``
 #: with; each later one is the next id.
 SLICED = 77
 #: The colours `body()`'s plan slices slots 1 and 2 in.
@@ -102,7 +102,7 @@ class FakeLibrary:
 
     def _upload(self, request: httpx.Request) -> httpx.Response:
         name = request.content.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
-        if not name.endswith(".sliced.3mf"):
+        if not name.endswith(".gcode.3mf"):
             return httpx.Response(
                 200, json={"id": COPY, "filename": name, "file_type": "3mf", "file_size": 9}
             )
@@ -333,7 +333,7 @@ def test_a_native_run_slices_uploads_and_queues(
     run = follow_run(native_client, run_id, timeout=120)
 
     assert run["status"] == "succeeded", run
-    assert library.sliced_names == ["demo-elan.plate1.sliced.3mf"]
+    assert library.sliced_names == ["demo-elan.plate1.gcode.3mf"]
     assert library.queued == [SLICED]
     (row,) = _native_rows(native_client)
     assert row["status"] == "completed"
@@ -471,7 +471,7 @@ def test_a_lost_upload_answer_is_taken_on_the_retry(
     run = _run(native_client, output_id)
 
     assert run["status"] == "succeeded", run
-    assert library.sliced_names == ["demo-elan.plate1.sliced.3mf"]
+    assert library.sliced_names == ["demo-elan.plate1.gcode.3mf"]
     assert list(library.stored) == [SLICED]
     assert library.queued == [SLICED]
 
@@ -488,7 +488,7 @@ def test_a_reprint_reuses_the_native_upload(
 
     assert again["status"] == "succeeded", again
     assert library.queued == [SLICED, SLICED]
-    assert library.sliced_names == ["demo-elan.plate1.sliced.3mf"]
+    assert library.sliced_names == ["demo-elan.plate1.gcode.3mf"]
     assert slicer.calls == 1
     assert "slice_run" not in _activities(_history(native_client, run_id))
 

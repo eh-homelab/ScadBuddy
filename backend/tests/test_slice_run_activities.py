@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.dispatch import SlicePlan
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.print_run import PlannedRun
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
+from scadbuddy.print_library.store import file_type_of
 from scadbuddy.workflows import print_activities, printing
 from scadbuddy.workflows.print_models import NativeSliced, SlicedUploadInput, SliceRunInput
 from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status
@@ -98,7 +99,13 @@ async def test_a_native_copys_sliced_file_goes_to_the_native_library(tmp_path: P
     )
 
     assert uploaded == COPY + 1
-    assert native.uploads == [("demo-elan.plate2.sliced.3mf", b"sliced", NATIVE_ID_BASE + 3)]
+    ((name, body, folder),) = native.uploads
+    assert (body, folder) == (b"sliced", NATIVE_ID_BASE + 3)
+    # Typed by its name as Bambuddy's own slices are (`.gcode.3mf`), so both libraries
+    # list it as sliced, not as a 3MF to slice (the native library reads the type from
+    # the name, `print_library/store.py` `file_type_of`).
+    assert file_type_of(name) == "gcode.3mf"
+    assert name == "demo-elan.plate2.gcode.3mf"
 
 
 async def test_slice_run_beats_before_its_wait(
