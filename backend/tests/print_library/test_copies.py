@@ -340,7 +340,7 @@ async def _copy_with_slice(
     copy_id = await ensure_native_copy(
         native, uploads, fetches.printable(key), target=H2D, folder_id=None
     )
-    sliced = await native.upload("bracket.plate1.sliced.3mf", io.BytesIO(b"gcode"), None)
+    sliced = await native.upload("bracket.plate1.gcode.3mf", io.BytesIO(b"gcode"), None)
     await uploads.record_sliced(key, copy_id, SlicedCopy(id=sliced.id, preset_key="k"))
     return copy_id, sliced.id, sliced.sha256
 

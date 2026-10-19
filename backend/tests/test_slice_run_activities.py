@@ -228,7 +228,7 @@ async def test_a_native_sliced_upload_left_unanswered_is_taken(tmp_path: Path) -
     of that name, size and sha256 in the copy's folder is taken, never uploaded twice;
     one any subject records, or of other bytes, is not."""
     digest = hashlib.sha256(b"sliced").hexdigest()
-    name = "demo-elan.plate2.sliced.3mf"
+    name = "demo-elan.plate2.gcode.3mf"
     left, recorded, other = COPY + 30, COPY + 20, COPY + 25
 
     class Listed(_Native):

@@ -148,7 +148,7 @@ def test_an_output_delete_trashes_its_native_per_print_copies(
     portal = native_client.portal
     assert portal is not None
     copy = portal.call(native.upload, "copy.3mf", io.BytesIO(payload), None)
-    sliced = portal.call(native.upload, "copy.plate1.sliced.3mf", io.BytesIO(b"g"), None)
+    sliced = portal.call(native.upload, "copy.plate1.gcode.3mf", io.BytesIO(b"g"), None)
     portal.call(
         state.uploads.record,
         saved["id"],

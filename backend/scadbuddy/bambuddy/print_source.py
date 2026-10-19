@@ -413,9 +413,9 @@ class PrintPipeline:
                 if error.status == status.HTTP_404_NOT_FOUND:
                     await _forget_slice(uploads, self.subject.run_subject, sliced.id)
                 continue
-            # A native sliced upload is named `.sliced.3mf`, which its name-derived
-            # `file_type` reads as a plain 3MF; its id is never reissued, so the recorded
-            # hash alone is the check (#4312 review I2).
+            # A native id is never reissued, so the recorded hash alone is the check
+            # (#4312 review I2): a native slice is typed `gcode.3mf` by its name (#4207,
+            # 19db20ab1), but one uploaded before that read as a plain 3MF.
             sliced_kind = is_native_id(sliced.id) or is_sliced(file.file_type)
             if sliced_kind and file.file_hash == sliced.file_hash:
                 return sliced.id
