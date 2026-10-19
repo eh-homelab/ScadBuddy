@@ -3,9 +3,10 @@ import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useNavigate, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { Job } from '../api/types'
 import type * as embed from '../lib/embed'
-import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
+import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
 import { outputs, prints, versionIds } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -26,6 +27,7 @@ vi.mock('../lib/embed', async (original) => ({
     await load()
   }),
   openExternal: vi.fn(),
+  isEmbedded: vi.fn(() => false),
 }))
 
 const REAGAN = outputs[0]!.id
@@ -68,6 +70,7 @@ beforeEach(() => {
     await load()
   })
   vi.mocked(openExternal).mockClear()
+  vi.mocked(isEmbedded).mockReturnValue(false)
 })
 
 describe('PrintDetailPage (#311)', () => {
@@ -503,6 +506,71 @@ describe('PrintDetailPage (#311)', () => {
     server.events.removeAllListeners()
   })
 
+  it('saves the timelapse from its URL under its own extension, not through memory (#3107)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          media: { ...done.media, timelapse: { ...done.media.timelapse!, filename: 'print-35-timelapse.avi' } },
+        }),
+      ),
+    )
+    const clicked: { href: string; download: string }[] = []
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clicked.push({ href: this.getAttribute('href') ?? '', download: this.download })
+    })
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: 'Download print-35-timelapse.avi' }))
+
+    expect(clicked).toEqual([{ href: '/api/v1/prints/35/timelapse', download: 'print-35-timelapse.avi' }])
+    expect(downloadBlob).not.toHaveBeenCalled()
+
+    // In Bambuddy's frame the sandbox drops that: the popup's path, as for any file.
+    vi.mocked(isEmbedded).mockReturnValue(true)
+    await user.click(within(files).getByRole('button', { name: 'Download print-35-timelapse.avi' }))
+    await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.any(Function), 'print-35-timelapse.avi'))
+    expect(clicked).toHaveLength(1)
+    click.mockRestore()
+  })
+
+  it('reads the output once to open the editable 3MF with its mesh (#3108)', async () => {
+    const read = vi.spyOn(api, 'getOutput')
+    const { user } = render(35)
+    const files = await section('Files')
+    // The page reads it too, for itself: only what the dialog reads is counted.
+    const before = read.mock.calls.length
+    await user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    expect(await within(dialog).findByTestId('preview')).toBeInTheDocument()
+    expect(read.mock.calls.slice(before).filter(([id]) => id === REAGAN)).toHaveLength(1)
+    read.mockRestore()
+  })
+
+  it("says a slicer project's view is the print's slicing, not the file's (#3108)", async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          files: [...done.files, { kind: 'source', name: 'keychain.3mf', size: 1000, url: '/api/v1/prints/35/files/source' }],
+        }),
+      ),
+    )
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Sliced file, .*, open$/ }))
+    let dialog = await screen.findByRole('dialog', { name: 'Sliced file' })
+    expect(within(dialog).queryByText('How this print was sliced')).not.toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await user.click(within(files).getByRole('button', { name: /^Slicer project \(3MF\), .*, open$/ }))
+    dialog = await screen.findByRole('dialog', { name: 'Slicer project (3MF)' })
+    expect(within(dialog).getByText('How this print was sliced')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Slicing summary')).toBeInTheDocument()
+  })
+
   it('gives each file an icon of its kind, a friendly label over its name, and a download of its own (#894)', async () => {
     render(35)
     const files = await section('Files')
@@ -742,11 +810,14 @@ describe('PrintDetailPage (#311)', () => {
     // An outward write: only a person may press it, never the agent's fallback click.
     expect(pull).toHaveAttribute('data-agent-user-only')
     // Only the timelapse is offered, not the camera recording.
-    expect(timelapse).toHaveTextContent('video_2026-09-26_20-01-00.mp4')
+    expect(timelapse).toHaveTextContent('video_2026-09-26_20-01-00.MP4')
     expect(timelapse).not.toHaveTextContent('ipcam-record')
 
     await user.click(pull)
     await waitFor(() => expect(timelapse.querySelector('video')).toHaveAttribute('src', '/api/v1/prints/36/timelapse'))
+    // Saved under its own extension, lower-cased (#3107): the printer named it `.MP4`.
+    const files = await section('Files')
+    expect(within(files).getByRole('button', { name: 'Download print-36-timelapse.mp4' })).toBeInTheDocument()
     server.events.removeAllListeners()
   })
 

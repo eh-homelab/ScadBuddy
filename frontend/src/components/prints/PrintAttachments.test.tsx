@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
+import { attachmentsOf } from '../../mocks/features/printAttachments'
 import { prints } from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -23,6 +24,13 @@ async function attachments(): Promise<HTMLElement> {
 
 const photo = () => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'desk.png', { type: 'image/png' })
 const video = () => new File([new Uint8Array(64)], 'spin.mp4', { type: 'video/mp4' })
+const MB = 1024 * 1024
+/** Over a 1 MB upload limit. */
+const big = (name = 'spin.mp4') => new File([new Uint8Array(2 * MB)], name, { type: 'video/mp4' })
+const limitOf = (bytes: number) =>
+  http.get('/api/v1/settings', ({ request }) =>
+    request.url.endsWith('/settings') ? HttpResponse.json({ media_upload_max_bytes: bytes }) : undefined,
+  )
 
 describe('a print’s own photos and videos (#309, #311)', () => {
   it('offers the camera on a phone, and files, and says when there are none yet', async () => {
@@ -71,7 +79,7 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     let posted = false
     server.use(
       http.get('/api/v1/settings', ({ request }) =>
-        request.url.endsWith('/settings') ? HttpResponse.json({ media_upload_max_bytes: 10 }) : undefined,
+        request.url.endsWith('/settings') ? HttpResponse.json({ media_upload_max_bytes: MB }) : undefined,
       ),
       http.post('/api/v1/prints/35/attachments', () => {
         posted = true
@@ -80,9 +88,10 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     )
     const { user } = render()
     const section = await attachments()
-    await user.upload(within(section).getByLabelText('Choose files'), video())
+    await user.upload(within(section).getByLabelText('Choose files'), big())
 
-    expect(await within(section).findByRole('alert')).toHaveTextContent('spin.mp4 is larger than the 0 MB upload limit.')
+    // A figure that tells a person something (#3114), not "the 0 MB upload limit".
+    expect(await within(section).findByRole('alert')).toHaveTextContent('spin.mp4 is larger than the 1 MB upload limit.')
     expect(posted).toBe(false)
   })
 
@@ -168,5 +177,79 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     render()
     const item = await within(await attachments()).findByRole('listitem', { name: 'kept.png' })
     expect(within(item).getByRole('button', { name: 'Added to the gallery' })).toBeDisabled()
+  })
+
+  it('takes a copy made elsewhere as made, not as an error (#3114)', async () => {
+    const { user } = render()
+    const section = await attachments()
+    await user.upload(within(section).getByLabelText('Choose files'), photo())
+    const item = await within(section).findByRole('listitem', { name: 'desk.png' })
+    // Another tab copies it into the gallery first: this one's promote is answered 409.
+    const done = prints.find((print) => print.archive_id === 35)!
+    attachmentsOf(35)[0]!.promoted_to.push(done.slug!)
+
+    await user.click(within(item).getByRole('button', { name: 'Add to the template’s gallery' }))
+    expect(await within(item).findByRole('button', { name: 'Added to the gallery' })).toBeDisabled()
+    expect(within(item).queryByRole('alert')).toBeNull()
+  })
+
+  it('lists two refusals in the same words twice (#3114)', async () => {
+    server.use(limitOf(MB))
+    const errors = vi.spyOn(console, 'error')
+    const { user } = render()
+    const section = await attachments()
+    await user.upload(within(section).getByLabelText('Choose files'), [big('image.jpg'), big('image.jpg')])
+
+    const alert = await within(section).findByRole('alert')
+    expect(within(alert).getAllByRole('listitem')).toHaveLength(2)
+    expect(errors.mock.calls.some((call) => String(call[0]).includes('same key'))).toBe(false)
+    errors.mockRestore()
+  })
+
+  it('shows each upload as it lands, not once the batch has (#3114)', async () => {
+    const pending: Array<() => void> = []
+    const add = api.addPrintAttachment.bind(api)
+    const sent = vi
+      .spyOn(api, 'addPrintAttachment')
+      .mockImplementation((...args) => new Promise((resolve) => pending.push(() => resolve(add(...args)))))
+    const { user } = render()
+    const section = await attachments()
+    await user.upload(within(section).getByLabelText('Choose files'), [photo(), video()])
+    await waitFor(() => expect(pending).toHaveLength(1))
+    pending[0]!()
+
+    // The video still uploads; the photo is listed already.
+    expect(await within(section).findByRole('img', { name: 'desk.png' })).toBeInTheDocument()
+    await waitFor(() => expect(pending).toHaveLength(2))
+    expect(within(section).getByRole('list', { name: 'Uploading' })).toHaveTextContent('spin.mp4')
+    pending[1]!()
+    await waitFor(() => expect(within(section).queryByRole('list', { name: 'Uploading' })).toBeNull())
+    sent.mockRestore()
+  })
+
+  it('keeps an earlier drop’s refusals while it still uploads (#3114)', async () => {
+    server.use(limitOf(MB))
+    const pending: Array<() => void> = []
+    const sent = vi.spyOn(api, 'addPrintAttachment').mockImplementation(
+      () => new Promise((resolve) => pending.push(() => resolve(undefined as never))),
+    )
+    const { user } = render()
+    const section = await attachments()
+    const choose = within(section).getByLabelText('Choose files')
+    await user.upload(choose, [big('first.mp4'), photo()])
+    await waitFor(() => expect(pending).toHaveLength(1))
+    await user.upload(choose, big('second.mp4'))
+
+    const alert = await within(section).findByRole('alert')
+    await waitFor(() => expect(alert).toHaveTextContent('second.mp4'))
+    expect(alert).toHaveTextContent('first.mp4')
+
+    // Nothing uploads now: a new pick starts a new list.
+    pending[0]!()
+    await waitFor(() => expect(within(section).queryByRole('list', { name: 'Uploading' })).toBeNull())
+    await user.upload(choose, big('third.mp4'))
+    await waitFor(() => expect(within(section).getByRole('alert')).toHaveTextContent('third.mp4'))
+    expect(within(section).getByRole('alert')).not.toHaveTextContent('first.mp4')
+    sent.mockRestore()
   })
 })

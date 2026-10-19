@@ -1,6 +1,6 @@
 import { useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { PrintAttachment, PrintDetail } from '../../api/types'
 import { formatBytes } from '../../lib/format'
 import { MEDIA_ACCEPT, failure, mediaProblem, useUploadLimit } from '../../lib/mediaFiles'
@@ -23,6 +23,8 @@ import { cn } from '@/lib/utils'
 import { Spinner } from '../ui/spinner'
 
 type Upload = { id: number; name: string; fraction: number }
+/** Its own id, as an upload's: two files can fail with the same words (#3114). */
+type Refusal = { id: number; text: string }
 
 /** The server's caption limit (`MAX_CAPTION_CHARS`, `library/media.py`). */
 const MAX_CAPTION_CHARS = 1000
@@ -37,20 +39,27 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
   const limit = useUploadLimit()
   const [uploads, setUploads] = useState<Upload[]>([])
   const nextUpload = useRef(0)
-  const [errors, setErrors] = useState<string[]>([])
+  /** Uploads not yet finished, from every drop and pick. */
+  const running = useRef(0)
+  const [errors, setErrors] = useState<Refusal[]>([])
+  const nextError = useRef(0)
   const [over, setOver] = useState(false)
 
   async function add(files: File[]) {
     if (files.length === 0) return
     const most = await limit()
-    const problems: string[] = []
+    const refusal = (text: string): Refusal => ({ id: (nextError.current += 1), text })
+    const problems: Refusal[] = []
     const fine: File[] = []
     for (const file of files) {
       const problem = mediaProblem(file, most)
-      if (problem) problems.push(problem)
+      if (problem) problems.push(refusal(problem))
       else fine.push(file)
     }
-    setErrors(problems)
+    // A drop while an earlier one still uploads keeps that one's refusals (#3114).
+    const earlier = running.current > 0
+    setErrors((now) => (earlier ? [...now, ...problems] : problems))
+    running.current += fine.length
     for (const file of fine) {
       // Its own id: a phone's camera names every capture alike (image.jpg).
       const id = (nextUpload.current += 1)
@@ -59,13 +68,15 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
         await api.addPrintAttachment(print.archive_id, file, '', (fraction) =>
           setUploads((now) => now.map((upload) => (upload.id === id ? { ...upload, fraction } : upload))),
         )
+        // Shown as each lands, not once the last of a batch of large videos has (#3114).
+        onChanged()
       } catch (caught) {
-        setErrors((now) => [...now, `${file.name}: ${failure(caught)}`])
+        setErrors((now) => [...now, refusal(`${file.name}: ${failure(caught)}`)])
       } finally {
+        running.current -= 1
         setUploads((now) => now.filter((upload) => upload.id !== id))
       }
     }
-    if (fine.length > 0) onChanged()
   }
 
   function dropped(event: DragEvent<HTMLDivElement>) {
@@ -124,7 +135,7 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
       {errors.length > 0 && (
         <ul role="alert" className="space-y-0.5 text-xs text-warn">
           {errors.map((error) => (
-            <li key={error}>{error}</li>
+            <li key={error.id}>{error.text}</li>
           ))}
         </ul>
       )}
@@ -198,8 +209,10 @@ function AttachmentItem({
 }) {
   const [caption, setCaption] = useState(attachment.caption ?? '')
   const [busy, setBusy] = useState<'caption' | 'delete' | 'promote' | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [promoted, setPromoted] = useState(print.slug !== null && attachment.promoted_to.includes(print.slug))
+  const [error, setError] = useState<{ what: 'caption' | 'delete' | 'promote'; text: string } | null>(null)
+  // The print's own record says, once read again; `copied` until then (#3114).
+  const [copied, setCopied] = useState(false)
+  const promoted = copied || (print.slug !== null && attachment.promoted_to.includes(print.slug))
   const [confirming, setConfirming] = useState(false)
   const name = attachment.caption ?? attachment.filename
 
@@ -208,11 +221,16 @@ function AttachmentItem({
     setError(null)
     try {
       await call()
-      if (what === 'promote') setPromoted(true)
-      else onChanged()
+      if (what === 'promote') setCopied(true)
+      onChanged()
       if (what === 'delete') setConfirming(false)
     } catch (caught) {
-      setError(failure(caught))
+      setError({ what, text: failure(caught) })
+      // Copied from another tab, say (a 409): the print read again says so, and the
+      // refusal is not shown once it does (#3114). The route's other 409s (the template
+      // full, a copy still in flight) leave `promoted_to` without this template, so
+      // theirs stays shown: what hides it is the record, not the status.
+      if (what === 'promote' && caught instanceof ApiError && caught.status === 409) onChanged()
     } finally {
       setBusy(null)
     }
@@ -294,9 +312,9 @@ function AttachmentItem({
               Remove
             </Button>
           </div>
-          {error && !confirming && (
+          {error && !confirming && !(error.what === 'promote' && promoted) && (
             <p role="alert" className="text-xs text-warn">
-              {error}
+              {error.text}
             </p>
           )}
         </div>
@@ -309,7 +327,7 @@ function AttachmentItem({
           </AlertDialogHeader>
           {error && (
             <p role="alert" className="text-sm text-destructive">
-              {error}
+              {error.text}
             </p>
           )}
           <AlertDialogFooter>
