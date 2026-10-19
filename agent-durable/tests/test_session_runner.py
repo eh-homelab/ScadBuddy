@@ -996,15 +996,17 @@ async def test_a_claimed_subagents_late_call_names_no_other_agent_call() -> None
     assert [e.get("parent") for e in seen if e["id"] == "c1"] == [None]
 
 
-async def test_an_attempt_answering_an_error_ends_the_calls_it_opened() -> None:
-    """#4404 review: a segment that returns an error, not raises one, leaves no call running."""
+@pytest.mark.parametrize("error", ["it broke", "Reached maximum budget ($1.00)"])
+async def test_an_attempt_answering_an_error_ends_the_calls_it_opened(error: str) -> None:
+    """#4404 review: a segment that returns an error, not raises one, leaves no call running;
+    the budget cap's (answered as BUDGET_EXHAUSTED) too."""
     calls = SegmentCalls([])
     started: Any = calls.hooks()["PreToolUse"][0].hooks[0]
     seen: list[dict[str, Any]] = []
     token = _EMIT.set(seen.append)
     try:
         await started({"tool_name": "Skill", "tool_input": {}}, "s1", None)
-        failed = SegmentOutput(session_id="s", is_error=True, error="it broke")
+        failed = SegmentOutput(session_id="s", is_error=True, error=error)
         runner = ScadBuddyRunner(_no_database, KEK, cwd="/tmp", make_runner=_Answers(failed))
         settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
         inp = SegmentInput(session_id="s", prompt="hi", tools=[])

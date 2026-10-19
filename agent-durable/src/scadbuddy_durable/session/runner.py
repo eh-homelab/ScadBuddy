@@ -656,8 +656,9 @@ class SegmentCalls:
         return {}
 
     def close_open(self, publish: Callable[[dict[str, Any]], None]) -> None:
-        """Ends every call still open as ``failed``: its attempt failed, and a retry or the
-        next credential opens its calls again under new ids."""
+        """Ends every call still open as ``failed``: its attempt ended with an error, raised or
+        returned (the budget cap among them), and a retry or the next credential opens its
+        calls again under new ids."""
         opened, self._open = self._open, {}
         self._agents.clear()
         self._owners.clear()
@@ -876,6 +877,7 @@ class ScadBuddyRunner:
                 out = await runner.run(inp, attempt)
                 if out.is_error and calls is not None and publish is not None:
                     # An attempt that answers with an error has ended too: so have its calls.
+                    # Once only: `_report` below never raises, and a later close finds none open.
                     calls.close_open(publish)
                 # The endpoint answered: the key works, whatever became of the segment.
                 await self._report(session, credential, "used")
