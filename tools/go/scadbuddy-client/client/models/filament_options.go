@@ -15,12 +15,16 @@ type FilamentOptions struct {
 	library_file_id FilamentOptions_FilamentOptions_library_file_idable
 	// The nozzles property
 	nozzles []NozzleInfoable
+	// The overlay_notes property
+	overlay_notes []string
 	// The printer_id property
 	printer_id FilamentOptions_FilamentOptions_printer_idable
 	// The printer_name property
 	printer_name FilamentOptions_FilamentOptions_printer_nameable
 	// The slots property
 	slots []SlotNeedable
+	// The source property
+	source *FilamentOptions_source
 	// The spools property
 	spools []SpoolOptionable
 	// The suggested property
@@ -319,6 +323,8 @@ type FilamentOptions_FilamentOptions_printer_nameable interface {
 func NewFilamentOptions() *FilamentOptions {
 	m := &FilamentOptions{}
 	m.SetAdditionalData(make(map[string]any))
+	sourceValue := INVENTORY_FILAMENTOPTIONS_SOURCE
+	m.SetSource(&sourceValue)
 	track_switchValue := false
 	m.SetTrackSwitch(&track_switchValue)
 	return m
@@ -366,6 +372,22 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["overlay_notes"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("string")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]string, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*string))
+				}
+			}
+			m.SetOverlayNotes(res)
+		}
+		return nil
+	}
 	res["printer_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateFilamentOptions_FilamentOptions_printer_idFromDiscriminatorValue)
 		if err != nil {
@@ -399,6 +421,16 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 				}
 			}
 			m.SetSlots(res)
+		}
+		return nil
+	}
+	res["source"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetEnumValue(ParseFilamentOptions_source)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSource(val.(*FilamentOptions_source))
 		}
 		return nil
 	}
@@ -491,6 +523,12 @@ func (m *FilamentOptions) GetNozzles() []NozzleInfoable {
 	return m.nozzles
 }
 
+// GetOverlayNotes gets the overlay_notes property value. The overlay_notes property
+// returns a []string when successful
+func (m *FilamentOptions) GetOverlayNotes() []string {
+	return m.overlay_notes
+}
+
 // GetPrinterId gets the printer_id property value. The printer_id property
 // returns a FilamentOptions_FilamentOptions_printer_idable when successful
 func (m *FilamentOptions) GetPrinterId() FilamentOptions_FilamentOptions_printer_idable {
@@ -507,6 +545,12 @@ func (m *FilamentOptions) GetPrinterName() FilamentOptions_FilamentOptions_print
 // returns a []SlotNeedable when successful
 func (m *FilamentOptions) GetSlots() []SlotNeedable {
 	return m.slots
+}
+
+// GetSource gets the source property value. The source property
+// returns a *FilamentOptions_source when successful
+func (m *FilamentOptions) GetSource() *FilamentOptions_source {
+	return m.source
 }
 
 // GetSpools gets the spools property value. The spools property
@@ -559,6 +603,12 @@ func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 			return err
 		}
 	}
+	if m.GetOverlayNotes() != nil {
+		err := writer.WriteCollectionOfStringValues("overlay_notes", m.GetOverlayNotes())
+		if err != nil {
+			return err
+		}
+	}
 	{
 		err := writer.WriteObjectValue("printer_id", m.GetPrinterId())
 		if err != nil {
@@ -579,6 +629,13 @@ func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("slots", cast)
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetSource() != nil {
+		cast := (*m.GetSource()).String()
+		err := writer.WriteStringValue("source", &cast)
 		if err != nil {
 			return err
 		}
@@ -661,6 +718,11 @@ func (m *FilamentOptions) SetNozzles(value []NozzleInfoable) {
 	m.nozzles = value
 }
 
+// SetOverlayNotes sets the overlay_notes property value. The overlay_notes property
+func (m *FilamentOptions) SetOverlayNotes(value []string) {
+	m.overlay_notes = value
+}
+
 // SetPrinterId sets the printer_id property value. The printer_id property
 func (m *FilamentOptions) SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable) {
 	m.printer_id = value
@@ -674,6 +736,11 @@ func (m *FilamentOptions) SetPrinterName(value FilamentOptions_FilamentOptions_p
 // SetSlots sets the slots property value. The slots property
 func (m *FilamentOptions) SetSlots(value []SlotNeedable) {
 	m.slots = value
+}
+
+// SetSource sets the source property value. The source property
+func (m *FilamentOptions) SetSource(value *FilamentOptions_source) {
+	m.source = value
 }
 
 // SetSpools sets the spools property value. The spools property
@@ -706,9 +773,11 @@ type FilamentOptionsable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetLibraryFileId() FilamentOptions_FilamentOptions_library_file_idable
 	GetNozzles() []NozzleInfoable
+	GetOverlayNotes() []string
 	GetPrinterId() FilamentOptions_FilamentOptions_printer_idable
 	GetPrinterName() FilamentOptions_FilamentOptions_printer_nameable
 	GetSlots() []SlotNeedable
+	GetSource() *FilamentOptions_source
 	GetSpools() []SpoolOptionable
 	GetSuggested() []SlotChoiceable
 	GetTrackSwitch() *bool
@@ -716,9 +785,11 @@ type FilamentOptionsable interface {
 	GetWarnings() []FilamentWarningable
 	SetLibraryFileId(value FilamentOptions_FilamentOptions_library_file_idable)
 	SetNozzles(value []NozzleInfoable)
+	SetOverlayNotes(value []string)
 	SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable)
 	SetPrinterName(value FilamentOptions_FilamentOptions_printer_nameable)
 	SetSlots(value []SlotNeedable)
+	SetSource(value *FilamentOptions_source)
 	SetSpools(value []SpoolOptionable)
 	SetSuggested(value []SlotChoiceable)
 	SetTrackSwitch(value *bool)
