@@ -44,7 +44,8 @@ const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> 
  * #977 — what each printer is doing now, whoever started the job: a print ScadBuddy
  * queued, one from Bambuddy's library, or one started on the printer. Read every
  * `NOW_POLL_MS` while the page is visible, and at once when it becomes visible again,
- * and (#3823) on a `printers` signal, at most every `NOW_SIGNAL_MS`. Each card says
+ * and (#3823) on a printer's report or change on the `printers` topic, no sooner than
+ * `NOW_SIGNAL_MS` after the last read of any kind. Each card says
  * which link answered for it: the printer's own LAN report or Bambuddy.
  */
 export function NowPrinting() {
@@ -56,16 +57,22 @@ export function NowPrinting() {
   const signalled = useRef<() => void>(() => undefined)
   // A `resync` (the subscription confirmed, or the socket back) is no news here: the
   // poll and the visibility read cover what a dropped socket missed.
+  // Only a printer's own events are news here (#4340 review M5).
   useSubscription('printers', (signal) => {
-    if (signal !== 'resync') signalled.current()
+    if (signal !== 'resync' && (signal.kind === 'printer.report' || signal.kind === 'printer.changed')) {
+      signalled.current()
+    }
   })
 
   useEffect(() => {
     let live = true
     // A timer read and a visibility read can overlap; only the newest one may land.
     let sent = 0
+    /** When the last read started, whatever started it: a signal waits `NOW_SIGNAL_MS` from it. */
+    let lastRead = -Infinity
     const read = () => {
       if (document.hidden) return
+      lastRead = Date.now()
       const mine = ++sent
       const current = () => live && mine === sent
       api
@@ -82,16 +89,13 @@ export function NowPrinting() {
           setCards((previous) => previous && previous.map((card) => ({ ...card, stale: card.stale ?? why })))
         })
     }
-    let lastSignalRead = 0
     let pending: ReturnType<typeof setTimeout> | undefined
     signalled.current = () => {
       if (pending !== undefined) return
-      const wait = Math.max(0, lastSignalRead + NOW_SIGNAL_MS - Date.now())
       pending = setTimeout(() => {
         pending = undefined
-        lastSignalRead = Date.now()
         read()
-      }, wait)
+      }, Math.max(0, lastRead + NOW_SIGNAL_MS - Date.now()))
     }
     read()
     const timer = setInterval(read, NOW_POLL_MS)

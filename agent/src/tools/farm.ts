@@ -46,7 +46,7 @@ export const farmTools: Tool[] = [
       "HMS errors, whether it waits for the plate to be cleared, and Bambuddy's archive of the job. A printer " +
       'whose status cannot be read is listed with an error rather than dropped. Each printer has `printer_id`, ' +
       'the Bambuddy printer id every print tool takes (as get_print_targets lists them), `id`, its registry id, ' +
-      'which the registry tools take (get_printer, list_printers), and `path`, the link that answered (native ' +
+      'which the registry tools take (get_printer, update_printer and the link tools), and `path`, the link that answered (native ' +
       'over the LAN, bambuddy, or none). `printer_id` is null for a printer reached only over the LAN, which the ' +
       'print tools cannot address yet.',
     input: z.object({}),

@@ -69,10 +69,12 @@ serial (`backend/scadbuddy/api/printers.py`; plan
 `docs/superpowers/plans/2026-10-16-printer-identity-native-path.md`). A row links
 the Bambuddy printer it is, a LAN connection, or both, and `preferred_path` says
 how a print reaches it: `native` over the LAN, `bambuddy` through Bambuddy, `auto`
-the LAN when it answers. `list_printers` and `discover_printers` read it;
-`link_printer_lan` takes the printer's 8-digit access code once, tests it on the
-printer, and never returns it (ask the user to type it in Settings > Printers
-rather than in chat). The print tools still take the Bambuddy `printer_id`, so a
+the LAN when it answers. `list_printers` and `discover_printers` read it. No tool
+links a printer over the LAN: its 8-digit access code is a device credential, typed
+only in Settings > Printers (`PUT /api/v1/printers/{printer_id}/lan` is listed as
+not a tool in `agent/src/tools/coverage.ts`). Send the user there, or open it with
+`browser_navigate` to `/settings#printers`, and never ask for the code in chat.
+The print tools still take the Bambuddy `printer_id`, so a
 printer the registry reaches only over the LAN cannot be printed to from here yet;
 `get_printers_now` lists both ids and says which link answered (`path`).
 

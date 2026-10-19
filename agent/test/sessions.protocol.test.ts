@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -168,6 +169,25 @@ describe('SdkEventMapper', () => {
 
 describe('scrubForLog', () => {
   const SECRET = 'sk-ant-api03-scrub-test-0000'
+
+  it('blanks the names in sensitive-keys.json, which agent-durable reads too (#4340 review C1)', () => {
+    const fixture = JSON.parse(
+      readFileSync(new URL('./fixtures/sensitive-keys.json', import.meta.url), 'utf8'),
+    ) as { blanked: Record<string, string>; kept: Record<string, string> }
+    const call = event({
+      type: 'tool.call',
+      sessionId: S,
+      id: 't0',
+      name: 'mcp__x__any',
+      input: { ...fixture.blanked, ...fixture.kept },
+      risk: 'outward',
+    })
+    const logged = scrubForLog(call, [])
+    expect(logged.type === 'tool.call' && logged.input).toEqual({
+      ...Object.fromEntries(Object.keys(fixture.blanked).map((key) => [key, REDACTED])),
+      ...fixture.kept,
+    })
+  })
 
   it('blanks secret-named arguments at any depth and redacts the credential everywhere', () => {
     const call = event({

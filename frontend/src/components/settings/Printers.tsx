@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { DiscoveredPrinter, PrinterRow, PrintPath } from '../../api/types'
+import type { RealtimeSignal } from '../../lib/realtime'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,8 +21,14 @@ import { Spinner } from '../ui/spinner'
  * the `printers` topic, so another tab's change shows here.
  */
 
-/** Every registry write announces `printer.changed` here (`backend/scadbuddy/api/realtime.py`). */
+/**
+ * The `printers` topic carries every registry write (`printer.changed`) and, while a LAN
+ * printer is watched, its reports (`printer.report`, about once a second while it prints;
+ * `printers/watch.py`). Only a write changes what this panel shows, so only that, or a
+ * resync, reads again: a report must not re-read the registry and Bambuddy each second.
+ */
 const TOPICS = ['printers'] as const
+const registryNews = (signal: RealtimeSignal) => signal === 'resync' || signal.kind === 'printer.changed'
 
 const PATHS: { value: PrintPath; label: string }[] = [
   { value: 'auto', label: 'Automatic' },
@@ -34,9 +41,14 @@ function problem(cause: unknown, fallback: string): string {
 }
 
 export function PrintersPanel() {
-  const printers = useAsync(() => api.listPrinters(), [], TOPICS)
+  const printers = useAsync(() => api.listPrinters(), [], TOPICS, registryNews)
   // Bambuddy's list is a convenience here: unreadable, nothing is offered to link.
-  const discovered = useAsync(() => api.discoverPrinters().catch(() => [] as DiscoveredPrinter[]), [], TOPICS)
+  const discovered = useAsync(
+    () => api.discoverPrinters().catch(() => [] as DiscoveredPrinter[]),
+    [],
+    TOPICS,
+    registryNews,
+  )
   const rows = printers.data
 
   const show = (next: PrinterRow[]) => printers.setData(next, { supersede: true })
@@ -153,6 +165,8 @@ function PrinterItem({
                   disabled={busy}
                   aria-label={`Unlink the LAN from ${row.name}`}
                   onClick={() => void act(() => api.unlinkPrinterLan(row.id), 'Could not unlink the LAN.')}
+                  // It deletes the stored access code: the user's to do, as the agent's tool is outward.
+                  {...USER_ONLY}
                 >
                   Unlink
                 </Button>
@@ -252,6 +266,7 @@ function LanForm({ row, onLinked }: { row: PrinterRow; onLinked: (row: PrinterRo
         value={host}
         onChange={(event) => setHost(event.target.value)}
         autoComplete="off"
+        maxLength={253}
         required
       />
       <LabeledInput
@@ -262,7 +277,9 @@ function LanForm({ row, onLinked }: { row: PrinterRow; onLinked: (row: PrinterRo
         maxLength={8}
         value={code}
         onChange={(event) => setCode(event.target.value)}
-        autoComplete="off"
+        // Not "off", which Chrome ignores on a password: it would save one printer's code and
+        // autofill it into the next printer's form, sending it to another host.
+        autoComplete="new-password"
         required
       />
       <Button type="submit" size="sm" variant="outline" disabled={busy} aria-busy={busy}>
@@ -305,8 +322,23 @@ function AddPrinter({ onAdded }: { onAdded: (row: PrinterRow) => void }) {
       className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
       onSubmit={(event) => void submit(event)}
     >
-      <LabeledInput label="Serial" value={serial} onChange={(event) => setSerial(event.target.value)} required />
-      <LabeledInput label="Name" value={name} onChange={(event) => setName(event.target.value)} required />
+      {/* The backend's bounds (`printers/models.py` PrinterCreate). */}
+      <LabeledInput
+        label="Serial"
+        value={serial}
+        onChange={(event) => setSerial(event.target.value)}
+        minLength={8}
+        maxLength={32}
+        pattern="[0-9A-Za-z]+"
+        required
+      />
+      <LabeledInput
+        label="Name"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        maxLength={80}
+        required
+      />
       <Button type="submit" size="sm" variant="outline" disabled={busy} aria-busy={busy}>
         {busy && <Spinner />}
         Add printer

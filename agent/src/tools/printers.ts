@@ -7,10 +7,11 @@ import { defineTool, json, type Tool } from './registry.js'
 // how ScadBuddy reaches it over the LAN. Routes: backend/scadbuddy/api/printers.py.
 //
 // The serial stays out of every result (it is an identifier the printer's cloud account
-// is bound to): a tool returns the row's `id`, which every tool here takes. The LAN
-// access code is sent once, by link_printer_lan (outward: a human approves it), and
-// never returned: a row says only `has_access_code`. Its argument is named so that the
-// session log and an approval's summary blank it (sessions/sdkEvents.ts SENSITIVE_KEY).
+// is bound to): a tool returns the row's `id`, which every tool here takes. No tool takes
+// the LAN access code (#4340 review I1): it is a device credential, typed only in
+// Settings > Printers (`PUT /printers/{id}/lan` is a coverage.ts NOT_A_TOOL), so it never
+// enters a model's context, a transcript or a flow script. Unlinking the LAN deletes that
+// stored code and stops the printer's watch, so it is outward, as delete_printer is.
 
 const SOURCE = "ScadBuddy's printer registry, with names typed by whoever set it up and Bambuddy's printer names"
 
@@ -32,10 +33,16 @@ const ROW_FIELDS =
   'Bambuddy printer it is, or null), `lan_host` and `has_access_code` (its LAN link, the code itself never ' +
   'shown), `preferred_path` and `bambuddy_active`.'
 
+/** Where the LAN link is made: by the user, never through a tool. */
+const LAN_IN_SETTINGS =
+  ' A printer is linked over the LAN only in Settings > Printers, where the user types its access code: ask ' +
+  'the user to do it there (open the page with browser_navigate to /settings#printers), and never ask for ' +
+  'the code in chat.'
+
 export const printerTools: Tool[] = [
   defineTool({
     name: 'list_printers',
-    description: `Every printer in ScadBuddy's registry, with its Bambuddy link and its LAN link. ${ROW_FIELDS}`,
+    description: `Every printer in ScadBuddy's registry, with its Bambuddy link and its LAN link. ${ROW_FIELDS}${LAN_IN_SETTINGS}`,
     input: z.object({}),
     risk: 'read',
     source: SOURCE,
@@ -46,7 +53,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'get_printer',
-    description: `One printer in the registry. ${ROW_FIELDS}`,
+    description: `One printer in the registry. ${ROW_FIELDS}${LAN_IN_SETTINGS}`,
     input: z.object({ printer }),
     risk: 'read',
     source: SOURCE,
@@ -77,10 +84,15 @@ export const printerTools: Tool[] = [
     description:
       'Adds a printer to the registry by its serial (on the printer, or in Bambu Handy), with a name. Link it to ' +
       'Bambuddy or the LAN afterwards. A serial already registered is refused, naming the row that has it.',
+    // The backend's bounds (printers/models.py PrinterCreate), so a bad serial is refused here, saying why.
     input: z.object({
-      serial: z.string().min(1).max(64),
-      name: z.string().min(1).max(100),
-      model: z.string().max(64).optional(),
+      serial: z
+        .string()
+        .trim()
+        .toUpperCase()
+        .pipe(z.string().regex(/^[0-9A-Z]{8,32}$/, 'must be the printer serial: 8 to 32 letters and digits')),
+      name: z.string().min(1).max(80),
+      model: z.string().max(40).optional(),
       preferred_path: path.default('auto'),
     }),
     risk: 'write',
@@ -94,7 +106,7 @@ export const printerTools: Tool[] = [
   defineTool({
     name: 'update_printer',
     description: "Renames a printer or sets its `preferred_path`, how a print reaches it.",
-    input: z.object({ printer, name: z.string().min(1).max(100).optional(), preferred_path: path.optional() }),
+    input: z.object({ printer, name: z.string().min(1).max(80).optional(), preferred_path: path.optional() }),
     risk: 'write',
     source: SOURCE,
     routes: ['PATCH /api/v1/printers/{printer_id}'],
@@ -152,43 +164,15 @@ export const printerTools: Tool[] = [
   }),
 
   defineTool({
-    name: 'link_printer_lan',
+    name: 'unlink_printer_lan',
     description:
-      "Links a printer over the LAN: its host or IP address and its 8-digit access code (on the printer's screen). " +
-      'The backend tests both on the printer before it stores anything, so a printer that does not answer is ' +
-      'refused (HTTP 502), as is an address off the LAN. The code is stored sealed and never shown again, here ' +
-      'or anywhere. Prefer that the user types it in Settings > Printers rather than in chat.',
-    input: z.object({
-      printer,
-      host: z.string().min(1).max(253),
-      access_code: z.string().regex(/^\d{8}$/, 'must be the 8-digit code the printer shows'),
-    }),
+      "Removes a printer's LAN link: its stored access code is deleted and ScadBuddy stops watching the printer, " +
+      'so printing to it over the LAN needs the user to link it again in Settings > Printers.',
+    input: z.object({ printer }),
     risk: 'outward',
     source: SOURCE,
-    routes: ['PUT /api/v1/printers/{printer_id}/lan'],
-    summarize: ({ printer: id, host }) => `Link printer ${id} over the LAN at ${host}`,
-    title: ({ host }) => `Link printer at ${host}`,
-    handler: async ({ printer: id, host, access_code }, { backend }) =>
-      json(
-        shown(
-          await ok(
-            backend.PUT('/api/v1/printers/{printer_id}/lan', {
-              params: { path: { printer_id: id } },
-              body: { host, access_code },
-            }),
-            'link the printer over the LAN',
-          ),
-        ),
-      ),
-  }),
-
-  defineTool({
-    name: 'unlink_printer_lan',
-    description: "Removes a printer's LAN link and its stored access code.",
-    input: z.object({ printer }),
-    risk: 'write',
-    source: SOURCE,
     routes: ['DELETE /api/v1/printers/{printer_id}/lan'],
+    summarize: ({ printer: id }) => `Unlink printer ${id} from the LAN, deleting its stored access code`,
     handler: async ({ printer: id }, { backend }) =>
       json(
         shown(

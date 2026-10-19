@@ -2,16 +2,14 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { summariseInput } from '../src/approvals/service.js'
-import { scrubForLog } from '../src/sessions/sdkEvents.js'
-import { event } from '../src/sessions/protocol.js'
+import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #3823 (plan 2026-10-16, Task 11): the printer registry's tools, over
-// backend/scadbuddy/api/printers.py. The LAN access code goes to the backend once and
-// never comes back: not in a result, a title, a pending action's summary or the log.
+// backend/scadbuddy/api/printers.py. No tool takes the LAN access code (it is typed only
+// in Settings > Printers), and no result carries the serial.
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -35,7 +33,6 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
 }
 
 const ID = '00000000-0000-4000-8000-0000000000aa'
-const CODE = '12345678'
 const ROW = {
   id: ID,
   serial: '01P00A0000000AA',
@@ -60,8 +57,7 @@ const TOOLS = {
   update_printer: ['write', 'PATCH /api/v1/printers/{printer_id}'],
   link_printer_bambuddy: ['write', 'PUT /api/v1/printers/{printer_id}/bambuddy'],
   unlink_printer_bambuddy: ['write', 'DELETE /api/v1/printers/{printer_id}/bambuddy'],
-  link_printer_lan: ['outward', 'PUT /api/v1/printers/{printer_id}/lan'],
-  unlink_printer_lan: ['write', 'DELETE /api/v1/printers/{printer_id}/lan'],
+  unlink_printer_lan: ['outward', 'DELETE /api/v1/printers/{printer_id}/lan'],
   delete_printer: ['outward', 'DELETE /api/v1/printers/{printer_id}'],
 } as const
 
@@ -73,60 +69,41 @@ describe('printer registry tools (#3823)', () => {
     expect(t.gated).toBe(risk === 'outward')
   })
 
-  it('link_printer_lan is outward and never echoes the access code', async () => {
-    let sent: unknown
+  it('takes no access code: the LAN link is made in Settings only (#4340 review I1)', () => {
+    expect(ALL_TOOLS.find((t) => t.name === 'link_printer_lan')).toBeUndefined()
+    expect(ALL_TOOLS.some((t) => t.routes.includes('PUT /api/v1/printers/{printer_id}/lan'))).toBe(false)
+    expect(ALL_TOOLS.some((t) => Object.keys(t.shape).some((key) => /access[-_]?code/i.test(key)))).toBe(false)
+    const lan = NOT_A_TOOL.find((entry) => entry.operation === 'PUT /api/v1/printers/{printer_id}/lan')
+    expect(lan?.reason).toMatch(/Settings > Printers/)
+    for (const name of ['list_printers', 'get_printer']) {
+      expect(tool(name).description).toMatch(/Settings > Printers/)
+      expect(tool(name).description).toMatch(/browser_navigate/)
+    }
+  })
+
+  it('unlink_printer_lan is outward: it deletes the stored code (#4340 review I2)', async () => {
+    const t = tool('unlink_printer_lan')
+    expect(t.gated).toBe(true)
+    expect(t.summarize({ printer: ID })).toContain(ID)
+    const pending = await runTool(t, { printer: ID }, ctx({ principal: { id: 'test', kind: 'browser', tiers: tiersUpTo('write') } }))
+    // A write-tier caller cannot reach it; nothing was sent to the backend (unhandled requests fail).
+    expect(pending.isError).toBe(true)
+  })
+
+  it('refuses a serial the backend would, and sends it uppercased (#4340 review M1)', async () => {
+    const bodies: unknown[] = []
     server.use(
-      http.put(`${BACKEND}/api/v1/printers/${ID}/lan`, async ({ request }) => {
-        sent = await request.json()
-        return HttpResponse.json(ROW)
+      http.post(`${BACKEND}/api/v1/printers`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(ROW, { status: 201 })
       }),
     )
-    const t = tool('link_printer_lan')
-    expect(t.risk).toBe('outward')
-    const args = { printer: ID, host: '10.0.0.9', access_code: CODE }
-
-    const result = await t.execute(args, ctx())
-
-    expect(result.isError).toBeFalsy()
-    expect(sent).toEqual({ host: '10.0.0.9', access_code: CODE })
-    expect(JSON.stringify(result)).not.toContain(CODE)
-    expect(firstText(result)).toMatchObject({ id: ID, has_access_code: true, lan_host: '10.0.0.9' })
-    expect(t.summarize(args)).not.toContain(CODE)
-    expect(t.title(args)).not.toContain(CODE)
-    // The pending action's summary and the session log blank it by its name.
-    expect(summariseInput(t.name, args, [])).not.toContain(CODE)
-    const logged = scrubForLog(
-      event({ type: 'tool.call', sessionId: 's', id: 'c', name: t.name, input: args, risk: 'outward' }),
-      [],
-    )
-    expect(JSON.stringify(logged)).not.toContain(CODE)
-  })
-
-  it("link_printer_lan passes the probe's failure through, without the code", async () => {
-    server.use(
-      http.put(`${BACKEND}/api/v1/printers/${ID}/lan`, () =>
-        HttpResponse.json({ detail: 'the printer did not answer at that address' }, { status: 502 }),
-      ),
-    )
-    // `execute` is the handler behind the approval gate; runTool turns this into the error result.
-    const failed = await tool('link_printer_lan')
-      .execute({ printer: ID, host: '10.0.0.99', access_code: CODE }, ctx())
-      .then(
-        () => null,
-        (error: unknown) => error as Error,
-      )
-    expect(failed?.message).toContain('the printer did not answer at that address')
-    expect(failed?.message).not.toContain(CODE)
-  })
-
-  it('link_printer_lan refuses a code that is not 8 digits before calling the backend', async () => {
-    const result = await runTool(
-      tool('link_printer_lan'),
-      { printer: ID, host: '10.0.0.9', access_code: 'abc' },
-      ctx({ principal: { id: 'test', kind: 'browser', tiers: tiersUpTo('outward') } }),
-    )
-    expect(result.isError).toBe(true)
-    expect(JSON.stringify(result)).not.toContain('"abc"')
+    for (const serial of ['short', '01P00A00000000AA-X', 'A'.repeat(33)]) {
+      expect((await runTool(tool('create_printer'), { serial, name: 'Garage' }, ctx())).isError).toBe(true)
+    }
+    expect((await runTool(tool('create_printer'), { serial: 'x'.repeat(8), name: 'n'.repeat(81) }, ctx())).isError).toBe(true)
+    await runTool(tool('create_printer'), { serial: ' 01p00a0000000aa ', name: 'Garage' }, ctx())
+    expect(bodies).toEqual([{ serial: '01P00A0000000AA', name: 'Garage', preferred_path: 'auto' }])
   })
 
   it('lists printers without their serials', async () => {

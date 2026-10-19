@@ -40,11 +40,14 @@ export function initialPrinters(): PrinterRow[] {
       bambuddy_printer_id: 1,
       preferred_path: 'bambuddy',
     }),
-    row({ id: '00000000-0000-4000-8000-0000000000aa', serial: '01P00A0000000AA', name: 'Garage', model: 'P1S' }),
+    row({ id: '00000000-0000-4000-8000-0000000000aa', serial: '01P00A0000000AA', name: 'Garage' }),
   ]
 }
 
-/** Bambuddy's printers (`printersNow.ts`'s): 1 linked, 2 free to link to `Garage`, 3 with its serial withheld. */
+/**
+ * Bambuddy's printers, named as `printersNow.ts` and `fixtures.targets` name them: 1 linked,
+ * 2 free to link to `Garage` (the same serial), 3 with its serial withheld.
+ */
 export function initialDiscovered(): DiscoveredPrinter[] {
   return [
     {
@@ -58,8 +61,8 @@ export function initialDiscovered(): DiscoveredPrinter[] {
     },
     {
       bambuddy_printer_id: 2,
-      name: 'Workshop',
-      model: 'P1S',
+      name: '3DP-77A-114',
+      model: 'H2C',
       serial: '01P00A0000000AA',
       linked_to: null,
       linkable: true,

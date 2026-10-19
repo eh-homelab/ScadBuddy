@@ -33,7 +33,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
     id: '00000000-0000-4000-8000-000000000002',
     path: 'bambuddy',
     printer_id: 2,
-    name: 'Workshop',
+    name: '3DP-77A-114',
     activity: 'printing',
     state: 'RUNNING',
     job_name: 'Luna keychain',
@@ -81,15 +81,18 @@ export function setPrintersNow(printers: PrinterNow[]): void {
 }
 
 /**
- * #3823 — the registry's LAN links show as the backend reports them: a linked row's
- * card is answered by its own LAN report (`path: 'native'`), and a row only the LAN
- * reaches is a card with no Bambuddy id.
+ * #3823 — the registry shows as the backend reports it: a card carries the id of the
+ * row that links its Bambuddy printer, a row with a LAN link answers its card itself
+ * (`path: 'native'`), and a row only the LAN reaches is a card with no Bambuddy id.
  */
 function withLan(cards: PrinterNow[]): PrinterNow[] {
-  const lan = printersState().filter((row) => row.lan_host)
+  const rows = printersState()
+  const lan = rows.filter((row) => row.lan_host)
   const shown = cards.map((card) => {
-    const row = lan.find((entry) => entry.bambuddy_printer_id === card.printer_id)
-    return row ? { ...card, id: row.id, path: 'native' as const } : card
+    // A card's `id` is the registry row that links its Bambuddy printer, as the backend's is.
+    const row = card.printer_id === null ? undefined : rows.find((entry) => entry.bambuddy_printer_id === card.printer_id)
+    if (!row) return card
+    return row.lan_host ? { ...card, id: row.id, path: 'native' as const } : { ...card, id: row.id }
   })
   const lanOnly = lan
     .filter((row) => row.bambuddy_printer_id == null)

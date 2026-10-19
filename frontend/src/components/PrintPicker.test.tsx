@@ -8,6 +8,7 @@ import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
+import { printersState } from '../mocks/features/printers'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
@@ -378,8 +379,11 @@ describe('PrintPicker', () => {
 
   it('sends the whole run request, with the plan the server suggested', async () => {
     const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
     const { user } = renderPicker()
     await loaded()
+    // `printer` goes out once the registry has answered (#4340 review M4).
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
@@ -1624,12 +1628,16 @@ describe('PrintPicker · Printer', () => {
   })
 
   it('lists a printer reached only over the LAN, not yet choosable (#3823)', async () => {
+    printersState()[1]!.lan_host = '10.0.0.9'
+    await api.createPrinter({ serial: '01P00A0000000BB', name: 'Attic', preferred_path: 'auto' })
     const { user } = renderPicker()
     await loaded()
 
     expect(await optionDisabled(user, screen.getByLabelText('Printer'), /^Garage/)).toBe(true)
     await user.click(screen.getByLabelText('Printer'))
     expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not in Bambuddy')
+    // A row neither Bambuddy nor the LAN reaches is not a printer to offer (#4340 review M3).
+    expect(screen.queryByRole('option', { name: /^Attic/ })).toBeNull()
   })
 
   it('does not ask which printer when there is only one', async () => {

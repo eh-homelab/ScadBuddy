@@ -317,7 +317,7 @@ export function PrintPicker({
    * #3823 — the printer registry, read with the dialog: the row that links the chosen
    * Bambuddy printer goes out as `printer` beside `printer_id` (plan 2026-10-16 Task 10;
    * the backend reads `printer` from Task 8, and ignores it before). A row no Bambuddy
-   * printer backs is listed but not choosable until the run can print over the LAN
+   * printer backs, and the LAN reaches, is listed but not choosable until the run can print over the LAN
    * (Tasks 8 and 9). Unreadable, the dialog works as before, on Bambuddy ids alone.
    */
   const registry = useAsync(
@@ -326,9 +326,9 @@ export function PrintPicker({
   )
   const registryRows = registry.data ?? NO_ROWS
   const registryPrinter = registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
-  const lanOnly = registryRows.filter(
-    (row) => row.bambuddy_printer_id == null || !printers.some((entry) => entry.id === row.bambuddy_printer_id),
-  )
+  // Only a row the LAN reaches and Bambuddy does not: one just created by serial reaches
+  // neither, and one linked to a Bambuddy printer is that printer's entry (#4340 review M3).
+  const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
   const { nozzles, tier, processName, bedType, overrides } = selection
   /**
    * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only

@@ -1,7 +1,9 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { PROBE_FAILED, UNREACHABLE, printersState } from '../../mocks/features/printers'
+import { emitRealtime } from '../../mocks/realtime'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { PrintersPanel } from './Printers'
@@ -25,6 +27,31 @@ describe('PrintersPanel (#3823)', () => {
     expect(within(garage).getByRole('combobox', { name: 'How Garage prints' })).toHaveTextContent('Automatic')
   })
 
+  it("reads again on a registry change, not on a printer's LAN report (#4340 review I3)", async () => {
+    const reads: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      const path = new URL(request.url).pathname
+      if (request.method === 'GET' && path.startsWith('/api/v1/printers')) reads.push(path)
+    })
+    renderPage(<PrintersPanel />)
+    await screen.findByRole('listitem', { name: GARAGE })
+
+    // A change elsewhere: the list follows it (and so is subscribed).
+    printersState()[1]!.name = 'Shed'
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', `printer:${printersState()[1]!.id}`], {})
+      expect(screen.getByRole('listitem', { name: 'Printer Shed' })).toBeInTheDocument()
+    })
+    await waitFor(() => expect(reads.filter((path) => path === '/api/v1/printers/discover').length).toBeGreaterThan(1))
+
+    reads.length = 0
+    for (let i = 0; i < 5; i += 1) {
+      act(() => emitRealtime('printer.report', ['printers', `printer:${printersState()[0]!.id}`], { progress: i }))
+    }
+    await act(() => new Promise((resolve) => setTimeout(resolve, 600)))
+    expect(reads).toEqual([])
+  })
+
   it("sets a printer's path", async () => {
     const { user } = renderPage(<PrintersPanel />)
     const garage = await screen.findByRole('listitem', { name: GARAGE })
@@ -44,7 +71,7 @@ describe('PrintersPanel (#3823)', () => {
     // The one already linked to another printer is not offered.
     expect(within(garage).queryByRole('button', { name: 'Link Bambuddy printer 3DP-31B-598' })).toBeNull()
 
-    await user.click(within(garage).getByRole('button', { name: 'Link Bambuddy printer Workshop' }))
+    await user.click(within(garage).getByRole('button', { name: 'Link Bambuddy printer 3DP-77A-114' }))
 
     await waitFor(() => expect(garage).toHaveTextContent('Bambuddy printer 2'))
     expect(printersState()[1]!.bambuddy_printer_id).toBe(2)
@@ -62,6 +89,8 @@ describe('PrintersPanel (#3823)', () => {
     await user.type(within(form).getByLabelText('Host or IP address'), '10.0.0.9')
     await user.type(within(form).getByLabelText('Access code'), '12345678')
     expect(within(form).getByLabelText('Access code')).toHaveAttribute('type', 'password')
+    // Never saved or autofilled into another printer's form (#4340 review M2).
+    expect(within(form).getByLabelText('Access code')).toHaveAttribute('autocomplete', 'new-password')
     await user.click(within(form).getByRole('button', { name: 'Test and link' }))
 
     await waitFor(() => expect(garage).toHaveTextContent('LAN 10.0.0.9'))
@@ -69,7 +98,9 @@ describe('PrintersPanel (#3823)', () => {
     for (const input of document.querySelectorAll('input')) expect(input.value).not.toBe('12345678')
     expect(printersState()[1]!.has_access_code).toBe(true)
 
-    await user.click(within(garage).getByRole('button', { name: 'Unlink the LAN from Garage' }))
+    const unlink = within(garage).getByRole('button', { name: 'Unlink the LAN from Garage' })
+    expect(isUserOnly(unlink)).toBe(true)
+    await user.click(unlink)
     await waitFor(() => expect(garage).toHaveTextContent('No LAN link'))
   })
 
