@@ -55,7 +55,7 @@ Where the spec leaves a choice open, or phase 1 needs something a later phase ow
 1. **Two replicas creating orders in the same year** must get distinct, gapless numbers (Task 2 `test_numbers_are_distinct_under_concurrent_creates`, two threads on two connections).
 2. **`close` while an item is still open** is refused with every offending item named, and nothing changes (Task 4 `test_close_names_every_open_item`).
 3. **A customer edit after `accept`** does not move the order's shipping address (Task 4 `test_accepted_order_keeps_its_address_snapshot`).
-4. **A reference change drops the accepted quote** and the order falls back from `quoted` to `draft` when it was not yet accepted; after `accept` the reference is immutable A quantity change drops it the same way (Ruling 1). (Task 4 `test_reference_change_drops_the_quote`, `test_quantity_change_drops_the_quote`, `test_reference_is_immutable_after_accept`).
+4. **A reference change drops the accepted quote** and the order falls back from `quoted` to `draft` when it was not yet accepted; after `accept` the reference is immutable. A quantity change drops it the same way (Ruling 1). (Task 4 `test_reference_change_drops_the_quote`, `test_quantity_change_drops_the_quote`, `test_reference_is_immutable_after_accept`).
 5. **The asset sweep keeps an ordered upload** whose only reference is an item's `inputs` (Task 3 `test_sweep_keeps_an_ordered_asset`).
 6. **A cancelled order cancels its open items and keeps its fulfilled ones' attempts** (Task 4 `test_cancel_keeps_fulfilled_attempts`).
 7. **A bad commit for the slug** (not in that model's history) is 422, and a deleted template's slug is 409 (Task 3 `test_a_commit_of_another_model_is_refused`, `test_a_deleted_template_is_refused`).
