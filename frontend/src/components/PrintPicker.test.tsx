@@ -2185,6 +2185,19 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     expect(bodies[0]).not.toHaveProperty('prime_tower')
   })
 
+  it('never builds a check with the tower choice once Advanced is left (#4361 review)', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toHaveProperty('prime_tower'))
+    vi.mocked(usePrintCheck).mockClear()
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByLabelText('Prime tower')).not.toBeInTheDocument())
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request !== null && 'prime_tower' in request)).toEqual([])
+  })
+
   it('sends the tower on with No sparse layers', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
@@ -3972,6 +3985,20 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
       expect.objectContaining({ rack_position: 2 }),
     )
+  })
+
+  it('never builds a check with a hand-picked nozzle once Advanced is left (#4361 review)', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByTestId('rack-position-2')).not.toBeInTheDocument())
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built).not.toContainEqual(expect.objectContaining({ rack_position: 2 }))
   })
 
   it('goes back to Automatic when the nozzle size changes', async () => {

@@ -395,7 +395,10 @@ export function PrintPicker({
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
   // #3628 — this print's prime tower; `null` leaves it to the template and the process.
-  const [primeTower, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
+  const [towerChosen, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
+  // Advanced mode's only: the render that leaves it must not build a check with it
+  // (#4361 review), as the effect below clears it a render later.
+  const primeTower = picker.advanced ? towerChosen : null
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
@@ -434,9 +437,13 @@ export function PrintPicker({
   const [picked, setPicked] = useState<{ printerId: number | null; size: typeof size; position: number } | null>(
     null,
   )
-  // Read for the printer and size it was picked for only, as `chosenAlgorithm` (#4347).
+  // Read for the printer and size it was picked for only, and in Advanced mode only, as
+  // `chosenAlgorithm` (#4347): Simple mode shows no rack step, and the render that
+  // leaves Advanced must not build a check with the pick (#4361 review).
   const rackPosition =
-    picked !== null && picked.printerId === printerId && picked.size === size ? picked.position : null
+    picked !== null && picker.advanced && picked.printerId === printerId && picked.size === size
+      ? picked.position
+      : null
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
   /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
@@ -465,6 +472,7 @@ export function PrintPicker({
       setPrimeTower(null)
     }
   }, [advanced])
+  // State clean-up only: `rackPosition` already reads no pick of another size (#4347).
   useEffect(() => {
     setPicked(null)
   }, [size])
