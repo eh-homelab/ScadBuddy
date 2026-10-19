@@ -142,6 +142,9 @@ def missing_glyph_warnings(
         if parameter.type != "font":
             continue
         font = str(params.get(parameter.name, parameter.initial) or "")
+        # Before the budget, and on purpose: a font naming no family (the default) is
+        # never asked about, so past the budget it is not one left unchecked either, and
+        # the log lists only fonts that name a family. Parsing the name asks nothing.
         if not font_families(font):
             continue
         left = deadline - clock()

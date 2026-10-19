@@ -1,5 +1,14 @@
 import { expect, test, type Locator } from '@playwright/test'
 
+/**
+ * `locator`'s box, once it shows: a missing element fails naming the locator, not as a
+ * TypeError on a null box (#3984).
+ */
+async function visibleBox(locator: Locator) {
+  await expect(locator).toBeVisible()
+  return (await locator.boundingBox())!
+}
+
 /** How far `left`'s right edge reaches past `right`'s left edge, in CSS pixels. */
 async function overlap(left: Locator, right: Locator): Promise<number> {
   const [a, b] = [await left.boundingBox(), await right.boundingBox()]
@@ -422,7 +431,7 @@ test.describe('the session switcher at 390 px (#795)', () => {
 
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
     const actions = sessions.getByRole('button', { name: 'Actions for Tune the gridfinity bin (fork)' })
-    const row = (await actions.boundingBox())!
+    const row = await visibleBox(actions)
     expect(row.x + row.width).toBeLessThanOrEqual(390)
     await actions.click()
     for (const name of [
@@ -430,7 +439,7 @@ test.describe('the session switcher at 390 px (#795)', () => {
       'Mark Tune the gridfinity bin (fork) done',
       'Archive Tune the gridfinity bin (fork)',
     ]) {
-      const box = (await page.getByRole('menuitem', { name }).boundingBox())!
+      const box = await visibleBox(page.getByRole('menuitem', { name }))
       expect(box.x, name).toBeGreaterThanOrEqual(0)
       expect(box.x + box.width, name).toBeLessThanOrEqual(390)
     }
@@ -464,7 +473,7 @@ test.describe('the session switcher at 390 px (#795)', () => {
     await sessions.getByRole('tab', { name: 'Archived' }).click()
     const archived = sessions.getByRole('list', { name: 'Archived chats' })
     for (const name of [`Open ${OWN}`, `Unarchive ${OWN}`]) {
-      const box = (await archived.getByRole('button', { name }).boundingBox())!
+      const box = await visibleBox(archived.getByRole('button', { name }))
       expect(box.x + box.width, name).toBeLessThanOrEqual(390)
     }
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
@@ -500,9 +509,9 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
       el.textContent = 'Sessions (999)'
     })
 
-    const edge = (await panel.boundingBox())!
+    const edge = await visibleBox(panel)
     for (const button of await panel.locator('header').getByRole('button').all()) {
-      const box = (await button.boundingBox())!
+      const box = await visibleBox(button)
       expect(box.x + box.width, await button.innerText()).toBeLessThanOrEqual(edge.x + edge.width + 0.5)
     }
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(768)
@@ -521,9 +530,8 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
 
     const header = panel.getByTestId('active-session-header')
     const title = panel.getByTestId('active-session-title')
-    await expect(title).toBeVisible()
-    const row = (await header.boundingBox())!
-    const box = (await title.boundingBox())!
+    const row = await visibleBox(header)
+    const box = await visibleBox(title)
     const padding = await header.evaluate((el) => {
       const style = el.ownerDocument.defaultView!.getComputedStyle(el)
       return parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
@@ -531,7 +539,7 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
     // 12rem, or the whole row when the row is narrower; less the row's padding.
     expect(box.width).toBeGreaterThanOrEqual(Math.min(192, row.width - padding) - 0.5)
 
-    const edge = (await panel.boundingBox())!
+    const edge = await visibleBox(panel)
     const actions = panel.getByTestId('composer-actions')
     let measured = 0
     for (const child of await actions.locator(':scope > *').all()) {
@@ -577,8 +585,7 @@ test.describe('the session switcher with a long title', () => {
     const right = await panel.evaluate((el) => el.getBoundingClientRect().right)
     for (const title of ['hello', LONG]) {
       const actions = sessions.getByRole('button', { name: `Actions for ${title}` })
-      await expect(actions).toBeVisible()
-      const box = (await actions.boundingBox())!
+      const box = await visibleBox(actions)
       expect(box.x + box.width, title).toBeLessThanOrEqual(right)
     }
     await sessions.getByRole('button', { name: `Actions for ${LONG}` }).click()

@@ -676,4 +676,21 @@ describe("decidedCalls: a released turn's approved call (unified runtime spec §
     expect(ran).toBe(0)
     expect(asked).toEqual([])
   })
+
+  // #3441: only ScadBuddy's own tools can run outside the conversation; a released park of
+  // any other (a remote plugin's, http_request, a package's Bash) is told it was not run,
+  // so nothing outside the backend's Idempotency-Key can run twice.
+  it.each(['mcp__plugin_notes_api__send', 'mcp__scadbuddy_http__http_request', 'Bash', 'mcp__scadbuddy__unknown'])(
+    'tells the model %s was not run, and runs nothing',
+    async (tool) => {
+      ran = 0
+      asked.length = 0
+      expect(await run({ ...call(`durable:${SESSION}:run-1:toolu_1`), tool })).toEqual({
+        ran: false,
+        text: `${tool} cannot be run outside the conversation, so it was not run`,
+      })
+      expect(ran).toBe(0)
+      expect(asked).toEqual([])
+    },
+  )
 })

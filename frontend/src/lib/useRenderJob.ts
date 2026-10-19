@@ -146,10 +146,10 @@ export function canRetry(error: unknown): boolean {
  * #2464 — a render that could not be submitted (a 503 while the server restarts, no
  * answer at all) is tried again on its own, at once when the browser comes back online,
  * so a deploy mid-edit does not leave the page on the previous render for good. At most
- * RENDER_AUTO_RETRIES timed tries in a row (one made on coming back online is not counted,
- * and is made past the cap too),
- * and none while `enabled` is false; the count starts over once a render goes through,
- * and for new values (`values`), which the server may take where it refused the old.
+ * RENDER_AUTO_RETRIES timed tries in a row (one made on coming back online is not
+ * counted, and is made past the cap too), and none while `enabled` is false; the count
+ * starts over once a render goes through, and for new values (`values`), which the
+ * server may take where it refused the old.
  */
 export function useRenderAutoRetry(
   error: unknown,

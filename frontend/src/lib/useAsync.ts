@@ -189,7 +189,8 @@ export function useAsync<T>(
           if (!mounted.current || sequence.current !== mine) return
           const error = cause instanceof Error ? cause : new Error(String(cause))
           // A failed background read keeps what is on screen: the next change reads
-          // again. Only a key with nothing to show yet shows the error.
+          // again. Only a key with nothing to show yet shows the error. The very same
+          // snapshot, `data` and all: LibraryUpgrade's re-list alert relies on it (#3839).
           setSnapshot((s) => (s.key === at && s.data !== undefined ? s : { key: at, error }))
           for (const f of fail) f()
         },
