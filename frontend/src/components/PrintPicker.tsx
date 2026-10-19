@@ -237,7 +237,11 @@ const NO_ROWS: PrinterRow[] = []
 /** A closed dialog follows no topic. */
 const NO_TOPICS: readonly string[] = []
 
-/** #3222 — the sequence a template's `print_settings` sets, which no override prints with. */
+/**
+ * #3222 — the sequence a template's `print_settings` sets, which no override prints with.
+ * The backend accepts only these two spellings (`PrintSequence`, `library/catalogue.py`),
+ * so any other value is unknown.
+ */
 function templateSequence(settings: Record<string, string> | undefined): PrintSequence | null {
   const value = settings?.['print_sequence']
   return value === 'by layer' || value === 'by object' ? value : null
