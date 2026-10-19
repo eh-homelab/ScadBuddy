@@ -526,6 +526,26 @@ def test_risk_tiers_are_the_agents() -> None:
     assert frozenset(json.loads(fixture.read_text())) == events_module.RISK_TIERS
 
 
+def test_sensitive_keys_are_the_agents() -> None:
+    """#4340 review C1: `SENSITIVE_KEY` copies sdkEvents.ts's; both read one fixture."""
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "agent"
+            / "test"
+            / "fixtures"
+            / "sensitive-keys.json"
+        ).read_text()
+    )
+    blanked: dict[str, str] = fixture["blanked"]
+    kept: dict[str, str] = fixture["kept"]
+    logged = logged_input({**blanked, **kept})
+    assert logged == {**{key: events_module.REDACTED for key in blanked}, **kept}
+    text = json.dumps(logged)
+    for value in blanked.values():
+        assert value not in text
+
+
 @workflow.defn(sandboxed=False)
 class Streamed:
     """A session's stream alone: what a test publishes, until it is told to close."""

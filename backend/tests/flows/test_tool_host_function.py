@@ -701,6 +701,9 @@ async def test_a_beatless_tier_in_a_run_from_before_4262_still_fails_and_replays
     served.tier_delay_s = 2.5
     projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
     activities = outward_activities(outward.store, None)
+    # The workflow sandbox passes `temporalio` through, so the run sees this stand-in
+    # (as `before_2937` above); were it not, the run would fall back and the assertions
+    # on the timeout below would fail.
     patched = workflow.patched
 
     def before_4262(patch_id: str) -> bool:

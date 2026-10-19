@@ -8,6 +8,7 @@ import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
+import { printersState } from '../mocks/features/printers'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
@@ -22,7 +23,7 @@ import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 import { chooseProject, openPicker } from '../test/projectPicker'
-import { choose, optionNames } from '../test/select'
+import { choose, optionDisabled, optionNames } from '../test/select'
 
 /** #3669 — the option text for the value a native select took, in the shadcn select that replaced it. */
 const OPTION_TEXT: Record<string, string | RegExp> = {
@@ -378,14 +379,19 @@ describe('PrintPicker', () => {
 
   it('sends the whole run request, with the plan the server suggested', async () => {
     const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
     const { user } = renderPicker()
     await loaded()
+    // `printer` goes out once the registry has answered (#4340 review M4).
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
 
     expect(bodies).toHaveLength(1)
     expect(bodies[0]).toEqual({
+      // #3823 — the registry printer, and its Bambuddy id for a backend that reads only that.
+      printer: '00000000-0000-4000-8000-000000000001',
       printer_id: 1,
       filament_plan: {
         slots: [
@@ -1604,6 +1610,34 @@ describe('PrintPicker · Printer', () => {
     expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-31B-598')
     await pick(user, screen.getByLabelText('Printer'), '2')
     await waitFor(() => expect(urls.at(-1)).toContain('printer_id=2'))
+  })
+
+  it('names the registry printer only for a Bambuddy printer the registry links (#3823)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114'))
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    const body = bodies[0] as { printer?: unknown; printer_id?: unknown }
+    expect(body.printer_id).toBe(2)
+    expect(body).not.toHaveProperty('printer')
+  })
+
+  it('lists a printer reached only over the LAN, not yet choosable (#3823)', async () => {
+    printersState()[1]!.lan_host = '10.0.0.9'
+    await api.createPrinter({ serial: '01P00A0000000BB', name: 'Attic', preferred_path: 'auto' })
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(await optionDisabled(user, screen.getByLabelText('Printer'), /^Garage/)).toBe(true)
+    await user.click(screen.getByLabelText('Printer'))
+    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not in Bambuddy')
+    // A row neither Bambuddy nor the LAN reaches is not a printer to offer (#4340 review M3).
+    expect(screen.queryByRole('option', { name: /^Attic/ })).toBeNull()
   })
 
   it('does not ask which printer when there is only one', async () => {
@@ -3957,6 +3991,37 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(puts.bodies).toEqual([{ algorithm: 'newest_first', version: expect.any(Number) }])
   })
 
+  it("never builds a check of one printer with another's hand-picked nozzle (#4347)", async () => {
+    // As the algorithm above: a rack position is the printer's own, cleared on a switch.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ printer_id: 2 }))
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
+      expect.objectContaining({ rack_position: 2 }),
+    )
+  })
+
+  it('never builds a check with a hand-picked nozzle once Advanced is left (#4361 review)', async () => {
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_position: 2 }))
+    vi.mocked(usePrintCheck).mockClear()
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByTestId('rack-position-2')).not.toBeInTheDocument())
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built).not.toContainEqual(expect.objectContaining({ rack_position: 2 }))
+  })
+
   it('goes back to Automatic when the nozzle size changes', async () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     renderPicker()
@@ -4076,6 +4141,28 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer_id: 2 }))
     expect(checks.bodies.filter((b) => (b as { printer_id?: number }).printer_id === 2)).toEqual(
       expect.not.arrayContaining([expect.objectContaining({ rack_algorithm: 'oldest_first' })]),
+    )
+  })
+
+  it("never builds a check of one printer with another's algorithm (#4347)", async () => {
+    // The check is debounced, so the test above sees only the requests sent. A request
+    // built for a render is sent if nothing replaces it within the debounce, and under load
+    // the render that clears the old printer's algorithm came later than that (#4347):
+    // so no render may build one.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    pickAlgorithm(await screen.findByLabelText('Rack algorithm'), 'oldest_first')
+    await waitFor(() =>
+      expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ rack_algorithm: 'oldest_first' }),
+    )
+    vi.mocked(usePrintCheck).mockClear()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toMatchObject({ printer_id: 2 }))
+    const built = vi.mocked(usePrintCheck).mock.calls.map(([, request]) => request)
+    expect(built.filter((request) => request?.printer_id === 2)).not.toContainEqual(
+      expect.objectContaining({ rack_algorithm: 'oldest_first' }),
     )
   })
 

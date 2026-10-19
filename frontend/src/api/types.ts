@@ -135,6 +135,13 @@ export type SidebarLink = Schemas['SidebarLink']
 export type FilamentPresetOption = Schemas['FilamentPresetOption']
 
 export type PrintRunRequest = Schemas['PrintRunRequest']
+/**
+ * #3823 — a run request that also names the registry printer (`printer`, plan 2026-10-16
+ * Task 8). Until the backend reads it, `printer_id` (the Bambuddy printer the row links)
+ * is what it acts on, and it ignores `printer`: the request model takes no extra keys as
+ * errors (`print_run.py` `PrintRunRequest`, pydantic's default `extra='ignore'`).
+ */
+export type RegistryRunRequest = PrintRunRequest & { printer?: string }
 export type PrintRunResult = Schemas['PrintRunResult']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
@@ -287,6 +294,14 @@ export type PrintersNow = Schemas['PrintersNow']
 export type QueueItem = Schemas['QueueItem']
 export type ArchiveStats = Schemas['ArchiveStats']
 export type PrinterNow = Schemas['PrinterNow']
+/** #3823 — the printer registry: one row per physical printer, keyed by serial. */
+export type PrinterRow = Schemas['PrinterRow']
+export type PrinterCreate = Schemas['PrinterCreate']
+export type PrinterPatch = Schemas['PrinterPatch']
+export type PrintPath = PrinterRow['preferred_path']
+export type DiscoveredPrinter = Schemas['DiscoveredPrinter']
+/** The LAN link as typed: the access code goes once and never comes back. */
+export type LanLink = Schemas['LanLink']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']

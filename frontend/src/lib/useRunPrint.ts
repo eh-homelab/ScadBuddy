@@ -5,6 +5,7 @@ import type {
   ChoicesView,
   PrintOptions,
   PrintRunRequest,
+  RegistryRunRequest,
   PrintRunResult,
   PrintSequence,
   PrimeTowerChoice,
@@ -23,6 +24,8 @@ interface RunInput {
   source: PrintSource | undefined
   choices: ChoicesView | null
   printerId: number | null
+  /** #3823 — the registry printer that links `printerId`, when the registry has one. */
+  registryPrinter?: string | null
   selection: PrintSelection
   plan: SlotChoice[]
   /** Whether `plan` differs from the suggestion, so it is worth remembering (#78). */
@@ -77,6 +80,7 @@ const NONE: string[] = []
  */
 export function printRunBody({
   printerId,
+  registryPrinter = null,
   plan,
   printChoices,
   copies,
@@ -92,6 +96,8 @@ export function printRunBody({
   rackAlgorithm,
 }: {
   printerId: number | null
+  /** #3823 — sent as `printer`, beside `printer_id`, so a backend of either age reads it. */
+  registryPrinter?: string | null
   plan: SlotChoice[]
   printChoices: NonNullable<ReturnType<typeof printChoicesOf>>
   copies: number | null
@@ -105,8 +111,9 @@ export function printRunBody({
   filamentProfiles?: readonly string[]
   rackPosition: number | null
   rackAlgorithm: RackAlgorithm | null
-}): PrintRunRequest {
+}): RegistryRunRequest {
   return {
+    ...(registryPrinter ? { printer: registryPrinter } : {}),
     printer_id: printerId,
     filament_plan: { slots: plan, force_colour_match: false },
     choices: printChoices,
@@ -131,6 +138,7 @@ export function useRunPrint({
   source,
   choices,
   printerId,
+  registryPrinter = null,
   selection,
   plan,
   planChanged,
@@ -237,9 +245,10 @@ export function useRunPrint({
     setRunError(null)
     setRefused(false)
     try {
-      const body: PrintRunRequest = {
+      const body: RegistryRunRequest = {
         ...printRunBody({
           printerId,
+          registryPrinter,
           plan,
           printChoices,
           copies,

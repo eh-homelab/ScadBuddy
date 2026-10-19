@@ -115,6 +115,12 @@ describe('SettingsPage', () => {
     expect(within(answered).getByText('Too many requests for this API key')).toBeInTheDocument()
   })
 
+  it('has a Printers section with the registry (#3823)', async () => {
+    renderPage(<SettingsPage />)
+    const section = await screen.findByRole('region', { name: 'Printers' })
+    expect(await within(section).findByRole('listitem', { name: 'Printer Garage' })).toBeInTheDocument()
+  })
+
   it('shows no answer when the test passed', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()

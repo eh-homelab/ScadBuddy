@@ -301,6 +301,24 @@ describe('extractors', () => {
     ])
   })
 
+  it('records the printer registry as settings, by row (#3823)', () => {
+    const P = '00000000-0000-4000-8000-0000000000aa'
+    expect(touches('create_printer', { serial: '01P00A0000000AA', name: 'Garage' }, { id: P, name: 'Garage' })).toEqual([
+      { type: 'setting', id: `printer:${P}`, action: 'created' },
+    ])
+    for (const name of ['update_printer', 'link_printer_bambuddy', 'unlink_printer_bambuddy']) {
+      expect(touches(name, { printer: P }, { id: P })).toEqual([{ type: 'setting', id: `printer:${P}`, action: 'modified' }])
+    }
+    expect(touches('unlink_printer_lan', { printer: P }, { id: P }, 'outward')).toEqual([
+      { type: 'setting', id: `printer:${P}`, action: 'modified' },
+    ])
+    expect(touches('delete_printer', { printer: P }, { deleted: P }, 'outward')).toEqual([
+      { type: 'setting', id: `printer:${P}`, action: 'deleted' },
+    ])
+    // The serial is never a recorded id.
+    expect(JSON.stringify(touches('create_printer', { serial: '01P00A0000000AA', name: 'G' }, {}))).not.toContain('01P00A')
+  })
+
   it("records Bambuddy projects, files and a print's timelapse", () => {
     expect(touches('create_print_project', { name: 'Bins' }, { id: 9, name: 'Bins' }, 'outward')).toEqual([
       { type: 'project', id: '9', action: 'created' },
