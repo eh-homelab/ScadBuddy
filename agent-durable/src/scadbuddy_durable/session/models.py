@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Literal
 
-from temporalio.claude_agent_sdk import AgentState
+from temporalio.claude_agent_sdk import AgentState, ToolOutcome
 
 WORKFLOW = "DurableSession"
 TASK_QUEUE = "agent"
@@ -123,8 +123,9 @@ class ForkPoint:
     """A page of the conversation the session's agent holds, for a fork (#2688).
 
     ``entries`` are transcript entries as JSON text, as AgentState keeps them; the
-    agent service reads every page and seeds the child's SessionStart.agent with a
-    copy (agent/src/sessions/durable.ts ``forkSource``)."""
+    agent service reads every page and seeds the child's SessionStart.agent with them
+    (agent/src/sessions/durable.ts ``forkSource``). The rest of the agent's state at
+    the checkpoint is on the first page only."""
 
     # The Claude session the entries belong to, and where it was last committed.
     session_id: str | None
@@ -133,6 +134,14 @@ class ForkPoint:
     busy: bool
     total: int
     entries: list[str] = field(default_factory=list)
+    # What the agent still owes at the checkpoint (#4173), for a child that continues
+    # there: the results its next segment delivers (a stopped task's paused calls), and
+    # whether that segment continues in a copy of the session. Without them the child
+    # resumes at a paused call with nothing to deliver, and its first segment fails.
+    pending: dict[str, ToolOutcome] = field(default_factory=dict)
+    fork_next: bool = False
+    # The calls that already ran, so none runs again in the child.
+    recent_call_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

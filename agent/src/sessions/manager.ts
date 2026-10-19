@@ -58,7 +58,7 @@ import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut, unansweredCalls } from './forkPoint.js'
+import { blobNames, durableReplies, entriesThrough, forkHistory, historyThroughCalls, transcriptCut, unansweredCalls } from './forkPoint.js'
 import { scrubForLog, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { userPrompt, type UserImage } from './images.js'
@@ -2339,11 +2339,12 @@ export class SessionManager {
   /**
    * Where a durable session forks (#2688): its workflow's committed conversation through
    * `upTo`'s reply, or all of it. A parent whose turn is running forks at its last
-   * finished reply, as the conversation past it is not committed yet. So does one whose
-   * committed state ends at a paused call (#4173: a stopped turn's last segment never
-   * committed): the call's result is the workflow's, not the conversation's, so the child
-   * resumes before it, and its history is the parent's through that reply. A cut never
-   * leaves a call unanswered.
+   * finished reply, as the conversation past it is not committed yet. One whose committed
+   * state ends at a paused call (#4173: a stopped turn's last segment never committed)
+   * forks there when its workflow holds the call's result: the child takes it with the
+   * checkpoint and delivers it first, and its history runs through the call. Without the
+   * result (a worker from before it was sent) it forks at its last finished reply before
+   * the call, with its history through that reply. A cut never leaves a call unanswered.
    */
   private async durableForkPoint(
     parent: SessionRecord,
@@ -2358,12 +2359,14 @@ export class SessionManager {
     }
     const replies = durableReplies(source.entries, all)
     const through = (uuid: string | undefined) => (uuid === undefined ? undefined : entriesThrough(source.entries, uuid))
-    const answered = (uuid: string | undefined) => {
+    // At the checkpoint, a call whose result the workflow holds is answered: the child delivers it.
+    const answered = (uuid: string | undefined, owed: Record<string, unknown> = {}) => {
       const prefix = through(uuid)
-      return prefix && unansweredCalls(prefix).length === 0 ? prefix : undefined
+      return prefix && unansweredCalls(prefix).every((call) => call in owed) ? prefix : undefined
     }
+    const paused = unansweredCalls(through(source.checkpoint) ?? [])
     let at = upTo
-    if (at === undefined && (source.busy || !answered(source.checkpoint))) {
+    if (at === undefined && (source.busy || !answered(source.checkpoint, source.owed.pending))) {
       at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
       if (at === undefined) {
         throw new SessionError(
@@ -2374,17 +2377,23 @@ export class SessionManager {
         )
       }
     }
-    const entries = through(at === undefined ? source.checkpoint : replies.get(at))
-    if (entries && unansweredCalls(entries).length > 0) {
+    const entries = at === undefined ? answered(source.checkpoint, source.owed.pending) : answered(replies.get(at))
+    if (!entries && through(at === undefined ? source.checkpoint : replies.get(at))) {
       throw new SessionError('invalid', `session ${id}'s conversation through reply ${at} leaves a call unanswered; fork from an earlier reply`)
     }
-    const history = at === undefined ? all : await forkHistory(this.events, id, at)
+    const history = at === undefined ? historyThroughCalls(all, paused) : await forkHistory(this.events, id, at)
     if (!entries || !history) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
     }
+    const checkpoint = entries.at(-1)!.uuid!
+    // At the parent's checkpoint the child takes what the parent still owes there (#4173):
+    // a turn stopped at a paused call left its result for the next segment, which the
+    // child's first segment must deliver. A reply before it owes nothing; the calls that
+    // already ran never run again either way.
+    const owed = checkpoint === source.checkpoint ? source.owed : { pending: {}, fork_next: false, recent_call_ids: source.owed.recent_call_ids }
     return {
       turns,
-      agent: { session_id: source.claudeSessionId, checkpoint: entries.at(-1)!.uuid!, conversation: entries.map((e) => JSON.stringify(e)) },
+      agent: { session_id: source.claudeSessionId, checkpoint, conversation: entries.map((e) => JSON.stringify(e)), ...owed },
       history,
     }
   }
