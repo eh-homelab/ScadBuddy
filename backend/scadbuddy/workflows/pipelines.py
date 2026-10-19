@@ -73,7 +73,9 @@ RETRY = RetryPolicy(
 )
 #: `reuse_geometry` is only a shortcut: a failure falls back to rendering the piece, so
 #: one that recurs every time costs one retry, not all of `RETRY`'s (#3449).
-REUSE_RETRY = RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=2))
+REUSE_RETRY = RetryPolicy(
+    maximum_attempts=2, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
+)
 #: What signalling a workflow that is gone raises: one that never ran and one that has
 #: closed alike (measured against temporalio 1.33.0's dev server).
 EXTERNAL_NOT_FOUND = "ExternalWorkflowExecutionNotFound"

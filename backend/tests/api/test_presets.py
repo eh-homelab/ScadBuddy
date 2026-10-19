@@ -711,10 +711,14 @@ def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(
     def waiting_for_a_lock() -> bool:
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             for _ in range(200):
+                # The template's own lock: a bigint key is classid's high half, objid's low.
                 row = conn.execute(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
                     " AND database = (SELECT oid FROM pg_database"
                     " WHERE datname = current_database())"
+                    " AND ((classid::bigint << 32) | objid::bigint)"
+                    " = hashtextextended(%s, 0)",
+                    (f"{PRESET_LOCK_PREFIX}m",),
                 ).fetchone()
                 if row is not None and row[0]:
                     return True

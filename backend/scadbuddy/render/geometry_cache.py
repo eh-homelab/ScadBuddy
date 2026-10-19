@@ -64,7 +64,9 @@ from scadbuddy.render.split import ColourPart, Paint, split_by_material
 #: source is in the key (#3448).
 GEOMETRY_VERSION = 5
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
-#: A colour as `compile_scene` writes it, around each piece.
+#: A colour as `compile_scene` writes it, around each piece. A custom op's own
+#: ``color("#…")`` that equals a class is classed too: harmless, since the op's text is
+#: in the key's objects as it is.
 _COLOUR_CALL = re.compile(r'color\("(#[0-9A-Fa-f]{6})"\)')
 
 
