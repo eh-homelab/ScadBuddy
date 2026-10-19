@@ -71,6 +71,12 @@ jobs:
       - uses: docker/setup-buildx-action@v4 # noconfig
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+  quotedconfig:
+    steps:
+      - uses: docker/setup-buildx-action@v4 # quotedconfig
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: '[registry."docker.io"] mirrors = ["mirror.gcr.io"]'
   othertable:
     steps:
       - uses: docker/setup-buildx-action@v4 # othertable
@@ -92,10 +98,12 @@ flagged bare driver-opts || { echo "FAIL: wrong step named: $out"; exit 1; }
 flagged folded driver-opts || { echo "FAIL: a folded driver-opts block passed: $out"; exit 1; }
 flagged noconfig "a buildkitd" || { echo "FAIL: a daemon without the registry mirror passed: $out"; exit 1; }
 flagged othertable "a buildkitd" || { echo "FAIL: a mirror for another registry passed: $out"; exit 1; }
+# Only a `|` block of buildkitd config is read (driver-opts is read inline too): a quoted one is flagged.
+flagged quotedconfig "a buildkitd" || { echo "FAIL: an inline buildkitd config passed: $out"; exit 1; }
 for ok in ok block; do
   if grep -q "w.yml:$(at "$ok"):" <<<"$out"; then echo "FAIL: the mirrored step $ok was flagged: $out"; exit 1; fi
 done
-for step in wrongblock folded noconfig othertable; do
+for step in wrongblock folded noconfig quotedconfig othertable; do
   if [ "$(grep -c "w.yml:$(at "$step"):" <<<"$out")" != 1 ]; then
     echo "FAIL: $step was flagged for more than its one fault: $out"; exit 1
   fi

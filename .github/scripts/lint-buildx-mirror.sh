@@ -11,7 +11,8 @@
 # flagged, so write it one of the two ways above.
 # The daemon it starts pulls the Dockerfiles' Docker Hub bases through the same
 # mirror (#4012): each step also needs a `buildkitd-config-inline: |` block whose
-# `[registry."docker.io"]` table says `mirrors = ["mirror.gcr.io"]`. BuildKit
+# `[registry."docker.io"]` table says `mirrors = ["mirror.gcr.io"]` (only a `|`
+# block is read: an inline or quoted config is flagged). BuildKit
 # falls back to Docker Hub for an image the mirror does not hold, and a pinned
 # digest is checked either way, so the Dockerfiles keep their plain references
 # (which Dependabot and openscad-bump.yml read).
