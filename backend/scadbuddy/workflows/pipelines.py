@@ -82,6 +82,16 @@ PROJECT_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 SHORT = timedelta(seconds=60)
+#: `project` (one or two short statements; attempts took 0.03-0.4 s on prod). An
+#: attempt Temporal records as started but never delivers (a poll that gave up while
+#: history committed the start, on prod's slow Temporal database) is recovered only by
+#: this timeout, which is what a page load waited: 60 s under `SHORT` (2026-10-18). A
+#: slow attempt it cuts short is retried. A late write from it never moves the row's
+#: state back (`projection.py` settles only from pending or running), but a late
+#: `steps` write is last-writer-wins while the row is open: it can show older progress
+#: until the next progress write or the final projection replaces it. Its statements
+#: wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection.
+PROJECT_TIMEOUT = timedelta(seconds=10)
 #: `render_accept`, the run's first step: a bounded number of attempts, so a failure no
 #: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
 #: them answers still-accepting) answers the request rather than holding its render key
@@ -480,7 +490,7 @@ class TemplatePipeline:
             "project",
             self._projection(fields),
             result_type=bool,
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=PROJECT_TIMEOUT,
             retry_policy=PROJECT_RETRY,
             # A release that cancels the job mid-projection waits for the write to
             # resolve: its outcome must be in history before the run completes, or
@@ -507,7 +517,7 @@ class TemplatePipeline:
                 await workflow.execute_activity(
                     "project",
                     projection,
-                    start_to_close_timeout=SHORT,
+                    start_to_close_timeout=PROJECT_TIMEOUT,
                     retry_policy=PROJECT_RETRY,
                 )
 

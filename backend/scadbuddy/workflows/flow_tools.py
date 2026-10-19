@@ -162,6 +162,12 @@ class ToolFailedError(Exception):
 #: own error: final, the call is never sent again.
 _TOOL_REFUSALS = ["ToolError", "NotApproved", "GrantRevoked", "UnknownFlow", "NotForFlows"]
 _TOOL_TIMEOUT = timedelta(seconds=120)
+#: The agent's activities beat every 10 s from their start (`agent/src/temporal/worker.ts`
+#: `heartbeatingActivities`), as `flow_route_send` does here: an attempt Temporal recorded
+#: as started but never delivered (a poll that gave up mid-handoff on a slow Temporal
+#: database, or a replica a deploy took) is retried after this, not after the call's
+#: whole start-to-close. Two such `turn_tool_tier` attempts held a run 4 min (#4199).
+_AGENT_HEARTBEAT = timedelta(seconds=30)
 
 
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
@@ -264,6 +270,7 @@ async def _post(
             activity_id=None if outward is None else outward_activity_id(outward, call_id),
             result_type=RouteAnswer,
             start_to_close_timeout=_SEND,
+            heartbeat_timeout=_HEARTBEAT,
             retry_policy=_SEND_RETRY,
         )
     except ActivityError as err:
@@ -663,6 +670,7 @@ async def _call_tool(
                 task_queue=task_queue,
                 schedule_to_start_timeout=to_start,
                 start_to_close_timeout=_TOOL_TIMEOUT,
+                heartbeat_timeout=_AGENT_HEARTBEAT,
                 retry_policy=RetryPolicy(
                     maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
                 ),
@@ -752,6 +760,7 @@ async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
             task_queue=owner.tools_queue,
             result_type=dict,
             start_to_close_timeout=_TOOL_TIMEOUT,
+            heartbeat_timeout=_AGENT_HEARTBEAT,
             retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
         )
     except ActivityError as err:
@@ -929,6 +938,7 @@ async def _check_session(session_id: str) -> None:
             task_queue=owner.tools_queue,
             result_type=dict,
             start_to_close_timeout=_TOOL_TIMEOUT,
+            heartbeat_timeout=_AGENT_HEARTBEAT,
             retry_policy=RetryPolicy(non_retryable_error_types=_TURN_REFUSALS),
         )
     except ActivityError as err:
