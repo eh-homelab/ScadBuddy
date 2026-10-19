@@ -1933,7 +1933,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.8" },
     { name = "respx", specifier = ">=0.23,<0.24" },
     { name = "ruff", specifier = ">=0.7" },
-    { name = "types-aiobotocore", extras = ["s3"], specifier = ">=2.21,<3" },
+    { name = "types-aiobotocore", extras = ["s3"], specifier = ">=2.21,<4" },
     { name = "types-jsonschema", specifier = ">=4.26.0.20261006" },
     { name = "types-lxml", specifier = ">=2026.2.16" },
     { name = "types-regex", specifier = ">=2026.9.29.20261005" },
@@ -2038,14 +2038,14 @@ wheels = [
 
 [[package]]
 name = "types-aiobotocore"
-version = "2.26.0.post2"
+version = "3.9.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore-stubs" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3e/27/c60789f312a3630cbc82181e4d6e809bd8801b471de99f14ceb11f4c5c26/types_aiobotocore-2.26.0.post2.tar.gz", hash = "sha256:68ebe5e9de3201442e56359af182493e2e642e855a9133a5918352cbf5ac4e2d", size = 86472, upload-time = "2025-12-02T16:52:55.101Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/cd/79562ee488be03558881bc2ae402bcfc712d234545b5d7fd7628a20a08e0/types_aiobotocore-3.9.2.tar.gz", hash = "sha256:c7ed080b6dc414cdd4e358f4deeb0eb73dccb1bfd539b2dc7b9422618ab70608", size = 90177, upload-time = "2026-10-01T04:52:56.583Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/47/e080e365376619d4062da8989747ecf7c8404bd94b2de10904239a3104f0/types_aiobotocore-2.26.0.post2-py3-none-any.whl", hash = "sha256:0e19caffd6ce6b1c3e7ba5b085d1d03357672e1aa65e5bcdfd9efb026a1041f7", size = 54207, upload-time = "2025-12-02T16:52:48.246Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/e2/5ccbf548bbbb370b81fbde75f331ba6bc253633d1f3a04140300637d0322/types_aiobotocore-3.9.2-py3-none-any.whl", hash = "sha256:c20d291feb09c4fd5681d7ce9ea6226ed58f9643f2364c5abc90aa29f188ebea", size = 55589, upload-time = "2026-10-01T04:52:52.341Z" },
 ]
 
 [package.optional-dependencies]
@@ -2055,11 +2055,11 @@ s3 = [
 
 [[package]]
 name = "types-aiobotocore-s3"
-version = "2.26.0"
+version = "3.9.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b5/8a/dd2190fb5b19933b93c6f153226ac41ddc71a1e81d55f490168944156c43/types_aiobotocore_s3-2.26.0.tar.gz", hash = "sha256:35eb714401883febb61cca3dd65766724105ead3e8325082146a89d244f74768", size = 76495, upload-time = "2025-11-29T01:49:23.844Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/cd/5631df53041edf8322ad9c2a4a1e4c1ecd14b781010574f7cdf9ece72c95/types_aiobotocore_s3-3.9.2.tar.gz", hash = "sha256:10709325d2acc792ad9fa12d0fff93103d0685a36e4e08c1e8252ba80ca86570", size = 80064, upload-time = "2026-10-01T04:44:39.402Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b9/a4/abcd852032d7de6c1766d78d7b2769f1937b634bffc00e03afd68dc1bb22/types_aiobotocore_s3-2.26.0-py3-none-any.whl", hash = "sha256:b8c085c93db877d79f0d128c7d21c131bd596e1d8400ae807d25bf7b3ff1eff6", size = 84159, upload-time = "2025-11-29T01:49:22.519Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/ee/b3d3d915902f55d2edb4c02f16f6e73ed16a8051207d027c99104af7bdcb/types_aiobotocore_s3-3.9.2-py3-none-any.whl", hash = "sha256:1f50994fb362aa6e466b48957742415c838f153657129edb444565091a0d73b3", size = 87965, upload-time = "2026-10-01T04:44:38.039Z" },
 ]
 
 [[package]]
