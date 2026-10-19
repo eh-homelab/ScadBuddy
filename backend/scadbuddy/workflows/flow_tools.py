@@ -175,12 +175,20 @@ def _agent_heartbeat() -> timedelta:
     return timedelta(seconds=owner.agent_heartbeat_s)
 
 
-#: A `turn_tool_tier` whose every attempt missed its beats is asked once more with no
+#: A `turn_tool_tier` whose last attempt missed its beats is asked once more with no
 #: heartbeat timeout, as before #4199 (#4262). An agent replica from before #4200 never
 #: beats, and a tier call takes ~35 s there (it connects the turn's servers): during an
 #: agent rollout, or after a rollback past #4200, all three attempts could land on such
 #: replicas (`agent-tools` is unversioned, so any poller takes any attempt) and fail the
-#: run's tier check. Runs recorded before raised that heartbeat timeout to the script.
+#: run's tier check. The fallback needs only the last attempt to have missed its beats:
+#: that is the failure the call ends with. Runs recorded before raised that heartbeat
+#: timeout to the script.
+#: The cost: a tier whose attempts are all lost (recorded as started but never
+#: delivered, or taken by a replica that died) now reaches the script after
+#: 3 x `agent_heartbeat_s` of missed beats plus up to 3 x `_TOOL_TIMEOUT` (120 s) of
+#: start-to-close: at the default 30 s heartbeat, 450 s (about 7.5 min, plus the
+#: retries' backoff), where #4199 alone gave up after the first 90 s. A tier whose last
+#: attempt ends on its start-to-close instead takes no fallback.
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
 
@@ -784,7 +792,8 @@ async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
                 )
                 return tiered
             except ActivityError as err:
-                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH).
+                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH). Only the
+                # last attempt's failure is known: earlier ones may have failed otherwise.
                 if (
                     heartbeat is not None
                     and isinstance(err.cause, ActivityTimeoutError)

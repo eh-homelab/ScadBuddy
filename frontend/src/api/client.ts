@@ -108,6 +108,11 @@ import type {
   ActivityPage,
   PrintProgress,
   PrintersNow,
+  PrinterRow,
+  PrinterCreate,
+  PrinterPatch,
+  DiscoveredPrinter,
+  LanLink,
   QueueItem,
   ArchiveStats,
   PrintCheck,
@@ -1881,6 +1886,27 @@ export const api = {
 
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+
+  // #3823 — the printer registry: one row per physical printer, keyed by serial, with
+  // its Bambuddy link and its LAN link. The LAN access code is sent once (`PUT /lan`,
+  // which tests it on the printer first) and never returned.
+  listPrinters: () => request<PrinterRow[]>('/printers'),
+  createPrinter: (body: PrinterCreate) =>
+    request<PrinterRow>('/printers', { method: 'POST', body: JSON.stringify(body) }),
+  patchPrinter: (id: string, body: PrinterPatch) =>
+    request<PrinterRow>(`/printers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deletePrinter: (id: string) => request<void>(`/printers/${seg(id)}`, { method: 'DELETE' }),
+  /** Bambuddy's active printers, each with the row linking it, if any. */
+  discoverPrinters: () => request<DiscoveredPrinter[]>('/printers/discover'),
+  linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>
+    request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
+      method: 'PUT',
+      body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
+    }),
+  unlinkPrinterBambuddy: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, { method: 'DELETE' }),
+  linkPrinterLan: (id: string, body: LanLink) =>
+    request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'PUT', body: JSON.stringify(body) }),
+  unlinkPrinterLan: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'DELETE' }),
 
   /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
   getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
