@@ -280,6 +280,8 @@ async def test_render_solids_renders_with_the_solid_concurrency_in_effect_now(
     monkeypatch.setattr(Config, "solid_slots", spy)
     for _ in range(3):
         await env.run(acts.render_solids, req, prepared, main)
+    # The fixture's own value is 0, so its slots are the derived default (#4202).
+    assert deps.config.solid_concurrency == 0
     derived = solid_slots(deps.config)
     assert sized == [(3, 3), (5, 5), (0, derived)]
 
