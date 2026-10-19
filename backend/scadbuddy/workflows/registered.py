@@ -33,9 +33,10 @@ class RegisteredActivities(Interceptor):
         activities: Iterable[Callable[..., Any]],
         host_functions: Iterable[str] | None = None,
     ) -> None:
-        names = {activity._Definition.must_from_callable(fn).name for fn in activities}
+        names = [activity._Definition.must_from_callable(fn).name for fn in activities]
+        named = frozenset(n for n in names if n is not None)
         #: None for a worker with a dynamic activity (a None name): it registers every kind.
-        self.names = None if None in names else frozenset(n for n in names if n is not None)
+        self.names = None if len(named) < len(set(names)) else named
         self.host_functions = None if host_functions is None else frozenset(host_functions)
 
     def workflow_interceptor_class(
