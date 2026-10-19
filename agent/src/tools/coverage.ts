@@ -341,31 +341,19 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'reads the camera a frame at a time through get_printer_camera.',
   },
   {
+    operation: 'PUT /api/v1/printers/{printer_id}/lan',
+    reason:
+      "A printer's LAN access code is a device credential, written only in Settings > Printers, as the Bambuddy " +
+      'key and the settings are (#4340 review I1): a tool would put it in the model\'s context, the transcript ' +
+      'and any flow script that called it. The agent sends the user there (list_printers, get_printer).',
+  },
+  {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
       "print time and open picks in the print check's rack options, for the hotends that job could use. " +
       "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
-  ...(
-    [
-      'GET /api/v1/printers',
-      'POST /api/v1/printers',
-      'GET /api/v1/printers/discover',
-      'GET /api/v1/printers/{printer_id}',
-      'PATCH /api/v1/printers/{printer_id}',
-      'DELETE /api/v1/printers/{printer_id}',
-      'PUT /api/v1/printers/{printer_id}/bambuddy',
-      'DELETE /api/v1/printers/{printer_id}/bambuddy',
-      'PUT /api/v1/printers/{printer_id}/lan',
-      'DELETE /api/v1/printers/{printer_id}/lan',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      'The printer registry (#3823, plan 2026-10-16-printer-identity-native-path) lands API-first; its agent ' +
-      'tools are that plan\'s Task 11, which replaces this entry (link_printer_lan outward, never echoing the code).',
-  })),
 ]
 
 /**

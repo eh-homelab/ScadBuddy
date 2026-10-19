@@ -29,6 +29,7 @@ import { mcpAuthChanged } from '../lib/mcpAuthChanges'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
+import { PrintersPanel } from '../components/settings/Printers'
 import { McpTokensSection } from '../components/McpTokensSection'
 import {
   AlertDialog,
@@ -1159,6 +1160,14 @@ function SettingsSections() {
               </FieldRow>
             </>,
           )}
+
+          <Section
+            id="printers"
+            title={sectionTitle('printers')}
+            description="One entry per printer, by its serial: the Bambuddy printer it is, and how ScadBuddy reaches it over the LAN. The access code is tested on the printer, stored sealed, and never shown again. Each change applies at once."
+          >
+            <PrintersPanel />
+          </Section>
 
           <Section
             id="inventory"
