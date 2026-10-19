@@ -14,7 +14,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 import httpx
@@ -109,6 +109,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.printers.component import PrintersDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.slicing.component import SlicingDep
@@ -550,16 +551,23 @@ async def post_tray_spool(
     response_model=PrintersNow,
     summary="What each printer is doing now",
     description=(
-        "Every active Bambuddy printer's live state (#977): what it prints, how far, "
-        "time left and its HMS errors, whoever started the job. A job whose archive "
+        "Every registry printer's live state (#977, #3823): what it prints, how far, "
+        "time left and its HMS errors, whoever started the job, from Bambuddy's status or "
+        "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
         "names Bambuddy's archives page. A printer whose status cannot be read is a "
         "card with `error`, never a failed page."
     ),
 )
-async def get_printers_now(store: SettingsStoreDep, links: PrintLinksDep) -> PrintersNow:
+async def get_printers_now(
+    store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep
+) -> PrintersNow:
+    now = datetime.now(UTC)
+    if not (await asyncio.to_thread(store.load)).bambuddy_url:
+        # No Bambuddy (#3823): the LAN printers still have cards.
+        return await printers_now(None, links, printers.store, printers.reports, now=now)
     async with client_for(store.load()) as client:
-        return await printers_now(client, links)
+        return await printers_now(client, links, printers.store, printers.reports, now=now)
 
 
 @router.get(

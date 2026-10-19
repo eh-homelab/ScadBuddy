@@ -5,6 +5,7 @@ pods start a new kind's operations while the old print build is still current.""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Sequence
 
@@ -186,7 +187,10 @@ async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it
     arg = op_input()
     handle = client.get_workflow_handle(f"op-{arg.kind}-{arg.key}")
     try:
-        async with new:
+        # The gate is released before the new worker shuts down (exits run in reverse): a
+        # failure before the rollback leaves the insert held, and the shutdown would wait
+        # out its 30 s on it.
+        async with new, _released(new_fake.insert_gate):
             await _make(client, name, "new")
             assert await wait_until_build_serves(
                 client, queue, "new", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
@@ -214,7 +218,8 @@ async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it
                     if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
                 ] == ["op.test.check", "op_insert"]
                 # Failed by the deferral, which only a build without the kind raises: the
-                # rollback path, not any retry.
+                # rollback path, not any retry. One event, however many attempts: Temporal
+                # records only the first of a run of workflow task failures.
                 assert [
                     event.workflow_task_failed_event_attributes.failure.application_failure_info.type
                     for event in history.events
@@ -224,13 +229,19 @@ async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it
                 await _make(client, name, "new")
                 done = await asyncio.wait_for(answering, 60)
     finally:
-        # A failure before the rollback leaves the insert held: let it end, or the new
-        # worker's graceful shutdown waits out its 30 s on it.
-        new_fake.insert_gate.set()
         await terminate_open_workflows(client, queue)
     assert done.status == "succeeded"
     assert old_fake.calls == []
     assert new_fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+@contextlib.asynccontextmanager
+async def _released(gate: asyncio.Event) -> AsyncIterator[None]:
+    """Sets ``gate`` on the way out, however the block ends."""
+    try:
+        yield
+    finally:
+        gate.set()
 
 
 @activity.defn(name="op.other.check")

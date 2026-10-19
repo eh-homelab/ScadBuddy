@@ -23,8 +23,19 @@ ZERO_UUID = "0" * 32
 ZERO_TAG = "0" * 16
 
 
+def registered(pool: PgPool, *printer_ids: uuid.UUID) -> None:
+    """Registry rows for ``printer_ids``: a tray link names a printer (#4190's key)."""
+    with pool.connection() as conn:
+        for printer_id in printer_ids:
+            conn.execute(
+                "INSERT INTO printers (id, serial, name) VALUES (%s, %s, 'P')",
+                (printer_id, f"T{printer_id.hex[:15].upper()}"),
+            )
+
+
 @pytest.fixture
 def store(pg_pool: PgPool) -> SpoolStore:
+    registered(pg_pool, PRINTER)
     return SpoolStore(pg_pool)
 
 
@@ -451,6 +462,7 @@ async def test_a_merged_printers_tray_links_move_to_the_printer_it_merged_into(
     repoints the tray links in its own transaction; a tray both link keeps the real
     printer's."""
     synthetic, real = uuid.uuid4(), uuid.uuid4()
+    registered(pg_pool, synthetic, real)
     await store.replace_records("bambuddy", [record("1"), record("2"), record("3")], NOW)
     await store.link(synthetic, tray(0, 0), provider="bambuddy", record_id="1")
     await store.link(synthetic, tray(0, 1), provider="bambuddy", record_id="2")

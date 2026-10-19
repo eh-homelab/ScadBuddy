@@ -223,6 +223,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "settings.changed",
         "analyzer.decision",
         "activity.changed",
+        "printer.report",
+        "printer.changed",
         # The agent service's own (#300, agent/src/sessions/busEvents.ts).
         "session.started",
         "session.owner",
