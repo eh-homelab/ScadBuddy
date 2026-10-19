@@ -78,8 +78,9 @@ class PlacedObject:
     def height(self) -> float:
         """How high its top sits above the bed, which is what Bambu Studio holds to the
         gantry and lid heights (``print_object->max_z()``, in the source the module
-        docstring cites; #3223). An item lifted off the bed is taller here than its own
-        extent, which can only warn more, never less."""
+        docstring cites; #3223). An item lifted off the bed reads taller than its own
+        extent; one sunk below it reads shorter, as the part under the bed is cut off and
+        never printed."""
         return max(0.0, self.high[2])
 
 

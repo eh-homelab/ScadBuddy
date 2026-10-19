@@ -1574,6 +1574,17 @@ async def test_objects_that_all_draw_the_same_are_warned_about(tmp_path: Path) -
     ]
 
 
+async def test_objects_of_one_box_but_other_shapes_are_not_warned_about(tmp_path: Path) -> None:
+    """#4417 review: two shapes of one colour in one box (a block, and one more finely
+    meshed) are different objects, not one template ignoring $object."""
+    finer = (TRAY[0], TRAY[1], TRAY[2].subdivide())
+    layout, _, _ = await _object_layout(
+        tmp_path, {(None, None): [TRAY], (None, 1): [TRAY], (None, 2): [finer]}, objects=2
+    )
+
+    assert layout.warnings == []
+
+
 async def test_too_many_objects_fails_the_job(tmp_path: Path) -> None:
     with pytest.raises(OpenSCADError, match="asks for 17 objects"):
         await _object_layout(tmp_path, {(None, None): [TRAY]}, objects=jobs.MAX_OBJECTS + 1)

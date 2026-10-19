@@ -604,11 +604,19 @@ async def plate_layout(
 
 
 def _drawn_alike(parts: Sequence[ColourPart]) -> tuple[tuple[str, tuple[float, ...]], ...]:
-    """What one object's render drew, to compare with another's: each colour and its
-    box, rounded to a micron."""
+    """What one object's render drew, to compare with another's: each colour, its box
+    rounded to a micron, and its vertex and face counts, so two shapes of one colour in
+    one box (a block and a hollowed one) differ."""
     return tuple(
         sorted(
-            (part.colour, tuple(round(float(v), 3) for v in part.mesh.bounds.ravel()))
+            (
+                part.colour,
+                (
+                    *(round(float(v), 3) for v in part.mesh.bounds.ravel()),
+                    float(len(part.mesh.vertices)),
+                    float(len(part.mesh.faces)),
+                ),
+            )
             for part in parts
         )
     )

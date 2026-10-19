@@ -222,7 +222,10 @@ class PlateParts:
         if len(self.objects) != len(self.parts):
             raise ValueError("a plate needs one object number per colour part")
         if self.names and len(self.names) != len(set(self.objects)):
-            raise ValueError("a plate's names need one name per object")
+            raise ValueError(
+                "a plate's names need one name per object, in the order each object's"
+                " number first appears"
+            )
 
     @property
     def tower(self) -> bool:
@@ -313,7 +316,8 @@ class _Assembly:
 
 def _assemblies(plates: Sequence[PlateParts]) -> list[list[_Assembly]]:
     """Each plate's objects, one assembly per distinct ``PlateParts.objects`` number,
-    in first-seen order. Assembly ids follow the part ids, counted across plates."""
+    in first-seen order, the Nth taking ``PlateParts.names[N-1]`` when the plate names
+    them. Assembly ids follow the part ids, counted across plates."""
     next_id = sum(len(plate.parts) for plate in plates) + 1
     result: list[list[_Assembly]] = []
     for plate_index, (plate, ids) in enumerate(

@@ -422,7 +422,12 @@ async def _action_changed(
         return True
     if previous.workflow != action.workflow:
         return True
-    before = await client.data_converter.decode(previous.args)
+    try:
+        before = await client.data_converter.decode(previous.args)
+    except Exception:
+        # Arguments this converter cannot read (an older build's) count as changed: a
+        # boot that cannot tell runs the sweeps rather than fail.
+        return True
     return list(before) != list(action.args)
 
 
