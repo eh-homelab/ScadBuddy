@@ -50,7 +50,7 @@ from scadbuddy.slicing.start import (
 from scadbuddy.slicing.store import HOLDER, NativeSlice
 from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.content_models import BlobScope
-from scadbuddy.workflows.slicing import SliceWorkflow
+from scadbuddy.workflows.slicing import SLICE_RETRY, SliceWorkflow
 from scadbuddy.workflows.slicing_models import SliceWorkflowInput
 from tests.api.test_send import API, configure
 from tests.slicing.conftest import PROFILES
@@ -801,21 +801,49 @@ def test_a_cancel_from_the_worker_alone_is_a_failure(
     slice_client: TestClient, slicer: FakeSlicer
 ) -> None:
     """Re-review N4: no cancel was asked of the workflow, so the execution and the row
-    agree that the slice failed."""
+    agree that the slice failed. The server does not take the fake's cancel, which nothing
+    asked for, so each attempt ends at the heartbeat timeout: a short one here (#4403),
+    where the 60 s default made this test 248 s. Started by hand, not through the route,
+    since only `SliceWorkflowInput` names the heartbeat; the route path is covered by the
+    tests that slice through it."""
     slicer.self_cancel = True
-    row = _start(slice_client)
+    slicing = _slicing(slice_client)
+    starter = slicing.starter
+    assert starter is not None
 
-    async def outcome() -> str:
-        handle = _slicing(slice_client).temporal().get_workflow_handle(row.workflow_id)
+    async def outcome() -> tuple[NativeSlice, str]:
+        row = await slicing.store.start(
+            workflow_id="slice-self-cancelled",
+            subject=SUBJECT,
+            library_file_id=COPY,
+            plate_id=1,
+            preset_key="k",
+        )
+        handle = await slicing.temporal().start_workflow(
+            SliceWorkflow.run,
+            SliceWorkflowInput(
+                slice_id=row.id,
+                library_file_id=COPY,
+                plan=PLAN,
+                plate_id=1,
+                preset_key=native_preset_key(PLAN, 1, starter.profiles.version),
+                slicer_queue=starter.slicer_queue,
+                slice_heartbeat=timedelta(seconds=2),
+            ),
+            id=row.workflow_id,
+            task_queue=starter.library_queue,
+        )
         await handle.result()
         status = (await handle.describe()).status
         assert status is not None
-        return status.name
+        return row, status.name
 
-    assert _call(slice_client, outcome) == "COMPLETED"
+    row, status = _call(slice_client, outcome)
+    assert status == "COMPLETED"
     done = _row(slice_client, row)
     assert done.status == "failed"
     assert done.failure is not None and done.failure.startswith("The slicer worker failed")
+    assert slicer.calls == SLICE_RETRY.maximum_attempts
 
 
 def test_an_execution_whose_row_was_swept_takes_no_hold(slice_client: TestClient) -> None:

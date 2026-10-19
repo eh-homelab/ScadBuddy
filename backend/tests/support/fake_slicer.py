@@ -52,7 +52,10 @@ class FakeSlicer:
         #: Refuse this many calls' URLs first as expired (`TransferRefused`).
         self.expire_times = 0
         #: Fail as cancelled with no cancel asked of it, as `sb-slicer` returns
-        #: `ActivityError::cancelled()` whenever its context is cancelled.
+        #: `ActivityError::cancelled()` whenever its context is cancelled. Unlike Rust core,
+        #: which reports one for its worker's shutdown as a `WorkerShutdown` failure, the
+        #: Python SDK sends it as is, and the server leaves the attempt to its heartbeat
+        #: timeout (#4403).
         self.self_cancel = False
         #: Report a digest other than the one it PUT.
         self.wrong_sha = False

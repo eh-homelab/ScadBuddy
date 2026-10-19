@@ -68,6 +68,8 @@ export class InMemoryTokenStore implements TokenStore {
     return !record.expiresAt || record.expiresAt.getTime() > now.getTime()
   }
 
+  // No clock parameter, unlike approvalGrant: Date.now() stands in for Postgres's now(),
+  // which the real store's liveTier compares against (#3898).
   async liveTier(id: string): Promise<Tier | null> {
     const record = this.#byId.get(id)?.record
     if (!record || record.revokedAt) return null

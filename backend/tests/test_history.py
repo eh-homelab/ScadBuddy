@@ -1213,6 +1213,30 @@ def test_an_export_the_prune_races_every_time_fails_and_leaves_no_staging(
     assert list(directory.parent.iterdir()) == []
 
 
+def test_an_export_that_fails_after_staging_is_made_leaves_no_staging(
+    tmp_path: Path,
+) -> None:
+    """#4412 review: the staging directory made, then the export failing, is removed by
+    `export_revision`'s cleanup; nothing half-written is left in the slug directory."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    made: list[Path] = []
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            assert dest.is_dir(), "the staging directory is made before the export"
+            made.append(dest)
+            (dest / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+            raise RevisionNotFoundError(f"{slug!r} does not exist at {commit}")
+
+    with pytest.raises(RevisionNotFoundError):
+        export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert len(made) == 1
+    assert made[0].parent == directory.parent
+    assert not made[0].exists()
+    assert list(directory.parent.iterdir()) == []
+
+
 def test_two_pods_exporting_one_revision_never_share_a_staging_directory(
     tmp_path: Path,
 ) -> None:

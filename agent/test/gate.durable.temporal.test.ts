@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
-import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../src/gate/durable.js'
+import { DurableGate, DurableUnavailable, respondUpdateId, sessionWorkflowId } from '../src/gate/durable.js'
 import { responseHash } from '../src/gate/canonical.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { PendingInputSweep, temporalDescriber } from '../src/gate/sweep.js'
@@ -85,6 +85,20 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     // Temporal keeps the failed outcome under the respond's ID; the same approve still gets through.
     expect(await gate.respond(sessionId, args)).toEqual({ kind: 'approval', outcome: 'approved' })
     expect(await gate.pendingInput(sessionId)).toEqual([])
+  }, 60_000)
+
+  it('a respond whose handler failed is sent again at once under a fresh ID, within one call (#4081)', async () => {
+    // One failure: respond's own retry (HandlerFailed) answers, so the caller never sees it.
+    const { sessionId, requestId } = await park(randomUUID(), QUEUE, false, 'approval', 1)
+    const args = { request_id: requestId, response: { kind: 'approval', decision: 'approve' }, responder: BROWSER_USER, role: 'browser' as const }
+    expect(await new DurableGate(env.client, { timeoutMs: 20_000 }).respond(sessionId, args)).toEqual({ kind: 'approval', outcome: 'approved' })
+    // The stand-in saw two Updates: the respond's own ID, then a fresh one.
+    const history = await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).fetchHistory()
+    const ids = (history.events ?? []).flatMap((e) => e.workflowExecutionUpdateAcceptedEventAttributes?.acceptedRequest?.meta?.updateId ?? [])
+    expect(ids).toHaveLength(2)
+    expect(ids[0]).toBe(respondUpdateId(args))
+    expect(ids[1]).toMatch(new RegExp(`^${respondUpdateId(args)}-[0-9a-f-]{36}$`))
+    await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).terminate('test')
   }, 60_000)
 
   it('measures: an Update ID is not remembered across continue-as-new (#3717)', async () => {
