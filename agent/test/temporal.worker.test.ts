@@ -2,6 +2,7 @@ import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/co
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -179,6 +180,34 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
       expect(all.toString('latin1')).toContain(image!.name)
       expect(all.includes(bytes.subarray(0, 8))).toBe(false)
       expect(all.toString('latin1')).not.toContain(PNG.slice(0, 24))
+    } finally {
+      await agent.stop()
+    }
+  }, 120_000)
+
+  it('beats for every activity, so one that outlives its heartbeat timeout completes (#4261)', async () => {
+    // No beat of its own: only the worker's interceptor (heartbeatingActivities) keeps it alive.
+    const agent = AgentWorker.start({
+      address: env.address,
+      namespace: 'default',
+      activities: { slow: async () => (await sleep(4_000), 'done') },
+      activityHeartbeatMs: 200,
+    })
+    const caller = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: 'heartbeat-standin',
+      workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
+    })
+    try {
+      await agent.running()
+      const result = await caller.runUntil(
+        env.client.workflow.execute('callBeating', {
+          workflowId: `beating-${randomUUID()}`,
+          taskQueue: 'heartbeat-standin',
+          args: ['slow', 1_000],
+        }),
+      )
+      expect(result).toBe('done')
     } finally {
       await agent.stop()
     }
