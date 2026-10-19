@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from scadbuddy.bambuddy.catalogue import _Catalogue, catalogue_for
+from scadbuddy.bambuddy.catalogue import _Catalogue
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
@@ -154,6 +154,7 @@ from scadbuddy.rack.usage import (
     save_picks,
 )
 from scadbuddy.render.bambu3mf import FilamentMap
+from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
 from scadbuddy.slicing.values import values_for
 

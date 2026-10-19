@@ -13,7 +13,6 @@ from scadbuddy.bambuddy.catalogue import (
     PresetChoice,
     _Catalogue,
     cached_catalogue,
-    catalogue_for,
 )
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
@@ -45,6 +44,7 @@ from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
+from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
 
 logger = logging.getLogger(__name__)

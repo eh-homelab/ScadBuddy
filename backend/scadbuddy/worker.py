@@ -83,6 +83,8 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
+from scadbuddy.slicing.catalogue import warm_catalogue
+from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.store import BlobRefs
@@ -1082,6 +1084,11 @@ async def run_print_worker(
     AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
+    # The image's preset catalogue, built behind the start for the first native plan_run
+    # (#3818 tier A); nothing waits on it.
+    warming = warm_catalogue(
+        await asyncio.to_thread(Profiles.installed, settings.slicer_profiles_dir)
+    )
     try:
         await deps.events.start()
         client, sdk_port = await _own_client(settings, client)
@@ -1115,6 +1122,9 @@ async def run_print_worker(
                 server.should_exit = True
                 await serving
     finally:
+        if warming is not None:
+            warming.cancel()
+            await asyncio.gather(warming, return_exceptions=True)
         await deps.aclose()
 
 

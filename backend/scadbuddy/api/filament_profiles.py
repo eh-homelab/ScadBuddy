@@ -12,7 +12,6 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.bambuddy.catalogue import catalogue_for
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filament_profiles import (
     BUILTIN,
@@ -22,6 +21,7 @@ from scadbuddy.bambuddy.filament_profiles import (
     unknown_profiles,
 )
 from scadbuddy.bambuddy.resolver import PrintChoices, process_preset_for
+from scadbuddy.slicing.catalogue import catalogue_for
 
 router = APIRouter(prefix="/print/filament-profiles", tags=["print"])
 
