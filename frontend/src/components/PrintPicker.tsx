@@ -460,7 +460,8 @@ export function PrintPicker({
     setPicked(null)
     setAlgorithmUnsaved(false)
   }, [printerId])
-  // Clears a pick left from Advanced, which `rackPosition` already reads as none.
+  // Clears a pick left from Advanced, so going back to Advanced starts with none. It no
+  // longer decides what is sent: `rackPosition` already reads no pick outside Advanced.
   // The same for the prime tower (#3648 review): Simple mode sends none.
   useEffect(() => {
     if (!advanced) {
