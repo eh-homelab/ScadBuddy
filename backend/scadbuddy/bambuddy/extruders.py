@@ -290,6 +290,16 @@ def default_nozzles(status: PrinterStatus | None, size: NozzleSize = "0.4") -> l
     return [NozzleChoice(size=size, flow=flow), NozzleChoice(size=size, flow=flow)]
 
 
+def one_flow(nozzles: Sequence[NozzleChoice]) -> list[NozzleChoice]:
+    """``nozzles`` with one flow for both sides (#4272), by :func:`default_nozzles`'
+    rule: High Flow when either side was. A choice remembered from before #4272, when
+    the defaults could give each side its own flow (print #355's printer), would
+    otherwise be refused (``mixed-flows``) until someone chose again."""
+    if len({nozzle.flow for nozzle in nozzles}) < 2:
+        return list(nozzles)
+    return [nozzle.model_copy(update={"flow": "high_flow"}) for nozzle in nozzles]
+
+
 def _found(status: PrinterStatus, nozzles: Sequence[NozzleChoice]) -> dict[int, list[bool]]:
     """Each side's nozzles of the chosen size, as :func:`_nozzles_on` counts them."""
     size = nozzles[0].size
