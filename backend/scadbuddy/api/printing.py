@@ -87,6 +87,7 @@ from scadbuddy.bambuddy.projects import (
     ProjectChoices,
     ProjectRequest,
     ProjectView,
+    _destination_folders,
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
@@ -109,9 +110,13 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.print_library.component import PrintLibraryDep
+from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
+from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -1060,11 +1065,16 @@ async def get_preview_slice(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    slicing: SlicingDep,
+    slicer: SlicerQuery = "bambuddy",
 ) -> SlicePreview:
     """#2169: grams per slot, print time, the side each filament went to and how many
     filament changes the slice makes, once it has finished. Only a slice started for
-    this output, while Bambuddy's job is still that slice; else 404."""
+    this output, while Bambuddy's job is still that slice; else 404. ``slicer`` is the
+    one `PreviewStarted` named: a native slice's id is a `native_slices` row's."""
     meta = require_output(outputs, output_id)
+    if slicer == "native":
+        return await read_native_preview(slicing, job_id, PrintSubject.output(meta.id).run_subject)
     async with client_for(store.load()) as client:
         return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
 
@@ -1086,11 +1096,16 @@ async def get_preview_toolpath(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    slicing: SlicingDep,
+    slicer: SlicerQuery = "bambuddy",
 ) -> Response:
     """#2072: every move of the sliced plate, from its G-code, for the plate preview's
     Speed, Movement and Layers views: a binary header and float32 segments. 409 while
     the slice is under way; 422 when its G-code cannot be read."""
     meta = require_output(outputs, output_id)
+    if slicer == "native":
+        body = await read_native_toolpath(slicing, job_id, PrintSubject.output(meta.id).run_subject)
+        return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
     async with client_for(store.load()) as client:
         body = await read_toolpath(
             client, uploads, job_id, PrintSubject.output(meta.id).run_subject
@@ -1228,8 +1243,34 @@ async def get_progress(
     return progress
 
 
+#: Asks for a native print's destinations (#3818 tier A Task 5, D6).
+NativeQuery = Annotated[
+    bool,
+    Query(
+        description="A print on the native path: ScadBuddy's own library folders, no projects,"
+        " and Bambuddy is not asked"
+    ),
+]
+
+
+async def _serving_native(library: PrintLibraryDep) -> NativeLibrary:
+    native = await library.serving_native()
+    if native is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "ScadBuddy's own library does not serve (library_backend is bambuddy), so a"
+            " native print has no destinations",
+        )
+    return native
+
+
 @router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects and folders")
-async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectChoices:
+async def get_projects(
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    library: PrintLibraryDep,
+    native: NativeQuery = False,
+) -> ProjectChoices:
     """Every Bambuddy project, with the library folder that belongs to it (#79), and
     every library folder of no project, a destination of its own (#3651).
 
@@ -1241,6 +1282,13 @@ async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectC
     """
     settings = store.load()
     touches = await uploads.destination_touches()
+    if native:
+        # D6: a native print is filed in a native folder; projects are Bambuddy's.
+        folders = await (await _serving_native(library)).folders()
+        return ProjectChoices(
+            folders=_destination_folders(folders, touches, None),
+            sort=settings.destination_sort,
+        )
     async with client_for(settings) as client:
         return await describe_projects(
             client,
@@ -1266,10 +1314,14 @@ async def get_default_project(
     outputs: OutputsDep,
     output_id: Annotated[list[str] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
     library_file_id: Annotated[list[int] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
+    native: NativeQuery = False,
 ) -> DefaultDestination:
     """The project a print or Generate of these outputs and library files opens on
     (#3651): the one project they are all in already, else the Settings default
-    (``last_project_id``, #3188), else none. ``reason`` says which."""
+    (``last_project_id``, #3188), else none. ``reason`` says which. A native print has
+    no project (D6): none, with nothing asked of Bambuddy."""
+    if native:
+        return DefaultDestination()
     metas = [require_output(outputs, one) for one in dict.fromkeys(output_id or [])]
     settings = store.load()
     async with client_for(settings) as client:

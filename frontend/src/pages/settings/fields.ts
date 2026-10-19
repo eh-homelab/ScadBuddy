@@ -6,6 +6,7 @@ import type { Settings, SettingsUpdate } from '../../api/types'
 export const SECTIONS = [
   { id: 'connection', title: 'Connection' },
   { id: 'printing', title: 'Printing defaults' },
+  { id: 'printers', title: 'Printers' },
   { id: 'inventory', title: 'Spool inventory' },
   { id: 'projects', title: 'Projects & files' },
   { id: 'uploads', title: 'Uploads' },

@@ -19,6 +19,7 @@ describe('asSliced (#2703)', () => {
   it("puts each filament on the slice's side: pixel-art-mosaic, preview-slice 37", () => {
     const sliced = asSliced(plan, {
       job_id: 37,
+      slicer: 'bambuddy',
       status: 'completed',
       slots: [
         { slot_id: 1, grams: 60.6, side: 'R' },
@@ -36,7 +37,7 @@ describe('asSliced (#2703)', () => {
   it('drops the planned summary, which names the planned sides (#2737 review)', () => {
     const sliced = asSliced(
       { ...plan, summary: 'Inland Black → left · Insignia Black → right · Mistletoe Green → left' },
-      { job_id: 39, status: 'completed', slots: [{ slot_id: 1, grams: 60.6, side: 'R' }] },
+      { job_id: 39, status: 'completed', slicer: 'bambuddy', slots: [{ slot_id: 1, grams: 60.6, side: 'R' }] },
     )
     expect(sliced?.summary).toBe('')
   })
@@ -45,6 +46,7 @@ describe('asSliced (#2703)', () => {
     // A multi-plate file: this plate's slice uses slots 1 and 2 only, and moves slot 1.
     const sliced = asSliced(plan, {
       job_id: 38,
+      slicer: 'bambuddy',
       status: 'completed',
       slots: [
         { slot_id: 1, grams: 8.1, side: 'R' },
@@ -58,9 +60,9 @@ describe('asSliced (#2703)', () => {
   })
 
   it('is null when the slice agrees, says nothing, or there is none', () => {
-    const agrees = { job_id: 1, status: 'completed', slots: [{ slot_id: 1, side: 'L' as const }] }
+    const agrees = { job_id: 1, status: 'completed', slicer: 'bambuddy' as const, slots: [{ slot_id: 1, side: 'L' as const }] }
     expect(asSliced(plan, agrees)).toBeNull()
-    expect(asSliced(plan, { job_id: 1, status: 'completed', slots: [{ slot_id: 1 }] })).toBeNull()
+    expect(asSliced(plan, { job_id: 1, status: 'completed', slicer: 'bambuddy', slots: [{ slot_id: 1 }] })).toBeNull()
     expect(asSliced(plan, null)).toBeNull()
     expect(asSliced(null, agrees)).toBeNull()
   })

@@ -5,7 +5,7 @@ satisfy these, structurally."""
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from fastapi import status
 
@@ -37,6 +37,35 @@ class LibraryReads(Protocol):
     async def filament_requirements(
         self, file_id: int, *, plate_id: int | None = None
     ) -> FilamentRequirements: ...
+
+
+class Uploaded(Protocol):
+    """What an upload answers: `NativeLibrary`'s row, or `RemoteLibrary`'s `LibraryFile`."""
+
+    @property
+    def id(self) -> int: ...
+
+
+class LibraryWrites(Protocol):
+    """A per-print file's upload: it names no output and is not filed (#4312 review I3),
+    so nothing written through it can pass for an output's filed copy."""
+
+    async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> Uploaded: ...
+
+
+class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
+    """What a native run's per-print copy needs of the native library (#3818 tier A Tasks
+    4, 5): its reads, its folders (the destination's check), a folder's files (an earlier
+    attempt's upload, found by its bytes), the upload, and the template's folder the
+    filing uses. `NativeLibrary` in the API's process, `RemoteLibrary` on the print
+    worker."""
+
+    async def template_folder(self, name: str) -> Uploaded: ...
+
+    async def per_print_files(self, folder_id: int | None) -> list[LibraryListRow]:
+        """The live files directly in ``folder_id`` that name no output and are not filed:
+        per-print copies and slices, and files a person uploaded."""
+        ...
 
 
 def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None) -> LibraryReads:

@@ -615,8 +615,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
 - **No volume.** It does not mount `scadbuddy-data` and runs no template code. It reads an
   output's record, its stored `model.3mf` and the names taken from the model's files from
   the API's cluster-internal routes (`/api/v1/internal/outputs/…`, and a native library
-  file's record, plates and bytes from `/api/v1/internal/library/…`, #3827; neither in
-  the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
+  file's record, plates and bytes from `/api/v1/internal/library/…`, #3827, where a
+  native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
   like the rest of the API they have no auth today, so whoever reaches the API reaches
   them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in
@@ -1442,6 +1442,38 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   `emptyDir` there and keep the root filesystem read-only.
 - The new GHCR package needs the one-time **public** visibility step
   described above.
+
+What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822):
+
+- The KEK (`SCADBUDDY_SECRET_KEY_FILE`) and `SCADBUDDY_API_INTERNAL_URL` on the API:
+  every transfer URL's token is signed under a key derived from the KEK, and the URLs
+  name the internal blob routes at that base. Without either, a native slice fails
+  saying which is missing. The slicer pod must reach that URL.
+- `store_backend` `s3` or `bambuddy`: `local` has no content store for the slices'
+  blobs, and a native slice there fails with a 503.
+- The print worker's `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` and
+  `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` matching the API's: the dialog's slice is
+  started from the print worker onto those queues, and the API's `library` worker runs
+  it.
+- Bambu Studio's profiles ship in the API image (`/opt/slicer-profiles`, from the same
+  download as the slicer image), so nothing else is mounted.
+
+#### Rolling out the native slicer
+
+1. Deploy the API images and the slicer image together, from one build: a native
+   slice's preset key carries the API image's `BAMBU_STUDIO_VERSION`, which must be the
+   CLI the slicer runs (spec §8).
+2. On the slicer pod, `scadbuddy-slicer --check-cli` prints the CLI's version (the
+   image build runs it too); its `/healthz` answers on `9090`.
+3. With `slicer_backend` still `bambuddy`, slice one plate in the print dialog, so the
+   deploy itself is known good before the switch.
+4. In Settings → Projects & files, set **Slicer** to "ScadBuddy's slicer (Bambu Studio
+   CLI)". It applies at once, no restart: the next dialog slice and the next print run
+   use it (a run already planned keeps the slicer it planned with). Slice a plate in the
+   dialog (its progress shows as a percentage), then print one. The "Native slicer" row
+   of the printing dashboard charts the slices' duration and outcomes.
+5. To go back, set **Slicer** to "Bambuddy's slicer" the same way. Native slices already
+   recorded stay as provenance and are swept with their rows.
 
 ### Switching continuous deploy off
 

@@ -14,17 +14,17 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
+from scadbuddy.bambuddy.catalogue import _Catalogue
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, read_once
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -131,7 +131,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, require_native_folder
+from scadbuddy.print_library.reads import LibraryReads, NativeCopies
 from scadbuddy.rack.rank import (
     RackCandidate,
     RackGroup,
@@ -156,6 +157,13 @@ from scadbuddy.rack.usage import (
     save_picks,
 )
 from scadbuddy.render.bambu3mf import FilamentMap
+from scadbuddy.slicing.catalogue import catalogue_for
+from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
+from scadbuddy.slicing.values import values_for
+
+if TYPE_CHECKING:
+    # `slicing.start` imports the slice workflow, whose models import this module.
+    from scadbuddy.slicing.start import NativeSliceStarter
 
 logger = logging.getLogger(__name__)
 
@@ -867,7 +875,7 @@ async def check_print(
         if prepared.catalogue is not None
         else None
     )
-    read = read_once(client)
+    read = values_for(client, native=None)
     return PrintCheck(
         errors=errors,
         objects=objects,
@@ -1326,6 +1334,7 @@ async def prepare_run(
     rack: RackUsage | None = None,
     refuse_manual_pick: bool = True,
     project: ResolvedProject | None = None,
+    native: NativeCopies | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -1338,8 +1347,16 @@ async def prepare_run(
     :func:`execute_run`, because only a library file answers those. A manual rack
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
+
+    ``native`` is ScadBuddy's own library on a native run (#3818 tier A Task 5, D6): a
+    project is refused and the folder is checked there, never in Bambuddy.
     """
-    if request.folder_id is not None:
+    if native is not None:
+        if request.project_id is not None:
+            raise RunRefusalError(NATIVE_PROJECT_REFUSAL)
+        if request.folder_id is not None:
+            await require_native_folder(native, request.folder_id)
+    elif request.folder_id is not None:
         await require_destination_folder(client, request.folder_id, settings.library_folder_id)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()
@@ -1408,7 +1425,7 @@ async def prepare_run(
     # library. Slot errors need the plate's slots, which only a library file answers,
     # so those are still found after the upload, by `resolve` in `execute_run`. It is
     # two GETs, the same the dialog's own choices read makes to open (`choices.py`).
-    catalogue = await _catalogue(client)
+    catalogue = await catalogue_for(client, native=None)
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
@@ -1488,6 +1505,11 @@ class PlatePlan(BaseModel):
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
 
 
+#: A run on the native slicer without Bambu Studio's profiles (a process outside the
+#: image): nothing can slice it.
+NATIVE_SLICER_UNAVAILABLE = "the native slicer is not set up here: Bambu Studio's profiles"
+
+
 class PlannedRun(BaseModel):
     """Everything a run decides before its first slice (:func:`plan_run`): what was
     uploaded, each plate's plan, and every warning the result reports."""
@@ -1507,6 +1529,11 @@ class PlannedRun(BaseModel):
     has_rack: bool = False
     #: Which nozzle each filament prints from, as the 3MF states it (#2166).
     nozzle_plan: NozzlePlan | None = None
+    #: Who slices its plates (plan 2026-10-16 Task 13): ``native`` runs ``slice_run``
+    #: on ``library_queue``, which a workflow cannot read from the settings. The defaults
+    #: keep every recorded ``print_plan`` result reading as Bambuddy's.
+    slicer: Literal["bambuddy", "native"] = "bambuddy"
+    library_queue: str = "library"
 
 
 class QueuedPlate(BaseModel):
@@ -1649,8 +1676,14 @@ async def plan_run(
     prepared: PreparedPlates,
     *,
     reuse_slices: bool = True,
+    native: NativeSliceStarter | None = None,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
+
+    With ``slicer_backend`` ``native`` the plates are sliced by the native slicer
+    (``native``, the image's profiles; a 503 without them), and a reprint reuses a
+    native slice's upload, looked up under its native preset key (plan 2026-10-16 Task
+    13).
 
     With ``reuse_slices``, a plate ScadBuddy sliced before with the same presets queues
     that slice (#2671). The dialog's background slice passes ``False``: it slices to
@@ -1671,15 +1704,18 @@ async def plan_run(
     """
     if source.is_sliced:
         return await _plan_sliced(client, source, settings, request, prepared)
+    native_slicing = settings.slicer_backend == "native"
+    if native_slicing and native is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
     plate_ids = prepared.plate_ids
     printer_id = prepared.printer_id
     printer_status = prepared.printer_status
     choices = request.choices
-    catalogue = await _catalogue(client)
+    catalogue = await catalogue_for(client, native=None)
     process = process_preset_for(choices, catalogue)
     # #717: a profile that cannot apply is skipped with a warning, never refused.
     # One read of the preset's values for the profiles and the supports (#2804 review).
-    read = read_once(client)
+    read = values_for(client, native=None)
     from_profiles, profile_warnings = await profile_overrides(
         client, process, request.filament_profiles, read=read
     )
@@ -1703,7 +1739,7 @@ async def plan_run(
         client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
     # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
-    # No second round trip: `read` (read_once) answers again what supports just read.
+    # No second round trip: `read` (values_for) answers again what supports just read.
     tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
     tower_dropped = template_keys_dropped(request.prime_tower)
     # The plan's sides (one chosen by hand, or each Track Switch inlet's, #4272) are
@@ -1802,19 +1838,29 @@ async def plan_run(
         ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+
+    # Here, not at the top: see the `TYPE_CHECKING` import.
+    from scadbuddy.slicing.start import NativeSliceKeys
+
+    native_keys = NativeSliceKeys(native, client) if native is not None else None
+
+    async def reuse_key(plan: SlicePlan, plate_id: int) -> str:
+        if native_keys is None or not native_slicing:
+            return slice_request(plan, plate_id).preset_key
+        try:
+            return await native_keys.key(plan, plate_id)
+        except ProfileImageError as error:
+            raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
+        except ProfileError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+
+    async def recorded(plan: SlicePlan, plate_id: int) -> int | None:
+        return await source.recorded_slice(client, library_file_id, await reuse_key(plan, plate_id))
+
     # ScadBuddy's own slice of this copy with these presets, when it has one (#2671):
     # every plate's looked up together, each a few GETs (#2691 review).
     reused: list[int | None] = (
-        list(
-            await asyncio.gather(
-                *(
-                    source.recorded_slice(
-                        client, library_file_id, slice_request(plan, plate_id).preset_key
-                    )
-                    for plate_id, _, _, plan in ready
-                )
-            )
-        )
+        list(await asyncio.gather(*(recorded(plan, plate_id) for plate_id, _, _, plan in ready)))
         if reuse_slices
         else [None] * len(ready)
     )
@@ -1865,6 +1911,8 @@ async def plan_run(
         # unreadable status still tries, since the pick reads a fresh one (#1043).
         has_rack=printer_status is None or bool(rack_positions(printer_status.nozzle_rack)),
         nozzle_plan=nozzle_plan,
+        slicer="native" if native_slicing else "bambuddy",
+        library_queue=native.library_queue if native is not None else "library",
     )
 
 

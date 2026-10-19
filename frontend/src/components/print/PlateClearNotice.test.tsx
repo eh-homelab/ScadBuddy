@@ -9,7 +9,7 @@ describe('PlateClearNotice (#3632)', () => {
     const { rerender } = render(<PlateClearNotice printerId={2} />)
 
     const warning = await screen.findByTestId('print-plate-warning')
-    expect(warning).toHaveTextContent('Clear the plate of Workshop before the next print.')
+    expect(warning).toHaveTextContent('Clear the plate of 3DP-77A-114 before the next print.')
     expect(warning).toHaveClass('text-warn')
 
     // Another printer's plate is its own.

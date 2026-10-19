@@ -1079,4 +1079,8 @@ class DurableSession:
             busy=self._agent.busy,
             total=len(texts),
             entries=texts[start:end],
+            # What the agent owes at the checkpoint (#4173), on the first page only.
+            pending=state.pending if start == 0 else {},
+            fork_next=state.fork_next if start == 0 else False,
+            recent_call_ids=state.recent_call_ids if start == 0 else [],
         )

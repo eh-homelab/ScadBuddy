@@ -252,7 +252,7 @@ class Target:
 
 
 async def target_for(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     settings: StoredSettings,
     *,
     printer_id: int | None = None,
@@ -261,6 +261,7 @@ async def target_for(
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
     filament_map: FilamentMap | None = None,
+    model: str | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -272,12 +273,24 @@ async def target_for(
     alone: Generate's ``generate_target`` computes them too, so the file Generate lays
     out is the one the project's next print reuses. So are ``nozzle_volume_type``
     (#484), each extruder's flow.
+
+    ``model`` is the printer's model when the caller knows it (a native run's printer
+    row, #3818 tier A Task 4): the plate is then read from it, and Bambuddy's printer
+    list is not. Without a ``client`` a printer's plate needs it.
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
     flows = tuple(nozzle_volume_type) if nozzle_volume_type is not None else None
+    if model is not None:
+        return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
     printer_id = printer_id if printer_id is not None else settings.printer_id
-    if printer_id is None:
+    if printer_id is not None and client is None:
+        # An `ApiError`, so an activity that reaches it refuses once (#4312 review M6).
+        raise ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"printer {printer_id}'s plate needs its model or a Bambuddy client",
+        )
+    if printer_id is None or client is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
         return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
@@ -592,7 +605,7 @@ async def upload_copy(
         same = await _same_content(client, uploads, printable.key, folder, target_key, content)
         if same is not None:
             return same.id, same.filename, False
-    listed = await _listing(client, folder)
+    listed = await folder_listing(client, folder)
     uploaded = await _left_unrecorded(
         client, uploads, listed, payload, project_stem, printable.inbox_name, printable.origin_id
     )
@@ -709,7 +722,7 @@ async def _supersede_unprinted(
     return filename
 
 
-async def _listing(
+async def folder_listing(
     client: BambuddyClient, folder: int | None
 ) -> list[LibraryFile] | list[LibraryListRow] | None:
     """The files directly in ``folder`` (the library root for ``None``), read once per
@@ -768,7 +781,7 @@ async def _left_unrecorded(
         return None
     recorded = await uploads.recorded([row.id for row in rows])
     digest = hashlib.sha256(payload).hexdigest()
-    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], digest)
+    found = await same_bytes(client, [row for row in rows if row.id not in recorded], digest)
     if found is not None:
         logger.info(
             "an earlier attempt's upload was never recorded; taking it",
@@ -777,7 +790,7 @@ async def _left_unrecorded(
     return found
 
 
-async def _same_bytes(
+async def same_bytes(
     client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], digest: str
 ) -> LibraryFile | None:
     """The newest of ``rows`` whose ``file_hash`` is ``digest``, a sha256, or ``None``. A
@@ -1043,7 +1056,7 @@ async def _raw_left_unrecorded(
     """The raw copy an earlier attempt uploaded into ``folder`` and died before
     recording, or ``None``: one named ``filename``, of ``size`` bytes hashing to
     ``digest``, that nothing records (:func:`_left_unrecorded`'s check, #1145)."""
-    listed = await _listing(client, folder)
+    listed = await folder_listing(client, folder)
     if listed is None:
         return None
     name = filename.casefold()
@@ -1051,7 +1064,7 @@ async def _raw_left_unrecorded(
     if not rows:
         return None
     recorded = await uploads.recorded([row.id for row in rows])
-    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], digest)
+    found = await same_bytes(client, [row for row in rows if row.id not in recorded], digest)
     if found is not None:
         logger.info(
             "an earlier attempt's raw copy was never recorded; taking it",

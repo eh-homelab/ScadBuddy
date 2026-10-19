@@ -120,6 +120,21 @@ ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
 #: The native print library's trash purge and orphan blobs (#3827); after the attachments.
 LIBRARY_SWEEP = "housekeeping_sweep_library"
 LIBRARY_PATCH = "housekeeping-sweep-library"
+#: The native slicer's settled slices (plan 2026-10-16 Task 12): rows past
+#: `PREVIEW_GRACE` deleted with their holds (`sweep_content` then collects the blobs). It
+#: obeys the sweeps' switch, as
+#: `PREVIEWS_SWEEP` does: with the sweeps off, `sweep_content` does not run either.
+NATIVE_SLICES_SWEEP = "housekeeping_sweep_native_slices"
+NATIVE_SLICES_PATCH = "housekeeping-sweep-native-slices"
+#: What the slicer worker PUT through the internal blob route (`transfer_puts`), a day
+#: on. On the prune Schedule too, like the claims, so it runs with the sweeps off.
+TRANSFER_PUTS_SWEEP = "housekeeping_prune_transfer_puts"
+TRANSFER_PUTS_PATCH = "housekeeping-prune-transfer-puts"
+#: The native slices whose execution is gone, failed (Task 12 review M1): a correctness
+#: repair, not storage, so on the prune Schedule, with the sweeps off too; the TTL
+#: delete (`NATIVE_SLICES_SWEEP`) stays under the switch.
+LOST_NATIVE_SLICES_SWEEP = "housekeeping_stop_lost_native_slices"
+LOST_NATIVE_SLICES_PATCH = "housekeeping-stop-lost-native-slices"
 #: #3823: a `PrinterWatch` for every LAN-linked printer, so one that stopped (or never
 #: started: its link's start failed) comes back. Last, behind its own patch; on the
 #: prune Schedule too, so it comes back within `PRUNE_INTERVAL` (#4186 review I4).
@@ -141,6 +156,9 @@ SWEEPS = (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
     LIBRARY_SWEEP,
+    NATIVE_SLICES_SWEEP,
+    TRANSFER_PUTS_SWEEP,
+    LOST_NATIVE_SLICES_SWEEP,
     PRINTER_WATCHES_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
@@ -149,17 +167,20 @@ SWEEPS = (
 #: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6);
 #: and the native print library's trash purge and orphan blobs (#3827), which the generic
 #: blob sweep skips, so with the sweeps off nothing else would collect them. Behind
-#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged. And
-#: the printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started
-#: again within the interval, not the sweeps' day.
-#: Not the dialog's background slices (`PREVIEWS_SWEEP`): they obey the sweeps' switch,
-#: so with the sweeps off they stay in Bambuddy's library.
+#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
+#: Not the dialog's background slices (`PREVIEWS_SWEEP`, `NATIVE_SLICES_SWEEP`): they
+#: obey the sweeps' switch, so with the sweeps off they stay. The transfer PUTs'
+#: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch. And the
+#: printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started again
+#: within the interval, not the sweeps' day.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
     LOST_SLICES_SWEEP,
     ACTIVITY_SWEEP,
     LIBRARY_SWEEP,
+    TRANSFER_PUTS_SWEEP,
+    LOST_NATIVE_SLICES_SWEEP,
     PRINTER_WATCHES_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
@@ -189,6 +210,12 @@ ACTIVITY_TIMEOUT = timedelta(minutes=5)
 ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
 #: The library sweep purges trash past 30 days and deletes the blobs no row names.
 LIBRARY_TIMEOUT = timedelta(minutes=10)
+#: A delete, and a describe per running native slice past `LOST_AFTER`.
+NATIVE_SLICES_TIMEOUT = timedelta(minutes=5)
+#: A describe per running native slice past `LOST_AFTER`, each stopped in one update.
+LOST_NATIVE_SLICES_TIMEOUT = timedelta(minutes=2)
+#: One delete.
+TRANSFER_PUTS_TIMEOUT = timedelta(minutes=2)
 #: One start (or none) per LAN printer, each bounded by `follow.RPC_TIMEOUT`.
 PRINTER_WATCHES_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
@@ -211,6 +238,12 @@ def sweep_timeout(sweep: str) -> timedelta:
         return ATTACHMENTS_TIMEOUT
     if sweep == LIBRARY_SWEEP:
         return LIBRARY_TIMEOUT
+    if sweep == NATIVE_SLICES_SWEEP:
+        return NATIVE_SLICES_TIMEOUT
+    if sweep == LOST_NATIVE_SLICES_SWEEP:
+        return LOST_NATIVE_SLICES_TIMEOUT
+    if sweep == TRANSFER_PUTS_SWEEP:
+        return TRANSFER_PUTS_TIMEOUT
     if sweep == PRINTER_WATCHES_SWEEP:
         return PRINTER_WATCHES_TIMEOUT
     return SWEEP_TIMEOUT
@@ -245,6 +278,12 @@ class Housekeeping:
             if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
                 continue
             if sweep == LIBRARY_SWEEP and not workflow.patched(LIBRARY_PATCH):
+                continue
+            if sweep == NATIVE_SLICES_SWEEP and not workflow.patched(NATIVE_SLICES_PATCH):
+                continue
+            if sweep == TRANSFER_PUTS_SWEEP and not workflow.patched(TRANSFER_PUTS_PATCH):
+                continue
+            if sweep == LOST_NATIVE_SLICES_SWEEP and not workflow.patched(LOST_NATIVE_SLICES_PATCH):
                 continue
             if sweep == PRINTER_WATCHES_SWEEP and not workflow.patched(PRINTER_WATCHES_PATCH):
                 continue

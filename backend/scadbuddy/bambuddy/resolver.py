@@ -153,14 +153,37 @@ def _fits(rows: list[PresetChoice], prefix: str, printer: str) -> PresetRef | No
     )
 
 
+def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) -> PresetRef | None:
+    """The preset whose ``filament_id`` is a tray's ``tray_info_idx`` and which declares
+    ``printer``: one per printer and nozzle in the BBL tree (``slicing/catalogue.py``).
+    Only the image's catalogue carries ``filament_id``; Bambuddy's rows never match."""
+    return _best(
+        [
+            row
+            for row in rows
+            if row.filament_id == filament_id and printer in row.compatible_printers
+        ]
+    )
+
+
+#: What a ref the image's catalogue does not hold is, by its source (#3818 D5): a
+#: standard one is Bambu Studio's, from a version this image does not ship.
+_NOT_NATIVE: dict[str, str] = {
+    "standard": "not one of Bambu Studio's own presets in this version",
+    "cloud": "a Bambu Cloud user preset",
+    "local": "a Bambuddy local preset",
+    "orca_cloud": "an OrcaSlicer cloud preset",
+}
+
+
 def _override_problem(
-    ref: PresetRef, rows: list[PresetChoice], printer: str, size: str
+    ref: PresetRef, rows: list[PresetChoice], printer: str, size: str, owner: str = "Bambuddy"
 ) -> str | None:
     """Why an Advanced override cannot slice, or ``None`` when it can. An empty
     ``compatible_printers`` declares no restriction (see :class:`PresetChoice`)."""
     matches = [row for row in rows if row.ref == ref]
     if not matches:
-        return "isn't one Bambuddy has any more"
+        return f"isn't one {owner} has any more"
     if not any(
         not row.compatible_printers or printer in row.compatible_printers for row in matches
     ):
@@ -187,8 +210,8 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
         errors.append(
             FilamentWarning(
                 kind="mixed-sizes",
-                message="The two nozzles are different sizes. Bambuddy can't slice "
-                "mixed nozzle sizes yet.",
+                message="The two nozzles are different sizes. "
+                f"{catalogue.slicer} can't slice mixed nozzle sizes yet.",
             )
         )
     if len({nozzle.flow for nozzle in choices.nozzles}) > 1:
@@ -208,7 +231,7 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
         errors.append(
             FilamentWarning(
                 kind="no-preset",
-                message=f"Bambuddy has no printer preset {name!r}.",
+                message=f"{catalogue.owner} has no printer preset {name!r}.",
             )
         )
 
@@ -219,7 +242,8 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
         errors.append(
             FilamentWarning(
                 kind="no-process",
-                message=f"{process_name!r} is not a process Bambuddy has for a {size} mm nozzle.",
+                message=f"{process_name!r} is not a process {catalogue.owner} has for a "
+                f"{size} mm nozzle.{catalogue.native_note}",
             )
         )
     return _ChoiceResult(
@@ -283,11 +307,26 @@ def resolve(
             )
             continue
         ref = choices.filament_overrides.get(slot.slot_id)
+        if ref is not None and catalogue.is_native:
+            # A native run slices with the image's presets only (#3818 D5): a cloud ref
+            # is the preset its setting_id names there, and Bambuddy's own are refused.
+            native = catalogue.native_ref(ref, "filament")
+            if native is None:
+                errors.append(
+                    FilamentWarning(
+                        kind="no-preset",
+                        slot_id=slot.slot_id,
+                        message=f"The preset chosen for slot {slot.slot_id} is "
+                        f"{_NOT_NATIVE[ref.source]}.{catalogue.native_note}",
+                    )
+                )
+                continue
+            ref = native
         if ref is not None:
             # Checked like every other preset (PR #335 review 2): an override left from
             # an earlier nozzle size, or since deleted in Bambuddy, would otherwise only
             # fail as an opaque error from Bambuddy's own slice.
-            problem = _override_problem(ref, catalogue.filament, printer, size)
+            problem = _override_problem(ref, catalogue.filament, printer, size, catalogue.owner)
             if problem is not None:
                 errors.append(
                     FilamentWarning(
@@ -298,7 +337,10 @@ def resolve(
                     )
                 )
                 continue
-        else:
+        elif option.spool_id < 0 and option.slicer_filament:
+            # A tray chosen for itself: its tray_info_idx is the BBL preset's filament_id.
+            ref = _by_filament_id(catalogue.filament, option.slicer_filament, printer)
+        if ref is None:
             own = [
                 row.slicer_filament
                 for row in spool_presets.get(option.spool_id, [])
