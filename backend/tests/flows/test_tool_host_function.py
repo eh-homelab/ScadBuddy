@@ -20,6 +20,7 @@ from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
 from scadbuddy.workflows.flow_tools import (
+    FLOW_BEATLESS_CALL_PATCH,
     FLOW_BEATLESS_TIER_PATCH,
     FLOW_HOST_QUEUE_PATCH,
     FLOW_PINNED_CALL_PATCH,
@@ -354,6 +355,8 @@ class TurnTools:
         self.next_hosts: list[str] = []
         #: Seconds each tier takes, with no beat: an agent replica from before #4200.
         self.tier_delay_s = 0.0
+        #: The same for each call.
+        self.call_delay_s = 0.0
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -384,6 +387,7 @@ class TurnTools:
             info = activity.info()
             fields = activity.payload_converter().from_payload(args[0].payload, dict)
             self.calls.append((info.activity_type, info.activity_id, fields))
+            await asyncio.sleep(self.call_delay_s)
             return f"{fields['method']} done"
 
         return turn_call
@@ -728,6 +732,102 @@ async def test_a_beatless_tier_in_a_run_from_before_4262_still_fails_and_replays
             run = await projects.finished(run_id)
     assert "Heartbeat timeout" in (run.result or "")
     assert served.tiered == ["scadbuddy_http__http_request"] * 3
+    history = await outward.client.get_workflow_handle(f"flow-{run_id}").fetch_history()
+    await Replayer(
+        workflows=[ProjectWorkflow],
+        plugins=harness_plugins(FLOW_TOOLS),
+        data_converter=flows_converter(Keys()),
+        workflow_runner=projects_runner(),
+    ).replay_workflow(history)
+
+
+async def test_a_read_on_agent_replicas_that_never_beat_is_asked_again_without_beats(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    """#4281: every attempt of a read lands on an agent replica from before #4200, which
+    sends no beats and takes longer than the heartbeat timeout to answer. The read is
+    asked once more without one, as the tier is (#4262), and the run gets its answer."""
+    served, queue = turn_tools
+    served.call_delay_s = 2.5
+    run_id = await outward.run(
+        script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
+        tools_queue=queue,
+        agent_heartbeat_s=1,
+    )
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'GET done'"
+    # Three attempts that missed their beats, then the one with no heartbeat timeout.
+    [step] = run.steps
+    assert (
+        served.calls
+        == [("turn:scadbuddy_http__http_request", f"tool-{step.call_id}", {"method": "GET"})] * 4
+    )
+
+
+async def test_a_write_that_missed_its_beats_is_not_sent_again_and_says_it_may_have_run(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    """#4281: an approved write lands on a replica that never beats and outlasts the
+    heartbeat timeout. It may still land there, so it is not sent again, and the script
+    is told it may have run, not only that it timed out."""
+    served, queue = turn_tools
+    served.call_delay_s = 2.5
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('scadbuddy_http__http_request', {'method': 'POST'})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+        agent_heartbeat_s=1,
+    )
+    call_id = await outward.approval(run_id)
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert "scadbuddy_http__http_request may have run" in (run.result or "")
+    assert "Check whether it did before calling it again" in (run.result or "")
+    assert served.calls == [
+        ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
+    ]
+
+
+async def test_a_beatless_read_in_a_run_from_before_4281_still_fails_and_replays(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that recorded a read's heartbeat timeout before #4281 (no marker) replays on
+    this code: the timeout reaches the script again, and the read is not asked again."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{queue}.host-1")
+    served.call_delay_s = 2.5
+    projects = Outward(outward.client, f"projects-{uuid.uuid4().hex[:8]}", outward.store)
+    activities = outward_activities(outward.store, None)
+    # As `before_4262` above: the sandbox passes `temporalio` through to the run.
+    patched = workflow.patched
+
+    def before_4281(patch_id: str) -> bool:
+        return False if patch_id == FLOW_BEATLESS_CALL_PATCH else patched(patch_id)
+
+    with monkeypatch.context() as m:
+        m.setattr(workflow, "patched", before_4281)
+        async with (
+            projects_worker(outward.client, projects.queue, activities),
+            Worker(outward.client, task_queue=queue, activities=[served.tier()]),
+            Worker(outward.client, task_queue=served.host, activities=[served.call()]),
+        ):
+            run_id = await projects.run(
+                script(
+                    "try:",
+                    "    await tool('scadbuddy_http__http_request', {'method': 'GET'})",
+                    "except Exception as e:",
+                    "    return str(e)",
+                ),
+                tools_queue=queue,
+                agent_heartbeat_s=1,
+            )
+            run = await projects.finished(run_id)
+    assert "Heartbeat timeout" in (run.result or "")
+    assert len(served.calls) == 3
     history = await outward.client.get_workflow_handle(f"flow-{run_id}").fetch_history()
     await Replayer(
         workflows=[ProjectWorkflow],

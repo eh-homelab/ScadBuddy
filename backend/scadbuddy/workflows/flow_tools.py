@@ -191,6 +191,13 @@ def _agent_heartbeat() -> timedelta:
 #: attempt ends on its start-to-close instead takes no fallback.
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
+#: The same for a call's own activity (#4281). A read whose last attempt missed its
+#: beats is asked once more with no heartbeat timeout, as the tier is. A write is never
+#: sent again: one that missed its beats may still have run on a replica that does not
+#: beat, so it fails saying so, and the script checks before calling it again. Runs
+#: recorded before raised that heartbeat timeout to the script.
+FLOW_BEATLESS_CALL_PATCH = "flow-beatless-call-4281"
+
 
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
 #: accept (three 60 s checks, `agent/src/tools/command.ts` `ACCEPTING_MS`).
@@ -680,6 +687,7 @@ async def _call_tool(
     # A pinned call nothing picked up is asked for once more on the replica the agent
     # names then (#4152): one tiered just before a deploy took its replica.
     tries = 2 if per_call else 1
+    heartbeat: timedelta | None = _agent_heartbeat()
     while True:
         tries -= 1
         try:
@@ -692,7 +700,7 @@ async def _call_tool(
                 task_queue=task_queue,
                 schedule_to_start_timeout=to_start,
                 start_to_close_timeout=_TOOL_TIMEOUT,
-                heartbeat_timeout=_agent_heartbeat(),
+                heartbeat_timeout=heartbeat,
                 retry_policy=RetryPolicy(
                     maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
                 ),
@@ -701,6 +709,25 @@ async def _call_tool(
         except ActivityError as err:
             if isinstance(err.cause, ApplicationError):
                 raise ToolFailedError(err.cause.message) from None
+            # Only the last attempt's failure is known, as for the tier.
+            if (
+                heartbeat is not None
+                and isinstance(err.cause, ActivityTimeoutError)
+                and err.cause.type == TimeoutType.HEARTBEAT
+                and workflow.patched(FLOW_BEATLESS_CALL_PATCH)
+            ):
+                if attempts == 1:
+                    raise ToolFailedError(
+                        f"{name} may have run: the agent replica that took it sent no "
+                        f"heartbeat for {heartbeat.seconds}s (one from before the agent "
+                        "beat its calls, or one that stopped). Check whether it did before "
+                        "calling it again."
+                    ) from None
+                # A read: safe to ask again. Not a move to another replica, so the
+                # re-homing try below is kept.
+                heartbeat = None
+                tries += 1
+                continue
             if not (
                 isinstance(err.cause, ActivityTimeoutError)
                 and err.cause.type == TimeoutType.SCHEDULE_TO_START
