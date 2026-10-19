@@ -251,6 +251,20 @@ def test_no_switch_one_side_or_an_unknown_rest_says_nothing() -> None:
     assert inlet_warnings(_sides("R", "L"), _resting(None, LEFT)) == []
 
 
+def test_a_file_of_more_plates_warns_of_an_inlet_with_two_spools() -> None:
+    """#4381 review of #4272: a map in a file of more plates is not pinned, so the
+    slicer may split an inlet's spools whatever the plan says."""
+    [warning] = inlet_warnings(_sides("L", "L", "R"), _resting(LEFT, LEFT, RIGHT), kept=False)
+
+    assert warning.kind == "inlet-shared"
+    assert "may put Glow and Black, all fed through Track Switch inlet A" in warning.message
+    assert "print one plate at a time" in warning.message
+    # Kept (one plate, pinned), the same plan says nothing.
+    assert inlet_warnings(_sides("L", "L", "R"), _resting(LEFT, LEFT, RIGHT)) == []
+    # One spool per inlet cannot be split.
+    assert inlet_warnings(_sides("L", "R"), _resting(LEFT, RIGHT), kept=False) == []
+
+
 def test_checks_reads_each_spools_inlet_from_the_printer() -> None:
     """The wiring: both spools loaded in AMS 2, which the switch's inlet A feeds."""
     shelf = [spool(1, colour="Glow"), spool(2)]

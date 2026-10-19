@@ -1505,20 +1505,23 @@ def test_a_mounted_high_flow_nozzle_the_slice_is_not_offered_is_not_warned_about
 def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#484 on queue item 149's printer: High Flow chosen, which only the left's HH01 0.4
-    is (the right's HS01 and rack spares are Standard). One flow for both sides (#4272),
-    so the High Flow left is the side offered: left to choose, the slicer put the print
-    on the Standard right (live slices, 2026-10-06). Nothing is warned of, since the
-    Standard right is not offered."""
+    """#484 on queue item 149's printer, High Flow chosen: one flow for both sides
+    (#4272). The left's HH01 0.4 is High Flow and the right can swap on a High Flow 0.4
+    from the rack, so both sides are offered and the file says both are High Flow. Both
+    spools rest on the right (inlet B), so the plan prints them there, and the right's
+    mounted Standard HS01 is warned of (#723): fit a High Flow nozzle before it starts."""
     response, upload = _run_on(
         client, model, paths, BOTH_04_LEFT_HF, nozzles=[{"size": "0.4", "flow": "high_flow"}]
     )
 
     assert response.status_code == 200, response.text
-    assert not NOZZLE_KINDS & _kinds(response)
+    assert _high_flow(response.json()["warnings"]) == [
+        high_flow_warning(RIGHT, "high_flow").message
+    ]
+    assert NOZZLE_KINDS & _kinds(response) == {"hf-mounted"}
     settings = _uploaded_settings(upload)
     assert settings["nozzle_volume_type"] == ["High Flow", "High Flow"]
-    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "Standard#0"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#0", "High Flow#1"]
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         assert "Metadata/slice_info.config" not in archive.namelist()
 
@@ -1602,11 +1605,46 @@ def test_sides_chosen_by_hand_in_a_file_of_more_plates_slice_only_the_plate_prin
 
 
 @respx.mock
+def test_with_the_switch_a_plan_on_both_inlets_is_pinned_and_sliced_whole(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#4381 review of #4272: nothing chosen by hand, one spool on each Track Switch
+    inlet (AMS 0 on B, the right; AMS 2 on A, the left). The plan puts each on its
+    inlet's side, and the map is pinned so the slicer cannot regroup them: left to
+    group, it could feed one inlet to both extruders, which stalled print #355."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**_mounted(("HS01", "0.4"), ("HS01", "0.4")))
+    sliced = slice_routes()
+    queue_route()
+    response = run_print(
+        client,
+        output_id,
+        json={
+            **body(tier="standard", nozzles=[{"size": "0.4"}]),
+            "filament_plan": ONE_ON_LEFT,
+            "plate_id": 1,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    assert settings["filament_map"] == ["2", "1"]
+    assert settings["filament_nozzle_map"] == ["1", "0"]
+    [plate] = _plate_metadata(upload)
+    assert plate["filament_map_mode"] == "Nozzle Manual"
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [0]
+
+
+@respx.mock
 def test_a_plan_nobody_touched_is_left_to_the_slicers_grouping(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     """#3955: with every side on Automatic the slicer still groups the filaments itself
-    (Auto For Flush), as the owner's inkjet-easy default, and the plate is named."""
+    (Auto For Flush), as the owner's inkjet-easy default, and the plate is named. Both
+    spools rest on inlet B, so the plan uses one side and the stats offer only it: there
+    is nothing to pin (#4272)."""
     response, upload, sliced = _sides_run(client, model, paths)
 
     assert response.status_code == 200, response.text

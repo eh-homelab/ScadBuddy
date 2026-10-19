@@ -74,6 +74,33 @@ def test_with_the_switch_two_spools_on_one_inlet_share_its_side(inlet_side: int)
     assert [slot.side for slot in plan.slots] == [side, side]
 
 
+@pytest.mark.parametrize(
+    ("switch", "rests", "one_plate", "pinned"),
+    [
+        # One spool on each inlet: both sides used, so the sides are kept.
+        (True, (RIGHT, LEFT), True, True),
+        # A file of more plates cannot be pinned (#3955 review).
+        (True, (RIGHT, LEFT), False, False),
+        # One inlet, one side: the nozzle stats offer only it.
+        (True, (RIGHT, RIGHT), True, False),
+        # No switch: each AMS is wired to its side, nothing to keep.
+        (False, (RIGHT, LEFT), True, False),
+    ],
+)
+def test_a_switch_plan_on_both_sides_keeps_them(
+    switch: bool, rests: tuple[int, int], one_plate: bool, pinned: bool
+) -> None:
+    """#4381 review of #4272: the slicer regroups an unpinned map, and could put two of
+    one inlet's spools on different extruders, so a plan using both sides with the
+    switch is pinned like one chosen by hand."""
+    filaments = [replace(GREEN, rests=rests[0]), replace(BLACK, rests=rests[1])]
+    plan = plan_nozzles(h2c(switch=switch), HF, filaments)
+
+    assert plan is not None
+    stated = plan.stated_map(2, one_plate=one_plate)
+    assert stated is not None and stated.pinned is pinned
+
+
 def test_with_the_switch_a_spool_of_unknown_rest_is_still_spread() -> None:
     """A spool whose side cannot be told (not loaded) is planned by material, as before."""
     plan = plan_nozzles(h2c(), HF, [replace(GREEN, rests=None), replace(BLACK, rests=None)])

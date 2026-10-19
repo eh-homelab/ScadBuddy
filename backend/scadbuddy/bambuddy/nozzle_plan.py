@@ -174,15 +174,24 @@ class NozzlePlan(BaseModel):
         plan, every filament where it puts it (#3955)."""
         return any(slot.by_hand for slot in self.slots)
 
+    @property
+    def keeps_sides(self) -> bool:
+        """Whether the slice must keep the plan's sides: one chosen by hand (#3955), or
+        both sides used with the Track Switch fitted (#4272). Left to regroup, the
+        slicer could put two spools of one inlet on different extruders, and the switch
+        would then move that inlet between them at every colour change, as it did on
+        print #355. With one side used, the nozzle stats offer only it."""
+        return self.by_hand or (self.track_switch and len(self.sides) == 2)
+
     def stated_map(self, filaments: int, *, one_plate: bool) -> FilamentMap | None:
         """The Manual map the 3MF states for a file of ``filaments`` filaments, pinned
-        when a side was chosen by hand and the file has ``one_plate``."""
+        when the plan :attr:`keeps_sides` and the file has ``one_plate``."""
         if filaments < 1:
             return None
         return FilamentMap(
             tuple(self.filament_map(filaments)),
             tuple(self.volume_map(filaments)),
-            pinned=self.by_hand and one_plate,
+            pinned=self.keeps_sides and one_plate,
         )
 
 
