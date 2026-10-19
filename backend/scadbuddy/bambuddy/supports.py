@@ -18,9 +18,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
+from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
-from scadbuddy.bambuddy.models import PresetRef, ProcessValue
+from scadbuddy.bambuddy.models import NOT_IN_PROFILES, PresetRef, ProcessValue
 from scadbuddy.core.problems import ApiError
 
 #: The Bambu Studio process keys a support choice sets, in the order they are listed.
@@ -83,7 +83,7 @@ def _not_applied(message: str) -> FilamentWarning:
 
 
 async def support_overrides(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     process: PresetRef | None,
     wanted: Mapping[str, str],
     *,
@@ -103,7 +103,7 @@ async def support_overrides(
         reason = "no process preset was resolved for this print"
     else:
         try:
-            answer = await (read or client.preset_values)(process)
+            answer = await preset_reader(client, read)(process)
         except ApiError:
             # Not ``error.detail``: that repeats the operation ("read the values of
             # process preset …"), which the sentence around it already says. Nor
@@ -113,6 +113,8 @@ async def support_overrides(
         else:
             if answer.resolved:
                 values = answer.values
+            elif answer.reason == NOT_IN_PROFILES:
+                reason = "the preset is not one of Bambu Studio's own, which a native print reads"
             else:
                 reason = f"Bambuddy could not read them ({answer.reason or 'no reason given'})"
     if values is None:
