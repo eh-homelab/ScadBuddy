@@ -1,6 +1,6 @@
 # Orders: customers, line items priced by the slice, fulfilment with provenance, and the flow that works them
 
-Status: proposed, 2026-10-18. Design only; no code. Builds on the flows specs
+Status: accepted, merged in #4176 (2026-10-19). Epic #4248. Design only; no code. Builds on the flows specs
 (`2026-10-01-durable-printing-agents-flows-design.md`, the "10-01 spec", and
 `2026-10-11-flow-grants-and-git-design.md`, the "10-11 spec", with its §12 triggers
 amendment), the template-pipelines spec (`2026-09-27-template-pipelines-design.md`,
@@ -703,19 +703,19 @@ Each phase is a PR series with its plan under `docs/superpowers/plans/`; each la
 usable on its own.
 
 1. **Customers and orders** (§3.1-3.3, §3.5 without print states, §4's reads and
-   writes, the three pages, agent tools, mocks). An item can be added from Customize
+   writes, the three pages, agent tools, mocks) (#4249). An item can be added from Customize
    and from an output. Close works with manual fulfilment (§6.1 by hand).
-2. **Pricing** (§5): the price book, the `order_item_quote` operation over
+2. **Pricing** (§5) (#4250): the price book, the `order_item_quote` operation over
    `slice_info.read_sliced` (F4, on main), accept, the rough estimate. Slices through
    the Bambuddy slicer until #3822's remaining parts put the native one in
    `PrintRunWorkflow`; the reader is the same either way.
-3. **Fulfilment and provenance** (§6): attempts from the print path (`subject`
+3. **Fulfilment and provenance** (§6) (#4251): attempts from the print path (`subject`
    `order_item:<id>`), the `attachments` table and routes, shipments, costs.
-4. **Flows** (§7): the two bus-named trigger kinds, `match`, the subject generalisation, `trigger()`
+4. **Flows** (§7) (#4252): the two bus-named trigger kinds, `match`, the subject generalisation, `trigger()`
    models, the `orders` grant bound, `parent_run_id`, the built-in `order-fulfilment`
    flow, `order_notify_customer`. Needs #2484's trigger work, which is in.
-5. **Bambuddy mirrors** (§8): the seam, nested projects, archive copy-in, spool import.
-6. **Declared pages** (§9): its own spec, after phase 1 has extracted the generic
+5. **Bambuddy mirrors** (§8) (#4253): the seam, nested projects, archive copy-in, spool import.
+6. **Declared pages** (§9) (#4254): its own spec, after phase 1 has extracted the generic
    table, filter and drawer components the page host would offer.
 
 ## 12. Open decisions
