@@ -65,6 +65,9 @@ func (d *dir) Mkdir(ctx context.Context, name string, _ uint32, out *fuse.EntryO
 	}
 	ctx, op := telemetry.StartOp(ctx, "mkdir", telemetry.FolderID(d.id))
 	defer func() { op.End(errno) }()
+	if errno := storable(name); errno != 0 {
+		return nil, errno
+	}
 	if errno := d.free(ctx, d, name); errno != 0 {
 		return nil, errno
 	}

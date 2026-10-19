@@ -712,7 +712,9 @@ func TestQueueableTellsARefusalFromAFailure(t *testing.T) {
 		{502, 408, true},  // Bambuddy's timeout
 		{502, 400, false}, // Bambuddy refusing the request
 		{502, 410, false},
-		{422, 0, false}, // ScadBuddy refusing the request
+		{422, 0, false},  // ScadBuddy refusing the request
+		{404, 404, true}, // a folder gone, relayed: sendFailed moves the write to the top
+		{403, 403, true}, // a scope refusal, relayed: queued until the key is fixed
 	} {
 		err := &api.Error{Op: "upload", Status: c.status, Upstream: c.upstream}
 		if got := queueable(err); got != c.want {
@@ -736,6 +738,9 @@ func TestANameWithAColonIsRefusedBeforeAnythingIsStored(t *testing.T) {
 	}
 	if err := os.Rename(filepath.Join(dir, "x.3mf"), filepath.Join(dir, "y:z.3mf")); !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("rename: %v, want EINVAL", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "a:b"), 0o755); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("mkdir: %v, want EINVAL", err)
 	}
 	if q := queued(t, state); len(q) != 0 {
 		t.Fatalf("queued: %+v", q)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1167,16 +1168,20 @@ func status(err error) int {
 }
 
 // queueable is whether a failed upload is worth sending again: everything but a
-// refusal of the request itself, which would only be refused again. That includes
-// Bambuddy's own 4xx, which ScadBuddy relays as a 502 (#4142: a name with a colon, a
-// .3mf that is not a ZIP), but not its 408 or 429, which a later attempt may not meet.
+// refusal of the request itself, which would only be refused again. That includes a
+// Bambuddy 4xx that ScadBuddy relays as its generic 502 (#4142: a name with a colon, a
+// .3mf that is not a ZIP), but not Bambuddy's 408 or 429, which a later attempt may get
+// past. Only the 502 hides Bambuddy's status: ScadBuddy names it on its other answers
+// too (a 404, a scope refusal), and those keep their own handling (a folder gone, a key
+// to fix).
 func queueable(err error) bool {
 	switch status(err) {
 	case 400, 413, 415, 422:
 		return false
 	}
 	var e *api.Error
-	if errors.As(err, &e) && e.Upstream >= 400 && e.Upstream < 500 && e.Upstream != 408 && e.Upstream != 429 {
+	if errors.As(err, &e) && e.Status == http.StatusBadGateway && e.Upstream >= 400 && e.Upstream < 500 &&
+		e.Upstream != http.StatusRequestTimeout && e.Upstream != http.StatusTooManyRequests {
 		return false
 	}
 	return true

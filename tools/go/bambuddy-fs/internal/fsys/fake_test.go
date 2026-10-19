@@ -178,7 +178,8 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name, key string, 
 		return api.File{}, &api.Error{Op: "upload", Status: status, Upstream: l.failUpstream}
 	}
 	if folderID != 0 && !slices.ContainsFunc(l.folders, func(f api.Folder) bool { return f.ID == folderID }) {
-		return api.File{}, &api.Error{Op: "upload", Status: http.StatusNotFound, Detail: "folder not found"}
+		// As ScadBuddy relays it: Bambuddy's 404 named beside its own.
+		return api.File{}, &api.Error{Op: "upload", Status: http.StatusNotFound, Detail: "folder not found", Upstream: http.StatusNotFound}
 	}
 	l.uploads++
 	l.nextID++
