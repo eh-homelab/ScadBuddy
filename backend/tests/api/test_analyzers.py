@@ -21,13 +21,16 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.component import DECISIONS
-from scadbuddy.analyzers.context import AnalysisContext
+from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
+from scadbuddy.analyzers.gather import _read_choices
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.models import NozzleChoice
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.test_events import Recorded
@@ -483,6 +486,16 @@ def test_without_choices_the_models_remembered_ones_and_printer_are_used(
     assert base["process_preset_name"] == "0.08mm High Quality @BBL H2C 0.2 nozzle"
     assert base["bed_type"] == "Supertack Plate"
     assert {row["id"] for row in report["diagnostics"]} >= {"SB2001", "SB2003"}
+
+
+def test_a_remembered_pair_of_two_flows_is_analysed_as_one() -> None:
+    """#4398 review: the analysis falls back to the remembered choices, as the dialog
+    reopens on them, and so with one flow (#4272), not the pair stored before it."""
+    context = AnalysisContext(slug="m", params={}, request=AnalysisRequest())
+    mixed = [NozzleChoice(size="0.4", flow="high_flow"), NozzleChoice(size="0.4")]
+    _read_choices(context, StoredSettings(), ModelPrintChoices(nozzles=mixed), None)
+    assert context.choices is not None
+    assert [nozzle.flow for nozzle in context.choices.nozzles] == ["high_flow", "high_flow"]
 
 
 # --- #1753: a library file is judged as any print is -------------------------------------
