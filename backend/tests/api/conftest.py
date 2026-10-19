@@ -31,6 +31,7 @@ from scadbuddy.workflows.client import DEPLOYMENT_NAME, LIBRARY_DEPLOYMENT_NAME
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
 from scadbuddy.workflows.previews import preview_schedule_id_for
+from scadbuddy.workflows.spool_refresh import spool_schedule_id_for
 from tests.conftest import TEST_ANSWER_DEADLINE, write_openscad_3mf
 from tests.support.deployment import (
     BUILD_SERVES_MAX_POLL,
@@ -145,6 +146,10 @@ def settings(
             # No sweep Schedule: its trigger at start would run every sweep once,
             # beside the test's own (#1095 CI). A test of the sweeps sets its interval.
             "asset_sweep_interval": 0,
+            # No spool refresh Schedule either: its trigger at start reads Bambuddy's
+            # inventory beside the test's own mocked reads (#4180 CI). A test of the
+            # refresh sets its interval.
+            "spool_overlay_refresh_seconds": 0,
         }
     )
     # Before the runs: a Schedule left behind would start more on a queue nobody serves.
@@ -152,6 +157,7 @@ def settings(
         schedule_id_for(f"{queue}-library"),
         prune_schedule_id_for(f"{queue}-library"),
         preview_schedule_id_for(f"{queue}-library"),
+        spool_schedule_id_for(f"{queue}-library"),
     )
     workflow_reaper.terminate(queue)
     workflow_reaper.terminate(f"{queue}-bambuddy")

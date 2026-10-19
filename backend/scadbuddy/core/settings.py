@@ -390,6 +390,10 @@ class Settings(BaseSettings):
     # a flow run waits for a person's decision before it is denied. 0 is never. A flow
     # may set its own, and a run may override both.
     flow_approval_timeout_seconds: int = 0
+    # SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS (#3818 tier A, plan 2026-10-18 Task 6b): how
+    # often the spool providers' records are refreshed into Postgres, on their own
+    # Schedule (`workflows/spool_refresh.py`); 0 turns the refresh off.
+    spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -664,6 +668,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "preview_renders": "restart",
         # Decides at start whether the periodic sweep runs at all.
         "asset_sweep_interval": "restart",
+        # The spool providers' Schedule is set up at start, as the sweeps' is.
+        "spool_overlay_refresh_seconds": "restart",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",

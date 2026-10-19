@@ -36,7 +36,11 @@ from tests.test_print_worker_task import StubWorker
 
 def _library_state(revision: str) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_library="library", revision=revision),
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library",
+            revision=revision,
+            spool_overlay_refresh_seconds=0,
+        ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
@@ -123,6 +127,7 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     monkeypatch.setattr(main, "_make_library_current", current)
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "ensure_spool_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     stop = asyncio.Event()
@@ -194,6 +199,7 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
         "FlowTriggerFire": VersioningBehavior.AUTO_UPGRADE,
         "StoreMigration": VersioningBehavior.AUTO_UPGRADE,
         "SliceWorkflow": VersioningBehavior.AUTO_UPGRADE,
+        "SpoolRefresh": VersioningBehavior.AUTO_UPGRADE,
     }
 
 

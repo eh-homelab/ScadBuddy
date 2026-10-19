@@ -3,11 +3,19 @@
 # progress line in two chunks with a pause, FAKE_SILENT=1 writes nothing to the pipe, FAKE_HANG=1 sleeps 300 s.
 # FAKE_QUIET=<s> sleeps that long, silent, before it writes anything. FAKE_NO_OUTPUT=1 exits 0 without writing
 # the output; FAKE_ENV=1 writes its environment to stderr. FAKE_STRAGGLER=1 writes "pgid <its pid>" to stderr
-# and leaves a background sleep in its group.
+# and leaves a background sleep in its group. FAKE_HOLDER=1 leaves a process in a session of its own (out of
+# the group's reach) holding stderr open, its pid in holder.pid beside the output (the CLI's environment
+# is cleared, so no variable can name the file).
 pipe=""; out=""
 while [ $# -gt 0 ]; do case "$1" in --pipe) pipe="$2"; shift;; --export-3mf) out="$2"; shift;; esac; shift; done
 [ -n "$FAKE_HANG" ] && sleep 300
 if [ -n "$FAKE_STRAGGLER" ]; then echo "pgid $$" >&2; sleep 300 & fi
+if [ -n "$FAKE_HOLDER" ]; then
+  # shellcheck disable=SC2016 # $$ and $1 are the held shell's own
+  setsid sh -c 'echo held >&2; echo $$ > "$1"; exec sleep 30' sh "$(dirname "$out")/holder.pid" &
+  # "held" and the pid are written before the CLI exits, so the test always sees one and can stop it.
+  while [ ! -s "$(dirname "$out")/holder.pid" ]; do sleep 0.05; done
+fi
 [ -n "$FAKE_QUIET" ] && sleep "$FAKE_QUIET"
 if [ -z "$FAKE_SILENT" ]; then
   if [ -n "$FAKE_SPLIT" ]; then

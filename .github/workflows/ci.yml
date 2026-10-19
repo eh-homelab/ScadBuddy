@@ -265,6 +265,10 @@ jobs:
       - name: Test the OpenSCAD bump script
         run: .github/scripts/openscad-bump.test.sh
 
+      # Against a stub gh: rust-toolchain-pin.yml's weekly check (#4099).
+      - name: Test the Rust toolchain action pin check
+        run: .github/scripts/rust-toolchain-pin.test.sh
+
       # Runs deploy.reusable.yml's own pin step against fixture manifests,
       # including the agent sidecar's image beside the API's (#720).
       - name: Test the clusters deploy pin
@@ -1608,6 +1612,8 @@ jobs:
           test -n "$channel"
           echo "channel=$channel" | tee -a "$GITHUB_OUTPUT"
 
+      # The action has no release tags, so Dependabot never moves this SHA:
+      # rust-toolchain-pin.yml compares it with master weekly (#4099).
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master as of 2026-10-17
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}

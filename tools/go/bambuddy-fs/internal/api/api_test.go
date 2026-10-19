@@ -214,6 +214,16 @@ func TestUpdatesSendOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
+func TestAnInterruptedCallIsEINTR(t *testing.T) {
+	if got := Errno(fmt.Errorf("list: %w", context.Canceled)); got != syscall.EINTR {
+		t.Fatalf("a cancelled call: %v, want EINTR", got)
+	}
+	// A deadline is a timeout, not an interrupt: it fails as before.
+	if got := Errno(fmt.Errorf("list: %w", context.DeadlineExceeded)); got != syscall.EIO {
+		t.Fatalf("a call past its deadline: %v, want EIO", got)
+	}
+}
+
 func TestErrnoMapping(t *testing.T) {
 	cases := map[int]syscall.Errno{404: syscall.ENOENT, 409: syscall.EBUSY, 413: syscall.EFBIG, 401: syscall.EACCES, 403: syscall.EACCES, 500: syscall.EIO, 502: syscall.EIO}
 	for status, want := range cases {
@@ -239,6 +249,14 @@ func TestErrnoMapping(t *testing.T) {
 	invalid := errorFrom("list", 422, []byte(`{"detail":[{"msg":"bad"}]}`))
 	if invalid.Detail != `[{"msg":"bad"}]` {
 		t.Errorf("invalid: %+v", invalid)
+	}
+	// A refusal ScadBuddy relays (#4142): Bambuddy's own status, at the top or in a failed operation's extensions.
+	relayed := errorFrom("upload", 502, []byte(`{"status":502,"detail":"Bambuddy answered 400 when asked to upload a:b","bambuddy_status":400}`))
+	// A failed operation's `error`, as GET /operations/{id} carries it.
+	inOperation := errorFrom("upload", 502, []byte(`{"type":"https://scadbuddy.dev/problems/bambuddy-unavailable","title":"Bad Gateway","status":502,"detail":"Bambuddy answered 400","extensions":{"bambuddy_status":400}}`))
+	own := errorFrom("upload", 502, []byte(`{"status":502,"detail":"Bambuddy could not be reached"}`))
+	if relayed.Upstream != 400 || inOperation.Upstream != 400 || own.Upstream != 0 || relayed.Status != 502 {
+		t.Errorf("upstream: %+v %+v %+v", relayed, inOperation, own)
 	}
 }
 
@@ -355,7 +373,10 @@ func TestAStillCheckingAnswerIsFollowedOnlyWithinTheContext(t *testing.T) {
 		t.Fatalf("err %v, want the deadline", err)
 	}
 	// An upload whose reader cannot be read again is answered with the 503, not sent again.
+	// Under the fake's lock: the mkdir the deadline cut may still be in its handler.
+	f.mu.Lock()
 	f.checking["upload"] = 1
+	f.mu.Unlock()
 	_, err := f.client(t).Upload(context.Background(), 0, "a.3mf", "", struct{ io.Reader }{strings.NewReader("abc")})
 	var e *Error
 	if !errors.As(err, &e) || e.Status != 503 {

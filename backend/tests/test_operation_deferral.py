@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
-from temporalio.common import WorkflowIDReusePolicy
+from temporalio.common import RawValue, WorkflowIDReusePolicy
+from temporalio.worker import WorkflowInterceptorClassInput
 
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows import client as temporal
@@ -21,7 +22,11 @@ from scadbuddy.workflows.commands import (
     CommandStillAcceptingError,
     start_command,
 )
-from scadbuddy.workflows.operation_models import OperationAnswer, OperationInput
+from scadbuddy.workflows.operation_models import (
+    REGISTERED_ACTIVITIES,
+    OperationAnswer,
+    OperationInput,
+)
 from scadbuddy.workflows.registered import RegisteredActivities
 from tests.support.deployment import wait_until_build_serves
 from tests.support.temporal import temporal_client, terminate_open_workflows
@@ -35,12 +40,34 @@ OLD_BUILD_HOLD = 25.0
 
 def test_the_interceptor_names_the_workers_activities() -> None:
     fake = Fake()
-    assert RegisteredActivities(fake.all()).names == {
-        "op.test.check",
-        "op_insert",
-        "op.test.run",
-        "op_finish",
-    }
+    assert RegisteredActivities(fake.all()).names == frozenset(
+        {"op.test.check", "op_insert", "op.test.run", "op_finish"}
+    )
+
+
+def test_the_interceptor_reads_temporalios_private_definition() -> None:
+    """`RegisteredActivities` takes each name from ``activity._Definition``, which
+    temporalio does not promise to keep (#4157): a bump that renames or reshapes it fails
+    here, rather than as a worker that defers every kind."""
+
+    @activity.defn(name="op.pinned.run")
+    async def pinned() -> None: ...
+
+    assert activity._Definition.must_from_callable(pinned).name == "op.pinned.run"
+
+
+def test_a_worker_with_a_dynamic_activity_defers_nothing() -> None:
+    """A dynamic activity takes every name (#4157): its worker registers every kind, so
+    its workflows are told nothing, which `defer_unregistered` reads as defer nothing."""
+
+    @activity.defn(dynamic=True)
+    async def anything(args: Sequence[RawValue]) -> None: ...
+
+    registered = RegisteredActivities([anything, *Fake().all()])
+    assert registered.names is None
+    given = WorkflowInterceptorClassInput(unsafe_extern_functions={})
+    registered.workflow_interceptor_class(given)
+    assert REGISTERED_ACTIVITIES not in given.unsafe_extern_functions
 
 
 async def _send_until_answered(
@@ -133,6 +160,73 @@ async def test_a_new_kind_waits_for_the_build_that_has_it(
                 await _make(client, name, "new")
                 done = await asyncio.wait_for(answering, 60)
     finally:
+        await terminate_open_workflows(client, queue)
+    assert done.status == "succeeded"
+    assert old_fake.calls == []
+    assert new_fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+@pytest.mark.requires_temporal
+async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run-site deferral (`DEFER_RUN_PATCH`, #4157): the check and the insert run on
+    a build with the kind, then one without it becomes current (a rollback). The kind's
+    run is never scheduled there, and the operation goes on once a build with the kind
+    is current again, running the effect once."""
+    name = f"scadbuddy-print-test-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(temporal, "PRINT_DEPLOYMENT_NAME", name)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    old_fake, new_fake = Fake(), Fake()
+    new_fake.insert_gate = asyncio.Event()
+    new = temporal.bambuddy_worker(client, queue, new_fake.all(), build_id="new")
+    old = temporal.bambuddy_worker(
+        client, queue, [old_fake.insert, old_fake.finish], build_id="old"
+    )
+    arg = op_input()
+    handle = client.get_workflow_handle(f"op-{arg.kind}-{arg.key}")
+    try:
+        async with new:
+            await _make(client, name, "new")
+            assert await wait_until_build_serves(
+                client, queue, "new", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
+            )
+            answering = asyncio.create_task(_send_until_answered(client, queue, arg, []))
+            async with asyncio.timeout(30):
+                while new_fake.calls != ["check", "insert"]:
+                    await asyncio.sleep(0.05)
+            async with old:
+                # The rollback, while the insert is in flight on the new build.
+                await _make(client, name, "old")
+                assert await wait_until_build_serves(
+                    client, queue, "old", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
+                )
+                new_fake.insert_gate.set()
+                async with asyncio.timeout(60):
+                    while (
+                        await handle.describe()
+                    ).raw_description.pending_workflow_task.attempt < 2:
+                        await asyncio.sleep(0.2)
+                history = await handle.fetch_history()
+                assert [
+                    event.activity_task_scheduled_event_attributes.activity_type.name
+                    for event in history.events
+                    if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+                ] == ["op.test.check", "op_insert"]
+                # Failed by the deferral, which only a build without the kind raises: the
+                # rollback path, not any retry.
+                assert [
+                    event.workflow_task_failed_event_attributes.failure.application_failure_info.type
+                    for event in history.events
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED
+                ] == ["UnregisteredKindError"]
+                assert not answering.done()
+                await _make(client, name, "new")
+                done = await asyncio.wait_for(answering, 60)
+    finally:
+        # A failure before the rollback leaves the insert held: let it end, or the new
+        # worker's graceful shutdown waits out its 30 s on it.
+        new_fake.insert_gate.set()
         await terminate_open_workflows(client, queue)
     assert done.status == "succeeded"
     assert old_fake.calls == []
