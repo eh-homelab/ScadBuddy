@@ -539,5 +539,15 @@ def test_one_flow_is_high_flow_when_either_side_was(flows: list[str], one: list[
     assert _flows_of(one_flow(nozzles)) == one
 
 
+def test_one_flow_keeps_each_sides_size() -> None:
+    """#4398 review: only the flow is made one; two sizes are left for the resolver to
+    refuse (`mixed-sizes`)."""
+    pair = [NozzleChoice(size="0.4", flow="high_flow"), NozzleChoice(size="0.2")]
+    assert one_flow(pair) == [
+        NozzleChoice(size="0.4", flow="high_flow"),
+        NozzleChoice(size="0.2", flow="high_flow"),
+    ]
+
+
 def test_an_unreadable_status_defaults_to_standard() -> None:
     assert _flows_of(default_nozzles(None)) == ["standard", "standard"]

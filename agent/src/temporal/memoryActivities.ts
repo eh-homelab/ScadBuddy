@@ -13,7 +13,7 @@ import {
 } from '../memory/hindsight.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { EventLog, LoggedEvent } from '../sessions/eventLog.js'
-import { recordMemoryActivity } from '../sessions/manager.js'
+import { recordMemoryActivity } from '../sessions/turnShared.js'
 import type { Owner } from '../sessions/protocol.js'
 import { durableSession, type SessionOwners } from './toolActivities.js'
 

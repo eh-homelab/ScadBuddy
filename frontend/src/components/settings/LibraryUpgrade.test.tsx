@@ -207,15 +207,18 @@ describe('LibraryUpgrade', () => {
 
   it('aborts an in-flight check when the rows unmount, so it stops holding the check permit', async () => {
     let started = false
+    let received: AbortSignal | undefined
     server.use(
-      http.post('/api/v1/models/:slug/libraries/:name/check', async () => {
+      http.post('/api/v1/models/:slug/libraries/:name/check', async ({ request }) => {
         started = true
+        received = request.signal
         await delay('infinite')
         return undefined
       }),
     )
-    // The signal given to fetch: msw 3 rebuilds the handler's request from the wire, and
-    // does not abort it when the client drops a reused keep-alive connection.
+    // The signal given to fetch, and the one the handler's request carries: msw rebuilds
+    // that request from the wire, so its abort says the abort reached the wire too
+    // (@mswjs/interceptors 0.45.8, #2855).
     const sent = vi.spyOn(globalThis, 'fetch')
     onTestFinished(() => sent.mockRestore())
     const { user, unmount } = await open()
@@ -226,6 +229,7 @@ describe('LibraryUpgrade', () => {
     const inflight = checks[0]?.[1]?.signal
     unmount()
     await waitFor(() => expect(inflight?.aborted).toBe(true))
+    await waitFor(() => expect(received?.aborted).toBe(true))
   })
 
   it('disables the Library select while a check or a move runs', async () => {
@@ -488,23 +492,52 @@ describe('LibraryUpgrade', () => {
     expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeChecked()
   })
 
-  it('says so when a removal could not re-list the checkouts (#3548)', async () => {
-    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
-    let removed = false
+  /** Re-lists that fail while `down` is set; removing `name` sets it, as the store went down. */
+  function storeDownOnRemoval(name: string) {
+    const store = { down: false }
     server.use(
-      http.delete('/api/v1/libraries/:name', () => {
-        removed = true
+      http.delete('/api/v1/libraries/:name', ({ params }) => {
+        if (params['name'] === name) store.down = true
         return undefined
       }),
-      // Only the re-list after the removal fails.
       http.get('/api/v1/libraries/installed', () =>
-        removed ? problem(503, 'Unavailable', 'the store is down') : undefined,
+        store.down ? problem(503, 'Unavailable', 'the store is down') : undefined,
       ),
     )
+    return store
+  }
+
+  it('says so when a removal could not re-list the checkouts (#3548), until a read lands (#3839)', async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    const store = storeDownOnRemoval('BOSL2')
     const { user } = renderPage(<LibraryUpgrade />)
     const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not re-list the checkouts')
+    // The store is back and a realtime refresh lists the checkouts: the alert goes with it.
+    store.down = false
+    await waitFor(() => {
+      emitRealtime('library.changed', ['libraries'], { name: 'BOSL2' })
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+    expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull()
+  })
+
+  it('clears a failed re-list once the next removal re-lists them (#3839)', async () => {
+    setMockUnusedCheckouts([
+      { name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] },
+      { name: 'threads', commit: 'c0ffee00'.repeat(5), used_by: [] },
+    ])
+    const store = storeDownOnRemoval('BOSL2')
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not re-list the checkouts')
+    // The store is back for the second removal, whose re-list lands.
+    store.down = false
+    await user.click(within(list).getByRole('button', { name: 'Remove threads c0ffee0' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it("says why a removal was refused, and keeps the row", async () => {

@@ -30,7 +30,7 @@ from scadbuddy.library.history import (
     subject_line,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
-from scadbuddy.render.jobs import export_revision, prune_revision_exports
+from scadbuddy.render.jobs import _STAGING_TRIES, export_revision, prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
 
@@ -1182,6 +1182,59 @@ def test_an_export_survives_the_prune_taking_its_slug_directory_mid_make(
 
     assert raced
     assert (directory / "model.scad").is_file()
+
+
+def test_an_export_the_prune_races_every_time_fails_and_leaves_no_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4401 review: when every try races, the FileNotFoundError still comes out, and
+    no staging directory is left behind."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    mkdir = Path.mkdir
+    raced: list[Path] = []
+
+    def racing(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.parent == directory.parent and self != directory:
+            raced.append(self)
+            # The parent is made, as in the race, so the check below reads a real one.
+            mkdir(self.parent, parents=True, exist_ok=True)
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        mkdir(self, *args, **kwargs)
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            raise AssertionError("nothing is exported into a staging directory never made")
+
+    monkeypatch.setattr(Path, "mkdir", racing)
+    with pytest.raises(FileNotFoundError):
+        export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert len(raced) == _STAGING_TRIES
+    assert list(directory.parent.iterdir()) == []
+
+
+def test_an_export_that_fails_after_staging_is_made_leaves_no_staging(
+    tmp_path: Path,
+) -> None:
+    """#4412 review: the staging directory made, then the export failing, is removed by
+    `export_revision`'s cleanup; nothing half-written is left in the slug directory."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    made: list[Path] = []
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            assert dest.is_dir(), "the staging directory is made before the export"
+            made.append(dest)
+            (dest / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+            raise RevisionNotFoundError(f"{slug!r} does not exist at {commit}")
+
+    with pytest.raises(RevisionNotFoundError):
+        export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert len(made) == 1
+    assert made[0].parent == directory.parent
+    assert not made[0].exists()
+    assert list(directory.parent.iterdir()) == []
 
 
 def test_two_pods_exporting_one_revision_never_share_a_staging_directory(

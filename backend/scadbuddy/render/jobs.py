@@ -142,6 +142,9 @@ def missing_glyph_warnings(
         if parameter.type != "font":
             continue
         font = str(params.get(parameter.name, parameter.initial) or "")
+        # Before the budget, and on purpose: a font naming no family (the default) is
+        # never asked about, so past the budget it is not one left unchecked either, and
+        # the log lists only fonts that name a family. Parsing the name asks nothing.
         if not font_families(font):
             continue
         left = deadline - clock()
@@ -978,7 +981,12 @@ def _make_staging(staging: Path) -> None:
     mid-make (#4400). `prune_revision_exports` calls ``rmdir`` on a slug directory it
     emptied; landing between ``mkdir`` making the parent and the leaf, it fails the
     leaf with ``FileNotFoundError``. Once the staging directory is in the slug
-    directory, that ``rmdir`` cannot take it, so only this make is exposed."""
+    directory, that ``rmdir`` cannot take it, so only this make is exposed.
+
+    That rests on the prune's ``rmtree`` also passing it by: it takes only exports
+    older than its TTL (``job_ttl``, in seconds; 24 h by default), and a staging
+    directory is seconds old for as long as ``git archive`` runs. A TTL that short
+    would reopen the race."""
     for attempt in range(_STAGING_TRIES):
         try:
             staging.mkdir(parents=True, exist_ok=True)

@@ -51,6 +51,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
+import { poolRemainingUsd } from './sessions/turnShared.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
@@ -636,6 +637,7 @@ const turnToolDeps = temporal
                           spent: async (cost: number) => {
                             await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
                           },
+                          remaining: () => poolRemainingUsd(temporal.sql, context.session),
                         }),
                   }),
               },

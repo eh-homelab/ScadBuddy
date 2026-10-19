@@ -27,6 +27,7 @@ from scadbuddy.analyzers.context import (
     base_profile,
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.extruders import one_flow
 from scadbuddy.bambuddy.filaments import asked_plates, every_plate, gather_plate_options
 from scadbuddy.bambuddy.library_view import NotViewableError, library_geometry
 from scadbuddy.bambuddy.models import Printer
@@ -278,7 +279,9 @@ def _read_choices(
         return
     bed = settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None
     context.choices = PrintChoices(
-        nozzles=remembered.nozzles,
+        # One flow, as the dialog reopens on it (#4398 review): a pair remembered from
+        # before #4272 would describe nozzles nothing prints with.
+        nozzles=one_flow(remembered.nozzles),
         tier=remembered.tier or "standard",
         process_name=remembered.process_name,
         bed_type=bed or DEFAULT_BED,

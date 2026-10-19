@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ProcessError, ResultError
+from claude_agent_sdk import HookMatcher, ProcessError, ResultError
 from fake_anthropic import FakeAnthropic
 from session_support import (
     MANIFEST,
@@ -68,6 +68,8 @@ from scadbuddy_durable.session.runner import (
     TurnSettings,
     image_problem,
     image_size,
+    merged_hooks,
+    same_subagent,
     tool_images_loader,
     view_tool_images_tool,
     with_refusals,
@@ -174,7 +176,12 @@ async def test_a_segment_runs_with_the_credential_and_what_is_left_of_the_budget
     extra = dict(made["extra_options"])
     assert set(extra.pop("mcp_servers")) == {IMAGES_SERVER}
     # The segment's own calls, published as they run (SegmentCalls).
-    assert set(extra.pop("hooks")) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+    assert set(extra.pop("hooks")) == {
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStart",
+    }
     assert extra == {
         "system_prompt": {"type": "preset", "preset": "claude_code", "append": "Be careful."},
         "allowed_tools": [VIEW_TOOL_IMAGES_TOOL],
@@ -715,6 +722,9 @@ class Refusing:
         *,
         scripted: bool = False,
     ) -> None:
+        if scripted and said is None:
+            # Without it the plain Raises runner would run, not the path the test names (#3899).
+            raise ValueError("Refusing(scripted=True) needs said")
         self.refused = refused
         self.error = error
         self.said = said
@@ -929,6 +939,91 @@ async def test_segment_calls_publish_a_segments_own_calls_as_they_run() -> None:
         ("tool_result", "a1", None, "done"),
         ("tool_call", "c2", None, None),
     ]
+
+
+async def test_segment_calls_name_each_subagents_agent_call_by_its_start() -> None:
+    """#4184: with several Agent calls open, a subagent's calls name the one whose
+    subagent_type its SubagentStart names; of two alike, none (never the wrong one)."""
+    calls = SegmentCalls([])
+    hooks = calls.hooks()
+    started: Any = hooks["PreToolUse"][0].hooks[0]
+    sub_started: Any = hooks["SubagentStart"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started(
+            {"tool_name": "Agent", "tool_input": {"subagent_type": "scadbuddy:reviewer"}},
+            "a1",
+            None,
+        )
+        await started({"tool_name": "Agent", "tool_input": {}}, "a2", None)
+        await sub_started({"agent_id": "x", "agent_type": "reviewer"}, None, None)
+        await sub_started({"agent_id": "y", "agent_type": "general-purpose"}, None, None)
+        await started({"tool_name": "Read", "tool_input": {}, "agent_id": "y"}, "c1", None)
+        await started({"tool_name": "Read", "tool_input": {}, "agent_id": "x"}, "c2", None)
+        await started({"tool_name": "Agent", "tool_input": {}}, "a3", None)
+        await sub_started({"agent_id": "z", "agent_type": "general-purpose"}, None, None)
+        # a2 and a3 are both general-purpose and z came after a2 was claimed: a3 is z's.
+        await started({"tool_name": "Read", "tool_input": {}, "agent_id": "z"}, "c3", None)
+        await started({"tool_name": "Agent", "tool_input": {}}, "a4", None)
+        await started({"tool_name": "Agent", "tool_input": {}}, "a5", None)
+        await sub_started({"agent_id": "w", "agent_type": "general-purpose"}, None, None)
+        await started({"tool_name": "Read", "tool_input": {}, "agent_id": "w"}, "c4", None)
+    finally:
+        _EMIT.reset(token)
+    parents = {e["id"]: e.get("parent") for e in seen if e["id"].startswith("c")}
+    assert parents == {"c1": "a2", "c2": "a1", "c3": "a3", "c4": None}
+
+
+async def test_segment_calls_close_what_a_failed_attempt_left_open() -> None:
+    """#4184: an attempt that fails ends its open calls as failed, so none shows running."""
+    calls = SegmentCalls([])
+    hooks = calls.hooks()
+    started: Any = hooks["PreToolUse"][0].hooks[0]
+    ended: Any = hooks["PostToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started({"tool_name": "Skill", "tool_input": {}}, "s1", None)
+        await ended({"tool_name": "Skill"}, "s1", None)
+        await started({"tool_name": "Agent", "tool_input": {}}, "a1", None)
+        await started({"tool_name": "Read", "tool_input": {}, "agent_id": "x"}, "c1", None)
+    finally:
+        _EMIT.reset(token)
+    closed: list[dict[str, Any]] = []
+    calls.close_open(closed.append)
+    assert closed == [
+        {"type": "tool_result", "id": "a1", "name": "Agent", "status": "failed"},
+        {"type": "tool_result", "id": "c1", "name": "Read", "status": "failed"},
+    ]
+    calls.close_open(closed.append)
+    assert len(closed) == 2
+
+
+def test_a_subagent_type_matches_its_plugin_qualified_form() -> None:
+    assert same_subagent("scadbuddy:reviewer", "reviewer")
+    assert same_subagent("reviewer", "scadbuddy:reviewer")
+    assert same_subagent("reviewer", "reviewer")
+    assert not same_subagent("scadbuddy:reviewer", "author")
+    assert not same_subagent("viewer", "reviewer")
+    # Two plugins' subagents of one bare name are not each other's.
+    assert not same_subagent("a:reviewer", "b:reviewer")
+
+
+def test_segment_hooks_are_added_to_hooks_already_set() -> None:
+    """#4184: extra_options' own hooks stay; ours go after them, per event."""
+    theirs = HookMatcher(hooks=[])
+    ours = SegmentCalls([]).hooks()
+    merged = merged_hooks({"PreToolUse": [theirs], "Stop": [theirs]}, ours)
+    assert merged["PreToolUse"] == [theirs, *ours["PreToolUse"]]
+    assert merged["Stop"] == [theirs]
+    assert merged["SubagentStart"] == ours["SubagentStart"]
+    assert merged_hooks(None, ours) == ours
+
+
+def test_refusing_scripted_needs_what_it_says() -> None:
+    with pytest.raises(ValueError, match="needs said"):
+        Refusing(set(), RuntimeError("x"), scripted=True)
 
 
 async def test_a_first_credentials_answer_still_reaches_the_transcript(
@@ -1204,7 +1299,7 @@ async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
 class _Answers:
     """make_runner whose segment answers ``out``, or raises it, whatever it is asked."""
 
-    def __init__(self, out: SegmentOutput | Exception) -> None:
+    def __init__(self, out: SegmentOutput | BaseException) -> None:
         self.out = out
         self.budgets: list[float] = []
 
@@ -1214,7 +1309,7 @@ class _Answers:
 
         class Answers:
             async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
-                if isinstance(out, Exception):
+                if isinstance(out, BaseException):
                     raise out
                 return out
 
@@ -1239,6 +1334,31 @@ async def _segment(out: SegmentOutput | Exception, left: float) -> SegmentOutput
     got = await runner._on_credentials("s", "wf", inp, 1, [_credential()], left, {}, settings)
     assert answers.budgets == [left]
     return got
+
+
+async def test_a_cancelled_attempt_ends_the_calls_it_opened() -> None:
+    """#4184 review: a cancelled segment (an interrupt, a shutdown) leaves no call running."""
+    calls = SegmentCalls([])
+    started: Any = calls.hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started({"tool_name": "Skill", "tool_input": {}}, "s1", None)
+        runner = ScadBuddyRunner(
+            _no_database, KEK, cwd="/tmp", make_runner=_Answers(asyncio.CancelledError())
+        )
+        settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
+        inp = SegmentInput(session_id="s", prompt="hi", tools=[])
+        with pytest.raises(asyncio.CancelledError):
+            await runner._on_credentials(
+                "s", "wf", inp, 1, [_credential()], 1.0, {}, settings, calls
+            )
+    finally:
+        _EMIT.reset(token)
+    assert [(e["type"], e["id"], e.get("status")) for e in seen] == [
+        ("tool_call", "s1", None),
+        ("tool_result", "s1", "failed"),
+    ]
 
 
 @pytest.mark.parametrize(
