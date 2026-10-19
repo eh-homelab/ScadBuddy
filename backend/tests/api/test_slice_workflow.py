@@ -366,6 +366,21 @@ def test_the_same_bytes_and_presets_reuse_the_slice(
     assert first.sliced_blob_key in _holds(slice_client, second)
 
 
+def test_a_recolour_slices_again(slice_client: TestClient, slicer: FakeSlicer) -> None:
+    """#3962: the colours reach the CLI and change the sliced file, so the same copy and
+    presets in other colours are a slice of their own, sliced with those colours."""
+    first = _slice(slice_client)
+    assert first.status == "completed", first.failure
+    swapped = PLAN.model_copy(update={"filament_colours": ["#00FF00", "#FF0000"]})
+
+    second = _slice(slice_client, plan=swapped)
+
+    assert second.status == "completed", second.failure
+    assert second.id != first.id and second.workflow_id != first.workflow_id
+    assert slicer.calls == 2
+    assert slicer.inputs[-1].filament_colours == ["#00FF00", "#FF0000"]
+
+
 def test_a_started_slice_starts_once(slice_client: TestClient, slicer: FakeSlicer) -> None:
     """The dialog and the run name one execution (Ruling C2); a finished one is its row."""
     slicer.hold = _call(slice_client, _event)

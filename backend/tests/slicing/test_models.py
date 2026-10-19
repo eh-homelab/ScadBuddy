@@ -103,6 +103,21 @@ def test_vectors_round_trip() -> None:
             assert cls.model_validate(raw).model_dump(mode="json") == raw
 
 
+@pytest.mark.parametrize("colour", ["#FF0000;#00FF00", "red", "#FFF", ""])
+def test_a_colour_the_cli_would_misread_is_refused(colour: str) -> None:
+    """#3962: the worker joins the colours with ``;``, so one must never hold one."""
+    with pytest.raises(ValidationError):
+        SlicePlateInput(
+            input_3mf=_get("in"),
+            plate=1,
+            machine_preset=_get("m"),
+            process_preset=_get("p"),
+            filament_presets=[_get("f1")],
+            sliced_3mf=_put("out"),
+            filament_colours=[colour],
+        )
+
+
 def test_expires_at_is_normalised_to_utc() -> None:
     url = TransferUrl(
         url="http://api/x",
