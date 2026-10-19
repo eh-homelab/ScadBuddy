@@ -1231,7 +1231,9 @@ def test_an_export_that_fails_after_staging_is_made_leaves_no_staging(
     with pytest.raises(RevisionNotFoundError):
         export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
 
-    assert made
+    assert len(made) == 1
+    assert made[0].parent == directory.parent
+    assert not made[0].exists()
     assert list(directory.parent.iterdir()) == []
 
 
