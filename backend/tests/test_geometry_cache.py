@@ -89,7 +89,11 @@ def _key(root: Path, scene: Scene, **params: ParamValue) -> str:
 
 
 def _key_on_disk(root: Path, scene: Scene, **params: ParamValue) -> str:
-    return geometry_key("demo", "model.scad", root, scene, [], params)
+    return geometry_key("demo", "model.scad", root, scene, _source(root), [], params)
+
+
+def _source(root: Path) -> str:
+    return (root / "model.scad").read_text(encoding="utf-8")
 
 
 # ── the key ────────────────────────────────────────────────────────────────────
@@ -172,11 +176,12 @@ def test_a_geometry_change_is_another_geometry_key(tmp_path: Path) -> None:
     base = _key(tmp_path, _scene())
     assert base != _key(tmp_path, _scene(width=11))
     assert base != _key(tmp_path, _scene(), width=12)
-    assert base != geometry_key("other", "model.scad", tmp_path, _scene(), [], {})
+    source = _source(tmp_path)
+    assert base != geometry_key("other", "model.scad", tmp_path, _scene(), source, [], {})
     library = ModelLibrary(
         name="BOSL2", url="https://github.com/x/BOSL2", ref="v1", commit="a" * 40
     )
-    assert base != geometry_key("demo", "model.scad", tmp_path, _scene(), [library], {})
+    assert base != geometry_key("demo", "model.scad", tmp_path, _scene(), source, [library], {})
     (tmp_path / MESHES[0]).write_bytes(b"another mesh")
     assert base != _key(tmp_path, _scene())
 

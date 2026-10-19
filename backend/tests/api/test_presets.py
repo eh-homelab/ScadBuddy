@@ -712,6 +712,8 @@ def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             for _ in range(200):
                 # The template's own lock: a bigint key is classid's high half, objid's low.
+                # A negative key comes back too, since int8's << wraps into the sign bit
+                # (checked on postgres:17 with keys of both signs).
                 row = conn.execute(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
                     " AND database = (SELECT oid FROM pg_database"

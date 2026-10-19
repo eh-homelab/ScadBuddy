@@ -73,6 +73,12 @@ _COLOUR_CALL = re.compile(r'color\("(#[0-9A-Fa-f]{6})"\)')
 def mesh_scene(root: Path, file: str) -> Scene | None:
     """The scene ``root``'s ``file`` is compiled from, or None when it is not a mesh
     model's ``model.scad`` exactly as its scene last compiled it."""
+    found = _mesh_source(root, file)
+    return found[0] if found is not None else None
+
+
+def _mesh_source(root: Path, file: str) -> tuple[Scene, str] | None:
+    """`mesh_scene`'s scene and the ``model.scad`` text it checked against it."""
     scene_path = root / SCENE_NAME
     if file != SOURCE_NAME or not scene_path.is_file():
         return None
@@ -81,7 +87,7 @@ def mesh_scene(root: Path, file: str) -> Scene | None:
     except ValidationError:
         return None  # Rendered from model.scad as it is; only its geometry is unshared.
     source = (root / SOURCE_NAME).read_text(encoding="utf-8")
-    return scene if text_sha256(source) == scene.generated_sha256 else None
+    return (scene, source) if text_sha256(source) == scene.generated_sha256 else None
 
 
 def _default_colour(obj: SceneObject) -> str:
@@ -151,11 +157,13 @@ def geometry_key(
     file: str,
     root: Path,
     scene: Scene,
+    source: str,
     libraries: Sequence[ModelLibrary],
     params: Mapping[str, ParamValue],
 ) -> str:
     """The key of the mesh model's geometry: the same for two scenes that differ only
-    in which colours their colour classes are."""
+    in which colours their colour classes are. ``source`` is the ``model.scad`` text
+    `mesh_scene` checked against the scene, so the key hashes the bytes it checked."""
     classes = scene_classes(scene)
     objects = _classed(scene, classes)
     raw = json.dumps(
@@ -164,7 +172,7 @@ def geometry_key(
             slug,
             file,
             objects,
-            _classed_source((root / file).read_text(encoding="utf-8"), classes),
+            _classed_source(source, classes),
             _file_digests(root, scene),
             [library.model_dump(mode="json") for library in libraries],
             dict(params),
@@ -184,10 +192,12 @@ def mesh_geometry(
 ) -> tuple[str, list[str]] | None:
     """The piece's geometry key and its colour classes' colours, or None when its
     geometry is never shared (`mesh_scene`). Reads files: run it off the loop."""
-    scene = mesh_scene(root, file)
-    if scene is None:
+    found = _mesh_source(root, file)
+    if found is None:
         return None
-    return geometry_key(slug, file, root, scene, libraries, params), scene_classes(scene)
+    scene, source = found
+    key = geometry_key(slug, file, root, scene, source, libraries, params)
+    return key, scene_classes(scene)
 
 
 def _layout_colours(layout: Mapping[str, Any]) -> set[str]:
