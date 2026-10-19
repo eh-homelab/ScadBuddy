@@ -1311,12 +1311,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const turns: FakeTurn[] = [{ hang: true }, { reply: 'ok' }]
         const { runner, runs } = scriptedRunner(() => turns.shift()!)
         const m = manager({ sql: db.sql, paths, run: runner })
+        // Each step well inside the test's 20 s: a step that never ends (#4273, seen in CI
+        // only) fails naming itself and what the manager held then.
+        const step = <T,>(what: string, p: Promise<T>): Promise<T> => {
+          let timer: NodeJS.Timeout | undefined
+          const stuck = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${what} never ended; warm processes ${m.warm.size()}, spawned ${runs.length}`)), 5_000)
+          })
+          return Promise.race([p, stuck]).finally(() => clearTimeout(timer))
+        }
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
         await new Promise((r) => setTimeout(r, 50))
-        expect(await m.interrupt(session.id, agentA)).toBe(true)
-        expect(await turn!.done).toEqual({ kind: 'interrupted' })
+        expect(await step('the interrupt', m.interrupt(session.id, agentA))).toBe(true)
+        expect(await step('the interrupted turn', turn!.done)).toEqual({ kind: 'interrupted' })
         expect(m.warm.size()).toBe(1)
-        expect(await (await m.send(session.id, agentA, 'again')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+        expect(await step('the next turn', (async () => (await m.send(session.id, agentA, 'again')).done)())).toMatchObject({
+          kind: 'result',
+          subtype: 'success',
+        })
         expect(runs).toHaveLength(1)
         await m.warm.close()
       })

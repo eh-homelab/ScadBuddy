@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,6 +12,7 @@ import {
   PackageInstaller,
   PackageRefusedError,
 } from '../src/plugins/packages/install.js'
+import { FetchError, GitFetcher } from '../src/plugins/packages/git.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
@@ -87,6 +88,17 @@ describe('sources', () => {
     expect(() => validateSource({ kind: 'marketplace', url: 'https://git.test/a.git', entry: 'x', path: 'p' })).toThrow(
       /path/,
     )
+  })
+
+  // #4259: what git prints reaches the start-up log and the session's plugin_unavailable event.
+  it('leaves the userinfo of any URL git prints out of its error', async () => {
+    const dir = tree({ git: "#!/bin/sh\necho \"fatal: unable to access 'https://user:s3cret@git.test/a.git/': 403\" >&2\nexit 128\n" })
+    chmodSync(path.join(dir, 'git'), 0o755)
+    const fetcher = new GitFetcher({ git: path.join(dir, 'git') })
+    const err = await fetcher.checkout('https://git.test/a.git', 'HEAD', path.join(dir, 'into')).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(FetchError)
+    expect((err as Error).message).not.toContain('s3cret')
+    expect((err as Error).message).toContain("unable to access 'https://git.test/a.git/'")
   })
 })
 
