@@ -14,7 +14,7 @@ if [ "$#" = 0 ]; then
 fi
 
 lines="$(grep -Hn 'dtolnay/rust-toolchain@' "$@" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')" || {
-  echo "no dtolnay/rust-toolchain@ pin in $*" >&2; exit 2
+  echo "no dtolnay/rust-toolchain@ pin in $* (comment lines naming it are skipped)" >&2; exit 2
 }
 master="$(gh api repos/dtolnay/rust-toolchain/commits/master --jq .sha)"
 echo "master: $master"
