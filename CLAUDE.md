@@ -304,7 +304,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish; a kind its worker does not register fails the workflow task until a build that
-  has it is current, #4139, told by `registered.py` `RegisteredActivities`), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+  has it is current, #4139, told by `registered.py` `RegisteredActivities`),
+  `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
   Flows (#1057, plan `docs/superpowers/plans/2026-10-09-durable-phase-6-flows.md`):
   `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
   the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no
@@ -443,9 +444,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); `PrintRun`
-  and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
-  unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); every
+  workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
+  it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
+  behavior), so an `Operation` moves to the current build, which #4139's deferral needs. The API serves `bambuddy` itself,
   unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
   `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`. `--queue projects`
   (`run_projects_worker`, #1057) serves flow runs, deployment `scadbuddy-projects`

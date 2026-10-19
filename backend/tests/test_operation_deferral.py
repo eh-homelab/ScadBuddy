@@ -14,6 +14,7 @@ from temporalio import activity
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 from temporalio.common import RawValue, WorkflowIDReusePolicy
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import WorkflowInterceptorClassInput
 
 from scadbuddy.operations.store import Operation
@@ -31,7 +32,7 @@ from scadbuddy.workflows.operation_models import (
 from scadbuddy.workflows.registered import RegisteredActivities
 from tests.support.deployment import wait_until_build_serves
 from tests.support.temporal import temporal_client, terminate_open_workflows
-from tests.test_library_versioning import _make
+from tests.test_library_versioning import PROBES_IN_A_ROW, _make
 from tests.test_operation_workflow import Fake, op_input
 
 #: How long the old build is left current with the operation waiting on it: long
@@ -167,6 +168,42 @@ async def test_a_new_kind_waits_for_the_build_that_has_it(
     assert new_fake.calls == ["check", "insert", "run", "finish:ok"]
 
 
+@activity.defn(name="op.probe.check")
+async def _probe_check(request: dict[str, object]) -> dict[str, object]:
+    # Refused, so a probe never reaches the fakes' insert.
+    raise ApplicationError("a probe", non_retryable=True)
+
+
+async def _workflow_tasks_reach(client: Client, queue: str, build_id: str) -> None:
+    """Probe operations until `PROBES_IN_A_ROW` of their first workflow tasks complete on
+    ``build_id`` (#4346). `wait_until_build_serves` reads the queue's root partition, and
+    a workflow task goes to any partition, which can still route to the previous build
+    (#4255): the task the insert's completion schedules reached the new build after the
+    rollback, and nothing deferred. Both builds register the probe's kind, so whichever
+    takes its first task completes it, and the completion names the build; the probe's
+    check then refuses, which closes it. A heuristic, as `PROBES_IN_A_ROW` is: it
+    narrows the window, it does not close it."""
+    reached: list[str] = []
+    async with asyncio.timeout(60):
+        while reached[-PROBES_IN_A_ROW:] != [build_id] * PROBES_IN_A_ROW:
+            probe = OperationInput(kind="probe", subject="probe", key=uuid.uuid4().hex, request={})
+            handle = await client.start_workflow(
+                "Operation", probe, id=f"op-probe-{probe.key}", task_queue=queue
+            )
+            completed = None
+            while completed is None:
+                completed = next(
+                    (
+                        event.workflow_task_completed_event_attributes
+                        for event in (await handle.fetch_history()).events
+                        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
+                    ),
+                    None,
+                )
+                await asyncio.sleep(0.05)
+            reached.append(completed.deployment_version.build_id)
+
+
 @pytest.mark.requires_temporal
 async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it(
     client: Client, monkeypatch: pytest.MonkeyPatch
@@ -180,9 +217,9 @@ async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it
     queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
     old_fake, new_fake = Fake(), Fake()
     new_fake.insert_gate = asyncio.Event()
-    new = temporal.bambuddy_worker(client, queue, new_fake.all(), build_id="new")
+    new = temporal.bambuddy_worker(client, queue, [*new_fake.all(), _probe_check], build_id="new")
     old = temporal.bambuddy_worker(
-        client, queue, [old_fake.insert, old_fake.finish], build_id="old"
+        client, queue, [old_fake.insert, old_fake.finish, _probe_check], build_id="old"
     )
     arg = op_input()
     handle = client.get_workflow_handle(f"op-{arg.kind}-{arg.key}")
@@ -205,11 +242,17 @@ async def test_a_rollback_after_the_insert_defers_the_run_until_the_build_has_it
                 assert await wait_until_build_serves(
                     client, queue, "old", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
                 )
+                await _workflow_tasks_reach(client, queue, "old")
                 new_fake.insert_gate.set()
                 async with asyncio.timeout(60):
                     while (
                         await handle.describe()
                     ).raw_description.pending_workflow_task.attempt < 2:
+                        # Named, rather than a bare timeout, if it recurs (#4346).
+                        assert "run" not in new_fake.calls, (
+                            "the task after the insert reached the new build after the"
+                            " rollback (a partition still routing to it, #4255)"
+                        )
                         await asyncio.sleep(0.2)
                 history = await handle.fetch_history()
                 assert [

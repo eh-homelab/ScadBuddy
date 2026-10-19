@@ -176,11 +176,17 @@ async def deferred_kind(client: Client, id: str) -> bool:
     a bug in workflow code) waits for nothing (#4156), nor does one whose history cannot
     be read within `DESCRIBE_SECONDS`. Never raises.
 
+    A task completed since (its newest outcome, above any failure or timeout) is still
+    accepting too (#4320): Temporal refused while the task was failing, and it completed
+    before the read, as a deferred task does on the first build that has its kind. Nothing
+    is stuck, and the same request sent again is accepted.
+
     The limit: Temporal records only a task's first failure, and the SDK lets later
     attempts time out rather than report them. An ``Operation`` that deferred and then
     fails on the new build for another reason still reads as a deferral, and is answered
     still accepting until it completes a task or is terminated."""
     token = b""
+    timed_out = False
     try:
         # The one bound on the whole read, every page within it: no per-page RPC timeout,
         # which would only restart the clock on each page.
@@ -195,8 +201,19 @@ async def deferred_kind(client: Client, id: str) -> bool:
                     ),
                 )
                 for event in page.history.events:
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT:
+                        timed_out = True
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
-                        return False
+                        if timed_out:
+                            # Failing by timing out since it last completed: no failure
+                            # says it waits for a build.
+                            logger.warning(
+                                "command %s: its workflow task timed out since it last"
+                                " completed, not a deferral",
+                                id,
+                            )
+                            return False
+                        return True
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
                         attributes = event.workflow_task_failed_event_attributes
                         kind = attributes.failure.application_failure_info.type
@@ -370,7 +387,8 @@ async def start_command[T](
             raise CommandClosingError(id) from error
         if isinstance(error, RPCError) and workflow_not_ready(error):
             if await deferred_kind(client, id):
-                # The execution exists, and its task waits for a build with its kind (#4139).
+                # The execution exists, and its task waits for a build with its kind
+                # (#4139), or has since completed (#4320).
                 raise CommandStillAcceptingError(id) from error
             # Stuck, not waiting (#4156): refused as before, and said here, since only
             # the execution's history says why.
