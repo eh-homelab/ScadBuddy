@@ -106,6 +106,28 @@ it('starts a signalled read anyway once the read in flight has stalled', async (
   }
 })
 
+// #4318 review — unmounted while a signal waits on a read that never answers: nothing
+// is left pending, not the stall timer either.
+it('leaves no timer behind when unmounted while a signal waits on a read', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: false })
+  try {
+    const { load, resolvers } = deferred<number>()
+    const { unmount } = renderHook(() => useAsync(load, [], ['models']))
+    await act(async () => resolvers[0]?.(0))
+    await act(async () => signals[0]?.('resync'))
+    // Past the spacing, so the next signal's wait is on the read in flight: its stall timer.
+    await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_MIN_MS))
+    await act(async () => signals[0]?.('resync'))
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_STALL_MS * 2))
+    expect(resolvers).toHaveLength(2)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 // #4165 — an effect replayed in place (here `<Activity>` hiding and showing the view;
 // StrictMode and Fast Refresh do the same) must leave the hook hearing its topics.
 it('hears its topics again after its effects are torn down and replayed in place', async () => {
