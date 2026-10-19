@@ -223,6 +223,33 @@ def test_a_negative_part_is_carried_with_its_object_for_the_slicer() -> None:
     assert cut.colour == body.colour
 
 
+def _two_cuts_project() -> bytes:
+    """Library 2440's shape (#4061): a body with two negative parts that overlap."""
+    hole = _box(5, 5, 8)
+    hole.apply_translation((2, 2, 0))
+    cleanup = _box(6, 3, 3)
+    cleanup.apply_translation((4, 3, 1))
+    return bambu_project(
+        items=[at(0, 0)],
+        parts={
+            1: (_box(20, 10, 5), "normal_part", None),
+            2: (hole, "negative_part", 1),
+            3: (cleanup, "negative_part", 1),
+        },
+    )
+
+
+def test_each_negative_part_stays_a_part_of_its_own() -> None:
+    """#4061: joined into one mesh, an object's two overlapping negative parts failed
+    Bambu Studio's toolpath stage (exit 156); the source, slicing, keeps them apart."""
+    [obj] = read_objects(_two_cuts_project())
+    body, hole, cleanup = obj.parts
+    assert not body.negative and hole.negative and cleanup.negative
+    assert (hole.name, cleanup.name) == ("Negative part 1", "Negative part 2")
+    assert tuple(np.round(hole.mesh.extents, 3)) == (5, 5, 8)
+    assert tuple(np.round(cleanup.mesh.extents, 3)) == (6, 3, 3)
+
+
 def test_a_plate_read_leaves_a_negative_part_out() -> None:
     read = read_plate_parts(_cut_project(), 1)
     assert [p.negative for p in read.parts] == [False]

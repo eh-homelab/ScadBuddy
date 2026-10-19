@@ -693,6 +693,18 @@ async def test_a_pieces_declared_objects_stay_apart_in_the_output(
     assert [name for *_, name in objects] == ["demo (object 1)", "demo (object 2)"]
 
 
+async def test_an_objects_negative_parts_are_written_apart(tmp_path: Path) -> None:
+    """#4061: two negative parts joined into one failed Bambu Studio's toolpath stage
+    (exit 156); the arranged object carries each as a negative part of its own."""
+    from tests.test_objects3mf import _two_cuts_project
+
+    [(subtypes, count, _, _)] = await _written_objects(
+        tmp_path, read_objects(_two_cuts_project()), 1, "ch"
+    )
+
+    assert subtypes == {"normal_part", "negative_part"} and count == 3
+
+
 async def test_packed_copies_are_named_after_their_piece(tmp_path: Path) -> None:
     """#3212: every copy on a packed plate was named "<model> (object N)", whatever
     piece it was; each is named after its piece now, numbered when there are several."""
