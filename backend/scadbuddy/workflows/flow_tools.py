@@ -196,6 +196,10 @@ FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 #: sent again: one that missed its beats may still have run on a replica that does not
 #: beat, so it fails saying so, and the script checks before calling it again. Runs
 #: recorded before raised that heartbeat timeout to the script.
+#: The cost, as for the tier: a read whose attempts are all lost (recorded as started but
+#: never delivered, or taken by a replica that died) is asked again with its three
+#: attempts, so it reaches the script after 3 x `agent_heartbeat_s` of missed beats plus
+#: up to 3 x `_TOOL_TIMEOUT` (120 s) of start-to-close: about 6 min more than before.
 FLOW_BEATLESS_CALL_PATCH = "flow-beatless-call-4281"
 
 
@@ -716,6 +720,9 @@ async def _call_tool(
                 and err.cause.type == TimeoutType.HEARTBEAT
                 and workflow.patched(FLOW_BEATLESS_CALL_PATCH)
             ):
+                # Every single-attempt call counts as a write here: the outward and
+                # write tiers, sessions_start and sessions_send. A read made with one
+                # attempt would lose the fallback below.
                 if attempts == 1:
                     raise ToolFailedError(
                         f"{name} may have run: the agent replica that took it sent no "
