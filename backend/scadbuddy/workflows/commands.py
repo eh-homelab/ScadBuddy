@@ -191,7 +191,6 @@ async def deferred_kind(client: Client, id: str) -> bool:
                         maximum_page_size=NOT_READY_EVENTS,
                         next_page_token=token,
                     ),
-                    timeout=timedelta(seconds=DESCRIBE_SECONDS),
                 )
                 for event in page.history.events:
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
