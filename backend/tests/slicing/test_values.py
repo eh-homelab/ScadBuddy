@@ -3,14 +3,18 @@ dialog's override checks read on a native run, with no Bambuddy."""
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import pytest
 
 from scadbuddy.bambuddy.filament_profiles import profile_overrides
 from scadbuddy.bambuddy.models import PresetRef, PresetValues
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice, prime_tower_warnings
 from scadbuddy.bambuddy.supports import support_overrides
-from scadbuddy.slicing.profiles import Profiles
+from scadbuddy.slicing.profiles import ProfileImageError, Profiles
 from scadbuddy.slicing.values import NOT_IN_PROFILES, native_values, values_for
+from tests.slicing.conftest import PROFILES
 
 LEAF = PresetRef(source="standard", id="leaf")
 
@@ -106,3 +110,18 @@ async def test_values_for_native_needs_no_client(profiles: Profiles) -> None:
 def test_values_for_without_either_is_refused() -> None:
     with pytest.raises(ValueError, match="Bambuddy client"):
         values_for(None, native=None)
+
+
+async def test_an_unreadable_tree_is_the_images_error_not_an_unknown_preset(
+    tmp_path: Path,
+) -> None:
+    """A tree cut short or edited by hand is the image's defect (``ProfileImageError``),
+    never reported as "not one of Bambu Studio's own presets"."""
+    root = tmp_path / "profiles"
+    shutil.copytree(PROFILES, root)
+    profiles = Profiles(root)
+    read = native_values(profiles)
+    assert (await read(PresetRef(source="standard", id="0.20mm Standard @BBL H2C"))).resolved
+    (root / "BBL" / "process" / "leaf.json").write_text("{not json")
+    with pytest.raises(ProfileImageError):
+        await read(LEAF)

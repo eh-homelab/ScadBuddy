@@ -38,13 +38,23 @@ copied out of the Dockerfile's ``slicer-dist`` stage, every file of each kind re
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+import time
 from pathlib import Path
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
+from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _catalogue
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PresetRef
-from scadbuddy.slicing.profiles import Flat, Kind, ProfileError, Profiles, flatten
+from scadbuddy.slicing.profiles import (
+    Flat,
+    Kind,
+    ProfileError,
+    ProfileImageError,
+    Profiles,
+    flatten,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +63,57 @@ _FIELDS: dict[Kind, str] = {"machine": "printer", "process": "process", "filamen
 
 #: Built catalogues, by the tree's root and version.
 _built: dict[tuple[Path, str], _Catalogue] = {}
+#: A build that failed, by the same key: when, and the error, answered again until
+#: :data:`FAILED_RETRY` has passed, so a broken tree is not rebuilt on every open.
+_failed: dict[tuple[Path, str], tuple[float, ProfileImageError]] = {}
 _lock = threading.Lock()
+
+#: How long a failed build is answered from memory before it is tried again.
+FAILED_RETRY = 60.0
 
 
 def native_catalogue(profiles: Profiles) -> _Catalogue:
     """Every preset of the image's tree a native slice can read, as :class:`_Catalogue`
     rows (the module's docstring). File I/O and seconds of work on its first call per tree
-    and version: an async caller runs it in a thread (:func:`catalogue_for`)."""
+    and version: an async caller runs it in a thread (:func:`catalogue_for`), and the app
+    and the print worker start it at start (:func:`warm_catalogue`). A tree that cannot be
+    read raises :class:`ProfileImageError`, the same one for :data:`FAILED_RETRY`."""
     key = (profiles.root, profiles.version)
     with _lock:
         built = _built.get(key)
-        if built is None:
+        if built is not None:
+            return built
+        failed = _failed.get(key)
+        if failed is not None and time.monotonic() - failed[0] < FAILED_RETRY:
+            raise ProfileImageError(str(failed[1]))
+        try:
             built = _built[key] = _build(profiles)
+        except ProfileImageError as error:
+            _failed[key] = (time.monotonic(), error)
+            raise
+        _failed.pop(key, None)
     return built
+
+
+def warm_catalogue(profiles: Profiles | None) -> asyncio.Task[None] | None:
+    """Build the image's catalogue in the background, so the first native dialog does
+    not wait the seconds it takes; ``None`` without a tree. Never raises: a failure is
+    logged once, by type, and the first open that needs the catalogue raises it again.
+    The caller keeps the task and cancels it at shutdown, which stops waiting on the
+    build, not the build's thread (it finishes on its own)."""
+    if profiles is None:
+        return None
+    return asyncio.create_task(_warm(profiles), name="native-catalogue-warm")
+
+
+async def _warm(profiles: Profiles) -> None:
+    try:
+        await asyncio.to_thread(native_catalogue, profiles)
+    except Exception as error:
+        # By type only: the message names files under the image's tree.
+        logger.warning(
+            "could not build the native preset catalogue", extra={"error": type(error).__name__}
+        )
 
 
 def _build(profiles: Profiles) -> _Catalogue:
@@ -120,25 +168,18 @@ def _row(name: str, flat: Flat) -> PresetChoice:
 
 
 def native_ref(profiles: Profiles, ref: PresetRef) -> PresetRef | None:
-    """The standard ref of the preset ``ref`` names in the image's catalogue: a
-    ``standard`` ref as it is when offered, a ``cloud`` ref (a ``setting_id``) by the
-    preset it names; ``local``, ``orca_cloud`` and anything not offered is ``None``."""
-    return catalogue_native_ref(native_catalogue(profiles), ref)
+    """:meth:`_Catalogue.native_ref` on the image's catalogue. It builds the catalogue on
+    a first call (seconds of file I/O), so never call it on the event loop: an async
+    caller holds the catalogue from :func:`catalogue_for` and asks it."""
+    return native_catalogue(profiles).native_ref(ref)
 
 
-def catalogue_native_ref(
-    catalogue: _Catalogue, ref: PresetRef, field: str | None = None
-) -> PresetRef | None:
-    """:func:`native_ref` on a built native catalogue, in one of its fields
-    (``printer``, ``process``, ``filament``) or any of them."""
-    ids = catalogue.native_setting_ids
-    if ids is None:
-        raise ValueError("not a native catalogue: Bambuddy's refs are its own")
-    fields = [field] if field is not None else list(_FIELDS.values())
-    for name in fields:
-        offered = {row.name for row in getattr(catalogue, name)}
-        if ref.source == "standard" and ref.id in offered:
-            return ref
-        if ref.source == "cloud" and ref.id in ids.get(name, {}):
-            return PresetRef(source="standard", id=ids[name][ref.id])
-    return None
+async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | None) -> _Catalogue:
+    """The catalogue a run resolves against: the image's BBL profiles when ``native`` is
+    given (no Bambuddy call, #3818 tier A), else Bambuddy's, read fresh as
+    :func:`~scadbuddy.bambuddy.catalogue.read_catalogue` reads it."""
+    if native is not None:
+        return await asyncio.to_thread(native_catalogue, native)
+    if client is None:
+        raise ValueError("the preset catalogue needs a Bambuddy client or the native profiles")
+    return await _catalogue(client)

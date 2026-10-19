@@ -17,8 +17,8 @@ import asyncio
 
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, read_once
 from scadbuddy.bambuddy.models import NOT_IN_PROFILES, PresetRef, PresetValues
-from scadbuddy.slicing.catalogue import catalogue_native_ref, native_catalogue
-from scadbuddy.slicing.profiles import ProfileError, Profiles
+from scadbuddy.slicing.catalogue import native_catalogue
+from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 
 __all__ = ["NOT_IN_PROFILES", "native_values", "values_for"]
 
@@ -30,12 +30,16 @@ def native_values(profiles: Profiles) -> ReadPresetValues:
 
     async def values(ref: PresetRef) -> PresetValues:
         catalogue = await asyncio.to_thread(native_catalogue, profiles)
-        native = catalogue_native_ref(catalogue, ref, "process")
+        native = catalogue.native_ref(ref, "process")
         if native is None:
             return PresetValues(resolved=False, reason=NOT_IN_PROFILES)
         if native.id not in read:
             try:
                 flat = await asyncio.to_thread(profiles.process, native.id)
+            except ProfileImageError:
+                # The image's defect, not the plan's (Task 12 review N-b): never said
+                # to be a preset Bambu Studio lacks.
+                raise
             except ProfileError:
                 return PresetValues(resolved=False, reason=NOT_IN_PROFILES)
             read[native.id] = PresetValues(resolved=True, values=flat)

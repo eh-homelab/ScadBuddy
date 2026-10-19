@@ -308,13 +308,19 @@ class Profiles:
 
     def documents(self, kind: Kind) -> dict[str, dict[str, Any]]:
         """Every ``kind`` preset ``BBL.json`` lists, by name, as its own file holds it
-        (``inherits`` not applied): each file read once, for a caller that flattens the
-        whole tree (:func:`~scadbuddy.slicing.catalogue.native_catalogue`)."""
-        docs: dict[str, dict[str, Any]] = {}
-        for name in self._index(kind).paths:
-            doc = self._load(kind, name)
-            if doc is not None:
-                docs[name] = doc
+        (``inherits`` not applied), for a caller that flattens the whole tree
+        (:func:`~scadbuddy.slicing.catalogue.native_catalogue`). Before the kind is
+        indexed, the one read of each file builds the index as well."""
+        if kind not in self._indexes:
+            index, docs = self._scan(kind)
+            self._indexes.setdefault(kind, index)
+        else:
+            docs = {name: _read(path) for name, path in self._index(kind).paths.items()}
+        for name, doc in docs.items():
+            if not isinstance(doc, dict):
+                raise ProfileImageError(
+                    f"the native slicer cannot read preset {name}: not an object"
+                )
         return docs
 
     def _flat(self, kind: Kind, ref_or_name: str) -> Flat:
@@ -340,8 +346,13 @@ class Profiles:
         return index
 
     def _build(self, kind: Kind) -> _Index:
+        return self._scan(kind)[0]
+
+    def _scan(self, kind: Kind) -> tuple[_Index, dict[str, Any]]:
+        """The ``kind`` index, and each listed file's JSON, every file read once."""
         paths: dict[str, Path] = {}
         names: dict[str, str] = {}
+        docs: dict[str, Any] = {}
         listed = _LISTS[kind]
         for entry in self._vendor.get(listed, []):
             try:
@@ -351,12 +362,12 @@ class Profiles:
                     f"the profile file {self.root / VENDOR}.json has a malformed {listed}"
                     f" entry {entry!r}: {error!r}"
                 ) from None
-            doc = _read(path)
+            doc = docs[name] = _read(path)
             paths[name] = path
             setting_id = doc.get("setting_id") if isinstance(doc, dict) else None
             if isinstance(setting_id, str) and setting_id:
                 names[setting_id] = name
-        return _Index(paths=paths, names=names)
+        return _Index(paths=paths, names=names), docs
 
 
 def _read(path: Path) -> Any:
