@@ -168,12 +168,12 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     // instant, which `stepUntil` may step past. So the boundary is pinned from there
     // (#3904 review): two timers set at the scroll look at that scroll's observer (made
     // next) just before and just after SETTLE_MS.
-    const seen: boolean[] = []
+    const seen: (boolean | 'no observer')[] = []
     const { scrolls, restore } = stubLayout({ libraries: 5000 }, (top) => {
       if (top !== 4992) return
       const at = observers.length
       for (const delay of [SETTLE_MS - 1, SETTLE_MS + 1]) {
-        setTimeout(() => seen.push(observers[at]!.disconnected), delay)
+        setTimeout(() => seen.push(observers[at]?.disconnected ?? 'no observer'), delay)
       }
     })
     // Time itself, not one timer picked out by its closure's text (#3247 review), and

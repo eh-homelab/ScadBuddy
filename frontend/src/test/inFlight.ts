@@ -32,7 +32,8 @@ export function trackInFlight(server: SetupServer) {
     unhandledException: () => server.events.on('unhandledException', ended),
   }
   const events = server.events
-  const removeAll = events.removeAllListeners.bind(events)
+  const original = events.removeAllListeners
+  const removeAll = original.bind(events)
   events.removeAllListeners = (...args: Parameters<typeof removeAll>) => {
     removeAll(...args)
     const [type] = args
@@ -40,6 +41,13 @@ export function trackInFlight(server: SetupServer) {
   }
   for (const attach of Object.values(listeners)) attach()
   return {
+    /** Stops tracking: its listeners off, `removeAllListeners` as it was. */
+    dispose: () => {
+      events.removeAllListeners = original
+      server.events.removeListener('request:start', started)
+      server.events.removeListener('request:end', ended)
+      server.events.removeListener('unhandledException', ended)
+    },
     /** How many requests are open now. */
     open: () => open.size,
     /**

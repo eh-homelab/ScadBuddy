@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { server } from '../mocks/server'
 import { trackInFlight } from './inFlight'
 
@@ -19,6 +19,7 @@ function held(path: string) {
 describe('trackInFlight (#3243)', () => {
   it('names a request still open, once, and none once it is answered', async () => {
     const tracked = trackInFlight(server)
+    onTestFinished(tracked.dispose)
     const never = held('/api/v1/never')
     const controller = new AbortController()
     void fetch('/api/v1/never', { signal: controller.signal }).catch(() => {})
@@ -39,6 +40,7 @@ describe('trackInFlight (#3243)', () => {
 
   it('lets go of a request once it is aborted', async () => {
     const tracked = trackInFlight(server)
+    onTestFinished(tracked.dispose)
     const never = held('/api/v1/never')
     const controller = new AbortController()
     void fetch('/api/v1/never', { signal: controller.signal }).catch(() => {})
@@ -52,6 +54,7 @@ describe('trackInFlight (#3243)', () => {
     'still hears requests after a test removes its listeners (%s)',
     async (type) => {
       const tracked = trackInFlight(server)
+      onTestFinished(tracked.dispose)
       server.events.removeAllListeners(type)
       const never = held('/api/v1/never')
       const controller = new AbortController()
