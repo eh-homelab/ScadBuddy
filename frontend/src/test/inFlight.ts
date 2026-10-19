@@ -41,7 +41,10 @@ export function trackInFlight(server: SetupServer) {
   }
   for (const attach of Object.values(listeners)) attach()
   return {
-    /** Stops tracking: its listeners off, `removeAllListeners` as it was. */
+    /**
+     * Stops tracking: its listeners off, `removeAllListeners` as it was when this tracker
+     * was made. So trackers are disposed newest first, or an older one's wrapper is lost.
+     */
     dispose: () => {
       events.removeAllListeners = original
       server.events.removeListener('request:start', started)

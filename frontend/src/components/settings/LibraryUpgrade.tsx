@@ -68,7 +68,7 @@ export function LibraryUpgrade() {
   useEffect(() => {
     shownLibraries.current = libraries.data
   })
-  const relistFailed = relistFailedOn !== null && relistFailedOn === libraries.data
+  const relistFailed = libraries.data !== undefined && relistFailedOn === libraries.data
   const selectId = useId()
   const refId = useId()
 
