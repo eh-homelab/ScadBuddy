@@ -168,6 +168,29 @@ func (c *Client) Upload(ctx context.Context, folderID int, name, key string, r i
 	if key == "" {
 		key = NewKey()
 	}
+	for {
+		file, again, resend, err := c.upload(ctx, folderID, name, key, r)
+		if !resend {
+			return file, err
+		}
+		// Still being checked (#4141): the same form under the same key follows it. r is
+		// read from its start again, which only a seekable reader can be.
+		seeker, ok := r.(io.Seeker)
+		if !ok {
+			return File{}, err
+		}
+		if err := waitToResend(ctx, "upload", again); err != nil {
+			return File{}, err
+		}
+		if _, serr := seeker.Seek(0, io.SeekStart); serr != nil {
+			return File{}, fmt.Errorf("upload: %w", serr)
+		}
+	}
+}
+
+// upload sends Upload's form once. resend is ScadBuddy's still-checking answer: the same
+// request is to be sent again after again, and err says why.
+func (c *Client) upload(ctx context.Context, folderID int, name, key string, r io.Reader) (_ File, again time.Duration, resend bool, _ error) {
 	pr, pw := io.Pipe()
 	// Closing the reader on return fails the writer's next write, so it stops.
 	defer pr.Close()
@@ -175,7 +198,7 @@ func (c *Client) Upload(ctx context.Context, folderID int, name, key string, r i
 	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "upload", Route: "/api/v1/print/library/files", Transfer: telemetry.Upload, Attrs: folderAttr(folderID)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/print/library/files", pr)
 	if err != nil {
-		return File{}, err
+		return File{}, 0, false, err
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	req.Header.Set("Idempotency-Key", key)
@@ -188,22 +211,28 @@ func (c *Client) Upload(ctx context.Context, folderID int, name, key string, r i
 	}()
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return File{}, fmt.Errorf("upload: %w", err)
+		return File{}, 0, false, fmt.Errorf("upload: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return File{}, fmt.Errorf("upload: %w", err)
+		return File{}, 0, false, fmt.Errorf("upload: %w", err)
+	}
+	if again, ok := stillChecking(resp.StatusCode, resp.Header, body); ok {
+		// The writer stops reading r before it is read again from its start.
+		pr.Close()
+		<-sent
+		return File{}, again, true, errorFrom("upload", resp.StatusCode, body)
 	}
 	entry, err := answer[models.LibraryEntryUpdatedable](ctx, c, "upload", resp.StatusCode, body, models.CreateLibraryEntryUpdatedFromDiscriminatorValue)
 	if err != nil {
-		return File{}, err
+		return File{}, 0, false, err
 	}
 	// A success means the route read the whole form, so the writer has finished.
 	file := updatedFile(entry)
 	file.Size = <-sent
 	file.Created = time.Now().UTC()
-	return file, nil
+	return file, 0, false, nil
 }
 
 // writeForm writes the upload's form and returns the number of file bytes in it.
@@ -364,7 +393,7 @@ func skippedError(op string, skipped []models.SkippedLibraryFileable) error {
 // read sends a GET built by the generated client and decodes its 200 body.
 func read[T any](ctx context.Context, c *Client, op string, info *abs.RequestInformation, factory serialization.ParsableFactory) (T, error) {
 	var zero T
-	status, body, err := c.send(ctx, op, info)
+	status, _, body, err := c.send(ctx, op, info)
 	if err != nil {
 		return zero, err
 	}
@@ -375,15 +404,61 @@ func read[T any](ctx context.Context, c *Client, op string, info *abs.RequestInf
 }
 
 // write sends a write built by the generated client with a fresh Idempotency-Key, and
-// follows a 202 to its result.
+// follows a 202 to its result. ScadBuddy's still-checking answer is followed too, by
+// sending the same request under the same key again (#4141).
 func write[T any](ctx context.Context, c *Client, op string, info *abs.RequestInformation, factory serialization.ParsableFactory) (T, error) {
 	var zero T
 	info.Headers.Add("Idempotency-Key", NewKey())
-	status, body, err := c.send(ctx, op, info)
-	if err != nil {
-		return zero, err
+	for {
+		status, header, body, err := c.send(ctx, op, info)
+		if err != nil {
+			return zero, err
+		}
+		again, ok := stillChecking(status, header, body)
+		if !ok {
+			return answer[T](ctx, c, op, status, body, factory)
+		}
+		if err := waitToResend(ctx, op, again); err != nil {
+			return zero, err
+		}
 	}
-	return answer[T](ctx, c, op, status, body, factory)
+}
+
+// stillCheckingProblem is ScadBuddy's answer to a command it is still accepting
+// (api/operations.py STILL_ACCEPTING_PROBLEM): send it again, same key, to follow it.
+const stillCheckingProblem = "https://scadbuddy.dev/problems/command-still-accepting"
+
+// stillChecking is whether a write's answer asks for the same request again, and how
+// long to wait first: a 503 with the still-accepting problem, or one that says the
+// command may have started (`may_have_started`), which its key makes safe to send again.
+// The wait is Retry-After's, 5 s when it names none.
+func stillChecking(status int, header http.Header, body []byte) (time.Duration, bool) {
+	if status != http.StatusServiceUnavailable {
+		return 0, false
+	}
+	var problem struct {
+		Type           string `json:"type"`
+		MayHaveStarted bool   `json:"may_have_started"`
+	}
+	if json.Unmarshal(body, &problem) != nil || (problem.Type != stillCheckingProblem && !problem.MayHaveStarted) {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(header.Get("Retry-After"))); err == nil && n >= 0 {
+		return time.Duration(n) * time.Second, true
+	}
+	return defaultResendWait, true
+}
+
+// defaultResendWait is how long a still-checking answer is waited out when it names no Retry-After.
+var defaultResendWait = 5 * time.Second
+
+func waitToResend(ctx context.Context, op string, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("%s: still being checked: %w", op, ctx.Err())
+	case <-time.After(max(d, time.Millisecond)):
+		return nil
+	}
 }
 
 // answer decodes a write's 200 body, or follows its 202 operation to the result.
@@ -420,7 +495,7 @@ func (c *Client) follow(ctx context.Context, op, id string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		status, body, err := c.send(poll, op, info)
+		status, _, body, err := c.send(poll, op, info)
 		switch {
 		case err != nil && ctx.Err() != nil:
 			return nil, fmt.Errorf("%s: operation %s: %w", op, id, err)
@@ -475,23 +550,23 @@ func wait(ctx context.Context, op, id string, delay time.Duration) error {
 }
 
 // send turns the generated request into a net/http one and returns the answer's
-// status and body.
-func (c *Client) send(ctx context.Context, op string, info *abs.RequestInformation) (int, []byte, error) {
+// status, headers and body.
+func (c *Client) send(ctx context.Context, op string, info *abs.RequestInformation) (int, http.Header, []byte, error) {
 	info.PathParameters["baseurl"] = c.adapter.GetBaseUrl()
 	native, err := c.adapter.ConvertToNativeRequest(ctx, info)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	resp, err := c.http.Do(native.(*http.Request))
 	if err != nil {
-		return 0, nil, fmt.Errorf("%s: %w", op, err)
+		return 0, nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%s: %w", op, err)
+		return 0, nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, resp.Header, body, nil
 }
 
 func decode[T any](op string, body []byte, factory serialization.ParsableFactory) (T, error) {
