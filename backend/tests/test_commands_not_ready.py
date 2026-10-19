@@ -193,8 +193,14 @@ async def test_another_failure_is_no_deferral_and_says_what_it_was(
         event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
         workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(failure=Failure()),
     )
+    untyped = HistoryEvent(
+        event_type=EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED,
+        workflow_task_failed_event_attributes=WorkflowTaskFailedEventAttributes(
+            failure=Failure(application_failure_info=ApplicationFailureInfo())
+        ),
+    )
     caplog.set_level("WARNING", logger="scadbuddy.workflows.commands")
-    for event in (timed_out, newer, empty):
+    for event in (timed_out, newer, empty, untyped):
         client = SimpleNamespace(namespace="default", workflow_service=_Pages([event]))
         assert not await deferred_kind(cast(Client, client), "op-x")
     messages = [record.getMessage() for record in caplog.records]
@@ -205,6 +211,9 @@ async def test_another_failure_is_no_deferral_and_says_what_it_was(
         " 'Other', cause 999, not a deferral",
         "command op-x: its newest workflow task failure is a failure with no info, cause"
         " WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
+        # An application failure with no type is the one line that still shows ''.
+        "command op-x: its newest workflow task failure is application_failure_info '',"
+        " cause WORKFLOW_TASK_FAILED_CAUSE_UNSPECIFIED, not a deferral",
     ]
 
 
