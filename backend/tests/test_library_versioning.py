@@ -211,6 +211,8 @@ BLOCK_SWEEP = "housekeeping_blocks"
 PROBE_SWEEP = "housekeeping_probe"
 #: Probes in a row that must reach the new build: an activity goes to one of the
 #: queue's partitions, and each hears of the new current version on its own (#4255).
+#: A heuristic: three in a row can still miss a lagging partition, so this narrows the
+#: flake rather than removing it, and a rare recurrence is not a regression.
 PROBES_IN_A_ROW = 3
 
 

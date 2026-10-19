@@ -298,7 +298,12 @@ async def routes_to(
     Asked of the workflow-type queue and of the activity-type one: each has its own copy
     of the routing, and an activity is dispatched by the activity type's, which lagged
     the workflow type's on the dev server (#4255). Both answer from their root partition,
-    so a non-root partition can lag still: this narrows the window, it does not close it."""
+    so a non-root partition can lag still: this narrows the window, it does not close it.
+
+    So the queue must have activity pollers of this build: the activity type hears of a
+    version only from them. A queue that serves workflows only never answers True, and
+    a caller waiting on it waits out its whole timeout (every caller's worker today
+    registers activities: render, print, projects, library)."""
     for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
         described = await client.workflow_service.describe_task_queue(
             DescribeTaskQueueRequest(
