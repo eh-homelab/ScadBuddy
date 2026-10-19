@@ -234,6 +234,17 @@ describe('PreviewPane: the native slicer (plan 2026-10-16 Task 14)', () => {
     expect(bar).toHaveAttribute('value', '40')
   })
 
+  it('keeps the percentage out of the live region, so a poll is not announced (Task 14/15 review M4)', () => {
+    slicing(40)
+    const summary = screen.getByTestId('slice-summary')
+    expect(summary).toHaveAttribute('aria-live', 'polite')
+    // The state change ("Slicing…") is announced; each new percentage is not. The bar
+    // still carries the value for a reader that moves to it.
+    expect(screen.getByText('40%').closest('[aria-hidden="true"]')).not.toBeNull()
+    expect(screen.getByText('Slicing…').closest('[aria-hidden="true"]')).toBeNull()
+    expect(screen.getByRole('progressbar', { name: 'Slicing progress' })).toHaveAttribute('value', '40')
+  })
+
   it('shows the text alone while there is no progress (Bambuddy, or before the first beat)', () => {
     slicing(null)
     expect(screen.getByTestId('slice-status')).toHaveTextContent(/^Slicing…$/)

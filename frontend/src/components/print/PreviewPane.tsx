@@ -282,7 +282,9 @@ export function PreviewPane({
               {slice ? 'Reslicing for your changes…' : 'Slicing…'}
               {progress != null && (
                 <>
-                  {` ${progress}%`}
+                  {/* Out of the summary's live region: each poll's percentage is not
+                      announced, only the state; the bar keeps the value (review M4). */}
+                  <span aria-hidden="true">{` ${progress}%`}</span>
                   <progress
                     max={100}
                     value={progress}

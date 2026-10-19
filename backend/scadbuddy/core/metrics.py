@@ -68,6 +68,9 @@ TraceRelayOutcome = Literal[
 # A render is bounded by SCADBUDDY_RENDER_TIMEOUT (120 s by default) per openscad
 # pass, and a multi-colour job makes one pass per colour, so the tail runs long.
 RENDER_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 240, 480, 900)
+#: A native slice: the slicer queue's wait (up to two hours) and four `slice_plate`
+#: attempts of up to 30 minutes, past `RENDER_BUCKETS`' 15 minutes (Task 14/15 review M3).
+SLICE_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 16200)
 HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
 
 
@@ -300,7 +303,7 @@ class Metrics:
             "Time from a native slice's start to its record, by outcome"
             " (completed, failed, cancelled).",
             ["outcome"],
-            buckets=RENDER_BUCKETS,
+            buckets=SLICE_BUCKETS,
             registry=r,
         )
 

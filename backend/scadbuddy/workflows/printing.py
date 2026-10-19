@@ -38,6 +38,7 @@ from temporalio.exceptions import (
     ActivityError,
     ApplicationError,
     FailureError,
+    RetryState,
     TimeoutType,
     WorkflowAlreadyStartedError,
     is_cancelled_exception,
@@ -78,7 +79,7 @@ with workflow.unsafe.imports_passed_through():
         SucceedInput,
     )
     from scadbuddy.workflows.problems import problem_of
-    from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_TIMEOUT, SLICE_WORST_CASE
+    from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_ROUND, SLICE_TIMEOUT
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
 READ_RETRY = RetryPolicy(
@@ -122,29 +123,33 @@ HEARTBEAT = timedelta(seconds=30)
 #: margin for its prepare and record. It beats, so a worker that died is retried at
 #: `HEARTBEAT`; an attempt that ran out joins the same slice again.
 SLICE_RUN_TIMEOUT = SLICE_RETRY.maximum_attempts * SLICE_TIMEOUT + timedelta(minutes=10)
-#: Every ``slice_run`` attempt together (Task 13 review M2): past the slice's own worst
-#: case, so a run gives up only on a slice that has outlived it, and says so
-#: (`outlived_slice`).
-SLICE_RUN_BOUND = SLICE_WORST_CASE + timedelta(minutes=10)
-#: Rejoining is idempotent, so anything but the run's own failure retries until
-#: `SLICE_RUN_BOUND`.
+#: Every ``slice_run`` attempt together (Task 13 review M2; the Task 14/15 ruling): one
+#: round of the slice and a margin, about 4 h 25 min. Past it the run fails and says to
+#: print again (`outlived_slice`), which joins the slice if it still runs: an open run
+#: gains nothing by waiting longer.
+SLICE_RUN_BOUND = SLICE_ROUND + timedelta(minutes=10)
+#: Rejoining is idempotent, so every retryable failure retries until `SLICE_RUN_BOUND`.
+#: No type is listed as non-retryable (Task 14/15 review I1): a listed type is never
+#: retried whatever its own flag says, and a transient Bambuddy error is a retryable
+#: ``FAILED``; every deliberate refusal sets ``non_retryable`` itself.
 SLICE_RUN_RETRY = RetryPolicy(
     maximum_attempts=0,
     initial_interval=timedelta(seconds=1),
     maximum_interval=timedelta(minutes=1),
     backoff_coefficient=2.0,
-    non_retryable_error_types=[FAILED],
 )
 
 
 def outlived_slice(error: ActivityError) -> ApplicationError | None:
     """The run's failure for a ``slice_run`` that ran out of `SLICE_RUN_BOUND` (Task 13
     review M2): a named 504, since printing again joins the slice if it still runs; None
-    for any other failure."""
+    for any other failure. Out of it is the schedule-to-close timeout, or an attempt's
+    own timeout whose retry would have landed past it (``retry_state`` ``TIMEOUT``,
+    Task 14/15 review M1)."""
     cause = error.cause
-    if not (
-        isinstance(cause, TemporalTimeoutError) and cause.type == TimeoutType.SCHEDULE_TO_CLOSE
-    ):
+    if not isinstance(cause, TemporalTimeoutError):
+        return None
+    if cause.type != TimeoutType.SCHEDULE_TO_CLOSE and error.retry_state != RetryState.TIMEOUT:
         return None
     detail = "The slice is still running after the run's wait: print again to wait for it."
     return ApplicationError(

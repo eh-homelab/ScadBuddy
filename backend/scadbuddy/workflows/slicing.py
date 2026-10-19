@@ -70,14 +70,17 @@ SHORT = timedelta(seconds=60)
 READ_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
-#: How long one `SliceWorkflow` can run, which a run's ``slice_run`` waits out (Task 13
-#: review M2): two rounds (a ``TRANSFER_REFUSED`` prepares again), each the prepare's
-#: three attempts and four ``slice_plate`` attempts, each waiting up to `SLICER_WAIT` for
-#: a slicer worker to take it, then the record's margin.
-SLICE_WORST_CASE = 2 * (
+#: One realistic round of a `SliceWorkflow`, which a run's ``slice_run`` waits out (Task
+#: 13 review M2, bounded by the Task 14/15 ruling): the prepare's three attempts, one wait
+#: of up to `SLICER_WAIT` for a slicer worker (a schedule-to-start timeout is not
+#: retried, so a slice no worker takes ends after one), and four ``slice_plate`` attempts.
+#: A slice can run longer (a ``TRANSFER_REFUSED`` prepares again, each retry is scheduled
+#: anew); a run past this fails, and printing again joins the slice still running.
+SLICE_ROUND = (
     READ_RETRY.maximum_attempts * PREPARE_TIMEOUT
-    + SLICE_RETRY.maximum_attempts * (SLICER_WAIT + SLICE_TIMEOUT)
-) + timedelta(minutes=10)
+    + SLICER_WAIT
+    + SLICE_RETRY.maximum_attempts * SLICE_TIMEOUT
+)
 #: As ``printing.py``'s: a Postgres blip must not lose an outcome.
 RECORD_RETRY = RetryPolicy(
     maximum_attempts=0,

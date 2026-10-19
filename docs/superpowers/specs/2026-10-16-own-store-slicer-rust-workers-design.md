@@ -333,8 +333,8 @@ three kinds of files:
 
 Flattening reads Bambu Studio's profile tree, copied into the API image at build time
 from the Dockerfile's `slicer-dist` stage, the same checked download the slicer image
-installs (`/opt/slicer-profiles`: `BBL.json`, `VERSION` and `BBL/{machine,process,filament}`,
-11 MB; `settings.slicer_profiles_dir`). No store blob carries it and there is no
+installs (`/opt/slicer-profiles`: `BBL.json`, `VERSION` and `BBL/{machine,process,filament}`;
+`settings.slicer_profiles_dir`). No store blob carries it and there is no
 `preset_bundle` kind: the Python side reads files and never needs the binary. The
 preset key is `native@<version>/` before Bambuddy's preset key, where the version is that
 tree's `VERSION`, the API image's `BAMBU_STUDIO_VERSION` (`Profiles.version`,
@@ -365,12 +365,19 @@ its own `library`-queue activity `slice_run`, which starts it or joins the dialo
 waits (Rulings C1, C2; behind `workflow.patched("native-slicer")`). A child workflow was
 not used: temporalio 1.34.0's `start_child_workflow` takes no `id_conflict_policy`, so a
 running dialog slice of the same id would fail its start. `slice_run` heartbeats, and
-retries without a limit up to `SLICE_RUN_BOUND`, past the slice's own worst case
-(`workflows/slicing.py` `SLICE_WORST_CASE`: two prepare rounds, each up to four
-`slice_plate` attempts that may each wait two hours for a slicer worker and run 30
-minutes), about 21 hours; a run that outlives it fails with a 504 saying to print again,
-which joins the slice if it still runs (Task 13 review M2). A cancelled run stops
-waiting and never cancels the slice the dialog shares.
+every retryable failure (a Bambuddy blip in its reads among them) retries without a
+limit up to `SLICE_RUN_BOUND`, about 4 h 25 min: one realistic round of the slice
+(`workflows/slicing.py` `SLICE_ROUND`: the prepare's three attempts of five minutes, one
+wait of up to two hours for a slicer worker, since Temporal does not retry a
+schedule-to-start timeout, and four `slice_plate` attempts of up to 30 minutes) and a
+ten-minute margin (Task 13 review M2, bounded by the Task 14/15 review's ruling). A slice
+can outlast that only when attempts that are each taken just before their wait ends then
+die, or a `TransferRefused` prepares again; the run then fails with a 504 saying to print
+again, both on the schedule-to-close timeout and on a last attempt's own timeout whose
+retry would land past it (`printing.py` `outlived_slice`). Printing again joins the slice
+if it still runs (`USE_EXISTING`) or takes its completed row at once, so an open run gains
+nothing by waiting longer. A cancelled run stops waiting and never cancels the slice the
+dialog shares.
 
 The execution's id is `slice-<file id>-<sha256(subject, copy sha256, preset key)>`, known
 before any byte is read, so the dialog and the run name one (Ruling C2). The copy's

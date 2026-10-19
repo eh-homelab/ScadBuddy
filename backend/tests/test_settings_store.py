@@ -603,6 +603,12 @@ def test_library_backend_applies_on_restart() -> None:
     assert APPLIES["library_backend"] == "restart"
 
 
+def test_slicer_backend_applies_at_once() -> None:
+    """Task 14/15 review M5: the Settings row shows no restart badge because of this;
+    `plan_run` and `preview_run` read the setting per run and per start."""
+    assert APPLIES["slicer_backend"] == "live"
+
+
 @pytest.mark.parametrize(("saved", "read"), [("p/", "p"), ("/a/b/", "a/b"), ("/", "")])
 def test_the_s3_prefix_is_saved_without_its_outer_slashes(
     store: SettingsStore, saved: str, read: str

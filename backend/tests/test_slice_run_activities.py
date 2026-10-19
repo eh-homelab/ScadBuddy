@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, BinaryIO
@@ -25,8 +26,8 @@ from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.print_run import PlannedRun
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.workflows import print_activities, printing
-from scadbuddy.workflows.print_models import FAILED, NativeSliced, SlicedUploadInput, SliceRunInput
-from scadbuddy.workflows.slicing import SLICE_WORST_CASE, failure_status
+from scadbuddy.workflows.print_models import NativeSliced, SlicedUploadInput, SliceRunInput
+from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status
 from scadbuddy.workflows.slicing_activities import RunActivities, _refused
 from scadbuddy.workflows.slicing_models import SLICE_REFUSED
 
@@ -144,7 +145,7 @@ def test_failure_status(error: ApplicationError, expected: int) -> None:
     assert failure_status(error) == expected
 
 
-def _timed_out(kind: TimeoutType) -> ActivityError:
+def _timed_out(kind: TimeoutType, retry_state: RetryState = RetryState.TIMEOUT) -> ActivityError:
     error = ActivityError(
         "activity timed out",
         scheduled_event_id=1,
@@ -152,7 +153,7 @@ def _timed_out(kind: TimeoutType) -> ActivityError:
         identity="test",
         activity_type="slice_run",
         activity_id="1",
-        retry_state=RetryState.TIMEOUT,
+        retry_state=retry_state,
     )
     error.__cause__ = TimeoutError("timed out", type=kind, last_heartbeat_details=[])
     return error
@@ -168,11 +169,46 @@ def test_a_slice_past_the_runs_bound_is_named_and_retryable() -> None:
     found = problem_of(problem)
     assert found.status == 504
     assert "print again" in found.detail
-    assert printing.outlived_slice(_timed_out(TimeoutType.HEARTBEAT)) is None
+    # Task 14/15 review M1: the last attempt's own timeout, whose retry would land past
+    # the bound, is the bound too.
+    assert printing.outlived_slice(_timed_out(TimeoutType.HEARTBEAT)) is not None
+    assert (
+        printing.outlived_slice(_timed_out(TimeoutType.HEARTBEAT, RetryState.NON_RETRYABLE_FAILURE))
+        is None
+    )
 
 
-def test_slice_run_retries_until_the_slices_own_worst_case() -> None:
-    """Review M2: rejoining is idempotent, so timeouts retry until the bound."""
+def test_slice_run_retries_for_one_round_of_the_slice() -> None:
+    """Review M2, and the Task 14/15 ruling: rejoining is idempotent, so anything not a
+    deliberate refusal retries (review I1: never by type), until about one realistic
+    round of the slice; then the run's 504 sends the user to print again."""
     assert printing.SLICE_RUN_RETRY.maximum_attempts == 0
-    assert FAILED in (printing.SLICE_RUN_RETRY.non_retryable_error_types or [])
-    assert printing.SLICE_RUN_BOUND >= SLICE_WORST_CASE
+    assert not printing.SLICE_RUN_RETRY.non_retryable_error_types
+    assert SLICE_ROUND <= printing.SLICE_RUN_BOUND <= SLICE_ROUND + timedelta(minutes=15)
+    assert timedelta(hours=4) <= printing.SLICE_RUN_BOUND <= timedelta(hours=5)
+
+
+async def test_the_sliced_upload_beats_while_it_uploads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 13 review I1 (the slow-upload half): an upload longer than the heartbeat
+    interval beats, so only a dead worker times it out, not a large plate."""
+    monkeypatch.setattr(print_activities, "HEARTBEAT_EVERY", 0.05)
+
+    class Slow(_Native):
+        async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> Any:
+            await asyncio.sleep(0.3)
+            return await super().upload(filename, data, folder_id)
+
+    run = _activities(tmp_path, native=Slow())
+    beats: list[Any] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    planned = PlannedRun.model_construct(library_file_id=COPY, folder_id=None)
+    sliced = NativeSliced(slice_id=1, preset_key="k", sliced_blob_key="native-slice-1")
+
+    await env.run(
+        run.print_sliced_upload, SlicedUploadInput(planned=planned, plate_id=1, sliced=sliced)
+    )
+
+    assert beats

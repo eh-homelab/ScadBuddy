@@ -155,23 +155,30 @@ class NativeSliceStore:
     ) -> float | None:
         """A slice that did not complete drops its holds in the same transaction: its
         blobs serve nothing (`reusable` reads completed rows), and a later execution
-        holds them again (review I1). The seconds since its start, or None for a row
-        that is gone."""
+        holds them again (review I1). The seconds since its start when this moved the row
+        from running, else None (a retried record, a cancel recorded over a finished row,
+        a row that is gone), so a slice is timed once (Task 14/15 review M2)."""
 
         def run() -> float | None:
             with self._pool.connection() as conn, conn.transaction():
                 row = conn.execute(
-                    "UPDATE native_slices SET status = %s, sliced_blob_key = %s, failure = %s,"
-                    " warnings = %s, finished_at = now() WHERE id = %s"
-                    " RETURNING EXTRACT(EPOCH FROM finished_at - started_at)::float8 AS took",
-                    (status, sliced_blob_key, failure, Jsonb(warnings), slice_id),
+                    "WITH before AS (SELECT id, status FROM native_slices WHERE id = %s"
+                    " FOR UPDATE)"
+                    " UPDATE native_slices AS s SET status = %s, sliced_blob_key = %s,"
+                    " failure = %s, warnings = %s, finished_at = now() FROM before"
+                    " WHERE s.id = before.id"
+                    " RETURNING before.status AS was,"
+                    " EXTRACT(EPOCH FROM s.finished_at - s.started_at)::float8 AS took",
+                    (slice_id, status, sliced_blob_key, failure, Jsonb(warnings)),
                 ).fetchone()
                 if status != "completed":
                     conn.execute(
                         "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
                         (HOLDER, str(slice_id)),
                     )
-            return None if row is None else float(row["took"])
+            if row is None or row["was"] != "running":
+                return None
+            return float(row["took"])
 
         return await asyncio.to_thread(run)
 

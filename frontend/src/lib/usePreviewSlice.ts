@@ -110,7 +110,9 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     plan: mine?.plan ?? null,
     stale: mine !== null && mine.request !== wanted,
     slicing: slicing && wanted !== null,
-    progress: slicing && wanted !== null ? progress : null,
+    // Only the slice of the choices on screen: while new ones wait out the debounce, the
+    // old slice's percentage would say how far the wrong slice got (review M5).
+    progress: slicing && wanted !== null && wanted === key ? progress : null,
     toolpathUrl,
     error,
   }

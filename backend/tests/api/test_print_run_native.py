@@ -21,9 +21,14 @@ from fastapi.testclient import TestClient
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHistory
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
-from scadbuddy.workflows.slicing_activities import WAITING
+from scadbuddy.workflows.print_activities import raised_as
+from scadbuddy.workflows.printing import HEARTBEAT, PLAN_TIMEOUT
+from scadbuddy.workflows.print_models import FAILED, SliceRunInput
+from scadbuddy.workflows.slicing_activities import WAITING, RunActivities
 from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared
 from tests.api.test_print_preview_native import (
@@ -349,6 +354,16 @@ def test_a_native_run_slices_uploads_and_queues(
     assert outcome["native_slice_id"] == row["id"]
     assert outcome["sliced_blob_key"] == row["sliced_blob_key"]
     assert slicer.calls == 1
+    # Task 13 review I1: an upload's budget, beating, not `SHORT`'s 60 s.
+    (upload,) = [
+        event.activity_task_scheduled_event_attributes
+        for event in history.events
+        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        and event.activity_task_scheduled_event_attributes.activity_type.name
+        == "print_sliced_upload"
+    ]
+    assert upload.start_to_close_timeout.ToTimedelta() == PLAN_TIMEOUT
+    assert upload.heartbeat_timeout.ToTimedelta() == HEARTBEAT
     _record(history, "native_sliced")
 
 
@@ -411,6 +426,38 @@ def test_the_dialog_and_the_run_share_one_slice(
     assert row["id"] == op["result"]["job_id"]
     (record,) = _inputs(_history(native_client, run_id), "print_record")
     assert record["outcome"]["native_slice_id"] == row["id"]
+
+
+def test_a_transient_error_before_the_wait_is_retried(
+    native_client: TestClient,
+    model: str,
+    slicer: FakeSlicer,
+    library: FakeLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 14/15 review I1: a Bambuddy blip in ``slice_run``'s reads (raised as a
+    retryable ``FAILED``) is retried, not the run's failure."""
+    started = RunActivities._started
+    calls: list[int] = []
+
+    async def flaky(self: RunActivities, input: SliceRunInput) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise raised_as(
+                ApiError(503, "Bambuddy is busy", type_=UNAVAILABLE_PROBLEM),
+                FAILED,
+                non_retryable=False,
+            )
+        return await started(self, input)
+
+    monkeypatch.setattr(RunActivities, "_started", flaky)
+    output_id = prepared(native_client, model)
+
+    run = _run(native_client, output_id)
+
+    assert run["status"] == "succeeded", run
+    assert len(calls) == 2
+    assert library.queued == [SLICED]
 
 
 def test_a_lost_upload_answer_is_taken_on_the_retry(

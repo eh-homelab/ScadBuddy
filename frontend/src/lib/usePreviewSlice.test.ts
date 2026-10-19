@@ -63,6 +63,35 @@ describe('usePreviewSlice on the native slicer', () => {
     expect(result.current.toolpathUrl).toMatch(/\/preview-slices\/5\/toolpath\?slicer=native$/)
   })
 
+  it('reads a library file\u2019s native slice with slicer=native too (Task 14/15 review M5)', async () => {
+    const library = { kind: 'library', file: { id: 7, filename: 'a.3mf' } } as PrintSource
+    vi.spyOn(api, 'previewLibrarySlice').mockResolvedValue(started('native'))
+    const read = vi.spyOn(api, 'getLibraryPreviewSlice').mockResolvedValue(completed('native'))
+    const { result } = renderHook(() => usePreviewSlice(library, request))
+
+    await advance(RESLICE_DEBOUNCE_MS)
+
+    expect(read).toHaveBeenCalledWith(7, 5, 'native')
+    expect(result.current.toolpathUrl).toMatch(/\/print\/library\/7\/preview-slices\/5\/toolpath\?slicer=native$/)
+  })
+
+  it('drops the progress when the choices change mid-slice (Task 14/15 review M5)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    vi.spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce(running(40, 'native'))
+      .mockResolvedValue(running(null, 'native'))
+    const { result, rerender } = renderHook(({ wanted }) => usePreviewSlice(source, wanted), {
+      initialProps: { wanted: request },
+    })
+    await advance(RESLICE_DEBOUNCE_MS)
+    expect(result.current.progress).toBe(40)
+
+    rerender({ wanted: { ...request, copies: 2 } as PrintRunRequest })
+    await advance(0)
+
+    expect(result.current.progress).toBeNull()
+  })
+
   it('reads a Bambuddy start, and its toolpath, with no slicer at all', async () => {
     vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
     const read = vi.spyOn(api, 'getPreviewSlice').mockResolvedValue(completed('bambuddy'))

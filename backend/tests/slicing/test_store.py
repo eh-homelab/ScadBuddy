@@ -290,3 +290,21 @@ async def test_a_restart_of_a_finished_row_keeps_it_from_the_ttl_sweep(
     again = await _start(store)
     assert again == slice_id
     assert await store.sweep(timedelta(days=1)) == []
+
+
+async def test_finish_times_a_slice_once(store: NativeSliceStore) -> None:
+    """Task 14/15 review M2: a retried record, or a cancel recorded over a finished row,
+    returns no time, so ``scadbuddy_native_slice_seconds`` counts the slice once."""
+    slice_id = await _start(store)
+    took = await store.finish(
+        slice_id, status="completed", sliced_blob_key="k", failure=None, warnings=[]
+    )
+    assert took is not None and took >= 0
+    again = await store.finish(
+        slice_id, status="completed", sliced_blob_key="k", failure=None, warnings=[]
+    )
+    assert again is None
+    cancelled = await store.finish(
+        slice_id, status="cancelled", sliced_blob_key=None, failure="c", warnings=[]
+    )
+    assert cancelled is None

@@ -72,3 +72,11 @@ describe('PrintPicker · the slice in the 3D preview (#2072)', () => {
     expect(dialog).toHaveAttribute('data-toolpath', 'null')
   })
 })
+
+describe('PrintPicker · the native slicer\u2019s progress (Task 14/15 review M5)', () => {
+  it('hands the pane the slice\u2019s progress', async () => {
+    slice.state = { ...slice.state, result: null, toolpathUrl: null, stale: false, slicing: true, progress: 40 }
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    expect(await screen.findByTestId('slice-progress')).toHaveAttribute('value', '40')
+  })
+})

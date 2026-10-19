@@ -276,8 +276,9 @@ class SliceActivities:
             await self._hold(transfers.content, key, input.slice_id)
             return await self._completed(input.slice_id, key, input.output.warnings)
         if input.reused_blob_key is not None:
+            # Not timed: a reuse slices nothing, and would pull the slices' p50 down.
             return await self._completed(
-                input.slice_id, input.reused_blob_key, input.reused_warnings
+                input.slice_id, input.reused_blob_key, input.reused_warnings, timed=False
             )
         return await self._failed(
             input.slice_id,
@@ -294,8 +295,10 @@ class SliceActivities:
         sliced_blob_key: str | None,
         failure: str | None,
         warnings: list[str],
+        timed: bool = True,
     ) -> None:
-        """The row finished, and timed into ``scadbuddy_native_slice_seconds``."""
+        """The row finished, and timed into ``scadbuddy_native_slice_seconds`` once, when
+        this record moved it from running."""
         took = await self.slicing.store.finish(
             slice_id,
             status=status,
@@ -303,12 +306,19 @@ class SliceActivities:
             failure=failure,
             warnings=warnings,
         )
-        if took is not None:
+        if took is not None and timed:
             self.slicing.core.metrics.native_slice_duration.labels(status).observe(took)
 
-    async def _completed(self, slice_id: int, key: str, warnings: list[str]) -> SliceWorkflowResult:
+    async def _completed(
+        self, slice_id: int, key: str, warnings: list[str], *, timed: bool = True
+    ) -> SliceWorkflowResult:
         await self._finish(
-            slice_id, status="completed", sliced_blob_key=key, failure=None, warnings=warnings
+            slice_id,
+            status="completed",
+            sliced_blob_key=key,
+            failure=None,
+            warnings=warnings,
+            timed=timed,
         )
         return SliceWorkflowResult(
             status="completed", sliced_blob_key=key, failure=None, warnings=warnings
