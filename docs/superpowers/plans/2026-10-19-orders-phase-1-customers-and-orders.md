@@ -49,6 +49,7 @@ Where the spec leaves a choice open, or phase 1 needs something a later phase ow
 - §11 phase 1 says "Close works with manual fulfilment (§6.1 by hand)" but puts shipments in phase 3, while §3.5 needs a shipment to reach `shipped` and then `closed`. Ruling 2 moves §6.3's tables and routes into phase 1; §11 should say so. Task 12 edits the spec's phase 1 and phase 3 lines.
 - §3.5's item lifecycle names `queued`, `printing`, `printed` without saying they wait for the print path. Ruling 4 says which states phase 1 reaches; no spec edit.
 - §4's row for `POST /orders/{id}/items/{item}/quotes` says only "with a `manual` body". Ruling 1 fixes the body as `{unit_price_minor, label?}`; Task 12 adds that to §4.
+- §3.2 says the order number comes "from a sequence per year". A Postgres sequence skips on a rolled-back insert, which Ruling 5 rules out: the number comes from the `order_numbers` counter row under a row lock. Task 12 rewords §3.2 to "from a per-year counter row, never a sequence (Ruling 5 of the phase 1 plan)".
 
 ## Review Focus
 
@@ -234,7 +235,7 @@ def test_order_events_round_trip() -> None: ...
 - Test: `agent/test/orders.test.ts` (over the fake backend as `test/activity.test.ts` does), `agent/test/coverage.test.ts` (unchanged, must pass)
 
 **Interfaces:**
-- Produces, each a `defineTool` with its `routes` (Ruling 14): `customer_list`, `customer_get`, `customer_upsert` (`POST`/`PATCH`/archive), `order_list`, `order_get`, `order_create`, `order_update` (`PATCH`, hold, release, cancel, payments), `order_item_add`, `order_item_update` (`PATCH`, `DELETE`, item cancel), `order_item_quote` (manual; `{unit_price_minor, label?}`; phase 2 widens it), `order_item_accept_quote` (outward), `order_accept` (outward), `order_item_fulfil` (outward: `POST` fulfilment plus accept), `order_ship` (outward), `order_close` (outward). Each `summarize`/`title` names the order number.
+- Produces, each a `defineTool` with its `routes` (Ruling 14): `customer_list`, `customer_get`, `customer_upsert` (`POST`/`PATCH`/archive), `order_list`, `order_get`, `order_create`, `order_update` (`PATCH`, hold, release, cancel, payments), `order_item_add`, `order_item_update` (`PATCH`, `DELETE`, item cancel), `order_item_quote` (manual; `{unit_price_minor, label?}`; phase 2 widens it), `order_item_accept_quote` (outward), `order_accept` (outward), `order_item_fulfil` (outward: `POST` fulfilment, `PATCH …/fulfilments/{f}` and accept), `order_ship` (outward: `POST …/shipments` and `PATCH …/shipments/{s}`), `order_close` (outward). Each `summarize`/`title` names the order number.
 
 - [ ] **Step 1: Write the failing tests**: one per tool against recorded answers; `coverage.test.ts` lists no uncovered `/orders` or `/customers` operation.
 - [ ] **Step 2: Run to verify they fail**: `pnpm test -- orders coverage`.
@@ -295,7 +296,7 @@ def test_order_events_round_trip() -> None: ...
 
 **Files:**
 - Modify: `CLAUDE.md` ("Layout": a `backend/scadbuddy/orders/` entry naming the component, the store, the lifecycle's lock-and-derive rule, the two events, the pages and the mocks)
-- Modify: `docs/superpowers/specs/2026-10-18-orders-design.md` (§4: the manual quote body; §11 phases 1 and 3: shipments moved, per Ruling 2; §3.5: a note that phase 1 derives `in_production` from attempts, and that phase 3's `queued` writer must widen `derive` to "any item `queued` or beyond, or with an attempt" so the derivation keeps meaning "any item past `approved`", Ruling 4)
+- Modify: `docs/superpowers/specs/2026-10-18-orders-design.md` (§4: the manual quote body; §3.2: the order number from a per-year counter row, never a sequence, per Ruling 5; §11 phases 1 and 3: shipments moved, per Ruling 2; §3.5: a note that phase 1 derives `in_production` from attempts, and that phase 3's `queued` writer must widen `derive` to "any item `queued` or beyond, or with an attempt" so the derivation keeps meaning "any item past `approved`", Ruling 4)
 - Modify: `README.md` "Features" (one line: orders)
 
 - [ ] **Step 1: Write** the three edits.
