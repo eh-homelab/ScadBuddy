@@ -111,3 +111,34 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   }
   return { key: keys.count > 0, workflow, rows }
 }
+
+/** How old a session's payload key is before sweepOrphanedSessionKeys looks at it: well past any insert it could race. */
+export const ORPHAN_KEY_MIN_AGE_S = 24 * 3600
+
+/**
+ * Deletes the payload keys of sessions whose `ai_sessions` row is gone (#3317), and returns how
+ * many. forgetSubject deletes its own; what this catches is a durable fork whose workflow could
+ * not be started (SessionManager.fork deletes the child's row), whose start had already made the
+ * child's key. Older than `minAgeS` only, and checked again under the subject's lock, which a key's
+ * creation takes too. Not a forget: no tombstone, as no session can take that id again.
+ */
+export async function sweepOrphanedSessionKeys(sql: Sql, minAgeS = ORPHAN_KEY_MIN_AGE_S): Promise<number> {
+  const subjects = await sql<{ subject: string }[]>`
+    SELECT k.subject FROM ai_payload_keys k
+    WHERE k.subject LIKE 'session-%' AND k.created_at < now() - make_interval(secs => ${minAgeS})
+      AND NOT EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id::text = substr(k.subject, 9))
+    LIMIT 100`
+  let deleted = 0
+  for (const { subject } of subjects) {
+    const id = subject.slice('session-'.length)
+    deleted += await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+      const gone = await tx`
+        DELETE FROM ai_payload_keys WHERE subject = ${subject}
+          AND NOT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${id})
+          AND NOT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id::text = ${id})`
+      return gone.count
+    })
+  }
+  return deleted
+}

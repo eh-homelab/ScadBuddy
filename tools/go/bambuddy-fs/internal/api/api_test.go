@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"syscall"
 	"testing"
@@ -297,5 +299,74 @@ func TestEveryWriteSendsItsOwnKey(t *testing.T) {
 	}
 	if len(first) != 32 || f.lastKey == first {
 		t.Fatalf("keys %q then %q", first, f.lastKey)
+	}
+}
+
+// ScadBuddy's still-checking 503 (#4141) is followed by sending the same request under the
+// same key again, for every write: the delete of a replaced file and an upload included.
+func TestAStillCheckingAnswerIsFollowedForEveryWrite(t *testing.T) {
+	for _, c := range []struct {
+		kind string
+		run  func(*Client) error
+	}{
+		{"upload", func(c *Client) error {
+			_, err := c.Upload(context.Background(), 0, "a.3mf", "", bytes.NewReader(bytes.Repeat([]byte("ab"), 1<<16)))
+			return err
+		}},
+		{"delete", func(c *Client) error { return c.DeleteFiles(context.Background(), 10) }},
+		{"update_file", func(c *Client) error {
+			name := "b.3mf"
+			_, err := c.UpdateFile(context.Background(), 10, &name, nil)
+			return err
+		}},
+		{"mkdir", func(c *Client) error { _, err := c.Mkdir(context.Background(), 0, "New"); return err }},
+		{"update_folder", func(c *Client) error {
+			name := "Moved"
+			_, err := c.UpdateFolder(context.Background(), 4, &name, nil)
+			return err
+		}},
+		{"delete_folder", func(c *Client) error { return c.DeleteFolder(context.Background(), 4) }},
+	} {
+		for _, mayHaveStarted := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s may_have_started=%v", c.kind, mayHaveStarted), func(t *testing.T) {
+				f := newFake(t)
+				f.folder(4, "Top", 0)
+				f.file(10, "a.3mf", 0, []byte("x"), false)
+				f.checking[c.kind] = 1
+				f.mayHaveStarted = mayHaveStarted
+				if err := c.run(f.client(t)); err != nil {
+					t.Fatal(err)
+				}
+				if len(f.checkedKeys) != 1 || f.lastKey != f.checkedKeys[0] {
+					t.Fatalf("keys: checked %v, then %q", f.checkedKeys, f.lastKey)
+				}
+				if c.kind == "upload" {
+					uploaded := false
+					for _, fl := range f.files {
+						uploaded = uploaded || (fl.name == "a.3mf" && len(fl.data) == 2<<16)
+					}
+					if !uploaded {
+						t.Fatal("the upload sent again did not carry the whole file")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestAStillCheckingAnswerIsFollowedOnlyWithinTheContext(t *testing.T) {
+	f := newFake(t)
+	f.checking["mkdir"] = 1 << 20
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := f.client(t).Mkdir(ctx, 0, "New"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want the deadline", err)
+	}
+	// An upload whose reader cannot be read again is answered with the 503, not sent again.
+	f.checking["upload"] = 1
+	_, err := f.client(t).Upload(context.Background(), 0, "a.3mf", "", struct{ io.Reader }{strings.NewReader("abc")})
+	var e *Error
+	if !errors.As(err, &e) || e.Status != 503 {
+		t.Fatalf("err %v, want the 503", err)
 	}
 }

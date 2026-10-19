@@ -87,6 +87,7 @@ import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
+import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -511,6 +512,17 @@ if (database) {
     void sweepTurnDirs(sweepRoot, database.sql).catch((err: unknown) =>
       console.error('durable http body sweep failed:', (err as Error).message),
     )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
+// The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
+// start. Every hour, once the database is ready.
+if (database) {
+  const sweep = () =>
+    void database
+      .ready()
+      .then((ok) => (ok ? sweepOrphanedSessionKeys(database.sql) : 0))
+      .catch((err: unknown) => console.error('orphaned payload key sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()
 }
