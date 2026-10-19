@@ -1,0 +1,5 @@
+{
+  "_comment": "A durable session row's statuses while it holds a turn, and the parked half of them. Read by agent/test/turnStatuses.test.ts (durableSweep.ts TURN_STATUSES) and agent-durable/tests/test_turn_statuses.py (session/activities.py _RUNNING, gate/store.py _WAITING), so the TypeScript and Python lists cannot drift.",
+  "turn": ["running", "waiting_approval", "waiting_input"],
+  "waiting": ["waiting_approval", "waiting_input"]
+}
