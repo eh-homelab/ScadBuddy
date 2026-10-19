@@ -202,14 +202,20 @@ async def deferred_kind(client: Client, id: str) -> bool:
                         kind = attributes.failure.application_failure_info.type
                         if kind == DEFERRED_KIND:
                             return True
-                        # What it failed with instead: the type and the cause only, never
-                        # the message, which can carry the workflow's values.
+                        # What it failed with instead: the failure's kind (application,
+                        # timeout, …), its type and the task's cause, never the message,
+                        # which can carry the workflow's values. A cause newer than these
+                        # protos is logged as its number, not taken for a failed read.
+                        cause = attributes.cause
                         logger.warning(
-                            "command %s: its newest workflow task failure is %r, cause %s,"
+                            "command %s: its newest workflow task failure is %s %r, cause %s,"
                             " not a deferral",
                             id,
+                            attributes.failure.WhichOneof("failure_info"),
                             kind,
-                            WorkflowTaskFailedCause.Name(attributes.cause),
+                            WorkflowTaskFailedCause.Name(cause)
+                            if cause in WorkflowTaskFailedCause.values()
+                            else cause,
                         )
                         return False
                 token = page.next_page_token
