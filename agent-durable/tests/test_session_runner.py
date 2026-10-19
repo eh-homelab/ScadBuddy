@@ -69,6 +69,7 @@ from scadbuddy_durable.session.runner import (
     image_problem,
     image_size,
     merged_hooks,
+    same_subagent,
     tool_images_loader,
     view_tool_images_tool,
     with_refusals,
@@ -951,7 +952,9 @@ async def test_segment_calls_name_each_subagents_agent_call_by_its_start() -> No
     token = _EMIT.set(seen.append)
     try:
         await started(
-            {"tool_name": "Agent", "tool_input": {"subagent_type": "reviewer"}}, "a1", None
+            {"tool_name": "Agent", "tool_input": {"subagent_type": "scadbuddy:reviewer"}},
+            "a1",
+            None,
         )
         await started({"tool_name": "Agent", "tool_input": {}}, "a2", None)
         await sub_started({"agent_id": "x", "agent_type": "reviewer"}, None, None)
@@ -995,6 +998,14 @@ async def test_segment_calls_close_what_a_failed_attempt_left_open() -> None:
     ]
     calls.close_open(closed.append)
     assert len(closed) == 2
+
+
+def test_a_subagent_type_matches_its_plugin_qualified_form() -> None:
+    assert same_subagent("scadbuddy:reviewer", "reviewer")
+    assert same_subagent("reviewer", "scadbuddy:reviewer")
+    assert same_subagent("reviewer", "reviewer")
+    assert not same_subagent("scadbuddy:reviewer", "author")
+    assert not same_subagent("viewer", "reviewer")
 
 
 def test_segment_hooks_are_added_to_hooks_already_set() -> None:
@@ -1286,7 +1297,7 @@ async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
 class _Answers:
     """make_runner whose segment answers ``out``, or raises it, whatever it is asked."""
 
-    def __init__(self, out: SegmentOutput | Exception) -> None:
+    def __init__(self, out: SegmentOutput | BaseException) -> None:
         self.out = out
         self.budgets: list[float] = []
 
@@ -1296,7 +1307,7 @@ class _Answers:
 
         class Answers:
             async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
-                if isinstance(out, Exception):
+                if isinstance(out, BaseException):
                     raise out
                 return out
 
@@ -1321,6 +1332,31 @@ async def _segment(out: SegmentOutput | Exception, left: float) -> SegmentOutput
     got = await runner._on_credentials("s", "wf", inp, 1, [_credential()], left, {}, settings)
     assert answers.budgets == [left]
     return got
+
+
+async def test_a_cancelled_attempt_ends_the_calls_it_opened() -> None:
+    """#4184 review: a cancelled segment (an interrupt, a shutdown) leaves no call running."""
+    calls = SegmentCalls([])
+    started: Any = calls.hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started({"tool_name": "Skill", "tool_input": {}}, "s1", None)
+        runner = ScadBuddyRunner(
+            _no_database, KEK, cwd="/tmp", make_runner=_Answers(asyncio.CancelledError())
+        )
+        settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
+        inp = SegmentInput(session_id="s", prompt="hi", tools=[])
+        with pytest.raises(asyncio.CancelledError):
+            await runner._on_credentials(
+                "s", "wf", inp, 1, [_credential()], 1.0, {}, settings, calls
+            )
+    finally:
+        _EMIT.reset(token)
+    assert [(e["type"], e["id"], e.get("status")) for e in seen] == [
+        ("tool_call", "s1", None),
+        ("tool_result", "s1", "failed"),
+    ]
 
 
 @pytest.mark.parametrize(

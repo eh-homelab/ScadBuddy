@@ -185,6 +185,10 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect(await editing('toolu_b', 'baz', 'qux')).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('String to replace not found') }] })
     expect(await editing('toolu_c', 'foo', 'foo bar')).toMatchObject({ content: [{ text: updated }] })
     expect((await files.read(ws, 'e.txt'))!.bytes.toString()).toBe('foo bar bar\n')
+    // A Write since then is not that Edit's: its retry is judged on the file as it is.
+    expect(await call('Write', { file_path: '/workspace/e.txt', content: 'other\n' })).toMatchObject({ isError: false })
+    expect((await files.stat(ws, 'e.txt'))!.source).not.toHaveProperty('edit_call')
+    expect(await editing('toolu_c', 'foo', 'foo bar')).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('String to replace not found') }] })
   })
 
   it('answers the built-ins with nothing to act on as a classic turn does', async () => {

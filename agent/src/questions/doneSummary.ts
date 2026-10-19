@@ -222,6 +222,7 @@ export async function loadDoneSummary(
     SELECT at, at >= ${since}::text::timestamptz AS in_turn,
            EXISTS (SELECT 1 FROM jsonb_to_recordset(${tx.json(bounds)}) AS w(f timestamptz, u timestamptz)
                    WHERE at >= w.f AND (w.u IS NULL OR at < w.u)) AS in_away,
+           -- bounds[0] is the earliest window: the query above orders them by q.created_at.
            coalesce(at < ${bounds[0]?.f ?? null}::text::timestamptz, false) AS before_asked,
            tool, resource_type, resource_id, action, model_slug
     FROM ai_session_resources

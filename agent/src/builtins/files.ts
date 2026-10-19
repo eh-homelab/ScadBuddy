@@ -107,7 +107,7 @@ export function write(ctx: FileToolContext, input: { file_path: string; content:
     const before = await ctx.files.stat(ctx.ws, rel)
     await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(input.content), {
       ...(before ? { mediaType: before.mediaType } : {}),
-      source: before?.source ?? { tool: 'Write' },
+      source: withoutEditCall(before?.source) ?? { tool: 'Write' },
     })
     return ok(before ? updated(rel) : `File created successfully at: ${shown(rel)}`)
   })
@@ -138,6 +138,13 @@ export function applyEdit(text: string, edit: Edit): string | BuiltinResult {
 /** The source key naming the Edit call that last wrote a file (#3202): its retry is that call again. */
 export const EDIT_CALL = 'edit_call'
 
+/** A file's source kept by a write that is not that Edit call's: it names the call no longer. */
+function withoutEditCall(source: WorkspaceSource | null | undefined): WorkspaceSource | undefined {
+  if (!source) return undefined
+  const { [EDIT_CALL]: _call, ...rest } = source
+  return rest
+}
+
 /**
  * `callId`: the call's tool_use id, when its turn tool sends one. An activity retried
  * after its answer was lost finds its own write already made: it answers as it would
@@ -163,7 +170,7 @@ export function edit(ctx: FileToolContext, input: { file_path: string } & Edit, 
     if (typeof after !== 'string') return after
     await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(after), {
       mediaType: file.mediaType,
-      source: { ...(file.source ?? { tool: 'Edit' }), ...call },
+      source: { ...(withoutEditCall(file.source) ?? { tool: 'Edit' }), ...call },
       expectedSha256: file.sha256,
     })
     return ok(updated(rel))
@@ -474,7 +481,7 @@ export function notebookEdit(
     }
     await ctx.files.write(ctx.ws, rel, new TextEncoder().encode(JSON.stringify(notebook, null, 1)), {
       mediaType: file.mediaType,
-      source: file.source ?? { tool: 'NotebookEdit' },
+      source: withoutEditCall(file.source) ?? { tool: 'NotebookEdit' },
       expectedSha256: file.sha256,
     })
     if (mode === 'delete') return ok(`Deleted cell ${input.cell_id}`)

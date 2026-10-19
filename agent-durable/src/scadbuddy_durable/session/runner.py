@@ -629,7 +629,9 @@ class SegmentCalls:
         if not agent:
             return {}
         claimed = set(self._owners.values())
-        alike = [c for c, k in self._agents.items() if k == kind and c not in claimed]
+        alike = [
+            c for c, k in self._agents.items() if same_subagent(k, str(kind)) and c not in claimed
+        ]
         if len(alike) == 1:
             self._owners[str(agent)] = alike[0]
         return {}
@@ -668,6 +670,13 @@ class SegmentCalls:
             "PostToolUseFailure": [HookMatcher(hooks=[self._ended])],
             "SubagentStart": [HookMatcher(hooks=[self._subagent_started])],
         }
+
+
+def same_subagent(given: str, started: str) -> bool:
+    """Whether an ``Agent`` call's ``subagent_type`` names the type its ``SubagentStart``
+    reports: equal, or one the plugin-qualified form of the other (``scadbuddy:model-author``
+    and ``model-author``), since which form the hook reports is not measured here."""
+    return given == started or given.endswith(f":{started}") or started.endswith(f":{given}")
 
 
 def merged_hooks(
@@ -934,6 +943,11 @@ class ScadBuddyRunner:
                     error=bounded(str(err)),
                     cost_usd=_cost(err),
                 )
+            except BaseException:
+                # Cancelled (an interrupt, a worker shutting down): its calls end too.
+                if calls is not None and publish is not None:
+                    calls.close_open(publish)
+                raise
             finally:
                 if token is not None:
                     _EMIT.reset(token)

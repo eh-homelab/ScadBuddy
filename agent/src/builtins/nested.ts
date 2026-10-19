@@ -30,7 +30,12 @@ export type NestedDeps = {
   sessionId?: string | undefined
   /** Adds a query's cost to the session it ran for. */
   spent?: ((costUsd: number) => Promise<void>) | undefined
-  /** What the session's budget has left: each query's cap is at most that, and none runs at 0. */
+  /**
+   * What the session's budget has left: each query's cap is at most that, and none runs at
+   * 0. An upper bound: the row's cost does not yet hold the running turn's (or segment's)
+   * own model spend, which is written as it ends, so a query may still pass the budget by
+   * that much; the turn's own cap and the next turn's check hold the rest.
+   */
   remaining?: (() => Promise<number>) | undefined
   /** Tests: runs one query (runHarness), and asks about a refused credential (probeCredential). */
   run?: FallbackOptions['run']
