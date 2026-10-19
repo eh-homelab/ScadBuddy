@@ -214,6 +214,13 @@ export function useAsync<T>(
     /** Bumped when the effects are torn down: a wait from before that ends doing nothing. */
     generation: number
   }>({ waiting: false, last: -Infinity, generation: 0 })
+  /** Ends the read in flight's wait now, once: its timer cleared, its promise settled. */
+  const endStall = useCallback(() => {
+    const state = signals.current
+    clearTimeout(state.stalled?.timer)
+    state.stalled?.end()
+    state.stalled = undefined
+  }, [])
   const signalled = useCallback(() => {
     const state = signals.current
     if (state.waiting) return
@@ -227,8 +234,7 @@ export function useAsync<T>(
       void Promise.race([reading.current, stall]).then(() => {
         // Torn down and replayed in place meanwhile: that replay's own signals read.
         if (state.generation !== mine) return
-        clearTimeout(state.stalled?.timer)
-        state.stalled = undefined
+        endStall()
         if (!mounted.current) return
         state.waiting = false
         state.last = Date.now()
@@ -238,7 +244,7 @@ export function useAsync<T>(
     const wait = state.last + SIGNAL_READ_MIN_MS - Date.now()
     if (wait > 0) state.timer = setTimeout(start, wait)
     else start()
-  }, [refresh])
+  }, [refresh, endStall])
   useEffect(() => {
     const state = signals.current
     return () => {
@@ -249,14 +255,12 @@ export function useAsync<T>(
       state.generation++
       // Ended, not only its timer cleared: a read that never settles would otherwise
       // hold the wait (#4318 review). The generation above makes it do nothing.
-      clearTimeout(state.stalled?.timer)
-      state.stalled?.end()
+      endStall()
       state.timer = undefined
-      state.stalled = undefined
       state.waiting = false
       state.last = -Infinity
     }
-  }, [])
+  }, [endStall])
 
   const staleFor = useCallback(
     (topic: string, confirmation: Confirmation) => readAgain(shownRead.current, topic, confirmation),
