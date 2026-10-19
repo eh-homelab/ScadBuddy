@@ -162,12 +162,26 @@ class ToolFailedError(Exception):
 #: own error: final, the call is never sent again.
 _TOOL_REFUSALS = ["ToolError", "NotApproved", "GrantRevoked", "UnknownFlow", "NotForFlows"]
 _TOOL_TIMEOUT = timedelta(seconds=120)
-#: The agent's activities beat every 10 s from their start (`agent/src/temporal/worker.ts`
-#: `heartbeatingActivities`), as `flow_route_send` does here: an attempt Temporal recorded
-#: as started but never delivered (a poll that gave up mid-handoff on a slow Temporal
-#: database, or a replica a deploy took) is retried after this, not after the call's
-#: whole start-to-close. Two such `turn_tool_tier` attempts held a run 4 min (#4199).
-_AGENT_HEARTBEAT = timedelta(seconds=30)
+
+
+def _agent_heartbeat() -> timedelta:
+    """The heartbeat timeout of a call to the agent: the run's `agent_heartbeat_s`, 30 s.
+    The agent's activities beat every 10 s from their start (`agent/src/temporal/worker.ts`
+    `heartbeatingActivities`), as `flow_route_send` does here: an attempt Temporal recorded
+    as started but never delivered (a poll that gave up mid-handoff on a slow Temporal
+    database, or a replica a deploy took) is retried after this, not after the call's
+    whole start-to-close. Two such `turn_tool_tier` attempts held a run 4 min (#4199)."""
+    owner: StepOwner = workflow.instance()
+    return timedelta(seconds=owner.agent_heartbeat_s)
+
+
+#: A `turn_tool_tier` whose every attempt missed its beats is asked once more with no
+#: heartbeat timeout, as before #4199 (#4262). An agent replica from before #4200 never
+#: beats, and a tier call takes ~35 s there (it connects the turn's servers): during an
+#: agent rollout, or after a rollback past #4200, all three attempts could land on such
+#: replicas (`agent-tools` is unversioned, so any poller takes any attempt) and fail the
+#: run's tier check. Runs recorded before raised that heartbeat timeout to the script.
+FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
 
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
@@ -670,7 +684,7 @@ async def _call_tool(
                 task_queue=task_queue,
                 schedule_to_start_timeout=to_start,
                 start_to_close_timeout=_TOOL_TIMEOUT,
-                heartbeat_timeout=_AGENT_HEARTBEAT,
+                heartbeat_timeout=_agent_heartbeat(),
                 retry_policy=RetryPolicy(
                     maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
                 ),
@@ -753,23 +767,39 @@ async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
     replica a pinned server's call runs on. One no enabled plugin or setting offers is
     refused."""
     owner: StepOwner = workflow.instance()
+    heartbeat: timedelta | None = _agent_heartbeat()
     try:
-        tiered: dict[str, Any] = await workflow.execute_activity(
-            TURN_TOOL_TIER,
-            {"tool": name, "input": args},
-            task_queue=owner.tools_queue,
-            result_type=dict,
-            start_to_close_timeout=_TOOL_TIMEOUT,
-            heartbeat_timeout=_AGENT_HEARTBEAT,
-            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
-        )
+        while True:
+            try:
+                tiered: dict[str, Any] = await workflow.execute_activity(
+                    TURN_TOOL_TIER,
+                    {"tool": name, "input": args},
+                    task_queue=owner.tools_queue,
+                    result_type=dict,
+                    start_to_close_timeout=_TOOL_TIMEOUT,
+                    heartbeat_timeout=heartbeat,
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS
+                    ),
+                )
+                return tiered
+            except ActivityError as err:
+                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH).
+                if (
+                    heartbeat is not None
+                    and isinstance(err.cause, ActivityTimeoutError)
+                    and err.cause.type == TimeoutType.HEARTBEAT
+                    and workflow.patched(FLOW_BEATLESS_TIER_PATCH)
+                ):
+                    heartbeat = None
+                    continue
+                raise
     except ActivityError as err:
         if isinstance(err.cause, ApplicationError) and err.cause.type == "ToolError":
             raise ValueError(f"there is no tool {name!r}: {err.cause.message}") from None
         if isinstance(err.cause, ApplicationError):
             raise ToolFailedError(err.cause.message) from None
         raise
-    return tiered
 
 
 async def _turn_queue(name: str, args: dict[str, Any]) -> str:
@@ -938,7 +968,7 @@ async def _check_session(session_id: str) -> None:
             task_queue=owner.tools_queue,
             result_type=dict,
             start_to_close_timeout=_TOOL_TIMEOUT,
-            heartbeat_timeout=_AGENT_HEARTBEAT,
+            heartbeat_timeout=_agent_heartbeat(),
             retry_policy=RetryPolicy(non_retryable_error_types=_TURN_REFUSALS),
         )
     except ActivityError as err:
