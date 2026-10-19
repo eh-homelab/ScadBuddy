@@ -28,6 +28,8 @@ export function asSliced(plan: NozzlePlan | null | undefined, slice: SlicePrevie
   // Left off a slot or moved one: either way the line is this plate's slice, not the plan,
   // whether or not a side moved (#3751). The plan's summary names the planned slots and
   // sides; the sliced copy has none rather than a wrong one.
+  // A slice of none of the plan's slots says nothing of them: the plan's line stays.
+  if (slots.length === 0) return null
   const filtered = slots.length < (plan.slots ?? []).length
   return moved || filtered ? { ...plan, slots, summary: '' } : null
 }

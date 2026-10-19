@@ -338,6 +338,8 @@ export function PrintPicker({
     open ? PRINTER_TOPICS : NO_TOPICS,
     registryNews,
   )
+  // `registry.error` is deliberately not shown: an unreadable registry is no rows, and
+  // the dialog prints on Bambuddy ids alone.
   const registryRows = registry.data ?? NO_ROWS
   const registryPrinter = registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
   // Only a row the LAN reaches and Bambuddy does not: one just created by serial reaches

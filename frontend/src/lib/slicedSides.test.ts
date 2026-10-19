@@ -89,6 +89,8 @@ describe('asSliced (#2703)', () => {
     }
     expect(asSliced(plan, agrees)).toBeNull()
     expect(asSliced(plan, { job_id: 1, status: 'completed', slicer: 'bambuddy', slots: [{ slot_id: 1 }] })).toBeNull()
+    // Sides, but of no slot the plan has: the plan's line stays (#4391 review).
+    expect(asSliced(plan, { job_id: 1, status: 'completed', slicer: 'bambuddy', slots: [{ slot_id: 9, side: 'R' }] })).toBeNull()
     expect(asSliced(plan, null)).toBeNull()
     expect(asSliced(null, agrees)).toBeNull()
   })
