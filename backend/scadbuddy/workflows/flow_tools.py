@@ -181,9 +181,10 @@ def _agent_heartbeat() -> timedelta:
 #: agent rollout, or after a rollback past #4200, all three attempts could land on such
 #: replicas (`agent-tools` is unversioned, so any poller takes any attempt) and fail the
 #: run's tier check. Runs recorded before raised that heartbeat timeout to the script.
-#: The cost: a tier whose attempts are all lost (never delivered, or on replicas that
-#: died) now reaches the script after 3 x 30 s of missed beats plus up to 3 x 120 s of
-#: start-to-close, about 6.5 min, where #4199 alone gave up after the first 90 s.
+#: The cost: a tier whose attempts are all lost (recorded as started but never
+#: delivered, or taken by a replica that died) now reaches the script after 3 x 30 s of
+#: missed beats plus up to 3 x 120 s of start-to-close, 450 s (about 7.5 min, plus the
+#: retries' backoff), where #4199 alone gave up after the first 90 s.
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
 
