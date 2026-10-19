@@ -22,7 +22,10 @@ describe('durableHealthPort (#3655)', () => {
 
 describe('notStarted (#4086 review)', () => {
   it('names the port helper when the port line was never read', () => {
-    expect(notStarted('the durable worker', undefined, 'log').message).toMatch(/durableHealthPort/)
+    const { message } = notStarted('the durable worker', undefined, 'log')
+    expect(message).toMatch(/never got that far.*durableHealthPort/)
+    // The hint goes before the captured log, never in place of it.
+    expect(message.endsWith(': log')).toBe(true)
   })
 
   it('says only what it was told once the port was read', () => {

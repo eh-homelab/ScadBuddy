@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sb_slicer::models::{Arrange, SliceProgress};
-use sb_slicer::runner::{KEEPALIVE, RunError, RunOutcome, RunRequest, command_line, run};
+use sb_slicer::runner::{
+    KEEPALIVE, RunError, RunOutcome, RunRequest, STDERR_GRACE, command_line, run,
+};
 use support::assert_group_gone;
 use tokio_util::sync::CancellationToken;
 
@@ -138,6 +140,41 @@ async fn a_finished_slice_leaves_no_process_behind() {
         .parse()
         .unwrap();
     assert_group_gone(pgid).await;
+}
+
+#[tokio::test]
+async fn stderr_held_outside_the_group_is_abandoned_after_the_grace() {
+    let cli = fake("holder");
+    let p = paths();
+    // The CLI's environment is cleared, so the fake writes the pid beside its output.
+    let pid_file = p.out.with_file_name("holder.pid");
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        STDERR_GRACE + Duration::from_secs(2),
+        run(request(&cli, &p), |_| {}, CancellationToken::new()),
+    )
+    .await;
+    // The holder is in a session of its own, which the run's kill never reaches: stop it
+    // by the pid it wrote, before any assertion can fail.
+    let holder: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the fake writes the holder's pid")
+        .trim()
+        .parse()
+        .unwrap();
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(holder),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let outcome = result.expect("returns within the grace").unwrap();
+    assert!(started.elapsed() < STDERR_GRACE + Duration::from_secs(2));
+    assert_eq!(outcome.exit_code, 0);
+    assert!(p.out.exists());
+    assert!(
+        outcome.stderr_tail.contains("held"),
+        "{}",
+        outcome.stderr_tail
+    );
+    assert_group_gone(holder).await;
 }
 
 #[test]
