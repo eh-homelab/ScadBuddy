@@ -204,8 +204,13 @@ class PlateParts:
     parts: tuple[ColourPart, ...]
     extruders: tuple[int, ...]
     #: The 1-based object each part belongs to (#956): a template's declared object, or
-    #: a packed copy. Empty means one object, every part in it.
+    #: a packed copy. Empty means one object, every part in it. The numbers need not
+    #: start at 1 or be dense (plate 2 may hold only object 3, #3219): the writer numbers
+    #: a plate's objects densely, in first-seen order.
     objects: tuple[int, ...] = ()
+    #: Each object's name, in the order its number first appears in ``objects`` (#3212):
+    #: Arrange names a packed copy after its piece. Empty: each is named after the model.
+    names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.parts:
@@ -216,6 +221,8 @@ class PlateParts:
             object.__setattr__(self, "objects", (1,) * len(self.parts))
         if len(self.objects) != len(self.parts):
             raise ValueError("a plate needs one object number per colour part")
+        if self.names and len(self.names) != len(set(self.objects)):
+            raise ValueError("a plate's names need one name per object")
 
     @property
     def tower(self) -> bool:
@@ -275,12 +282,15 @@ def _object_ids(plates: Sequence[PlateParts]) -> list[range]:
 @dataclass(frozen=True)
 class _Assembly:
     """One object of a plate as the writer emits it (#956): its id, its 1-based number
-    on the plate, and the ``object_N`` ids, parts and extruders of its colour parts."""
+    on the plate, the number `PlateParts.objects` gave it, its name if the plate names
+    it, and the ``object_N`` ids, parts and extruders of its colour parts."""
 
     id: int
     plate_index: int
     number: int
     count: int
+    declared: int
+    label: str | None
     part_ids: tuple[int, ...]
     parts: tuple[ColourPart, ...]
     extruders: tuple[int, ...]
@@ -292,8 +302,13 @@ class _Assembly:
         return numbered if self.number == 1 else f"{numbered}-object-{self.number}"
 
     def name(self, model_name: str, plates: int) -> str:
+        """The plate's name for it (#3212), else the model's, numbered by plate when
+        there are several and, when the plate holds several objects, by the number the
+        template declared it with (#3219)."""
+        if self.label is not None:
+            return self.label
         name = _assembly_name(model_name, self.plate_index, plates)
-        return name if self.count == 1 else f"{name} (object {self.number})"
+        return name if self.count == 1 else f"{name} (object {self.declared})"
 
 
 def _assemblies(plates: Sequence[PlateParts]) -> list[list[_Assembly]]:
@@ -320,6 +335,8 @@ def _assemblies(plates: Sequence[PlateParts]) -> list[list[_Assembly]]:
                     plate_index=plate_index,
                     number=position,
                     count=len(numbers),
+                    declared=number,
+                    label=plate.names[position - 1] if plate.names else None,
                     part_ids=tuple(m[0] for m in members),
                     parts=tuple(m[1] for m in members),
                     extruders=tuple(m[2] for m in members),
@@ -1169,6 +1186,10 @@ def replate_3mf(
     it is the slicer's output.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        # Every entry is inflated, though only the root model and the settings are
+        # rewritten (#3438): the object files are nearly all of it and are read anyway
+        # for their boxes (`_plate_geometry`), and the read checks each entry's CRC
+        # before `rezipped` copies it as its compressed bytes stand.
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
         laid_out = laid_out_plates(archive)
         contents = dict(entries)
@@ -2037,8 +2058,11 @@ def _entry(name: str) -> zipfile.ZipInfo:
 
 def rezipped(payload: bytes, changed: Mapping[str, bytes]) -> bytes:
     """``payload`` with each entry in ``changed`` replaced, written in the writer's policy
-    (:func:`_entry`), so a replated file is byte-identical to one written for this plate
-    directly, covers included.
+    (:func:`_entry`). When this writer wrote ``payload``, a replated file is
+    byte-identical to one written for this plate directly, covers included. A file from
+    elsewhere (Bambu Studio's, MakerWorld's) is still valid, but its untouched DEFLATED
+    entries keep their own compressed streams, so its bytes differ from a fresh write
+    (#3438).
 
     An entry left unchanged and already in that policy is copied as its compressed
     bytes (:func:`~scadbuddy.render.zipcopy.copy_raw`, #2942) rather than inflated and

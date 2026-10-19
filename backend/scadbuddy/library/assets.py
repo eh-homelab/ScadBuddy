@@ -313,7 +313,8 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
         # Pillow refuses at open what declares over twice its own pixel limit, before the
         # pixel check above can run: it is that refusal, said the same way.
         raise AssetRejectedError(
-            f"the PNG is too large; at most {MAX_PNG_PIXELS} pixels are read"
+            f"the PNG declares more than {MAX_PNG_PIXELS} pixels; at most {MAX_PNG_PIXELS}"
+            " pixels are read"
         ) from None
     except AssetRejectedError:
         # Its own refusals (a ValueError too) pass through as they are.

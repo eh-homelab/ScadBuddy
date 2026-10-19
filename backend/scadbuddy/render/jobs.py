@@ -470,6 +470,10 @@ async def plate_layout(
         plate_parts: list[ColourPart] = []
         plate_objects: list[int] = []
         plate_sources: list[PartSource] = []
+        # The last object render that drew nothing: its log is the plate's when no
+        # object drew anything, as a file it could not open is often why (#451, #3218).
+        skipped: OpenSCADError | None = None
+        alike: list[tuple[tuple[str, tuple[float, ...]], ...]] = []
         for object_number in object_numbers:
             piece_dir = work_dir
             defines: list[str] = []
@@ -493,6 +497,7 @@ async def plate_layout(
                 # before there is a 3MF to find empty (#1328).
                 empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
                 if empty and may_be_empty:
+                    skipped = error
                     continue
                 assert plate_number is not None or object_number is not None
                 raise OpenSCADError(
@@ -511,6 +516,13 @@ async def plate_layout(
             split = await asyncio.to_thread(split_by_material, raw)
             if not split:
                 if may_be_empty:
+                    skipped = OpenSCADError(
+                        "",
+                        output.log_tail,
+                        diagnostics=output.diagnostics,
+                        diagnostics_dropped=output.diagnostics_dropped,
+                        missing_files=output.missing_files,
+                    )
                     continue
                 assert plate_number is not None
                 # A file the plate could not open is often why it drew nothing (#451).
@@ -541,13 +553,26 @@ async def plate_layout(
             plate_sources += _part_sources(work_dir, raw, split, parts)
             if object_number is not None:
                 objects_drawn.add(object_number)
+                alike.append(_drawn_alike(split))
         if not plate_parts:
             assert plate_number is not None or objects > 1
             raise OpenSCADError(
                 _empty_plate(plate_number, count)
                 if plate_number is not None
                 else "the render produced no geometry for any of its objects",
-                [],
+                skipped.log_tail if skipped is not None else [],
+                diagnostics=skipped.diagnostics if skipped is not None else (),
+                diagnostics_dropped=skipped.diagnostics_dropped if skipped is not None else 0,
+                missing_files=skipped.missing_files if skipped is not None else (),
+            )
+        if len(alike) > 1 and len(set(alike)) == 1:
+            # The same parts in the same place for every object: a template that never
+            # reads $object draws the whole model each time, so the copies would sit on
+            # top of each other (#3218).
+            where = f"plate {plate_number}: " if plate_number is not None else ""
+            warnings.append(
+                f"{where}every object draws the same geometry in the same place; the"
+                f" template declares echo(objects = {objects}), but does it read $object?"
             )
         drawn.append(
             (plate_parts, [colours.index(part.colour) + 1 for part in plate_parts], plate_objects)
@@ -564,22 +589,29 @@ async def plate_layout(
     for old, colour in enumerate(colours, start=1):
         if old not in renumber:
             warnings.append(f"{colour} is drawn only with every plate at once; it is on no plate")
+    # Each part keeps the object number the template declared it with, so the layout
+    # still says that plate 2's one object is object 3 (#3219); the 3MF writer numbers
+    # a plate's objects densely.
     plates = [
         PlateParts(
             tuple(parts),
             tuple(renumber[extruder] for extruder in extruders),
-            _dense_objects(numbers),
+            tuple(numbers),
         )
         for parts, extruders, numbers in drawn
     ]
     return PlateLayout(plates, [colours[old - 1] for old in used], warnings, box, sources)
 
 
-def _dense_objects(numbers: Sequence[int]) -> tuple[int, ...]:
-    """A plate's object numbers counted from 1 on that plate, in order: object 3 of the
-    template may be the first on plate 2."""
-    order = {number: index for index, number in enumerate(dict.fromkeys(numbers), start=1)}
-    return tuple(order[number] for number in numbers)
+def _drawn_alike(parts: Sequence[ColourPart]) -> tuple[tuple[str, tuple[float, ...]], ...]:
+    """What one object's render drew, to compare with another's: each colour and its
+    box, rounded to a micron."""
+    return tuple(
+        sorted(
+            (part.colour, tuple(round(float(v), 3) for v in part.mesh.bounds.ravel()))
+            for part in parts
+        )
+    )
 
 
 def result_parts(layout: PlateLayout) -> list[PartInfo]:

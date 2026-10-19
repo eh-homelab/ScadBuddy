@@ -373,7 +373,8 @@ async def ensure_workflow_schedule(
     """The Schedule starting ``action`` every ``interval`` seconds (0: none), then one
     run now: the boot's, unless a run is open or one started within ``boot_window``
     seconds (default `BOOT_TRIGGER_WINDOW`; or the interval, if shorter), which
-    converges this boot too (#2352). A
+    converges this boot too (#2352). A boot that changes the action (a rollout adding
+    or changing a sweep) runs it anyway, queued behind an open run (#3057). A
     Schedule an operator paused stays paused, and is not run: True says so (review
     #1095 2), since then nothing converges until it resumes. Every Schedule the API
     keeps (housekeeping, the preview backfill) is made here."""
@@ -386,22 +387,43 @@ async def ensure_workflow_schedule(
                 raise
         return False
     schedule = _schedule(interval, action)
+    #: Whether this boot changed what a run does (a sweep added or changed, #3057): the
+    #: open or recent run did the old action's work, so it converges nothing new.
+    changed = False
     try:
         await client.create_schedule(schedule_id, schedule)
     except ScheduleAlreadyRunningError:
+        previous: list[Any] = []
 
         def replace(input: ScheduleUpdateInput) -> ScheduleUpdate:
             # The state (paused, its note) is the operator's, not the deploy's.
             schedule.state = input.description.schedule.state
+            previous.append(input.description.schedule.action)
             return ScheduleUpdate(schedule=schedule)
 
         await handle.update(replace)
+        changed = bool(previous) and await _action_changed(client, previous[-1], action)
     window = BOOT_TRIGGER_WINDOW if boot_window is None else boot_window
-    if not schedule.state.paused and not await _ran_lately(handle, min(window, interval)):
+    if not schedule.state.paused and (
+        changed or not await _ran_lately(handle, min(window, interval))
+    ):
         # A run that opens between the look and this would SKIP this one; it queues
         # behind that run instead.
         await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
     return schedule.state.paused
+
+
+async def _action_changed(
+    client: Client, previous: Any, action: ScheduleActionStartWorkflow
+) -> bool:
+    """Whether ``action`` starts another workflow, or passes it other arguments, than
+    the ``previous`` action the Schedule held (described, so its arguments encoded)."""
+    if not isinstance(previous, ScheduleActionStartWorkflow):
+        return True
+    if previous.workflow != action.workflow:
+        return True
+    before = await client.data_converter.decode(previous.args)
+    return list(before) != list(action.args)
 
 
 async def _ran_lately(handle: ScheduleHandle, window: float) -> bool:

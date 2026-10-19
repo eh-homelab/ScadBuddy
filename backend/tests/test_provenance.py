@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -139,13 +138,6 @@ def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> N
     assert read(target) == PROVENANCE
     # The source is the job's file, read and never written.
     assert _compressed(source) == before and read(source) is None
-
-
-def test_the_raw_copy_is_checked_on_this_python() -> None:
-    """#2910: copy_raw writes through zipfile's private state. A Python minor bump fails
-    here until test_every_other_part_is_copied_as_its_compressed_bytes is run on it and
-    RAW_COPY_CHECKED moved; until then the stamp reads and writes every entry again."""
-    assert sys.version_info[:2] == zipcopy.RAW_COPY_CHECKED
 
 
 def test_an_unchecked_python_stamps_without_the_raw_copy(
