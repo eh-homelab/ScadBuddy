@@ -187,7 +187,8 @@ def _agent_heartbeat() -> timedelta:
 #: delivered, or taken by a replica that died) now reaches the script after
 #: 3 x `agent_heartbeat_s` of missed beats plus up to 3 x 120 s of start-to-close: at
 #: the default 30 s heartbeat, 450 s (about 7.5 min, plus the retries' backoff), where
-#: #4199 alone gave up after the first 90 s.
+#: #4199 alone gave up after the first 90 s. A tier whose last attempt ends on its
+#: start-to-close instead takes no fallback.
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
 
