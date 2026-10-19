@@ -304,8 +304,11 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
           >
             {shownSubjects.map((s) => (
               <ToggleGroupItem key={s.value} value={s.value} className={CHIP} title={s.value}>
-                {/* Unclipped until the facets load (#4003): two lines at most meanwhile. */}
-                <span className="line-clamp-2">{subjectLabel(s, facets?.subject_name_chars)}</span>
+                {/* Unclipped until the facets load (#4003): two lines at most meanwhile, with no
+                    clamp once subjectLabel is doing its own clipping, so the two never double up. */}
+                <span className={facets?.subject_name_chars === undefined ? 'line-clamp-2' : undefined}>
+                  {subjectLabel(s, facets?.subject_name_chars)}
+                </span>
                 <Count count={s.count} />
               </ToggleGroupItem>
             ))}
