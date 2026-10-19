@@ -25,7 +25,10 @@ timeouts, so it still stands for the current code); `rehomed` and `retried` on #
 live replica, recorded by
 `test_an_approved_turn_tool_in_a_run_from_before_2937_runs_on_the_live_replica`; and one
 nothing picked up, sent once more to the replica live then, recorded by
-`test_an_approved_turn_tool_nothing_picks_up_goes_to_the_replica_live_then`). Never
+`test_an_approved_turn_tool_nothing_picks_up_goes_to_the_replica_live_then`); `beatless`
+on #4262's (a `turn_tool_tier` whose three attempts missed their beats, asked once more
+with no heartbeat timeout, recorded by
+`test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats`). Never
 re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
@@ -62,6 +65,7 @@ NAMES = [
     "requeued",
     "rehomed",
     "retried",
+    "beatless",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 

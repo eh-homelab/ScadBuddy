@@ -1,6 +1,5 @@
 import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
-import { WorkflowFailedError } from '@temporalio/client'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -8,7 +7,6 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
-import { SESSION_TURN_ACTIVITY } from '../src/temporal/session/names.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { defineTool, json } from '../src/tools/registry.js'
@@ -187,33 +185,32 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     }
   }, 120_000)
 
-  it('beats for every activity it runs, so one that never beats outlives a short heartbeat timeout (#4261)', async () => {
-    // 4 s of work under a 2 s heartbeat timeout: only the worker's own beats keep it alive.
-    // `session_turn`, which the interceptor leaves alone, is the control: it times out.
-    const slow = () => sleep(4_000).then(() => 'done')
+  it('beats for every activity, so one that outlives its heartbeat timeout completes (#4261)', async () => {
+    // No beat of its own: only the worker's interceptor (heartbeatingActivities) keeps it alive.
+    // Without it in Worker.create's interceptors, the call fails with `TimeoutFailure: activity
+    // Heartbeat timeout` after 1 s. Its name is its own, so no other poller on `agent-tools` takes it.
+    const slow = `slow-${randomUUID()}`
     const agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
-      activities: { slow, [SESSION_TURN_ACTIVITY]: slow },
-      activityHeartbeatMs: 500,
+      activities: { [slow]: async () => (await sleep(4_000), 'done') },
+      activityHeartbeatMs: 200,
     })
     const caller = await Worker.create({
       connection: env.nativeConnection,
       taskQueue: 'heartbeat-standin',
       workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
     })
-    const call = (name: string) =>
-      env.client.workflow.execute('callUnderHeartbeat', {
-        workflowId: `heartbeat-${randomUUID()}`,
-        taskQueue: 'heartbeat-standin',
-        args: [name, '2 seconds'],
-      })
     try {
       await agent.running()
-      await caller.runUntil(async () => {
-        await expect(call('slow')).resolves.toBe('done')
-        await expect(call(SESSION_TURN_ACTIVITY)).rejects.toThrow(WorkflowFailedError)
-      })
+      const result = await caller.runUntil(
+        env.client.workflow.execute('callBeating', {
+          workflowId: `beating-${randomUUID()}`,
+          taskQueue: 'heartbeat-standin',
+          args: [slow, 1_000],
+        }),
+      )
+      expect(result).toBe('done')
     } finally {
       await agent.stop()
     }

@@ -44,7 +44,10 @@ export const farmTools: Tool[] = [
       "What each active printer is doing now, whoever started it (#977): its activity (printing, paused, idle, " +
       'finished, failed, offline or unknown), the job name, progress, layer and minutes left while it works, its ' +
       "HMS errors, whether it waits for the plate to be cleared, and Bambuddy's archive of the job. A printer " +
-      'whose status cannot be read is listed with an error rather than dropped.',
+      'whose status cannot be read is listed with an error rather than dropped. Each printer has `printer_id`, ' +
+      'the Bambuddy printer id every print tool takes (as get_print_targets lists them), and `id`, its registry ' +
+      'id, which no tool takes yet. `printer_id` is null for a printer reached only over the LAN, which the print ' +
+      'tools cannot address yet.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,

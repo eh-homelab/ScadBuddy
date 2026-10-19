@@ -175,6 +175,16 @@ class PrintRunEvent(BaseEvent):
     run_id: str
 
 
+class PrinterEvent(BaseEvent):
+    """A registry printer changed (#3823): ``printer.changed`` for a write to its row
+    (`api/printers.py`), ``printer.report`` when its LAN report changed in a way a card
+    shows (`printers/watch.py`). Re-read ``GET /printers/{printer_id}`` or
+    ``/print/printers/now``. Published on ``printers`` and ``printer:<printer id>``."""
+
+    kind: Literal["printer.report", "printer.changed"]
+    printer_id: str
+
+
 class OperationEvent(BaseEvent):
     """An operation (#1053, spec 2026-10-01 §4.2) was accepted or ended: re-read
     ``GET /operations/{operation_id}``."""
@@ -326,6 +336,7 @@ Event = Annotated[
     | OutputEvent
     | PrintEvent
     | PrintRunEvent
+    | PrinterEvent
     | OperationEvent
     | FlowRunEvent
     | ActivityEvent

@@ -99,6 +99,8 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
@@ -153,6 +155,7 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
+    PRINTER_WATCHES_SWEEP,
     REAP_SWEEP,
     SWEEPS,
     ensure_schedules,
@@ -168,6 +171,7 @@ from scadbuddy.workflows.previews import (
     ensure_preview_schedule,
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.printer_watch import ensure_watches
 from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
@@ -598,6 +602,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_library() -> None:
         await _heartbeating(_sweep_print_library_logged(state))
 
+    @activity.defn(name=PRINTER_WATCHES_SWEEP)
+    async def ensure_printer_watches() -> None:
+        await _heartbeating(_ensure_printer_watches_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -613,7 +621,23 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_activity,
         sweep_print_attachments,
         sweep_print_library,
+        ensure_printer_watches,
     ]
+
+
+async def _ensure_printer_watches_logged(state: AppState) -> None:
+    """#3823: a watch for every LAN-linked printer, on the print queue."""
+    try:
+        started = await ensure_watches(
+            state.components.get(PRINTERS).store,
+            state.print_runs.client,
+            state.print_runs.task_queue,
+        )
+    except Exception:
+        logger.exception("could not start the printer watches")
+        raise
+    if started:
+        logger.debug("printer watches running", extra={"count": len(started)})
 
 
 async def _sweep_print_library_logged(state: AppState) -> None:
@@ -1040,6 +1064,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         library=await state.components.get(PRINT_LIBRARY).serving_native(),
     )
     ops = state.components.get(OPERATIONS)
+    registry = state.components.get(PRINTERS)
+    watches = WatchActivities(registry.store, registry.reports, state.events)
     activities = [
         *PrintActivities(deps).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
@@ -1056,6 +1082,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
                 FollowActivities(
                     state.print_follower, running=state.metrics.print_follows_running
                 ).follow_print,
+                printer_watch=watches.printer_watch,
             ),
         ]
         if not await _serve_until(workers, stop):
@@ -1135,8 +1162,11 @@ async def _make_library_current(
     then takes every new task of the queue, and an old one only finishes the activity
     attempts it already holds. It gives up once a newer build is current (#2538). Then
     it waits, up to `LIBRARY_ROUTED_WAIT`, for the queue itself to route to this build
-    (`routes_to`), and sets ``routed`` whatever came of it. An error other than
-    Temporal's is logged, not raised: the worker keeps serving."""
+    (`routes_to`), and sets ``routed`` whatever came of it. The wait narrows the window
+    in which a sweep only this build has reaches an old replica; it does not close it,
+    as a non-root partition of the queue can lag its root (#4255). Such a sweep fails
+    and runs again at its next tick. An error other than Temporal's is logged, not
+    raised: the worker keeps serving."""
     set_current, read_current = deployment_writes(client, build_id, LIBRARY_DEPLOYMENT_NAME)
     loop = asyncio.get_running_loop()
     try:

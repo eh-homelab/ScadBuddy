@@ -17,15 +17,15 @@ const UNLISTED = 'Bambuddy did not list this printer in the last read.'
  * clear the plate" card must not vanish for a poll because one Bambuddy read was slow.
  */
 export function mergeCards(previous: NowCard[] | null, read: PrinterNow[], now: number): NowCard[] {
-  const before = new Map((previous ?? []).map((card) => [card.printer.printer_id, card]))
+  const before = new Map((previous ?? []).map((card) => [card.printer.id, card]))
   const cards = read.map((printer): NowCard => {
-    const last = before.get(printer.printer_id)
+    const last = before.get(printer.id)
     if (printer.error && last && !last.printer.error) return { ...last, stale: printer.error }
     return { printer, seenAt: now, stale: null }
   })
-  const listed = new Set(read.map((printer) => printer.printer_id))
+  const listed = new Set(read.map((printer) => printer.id))
   for (const card of previous ?? []) {
-    if (!listed.has(card.printer.printer_id)) cards.push({ ...card, stale: card.stale ?? UNLISTED })
+    if (!listed.has(card.printer.id)) cards.push({ ...card, stale: card.stale ?? UNLISTED })
   }
   return cards
 }

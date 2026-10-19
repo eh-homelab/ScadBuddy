@@ -77,6 +77,8 @@ export type AgentWorkerOptions = {
   activityHeartbeatMs?: number
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
+  /** How often each activity heartbeats (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
+  activityHeartbeatMs?: number
   shutdownGraceMs?: number
   /** When the SDK gives up on running activities and the worker stops regardless. */
   shutdownForceMs?: number
