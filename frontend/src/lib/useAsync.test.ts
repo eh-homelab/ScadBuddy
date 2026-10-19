@@ -107,8 +107,9 @@ it('starts a signalled read anyway once the read in flight has stalled', async (
 })
 
 // #4318 review — unmounted while a signal waits on a read that never answers: nothing
-// is left pending, not the stall timer either.
-it('leaves no timer behind when unmounted while a signal waits on a read', async () => {
+// is left pending, not the stall timer, and not the wait itself (#4327 review): it is
+// settled, so the read that never answers holds nothing.
+it('leaves no timer or wait behind when unmounted while a signal waits on a read', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: false })
   try {
     const { load, resolvers } = deferred<number>()
@@ -117,10 +118,17 @@ it('leaves no timer behind when unmounted while a signal waits on a read', async
     await act(async () => signals[0]?.('resync'))
     // Past the spacing, so the next signal's wait is on the read in flight: its stall timer.
     await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_MIN_MS))
+    const race = vi.spyOn(Promise, 'race')
     await act(async () => signals[0]?.('resync'))
+    const wait = race.mock.results.at(-1)?.value as Promise<unknown>
+    race.mockRestore()
+    let settled = false
+    void wait.then(() => (settled = true))
     expect(vi.getTimerCount()).toBeGreaterThan(0)
     unmount()
     expect(vi.getTimerCount()).toBe(0)
+    await act(async () => {})
+    expect(settled).toBe(true)
     await act(() => vi.advanceTimersByTimeAsync(SIGNAL_READ_STALL_MS * 2))
     expect(resolvers).toHaveLength(2)
   } finally {
