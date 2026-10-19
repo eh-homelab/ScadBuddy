@@ -198,10 +198,15 @@ async def _workflow_tasks_reach(client: Client, queue: str, build_id: str) -> No
                     # A task that only times out is retried, and may still complete on a
                     # loaded runner: that is left to the outer timeout, not failed here.
                     failed = event.workflow_task_failed_event_attributes
+                    # A cause newer than these protos is named by its number.
+                    cause = (
+                        WorkflowTaskFailedCause.Name(failed.cause)
+                        if failed.cause in WorkflowTaskFailedCause.values()
+                        else failed.cause
+                    )
                     assert event.event_type != EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED, (
                         "a probe's workflow task failed:"
-                        f" {failed.failure.application_failure_info.type!r},"
-                        f" cause {WorkflowTaskFailedCause.Name(failed.cause)}"
+                        f" {failed.failure.application_failure_info.type!r}, cause {cause}"
                     )
                     if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
                         completed = event.workflow_task_completed_event_attributes
