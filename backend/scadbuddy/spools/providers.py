@@ -16,6 +16,7 @@ from typing import Protocol
 
 import scadbuddy
 from scadbuddy.core.components import Components, Core, feature_exports
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import SeenTray, SpoolSnapshot
 
 PROVIDER_MODULE = "spool_providers"
@@ -37,6 +38,12 @@ class SpoolProvider(Protocol):
 
     async def records(self) -> list[SpoolSnapshot]:
         """The whole inventory; read only by the refresh."""
+        ...
+
+    def printer_key(self, row: PrinterRow) -> str | None:
+        """The registry printer ``row`` as the provider names it in a record's
+        `SpoolLocation.printer` (``bambuddy:<id>``), or ``None`` when the provider does
+        not know it. No I/O: the print dialog calls it."""
         ...
 
 

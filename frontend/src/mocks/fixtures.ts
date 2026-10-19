@@ -1386,6 +1386,7 @@ export function mockParseError(source: string): { line: number } | null {
  */
 export const filamentOptions: FilamentOptions = {
   library_file_id: 8812,
+  source: 'inventory',
   printer_id: 1,
   printer_name: '3DP-31B-598',
   slots: [

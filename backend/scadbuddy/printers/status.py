@@ -67,20 +67,74 @@ def _trays(value: Any) -> list[AmsTray]:
     return [tray for entry in _list(value) if (tray := _valid(AmsTray, entry)) is not None]
 
 
+#: The A2L AMS-Lite reports unit 16 and takes the bit base of unit 6 (Bambuddy
+#: ``normalize_am_unit_id``, ``bambu_mqtt.py:115-127`` at ``0d427510``).
+_A2L_PHYSICAL, _A2L_BITS = 16, 6
+
+
+def _presence_bits(block: dict[str, Any]) -> int | None:
+    """``ams.tray_exist_bits``, the firmware's "which slots hold a spool" mask (hex), or
+    ``None`` when the report carries none, or carries the printer-off pattern: all zeros
+    with ``power_on_flag`` false (Bambuddy ``apply_tray_exist_bits``, #765)."""
+    raw = block.get("tray_exist_bits")
+    try:
+        bits = raw if isinstance(raw, int) else int(str(raw), 16) if raw else None
+    except ValueError:
+        return None
+    if bits is None or (bits == 0 and block.get("power_on_flag", True) is False):
+        return None
+    return bits
+
+
+def _presence_bit(ams_id: int, tray_id: int) -> int | None:
+    """Where a tray's presence is in ``tray_exist_bits``: ``ams_id * 4 + tray`` for an
+    AMS (0-15, the A2L folded to 6), ``16 + (ams_id - 128)`` for an AMS-HT (128-135);
+    ``None`` for any other unit, whose layout is unknown (Bambuddy
+    ``apply_tray_exist_bits``, ``bambu_mqtt.py:216-330`` at ``0d427510``, which checked the
+    HT's against OrcaSlicer ``DevFilaSystem.cpp`` and a live H2D capture). Not yet
+    measured on our H2C: the LAN fixture is synthetic (plan 2026-10-16 Task 7)."""
+    unit = _A2L_BITS if ams_id == _A2L_PHYSICAL else ams_id
+    if 128 <= unit <= 135:
+        return 16 + (unit - 128)
+    if 0 <= unit <= 15:
+        return unit * 4 + tray_id
+    return None
+
+
 def _ams(report: dict[str, Any]) -> list[AmsUnit]:
     block = report.get("ams")
     units = block.get("ams") if isinstance(block, dict) else None
+    bits = _presence_bits(block) if isinstance(block, dict) else None
     found: list[AmsUnit] = []
     for entry in _list(units):
         if not isinstance(entry, dict):
             continue
         unit = _valid(AmsUnit, {**entry, "tray": _trays(entry.get("tray"))})
-        if unit is not None:
-            found.append(unit)
+        if unit is None:
+            continue
+        if bits is not None:
+            # Bambuddy annotates the same ``exists`` (``annotate_exists=True``), which
+            # `trays._filled` reads as a veto.
+            for index, tray in enumerate(unit.tray):
+                bit = _presence_bit(unit.id, tray.id)
+                if bit is not None:
+                    unit.tray[index] = tray.model_copy(update={"exists": bool(bits >> bit & 1)})
+        found.append(unit)
     return found
 
 
 def _vt_tray(report: dict[str, Any]) -> list[AmsTray]:
+    """The external holders. An H2-series printer lists both in ``vir_slot`` and sends
+    ``vt_tray`` as the one active spool, so ``vir_slot`` wins (Bambuddy
+    ``bambu_mqtt.py:2323-2349`` at ``0d427510``; ha-bambulab ``pybambu/models.py:3696`` at
+    ``0e027ff1``). A single ``vir_slot`` holder that says 255 is a single-nozzle
+    printer's one holder, 254, as Bambuddy reads it."""
+    slots = report.get("vir_slot")
+    if isinstance(slots, list) and slots:
+        trays = _trays(slots)
+        if len(trays) == 1 and trays[0].id == 255:
+            trays = [trays[0].model_copy(update={"id": 254})]
+        return trays
     value = report.get("vt_tray")
     return _trays([value] if isinstance(value, dict) else value)
 

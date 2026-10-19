@@ -99,6 +99,7 @@ export function h2cFilaments(printerId: number | null): FilamentOptions {
     : inlandBlack
   return {
     library_file_id: H2C_FILE,
+    source: 'inventory',
     printer_id: printerId,
     printer_name: '3DP-31B-598',
     track_switch: true,

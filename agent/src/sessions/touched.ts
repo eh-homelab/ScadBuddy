@@ -512,6 +512,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #2686: a library folder is no recorded resource kind.
   'create_library_folder',
   'update_library_folder',
+  // #3818: a tray's spool link is no recorded resource kind either (ScadBuddy's
+  // tray_spool_links; the spool and its providers' records are unchanged).
+  'link_tray_spool',
+  'unlink_tray_spool',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

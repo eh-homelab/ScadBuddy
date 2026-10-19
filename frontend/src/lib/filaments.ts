@@ -20,6 +20,16 @@ import type {
  */
 
 /**
+ * Whether the choices are the printer's loaded trays (a native run, #3818) rather than
+ * Bambuddy's inventory. Only an explicit `'trays'` counts: an older backend sends no
+ * `source` at all during a rolling deploy, and that is the inventory (#4336 review M3).
+ * Every reader of `source` goes through this, never `source !== 'inventory'`.
+ */
+export function fromTrays(options: Pick<FilamentOptions, 'source'> | { source?: string }): boolean {
+  return options.source === 'trays'
+}
+
+/**
  * `"Bambu Lab PLA Silk — Blue"`.
  *
  * Brand, subtype and colour name are each nullable on the wire — a spool added by hand

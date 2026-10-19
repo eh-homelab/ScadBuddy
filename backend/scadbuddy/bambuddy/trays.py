@@ -11,11 +11,18 @@ Until then, the tray itself is a choice: a :class:`~scadbuddy.bambuddy.filaments
 with a negative :func:`tray_spool_id`, of the tray's material and colour, with no
 weight tracked. Bambuddy's scheduler maps a queue item by type and colour, so the
 print draws from that tray.
+
+On a native run (#3818 tier A, plan 2026-10-18 D1) there is no inventory to pick from:
+every filled tray is a choice of its own (:func:`loaded_trays`), with the spool overlay's
+provider records of the spool in it, and :func:`seen_trays` is what that overlay reads.
 """
 
 from __future__ import annotations
 
-from scadbuddy.bambuddy.extruders import extruder_of, side_of
+from collections.abc import Mapping
+from typing import Any
+
+from scadbuddy.bambuddy.extruders import extruder_of, side_of, two_nozzles
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     LoadedAt,
@@ -26,10 +33,26 @@ from scadbuddy.bambuddy.filaments import (
     normalise_colour,
 )
 from scadbuddy.bambuddy.models import AmsTray, PrinterStatus
+from scadbuddy.spools.models import (
+    Overlay,
+    SeenTray,
+    SpoolSnapshot,
+    clean_tag_uid,
+    clean_tray_uuid,
+)
 
-#: A tray's state when it holds filament (Bambu firmware: 11 loaded, 10 present but
-#: not fed, 9 empty), as Bambuddy's own ``assign_spool`` reads it.
-FILLED_STATES = frozenset({10, 11})
+#: A tray's ``state`` is a bitfield, not an enum (ha-bambulab ``pybambu/const.py:321-328``
+#: at ``0e027ff1``, ``AMSTrayStateFlags``): SPOOL 0x01, METADATA 0x02, MOTION 0x04,
+#: STEADY 0x08, RFID 0x10; states up to ``AMS_TRAY_STATE_LEGACY_MAX`` (3) are an older
+#: firmware's. Read as ha-bambulab's ``utils.py:487-493`` ``ams_tray_spool_loaded``
+#: reads it (:func:`spool_loaded`). The enum this replaced (``{10, 11}``, after Bambuddy's
+#: ``assign_spool`` comment "11=loaded, 9=empty, 10=spool present but filament not in
+#: feeder", ``backend/app/api/routes/inventory.py:2134`` at maziggy/bambuddy
+#: ``0d427510``) read the recorded RFID tray at 27 (0x1B) as empty, and an AMS-HT's
+#: loaded tray, which reports 9 (Bambuddy's own #2594, the same file, ``:2245-2248``).
+TRAY_SPOOL = 0x01
+TRAY_STEADY = 0x08
+TRAY_STATE_LEGACY_MAX = 3
 #: The CIEDE2000 distance under which a spool's colour is "close" to the tray's: wider
 #: than the auto-match's, since a colour someone set on the printer by hand is rough.
 CLOSE_COLOUR = 20.0
@@ -93,12 +116,30 @@ def tray_label(ams_id: int, tray_id: int) -> str:
     return f"{unit_label(ams_id)} slot {tray_id + 1}"
 
 
+def spool_loaded(state: int) -> bool:
+    """Whether ``state`` says a spool is in the slot and the tray is not loading or
+    scanning: ha-bambulab's ``ams_tray_spool_loaded``, as cited at :data:`TRAY_SPOOL`."""
+    if not state & TRAY_SPOOL:
+        return False
+    if state <= TRAY_STATE_LEGACY_MAX:
+        return state == TRAY_STATE_LEGACY_MAX
+    return bool(state & TRAY_STEADY)
+
+
 def _filled(tray: AmsTray) -> bool:
+    """A tray with a material whose spool is loaded. A presence bit that says no spool
+    (``exists`` false: the firmware's ``tray_exist_bits``, "authoritative where it
+    exists", Bambuddy ``services/ams_slot_presence.py`` at ``0d427510``) vetoes before the
+    state is read: an AMS-HT echoes a stale ``tray_type`` after its spool is pulled
+    (Bambuddy #2670). A ``True`` bit does not overrule a state without SPOOL (10), as
+    Bambuddy lets it overrule only its own stamped 9 (``inventory.py:2270-2283``)."""
     if not (tray.tray_type or "").strip():
         return False
+    if tray.exists is False:
+        return False
     if tray.state is not None:
-        return tray.state in FILLED_STATES
-    return tray.exists is not False
+        return spool_loaded(tray.state)
+    return True
 
 
 def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
@@ -212,3 +253,92 @@ def tray_material_colour(
         if (ams_id, tray.id) == where and (tray.tray_type or "").strip():
             return (tray.tray_type or "").strip(), normalise_colour(tray.tray_color)
     return None
+
+
+def _external_label(side: str | None, status: PrinterStatus) -> str:
+    """The external holder as a person reads it: "External", or "External L"/"R" by the
+    side it feeds on a printer with two nozzles (254 the left, 255 the right,
+    `extruders.extruder_of`), so the label never disagrees with ``side``."""
+    return f"External {side}" if side is not None and two_nozzles(status) else "External"
+
+
+def _sorted_trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
+    """The filled trays in AMS order, the external holders last: units arrive unsorted."""
+    return sorted(
+        ((ams_id, tray) for ams_id, tray in _trays(status) if _filled(tray)),
+        key=lambda found: (found[0] == EXTERNAL, found[0], found[1].id),
+    )
+
+
+def seen_trays(status: PrinterStatus) -> list[SeenTray]:
+    """Every filled tray as the spool overlay reads it (`SpoolStore.overlay`): its RFID
+    keys (cleaned there, so zeros are no key), material, colour and ``tray_info_idx``;
+    its fingerprint is `spools.models.tray_fingerprint`, never its state."""
+    return [
+        SeenTray(
+            ams_id=ams_id,
+            tray_id=tray.id,
+            tray_uuid=clean_tray_uuid(tray.tray_uuid),
+            tag_uid=clean_tag_uid(tray.tag_uid),
+            material=(tray.tray_type or "").strip(),
+            colour=normalise_colour(tray.tray_color),
+            tray_info_idx=(tray.tray_info_idx or "").strip() or None,
+        )
+        for ams_id, tray in _sorted_trays(status)
+    ]
+
+
+def loaded_trays(
+    status: PrinterStatus,
+    printer_id: int,
+    printer_name: str | None,
+    overlay: Overlay | None = None,
+) -> list[SpoolOption]:
+    """The native run's filament choices (#3818 tier A, plan 2026-10-18 D1): every filled
+    tray as itself, under its :func:`tray_spool_id`, with what the overlay knows of the
+    spool in it. ``slicer_filament`` is the tray's ``tray_info_idx`` (the BBL preset's
+    ``filament_id``, `resolver._by_filament_id`); the weight, brand and label weight are
+    the first provider record's that has them, in the overlay's (priority) order."""
+    by_tray = {(tray.ams_id, tray.tray_id): tray for tray in (overlay.trays if overlay else [])}
+    options: list[SpoolOption] = []
+    for ams_id, tray in _sorted_trays(status):
+        spool = by_tray.get((ams_id, tray.id))
+        records = spool.records if spool is not None else {}
+        extruder = extruder_of(ams_id, tray.id, status)
+        options.append(
+            SpoolOption(
+                spool_id=tray_spool_id(ams_id, tray.id),
+                material=(tray.tray_type or "").strip(),
+                colour=normalise_colour(tray.tray_color),
+                brand=_first(records, "brand"),
+                color_name=_first(records, "name"),
+                slicer_filament=(tray.tray_info_idx or "").strip() or None,
+                remaining_g=_first(records, "remaining_g"),
+                label_weight_g=_first(records, "label_weight_g"),
+                loaded=LoadedAt(
+                    printer_id=printer_id,
+                    printer_name=printer_name,
+                    ams_id=ams_id,
+                    tray_id=tray.id,
+                ),
+                extruder=extruder,
+                side=side_of(extruder),
+                tray_only=True,
+                label=(
+                    _external_label(side_of(extruder), status)
+                    if ams_id == EXTERNAL
+                    else tray_label(ams_id, tray.id)
+                ),
+                remain_percent=tray.remain if tray.remain >= 0 else None,
+                physical_spool_id=spool.physical_spool_id if spool is not None else None,
+                records=records,
+            )
+        )
+    return options
+
+
+def _first(records: Mapping[str, SpoolSnapshot], field: str) -> Any:
+    return next(
+        (value for record in records.values() if (value := getattr(record, field)) is not None),
+        None,
+    )
