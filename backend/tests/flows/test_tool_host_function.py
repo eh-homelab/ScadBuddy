@@ -344,6 +344,9 @@ class TurnTools:
         self.tier_fails: str | None = None
         #: The replicas later tiers name, one a tier, as a deploy replaces them.
         self.next_hosts: list[str] = []
+        #: Attempts that fail retryably first, as ones on a replica a rollout has not
+        #: reached yet time out on their heartbeat (#4262).
+        self.attempts_lost = 0
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -352,6 +355,9 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
+            if self.attempts_lost:
+                self.attempts_lost -= 1
+                raise ApplicationError("lost on an old replica", type="Lost")
             if self.next_hosts:
                 self.host = self.next_hosts.pop(0)
             if self.tier_fails is not None:
@@ -404,6 +410,22 @@ async def test_a_turn_tool_runs_on_the_queue_its_tier_names(
     assert served.calls == [
         ("turn:scadbuddy_http__http_request", f"tool-{step.call_id}", {"method": "GET"})
     ]
+
+
+async def test_a_turn_tools_tier_outlasts_an_agent_rollout(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    """Three tier attempts lost to replicas a rollout has not reached (#4262) used to be
+    every attempt the tier had, and the run's call failed."""
+    served, queue = turn_tools
+    served.attempts_lost = 3
+    run_id = await outward.run(
+        script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'GET done'"
+    assert served.tiered == ["scadbuddy_http__http_request"] * 4
 
 
 async def test_an_outward_turn_tool_waits_for_approval(

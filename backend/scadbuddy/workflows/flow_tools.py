@@ -168,6 +168,13 @@ _TOOL_TIMEOUT = timedelta(seconds=120)
 #: database, or a replica a deploy took) is retried after this, not after the call's
 #: whole start-to-close. Two such `turn_tool_tier` attempts held a run 4 min (#4199).
 _AGENT_HEARTBEAT = timedelta(seconds=30)
+#: `turn_tool_tier` (a read, safe to ask again) is bounded by time, not by three attempts:
+#: while the agent rolls, an attempt on a replica the roll has not reached gets no beats
+#: and times out at `_AGENT_HEARTBEAT` when it runs longer, and three of those used to
+#: fail the call (#4262). Its whole budget is the old worst case, three attempts at
+#: `_TOOL_TIMEOUT`, so a tier that never answers fails no later than before.
+_TIER_RETRY = RetryPolicy(maximum_attempts=8, non_retryable_error_types=_TOOL_REFUSALS)
+_TIER_BUDGET = 3 * _TOOL_TIMEOUT
 
 
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
@@ -760,8 +767,9 @@ async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
             task_queue=owner.tools_queue,
             result_type=dict,
             start_to_close_timeout=_TOOL_TIMEOUT,
+            schedule_to_close_timeout=_TIER_BUDGET,
             heartbeat_timeout=_AGENT_HEARTBEAT,
-            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
+            retry_policy=_TIER_RETRY,
         )
     except ActivityError as err:
         if isinstance(err.cause, ApplicationError) and err.cause.type == "ToolError":
