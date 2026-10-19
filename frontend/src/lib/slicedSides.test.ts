@@ -59,8 +59,34 @@ describe('asSliced (#2703)', () => {
     ])
   })
 
+  it("leaves off a slot this plate's slice does not use when no slot moved (#3751)", () => {
+    // A multi-plate file whose printed plate keeps every planned side but uses slots 1 and 3.
+    const sliced = asSliced(plan, {
+      job_id: 40,
+      slicer: 'bambuddy',
+      status: 'completed',
+      slots: [
+        { slot_id: 1, grams: 8.1, side: 'L' },
+        { slot_id: 3, grams: 1.2, side: 'L' },
+      ],
+    })
+    expect(sliced?.slots?.map((slot) => [slot.slot_id, slot.side])).toEqual([
+      [1, 'L'],
+      [3, 'L'],
+    ])
+  })
+
   it('is null when the slice agrees, says nothing, or there is none', () => {
-    const agrees = { job_id: 1, status: 'completed', slicer: 'bambuddy' as const, slots: [{ slot_id: 1, side: 'L' as const }] }
+    const agrees = {
+      job_id: 1,
+      status: 'completed',
+      slicer: 'bambuddy' as const,
+      slots: [
+        { slot_id: 1, side: 'L' as const },
+        { slot_id: 2, side: 'R' as const },
+        { slot_id: 3, side: 'L' as const },
+      ],
+    }
     expect(asSliced(plan, agrees)).toBeNull()
     expect(asSliced(plan, { job_id: 1, status: 'completed', slicer: 'bambuddy', slots: [{ slot_id: 1 }] })).toBeNull()
     expect(asSliced(plan, null)).toBeNull()

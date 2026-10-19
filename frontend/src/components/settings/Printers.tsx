@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { DiscoveredPrinter, PrinterRow, PrintPath } from '../../api/types'
-import type { RealtimeSignal } from '../../lib/realtime'
+import { PRINTER_TOPICS as TOPICS, registryNews } from '../../lib/printerRegistry'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,15 +20,6 @@ import { Spinner } from '../ui/spinner'
  * path says how a print reaches it. Every change applies at once, and the list follows
  * the `printers` topic, so another tab's change shows here.
  */
-
-/**
- * The `printers` topic carries every registry write (`printer.changed`) and, while a LAN
- * printer is watched, its reports (`printer.report`, about once a second while it prints;
- * `printers/watch.py`). Only a write changes what this panel shows, so only that, or a
- * resync, reads again: a report must not re-read the registry and Bambuddy each second.
- */
-const TOPICS = ['printers'] as const
-const registryNews = (signal: RealtimeSignal) => signal === 'resync' || signal.kind === 'printer.changed'
 
 const PATHS: { value: PrintPath; label: string }[] = [
   { value: 'auto', label: 'Automatic' },

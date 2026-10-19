@@ -35,6 +35,7 @@ import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
+import { PRINTER_TOPICS, registryNews } from '../lib/printerRegistry'
 import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, singlePlate, withPlate } from '../lib/plateChoice'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
@@ -233,6 +234,14 @@ interface Props {
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
 const NO_ROWS: PrinterRow[] = []
+/** A closed dialog follows no topic. */
+const NO_TOPICS: readonly string[] = []
+
+/** #3222 — the sequence a template's `print_settings` sets, which no override prints with. */
+function templateSequence(settings: Record<string, string> | undefined): PrintSequence | null {
+  const value = settings?.['print_sequence']
+  return value === 'by layer' || value === 'by object' ? value : null
+}
 
 export function PrintPicker({
   open,
@@ -319,10 +328,14 @@ export function PrintPicker({
    * the backend reads `printer` from Task 8, and ignores it before). A row no Bambuddy
    * printer backs, and the LAN reaches, is listed but not choosable until the run can print over the LAN
    * (Tasks 8 and 9). Unreadable, the dialog works as before, on Bambuddy ids alone.
+   * Followed while open, as Settings → Printers follows it, so a link made in another tab
+   * is the `printer` sent (#4376).
    */
   const registry = useAsync(
     async () => (open ? await api.listPrinters().catch(() => [] as PrinterRow[]) : ([] as PrinterRow[])),
     [open],
+    open ? PRINTER_TOPICS : NO_TOPICS,
+    registryNews,
   )
   const registryRows = registry.data ?? NO_ROWS
   const registryPrinter = registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
@@ -1629,6 +1642,7 @@ export function PrintPicker({
                           <PrintSequenceStep
                             value={printSequence}
                             onChange={setPrintSequence}
+                            inherited={given?.kind === 'output' ? templateSequence(printSettings) : null}
                             objects={check.current ? (check.verdict?.objects ?? null) : null}
                           />
 

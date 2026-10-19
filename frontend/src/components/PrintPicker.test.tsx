@@ -12,6 +12,7 @@ import { printersState } from '../mocks/features/printers'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { useAnalysis } from '../lib/useAnalysis'
@@ -1627,6 +1628,30 @@ describe('PrintPicker · Printer', () => {
     expect(body).not.toHaveProperty('printer')
   })
 
+  it('names a registry printer linked elsewhere while the dialog is open (#4376)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const registry = watch('GET', '/printers', '/api/v1/printers')
+    const { user } = renderPicker()
+    await loaded()
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114'))
+    await waitFor(() => expect(registry.answered).toBeGreaterThan(0))
+
+    // Another tab links Garage to Bambuddy's printer 2: the dialog reads the registry again.
+    const garage = printersState()[1]!
+    garage.bambuddy_printer_id = 2
+    const before = registry.answered
+    // Sent until it is read: the subscription may not be open yet.
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', `printer:${garage.id}`], { printer_id: garage.id })
+      expect(registry.answered).toBeGreaterThan(before)
+    })
+
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ printer: garage.id, printer_id: 2 })
+  })
+
   it('lists a printer reached only over the LAN, not yet choosable (#3823)', async () => {
     printersState()[1]!.lan_host = '10.0.0.9'
     await api.createPrinter({ serial: '01P00A0000000BB', name: 'Attic', preferred_path: 'auto' })
@@ -2245,6 +2270,18 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]?.['prime_tower']).toEqual({ enabled: false })
+  })
+
+  it("counts a plate's objects when by object is the template's default (#3222)", async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], objects: 3 })),
+    )
+    renderPicker({ printSettings: { print_sequence: 'by object' } })
+    await loaded()
+    await showAdvanced()
+
+    expect(screen.getByLabelText('Print sequence')).toHaveTextContent('Default (template or process)')
+    expect(await screen.findByText(/This plate has 3 objects\./)).toBeInTheDocument()
   })
 
   it('says what Default means for a template that declares the tower, and strikes it when overridden', async () => {
