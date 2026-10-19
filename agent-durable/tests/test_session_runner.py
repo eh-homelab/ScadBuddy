@@ -975,6 +975,51 @@ async def test_segment_calls_name_each_subagents_agent_call_by_its_start() -> No
     assert parents == {"c1": "a2", "c2": "a1", "c3": "a3", "c4": None}
 
 
+async def test_a_claimed_subagents_late_call_names_no_other_agent_call() -> None:
+    """#4404 review: once its Agent call ended, a claimed subagent's call is not given
+    the one Agent call still open."""
+    calls = SegmentCalls([])
+    hooks = calls.hooks()
+    started: Any = hooks["PreToolUse"][0].hooks[0]
+    ended: Any = hooks["PostToolUse"][0].hooks[0]
+    sub_started: Any = hooks["SubagentStart"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started({"tool_name": "Agent", "tool_input": {}}, "a1", None)
+        await sub_started({"agent_id": "x", "agent_type": "general-purpose"}, None, None)
+        await ended({"tool_name": "Agent"}, "a1", None)
+        await started({"tool_name": "Agent", "tool_input": {"subagent_type": "other"}}, "a2", None)
+        await started({"tool_name": "Read", "tool_input": {}, "agent_id": "x"}, "c1", None)
+    finally:
+        _EMIT.reset(token)
+    assert [e.get("parent") for e in seen if e["id"] == "c1"] == [None]
+
+
+async def test_an_attempt_answering_an_error_ends_the_calls_it_opened() -> None:
+    """#4404 review: a segment that returns an error, not raises one, leaves no call running."""
+    calls = SegmentCalls([])
+    started: Any = calls.hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        await started({"tool_name": "Skill", "tool_input": {}}, "s1", None)
+        failed = SegmentOutput(session_id="s", is_error=True, error="it broke")
+        runner = ScadBuddyRunner(_no_database, KEK, cwd="/tmp", make_runner=_Answers(failed))
+        settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
+        inp = SegmentInput(session_id="s", prompt="hi", tools=[])
+        out = await runner._on_credentials(
+            "s", "wf", inp, 1, [_credential()], 1.0, {}, settings, calls
+        )
+    finally:
+        _EMIT.reset(token)
+    assert out.is_error
+    assert [(e["type"], e["id"], e.get("status")) for e in seen] == [
+        ("tool_call", "s1", None),
+        ("tool_result", "s1", "failed"),
+    ]
+
+
 async def test_segment_calls_close_what_a_failed_attempt_left_open() -> None:
     """#4184: an attempt that fails ends its open calls as failed, so none shows running."""
     calls = SegmentCalls([])

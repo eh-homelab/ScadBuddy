@@ -596,9 +596,10 @@ class SegmentCalls:
         )
 
     def _parent(self, agent_id: str) -> str | None:
-        owner = self._owners.get(agent_id)
-        if owner in self._agents:
-            return owner
+        if agent_id in self._owners:
+            # Claimed: its own Agent call, or none once that has ended, never another's.
+            owner = self._owners[agent_id]
+            return owner if owner in self._agents else None
         return next(iter(self._agents)) if len(self._agents) == 1 else None
 
     async def _started(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
@@ -873,6 +874,9 @@ class ScadBuddyRunner:
             token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
+                if out.is_error and calls is not None and publish is not None:
+                    # An attempt that answers with an error has ended too: so have its calls.
+                    calls.close_open(publish)
                 # The endpoint answered: the key works, whatever became of the segment.
                 await self._report(session, credential, "used")
                 if out.is_error and out.error and _BUDGET_REACHED.match(out.error):

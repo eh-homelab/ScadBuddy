@@ -280,7 +280,11 @@ const MATCH_SCRIPT = `(() => {
 
 const MATCH = new vm.Script(MATCH_SCRIPT)
 
-/** Matches in `context`, one per Grep call: a context per file could spend the budget on contexts alone (#3202). */
+/**
+ * Matches in `context`, one per Grep call: a context per file could spend the budget on
+ * contexts alone (#3202). A run that timed out leaves nothing behind in it: `out` is local
+ * to the script's function, and each file sets `text`, `re` and `whole` afresh.
+ */
 function matchesOf(context: vm.Context, text: string, re: RegExp, whole: boolean, deadline: number): { index: number; text: string }[] {
   const timeout = Math.max(1, deadline - Date.now())
   Object.assign(context, { text, re, whole })
