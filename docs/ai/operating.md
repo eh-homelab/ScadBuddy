@@ -65,7 +65,8 @@ covers the same ground more briefly.
   rolling update, or after rolling the agent back past #4200) any attempt may land on
   it. A `turn_tool_tier` whose three attempts all missed their beats is asked once more
   with no heartbeat timeout (#4262), so it cannot fail the run's tier check for that;
-  it only takes longer. A flow's tool calls have no such fallback: one slower than 30 s
+  it only takes longer. A tier whose attempts are all lost now reaches the script after
+  about 6.5 min (3 × 30 s of missed beats, then up to 3 × 120 s), not 90 s. A flow's tool calls have no such fallback: one slower than 30 s
   that lands on an old replica times out, a read up to three times and a write at once,
   and the script sees the error (`flow_session_check` retries without limit).
 

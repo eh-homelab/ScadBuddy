@@ -175,12 +175,15 @@ def _agent_heartbeat() -> timedelta:
     return timedelta(seconds=owner.agent_heartbeat_s)
 
 
-#: A `turn_tool_tier` whose every attempt missed its beats is asked once more with no
+#: A `turn_tool_tier` whose last attempt missed its beats is asked once more with no
 #: heartbeat timeout, as before #4199 (#4262). An agent replica from before #4200 never
 #: beats, and a tier call takes ~35 s there (it connects the turn's servers): during an
 #: agent rollout, or after a rollback past #4200, all three attempts could land on such
 #: replicas (`agent-tools` is unversioned, so any poller takes any attempt) and fail the
 #: run's tier check. Runs recorded before raised that heartbeat timeout to the script.
+#: The cost: a tier whose attempts are all lost (never delivered, or on replicas that
+#: died) now reaches the script after 3 x 30 s of missed beats plus up to 3 x 120 s of
+#: start-to-close, about 6.5 min, where #4199 alone gave up after the first 90 s.
 FLOW_BEATLESS_TIER_PATCH = "flow-beatless-tier-4262"
 
 
@@ -784,7 +787,8 @@ async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
                 )
                 return tiered
             except ActivityError as err:
-                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH).
+                # Read-only, so asking again is safe (FLOW_BEATLESS_TIER_PATCH). Only the
+                # last attempt's failure is known: earlier ones may have failed otherwise.
                 if (
                     heartbeat is not None
                     and isinstance(err.cause, ActivityTimeoutError)
