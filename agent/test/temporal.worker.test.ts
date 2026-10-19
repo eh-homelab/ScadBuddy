@@ -230,12 +230,14 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
           (error: unknown) => error,
         )
         expect(failed).toBeInstanceOf(WorkflowFailedError)
-        const activity = (failed as WorkflowFailedError).cause
+        const activity = failed instanceof WorkflowFailedError ? failed.cause : undefined
         expect(activity).toBeInstanceOf(ActivityFailure)
-        expect(activity?.cause).toBeInstanceOf(TimeoutFailure)
-        expect((activity?.cause as TimeoutFailure).timeoutType).toBe(TimeoutType.HEARTBEAT)
+        const timeout = activity?.cause
+        expect(timeout).toBeInstanceOf(TimeoutFailure)
+        expect(timeout instanceof TimeoutFailure ? timeout.timeoutType : undefined).toBe(TimeoutType.HEARTBEAT)
       })
     } finally {
+      // Before stop(): stop() waits for the control's sleep, which only this ends.
       release.abort()
       await agent.stop()
     }
