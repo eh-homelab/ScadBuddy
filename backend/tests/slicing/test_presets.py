@@ -12,7 +12,12 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import PresetRef
-from scadbuddy.slicing.presets import apply_overrides, build_presets, native_preset_key
+from scadbuddy.slicing.presets import (
+    apply_overrides,
+    build_presets,
+    native_preset_key,
+    needs_bambuddy,
+)
 from scadbuddy.slicing.profiles import Flat, ProfileError, Profiles, flatten
 from tests.conftest import SLICER_PROFILES_DIR
 from tests.slicing.conftest import PROFILES
@@ -401,3 +406,22 @@ def test_a_vendor_file_without_a_version_is_a_profile_error(tmp_path: Path) -> N
     (root / "BBL.json").write_text(json.dumps({"process_list": []}))
     with pytest.raises(ProfileError, match=r"BBL\.json.*version"):
         assert Profiles(root).profile_version
+
+
+async def test_only_a_preset_outside_the_tree_needs_bambuddy(
+    profiles: Profiles, plan: SlicePlan
+) -> None:
+    assert not await needs_bambuddy(plan, profiles)
+    local = plan.model_copy(update={"process_preset": PresetRef(source="local", id="4")})
+    assert await needs_bambuddy(local, profiles)
+    unknown = plan.model_copy(update={"filament_presets": [PresetRef(source="cloud", id="GF?")]})
+    assert await needs_bambuddy(unknown, profiles)
+    # Refused with or without Bambuddy: opening one would change nothing.
+    printer = plan.model_copy(update={"printer_preset": PresetRef(source="local", id="3")})
+    assert not await needs_bambuddy(printer, profiles)
+
+
+async def test_a_name_lookup_with_no_bambuddy_says_so(profiles: Profiles, plan: SlicePlan) -> None:
+    unknown = plan.model_copy(update={"filament_presets": [PresetRef(source="cloud", id="GF?")]})
+    with pytest.raises(ProfileError, match="needs Bambuddy, and none is configured"):
+        await build_presets(unknown, profiles, None)

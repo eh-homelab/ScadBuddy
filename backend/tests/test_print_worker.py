@@ -5,7 +5,9 @@ like the render worker, its workflows AUTO_UPGRADE."""
 from __future__ import annotations
 
 import asyncio
+import shutil
 import socket
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +24,7 @@ from scadbuddy import worker as worker_module
 from scadbuddy.bambuddy import output_reader
 from scadbuddy.core.settings import Settings
 from scadbuddy.operations.store import Operation
+from scadbuddy.slicing import catalogue as native_catalogue_module
 from scadbuddy.worker import (
     ApiUrlMissingError,
     build_print_deps,
@@ -38,10 +41,13 @@ from scadbuddy.workflows.operation_models import (
     PreludeStep,
 )
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.slicing.conftest import PROFILES
 from tests.support.temporal import temporal_client
 from tests.test_worker import _healthy
 
 NOW = datetime(2026, 10, 4, tzinfo=UTC)
+#: The task `warm_catalogue` starts.
+WARM = "native-catalogue-warm"
 
 
 def print_settings(pg_conninfo: str, tmp_path: Path, **fields: Any) -> Settings:
@@ -224,6 +230,42 @@ async def test_the_print_worker_never_drains(
     assert served["drain_timeout"] is None
     assert served["deployment_name"] == PRINT_DEPLOYMENT_NAME
     assert served["workers"] == ["bambuddy", "follow"]
+
+
+@pytest.mark.requires_postgres
+async def test_the_print_worker_serves_before_the_native_catalogue_is_built(
+    pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3818 tier A: the image's preset catalogue is built behind the start, so a held
+    build never holds the worker's serving back, and its stop does not wait on it."""
+    release = threading.Event()
+
+    def held(profiles: Any) -> Any:
+        release.wait(10)
+        raise RuntimeError("held")
+
+    monkeypatch.setattr(native_catalogue_module, "_build", held)
+    warming: list[bool] = []
+
+    async def serve(_client: Any, workers: Any, _stop: Any, **kwargs: Any) -> None:
+        warming.extend(
+            task.done()
+            for task in asyncio.all_tasks()
+            if task.get_name() == "native-catalogue-warm"
+        )
+
+    monkeypatch.setattr(worker_module, "_serve_versioned", serve)
+    monkeypatch.setattr(worker_module, "bambuddy_worker", lambda *_a, **_k: "bambuddy")
+    monkeypatch.setattr(worker_module, "follow_worker", lambda *_a, **_k: "follow")
+    root = tmp_path / "profiles"
+    shutil.copytree(PROFILES, root)
+    settings = print_settings(pg_conninfo, tmp_path, revision="b1", slicer_profiles_dir=root)
+    try:
+        async with asyncio.timeout(30):
+            await run_print_worker(settings, health_port=None, client=cast(Client, object()))
+    finally:
+        release.set()
+    assert warming == [False]
 
 
 async def _until_current(client: Client, build_id: str) -> None:

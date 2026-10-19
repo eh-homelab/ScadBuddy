@@ -470,6 +470,14 @@ function bambuddyUnanswered(problem: Problem): boolean {
 
 const seg = encodeURIComponent
 
+/** Who sliced a background slice: the `slicer` its start answered with. */
+export type Slicer = PreviewStarted['slicer']
+
+/** A Bambuddy read's URL is as it always was; only a native one names its slicer. */
+function slicerQuery(slicer: Slicer): string {
+  return slicer === 'native' ? '?slicer=native' : ''
+}
+
 /** #2329 — a workspace file's route, each path segment encoded (under `API_BASE`). */
 const sessionFilePath = (id: string, path: string) =>
   `/ai/sessions/${seg(id)}/files/${path.split('/').map(seg).join('/')}`
@@ -1726,21 +1734,25 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #2169 — how an output's background slice stands, and what it came to once finished. */
-  getPreviewSlice: (outputId: string, jobId: number) =>
-    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+  /**
+   * #2169 — how an output's background slice stands, and what it came to once finished.
+   * `slicer` is the one its start answered with: a native slice's id is its own
+   * slicer's, so it is read with `?slicer=native` (plan 2026-10-16 Task 14).
+   */
+  getPreviewSlice: (outputId: string, jobId: number, slicer: Slicer = 'bambuddy') =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}${slicerQuery(slicer)}`),
 
   /** #2169 — as `getPreviewSlice`, for a library file's. */
-  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
-    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
+  getLibraryPreviewSlice: (fileId: number, jobId: number, slicer: Slicer = 'bambuddy') =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}${slicerQuery(slicer)}`),
 
   /** #2072 — a finished background slice's toolpath, for the plate preview's slice views. */
-  previewToolpathUrl: (outputId: string, jobId: number) =>
-    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath`,
+  previewToolpathUrl: (outputId: string, jobId: number, slicer: Slicer = 'bambuddy') =>
+    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath${slicerQuery(slicer)}`,
 
   /** #2072 — as `previewToolpathUrl`, for a library file's. */
-  libraryPreviewToolpathUrl: (fileId: number, jobId: number) =>
-    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath`,
+  libraryPreviewToolpathUrl: (fileId: number, jobId: number, slicer: Slicer = 'bambuddy') =>
+    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath${slicerQuery(slicer)}`,
 
   /**
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only

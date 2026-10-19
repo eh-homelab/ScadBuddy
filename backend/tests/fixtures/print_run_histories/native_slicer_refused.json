@@ -1,0 +1,877 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-10-18T20:07:15.181879402Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "1050762",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "PrintRun"
+        },
+        "taskQueue": {
+          "name": "api-4862ef171c56-bambuddy",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzdWJqZWN0IjoiMDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIiLCJzbHVnIjoiZGVtbyIsImtleSI6Ijc4ODk1YjUzMjdjZDUwYTRjMDJkMDI2ZjQ1NWU5NGEyMDBjODZmYjBmNWE2MmNmMWM2NTE4NzA1NDU2NzIwOTgiLCJzb3VyY2UiOnsia2luZCI6Im91dHB1dCIsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIiwiZmlsZV9pZCI6bnVsbCwic3RlbSI6bnVsbCwicHJpbnRfc2V0dGluZ3MiOnt9LCJmaWxhbWVudHMiOm51bGx9LCJyZXF1ZXN0Ijp7InByaW50ZXJfaWQiOjEsImZpbGFtZW50X3BsYW4iOnsic2xvdHMiOlt7InNsb3RfaWQiOjEsInNwb29sX2lkIjo5fSx7InNsb3RfaWQiOjIsInNwb29sX2lkIjo1fV19LCJjaG9pY2VzIjp7Im5venpsZXMiOlt7InNpemUiOiIwLjIifV0sInRpZXIiOiJmaW5lIn0sImNvcGllcyI6MX0sInJlcGVhdF93aW5kb3dfcyI6NjAwLjAsInNlYXJjaF9hdHRyaWJ1dGVzIjpmYWxzZX0="
+            }
+          ]
+        },
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "01a150a0-25ed-7d60-9ef0-bb1a77d1f3b2",
+        "identity": "36393@newoldboy",
+        "firstExecutionRunId": "01a150a0-25ed-7d60-9ef0-bb1a77d1f3b2",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "header": {
+          "fields": {
+            "_tracer-data": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLTA4ZDgxOGM3MTA0NmVmYWYtMDMifQ=="
+            }
+          }
+        },
+        "workflowId": "print-78895b5327cd50a4c02d026f455e94a200c86fb0f5a62cf1c651870545672098",
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-10-18T20:07:15.182110549Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1050763",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "api-4862ef171c56-bambuddy",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-10-18T20:07:15.188023153Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1050767",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "36393@newoldboy",
+        "requestId": "c3b71d3f-c59b-4eee-90f5-15257f17c95d",
+        "historySizeBytes": "959",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-10-18T20:07:15.239872417Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1050771",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "36393@newoldboy",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        },
+        "sdkMetadata": {
+          "coreUsedFlags": [
+            1,
+            2,
+            3
+          ],
+          "sdkName": "temporal-python",
+          "sdkVersion": "1.34.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-10-18T20:07:15.240030368Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED",
+      "taskId": "1050772",
+      "workflowExecutionUpdateAcceptedEventAttributes": {
+        "protocolInstanceId": "00a8bb46-f89e-428f-bea8-2932539e0177",
+        "acceptedRequestMessageId": "00a8bb46-f89e-428f-bea8-2932539e0177/request",
+        "acceptedRequestSequencingEventId": "2",
+        "acceptedRequest": {
+          "meta": {
+            "updateId": "00a8bb46-f89e-428f-bea8-2932539e0177",
+            "identity": "36393@newoldboy"
+          },
+          "input": {
+            "header": {
+              "fields": {
+                "_tracer-data": {
+                  "metadata": {
+                    "encoding": "anNvbi9wbGFpbg=="
+                  },
+                  "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLTA4ZDgxOGM3MTA0NmVmYWYtMDMifQ=="
+                }
+              }
+            },
+            "name": "accepted"
+          }
+        }
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-10-18T20:07:15.240122219Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1050773",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1",
+        "activityType": {
+          "name": "print_check"
+        },
+        "taskQueue": {
+          "name": "api-4862ef171c56-bambuddy",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {
+          "fields": {
+            "_tracer-data": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLTRkN2I0YTc5NTVhMDVkMGYtMDMifQ=="
+            }
+          }
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpbnB1dCI6eyJzdWJqZWN0IjoiMDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIiLCJzbHVnIjoiZGVtbyIsImtleSI6Ijc4ODk1YjUzMjdjZDUwYTRjMDJkMDI2ZjQ1NWU5NGEyMDBjODZmYjBmNWE2MmNmMWM2NTE4NzA1NDU2NzIwOTgiLCJzb3VyY2UiOnsia2luZCI6Im91dHB1dCIsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIiwiZmlsZV9pZCI6bnVsbCwic3RlbSI6bnVsbCwicHJpbnRfc2V0dGluZ3MiOnt9LCJmaWxhbWVudHMiOm51bGx9LCJyZXF1ZXN0Ijp7InByaW50ZXJfaWQiOjEsImZpbGFtZW50X3BsYW4iOnsic2xvdHMiOlt7InNsb3RfaWQiOjEsInNwb29sX2lkIjo5fSx7InNsb3RfaWQiOjIsInNwb29sX2lkIjo1fV19LCJjaG9pY2VzIjp7Im5venpsZXMiOlt7InNpemUiOiIwLjIifV0sInRpZXIiOiJmaW5lIn0sImNvcGllcyI6MX0sInJlcGVhdF93aW5kb3dfcyI6NjAwLjAsInNlYXJjaF9hdHRyaWJ1dGVzIjpmYWxzZX0sInN0YXJ0ZWRfYXQiOiIyMDI2LTEwLTE4VDIwOjA3OjE1LjE4MTg3OVoifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "4",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true,
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-10-18T20:07:15.248324093Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1050779",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "6",
+        "identity": "36393@newoldboy",
+        "requestId": "14bff08f-5338-48d7-bf87-1cbb5a89029f",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-10-18T20:07:15.394991363Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1050780",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzb3VyY2UiOnsia2luZCI6Im91dHB1dCIsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIiwiZmlsZV9pZCI6bnVsbCwic3RlbSI6bnVsbCwicHJpbnRfc2V0dGluZ3MiOnt9LCJmaWxhbWVudHMiOm51bGx9LCJwcmVwYXJlZCI6eyJwbGF0ZV9pZHMiOlsxXSwicHJpbnRlcl9pZCI6MSwicHJpbnRlcl9zdGF0dXMiOnsiaWQiOjEsIm5hbWUiOiIzRFAtMzFCLTU5OCIsImNvbm5lY3RlZCI6dHJ1ZSwic3RhdGUiOiJGQUlMRUQiLCJhbXMiOlt7ImlkIjowLCJodW1pZGl0eSI6MzAsInRlbXAiOjQyLjAsImlzX2Ftc19odCI6ZmFsc2UsIm1vZHVsZV90eXBlIjoibjNmIiwidHJheSI6W3siaWQiOjAsInRyYXlfY29sb3IiOiJBNkE5QUFGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1EMDEiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDAiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MSwidHJheV9jb2xvciI6IjAwQjFCN0ZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIEJhc2ljIiwidHJheV9pZF9uYW1lIjoiQTAwLUIwNSIsInRyYXlfaW5mb19pZHgiOiJHRkEwMCIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjE5MCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfSx7ImlkIjoyLCJ0cmF5X2NvbG9yIjoiMDAwMDAwRkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgU2lsayIsInRyYXlfaWRfbmFtZSI6IkEwNS1UNSIsInRyYXlfaW5mb19pZHgiOiJHRkEwNSIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjIxMCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfSx7ImlkIjozLCJ0cmF5X2NvbG9yIjoiRkY5NDI1RkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgU2lsayIsInRyYXlfaWRfbmFtZSI6IkEwNS1UMSIsInRyYXlfaW5mb19pZHgiOiJHRkEwNSIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjIxMCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfV19LHsiaWQiOjEsImh1bWlkaXR5IjoyMSwidGVtcCI6NDQuNSwiaXNfYW1zX2h0IjpmYWxzZSwibW9kdWxlX3R5cGUiOiJuM2YiLCJ0cmF5IjpbeyJpZCI6MCwidHJheV9jb2xvciI6IkM0OENGM0ZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiIiwidHJheV9pZF9uYW1lIjoiIiwidHJheV9pbmZvX2lkeCI6Ik9GRFNyelo4IiwicmVtYWluIjotMSwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MSwidHJheV9jb2xvciI6IjAwNjI5QkZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtVDkiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MiwidHJheV9jb2xvciI6IjI3MjcyQ0ZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiIiwidHJheV9pZF9uYW1lIjoiIiwidHJheV9pbmZvX2lkeCI6IkdGTDk5IiwicmVtYWluIjotMSwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MywidHJheV9jb2xvciI6IjlENDMyQ0ZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIEJhc2ljIiwidHJheV9pZF9uYW1lIjoiQTAwLU4wIiwidHJheV9pbmZvX2lkeCI6IkdGQTAwIiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9XX0seyJpZCI6MTI4LCJodW1pZGl0eSI6MTUsInRlbXAiOjQ1LjQsImlzX2Ftc19odCI6dHJ1ZSwibW9kdWxlX3R5cGUiOiJuM3MiLCJ0cmF5IjpbeyJpZCI6MCwidHJheV9jb2xvciI6IjcyMDA2MkZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtVDciLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX1dfSx7ImlkIjoyLCJodW1pZGl0eSI6MTcsInRlbXAiOjQ1LjIsImlzX2Ftc19odCI6ZmFsc2UsIm1vZHVsZV90eXBlIjoibjNmIiwidHJheSI6W3siaWQiOjAsInRyYXlfY29sb3IiOiJFQzAwOENGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1QNiIsInRyYXlfaW5mb19pZHgiOiJHRkEwMCIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjE5MCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfSx7ImlkIjoxLCJ0cmF5X2NvbG9yIjoiQkVDRjAwRkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgQmFzaWMiLCJ0cmF5X2lkX25hbWUiOiJBMDAtRzMiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDAiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MiwidHJheV9jb2xvciI6IkVDOTg0Q0ZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtTTgiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MywidHJheV9jb2xvciI6IjZGNTAzNEZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIEJhc2ljIiwidHJheV9pZF9uYW1lIjoiQTAwLU4xIiwidHJheV9pbmZvX2lkeCI6IkdGQTAwIiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9XX1dLCJhbXNfZXhpc3RzIjp0cnVlLCJ2dF90cmF5IjpbeyJpZCI6MjU0LCJ0cmF5X2NvbG9yIjoiMDAwMDAwMDAiLCJ0cmF5X3R5cGUiOiIiLCJ0cmF5X3N1Yl9icmFuZHMiOiIiLCJ0cmF5X2lkX25hbWUiOiIiLCJ0cmF5X2luZm9faWR4IjoiIiwicmVtYWluIjowLCJub3p6bGVfdGVtcF9taW4iOjAsIm5venpsZV90ZW1wX21heCI6MCwic3RhdGUiOm51bGwsImV4aXN0cyI6bnVsbH0seyJpZCI6MjU1LCJ0cmF5X2NvbG9yIjoiMDAwMDAwMDAiLCJ0cmF5X3R5cGUiOiIiLCJ0cmF5X3N1Yl9icmFuZHMiOiIiLCJ0cmF5X2lkX25hbWUiOiIiLCJ0cmF5X2luZm9faWR4IjoiIiwicmVtYWluIjowLCJub3p6bGVfdGVtcF9taW4iOjAsIm5venpsZV90ZW1wX21heCI6MCwic3RhdGUiOm51bGwsImV4aXN0cyI6bnVsbH1dLCJub3p6bGVzIjpbeyJub3p6bGVfdHlwZSI6IkhTMDAiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjIifSx7Im5venpsZV90eXBlIjoiSEgwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCJ9XSwibm96emxlX3JhY2siOlt7Im5venpsZV90eXBlIjoiSFMwMCIsIm5venpsZV9kaWFtZXRlciI6IjAuMiIsImlkIjowLCJ3ZWFyIjoxMjgsInN0YXQiOjAsImZpbGFtZW50X3R5cGUiOiIiLCJmaWxhbWVudF9jb2xvciI6IjI3MjcyQ0ZGIiwiZmlsYW1lbnRfaWQiOiJHRkw5OSIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSEgwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoxLCJ3ZWFyIjowLCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDAwMDAwMCIsImZpbGFtZW50X2lkIjoiIiwic2VyaWFsX251bWJlciI6IiJ9LHsibm96emxlX3R5cGUiOiJIUzAxIiwibm96emxlX2RpYW1ldGVyIjoiMC40IiwiaWQiOjE3LCJ3ZWFyIjoxMjgsInN0YXQiOjAsImZpbGFtZW50X3R5cGUiOiIiLCJmaWxhbWVudF9jb2xvciI6IjAwNjI5QkZGIiwiZmlsYW1lbnRfaWQiOiJHRkEwNSIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSEgwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoxOCwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDAwMDAwMCIsImZpbGFtZW50X2lkIjoiIiwic2VyaWFsX251bWJlciI6IiJ9LHsibm96emxlX3R5cGUiOiJIUzAxIiwibm96emxlX2RpYW1ldGVyIjoiMC40IiwiaWQiOjE5LCJ3ZWFyIjoxMjgsInN0YXQiOjAsImZpbGFtZW50X3R5cGUiOiIiLCJmaWxhbWVudF9jb2xvciI6IkZGNkExM0ZGIiwiZmlsYW1lbnRfaWQiOiJHRkEwMCIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSEgwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoyMCwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDAwMDAwMCIsImZpbGFtZW50X2lkIjoiIiwic2VyaWFsX251bWJlciI6IiJ9LHsibm96emxlX3R5cGUiOiJIUzAxIiwibm96emxlX2RpYW1ldGVyIjoiMC40IiwiaWQiOjIxLCJ3ZWFyIjoxMjgsInN0YXQiOjAsImZpbGFtZW50X3R5cGUiOiIiLCJmaWxhbWVudF9jb2xvciI6IjAwMDAwMEZGIiwiZmlsYW1lbnRfaWQiOiJHRkEwMCIsInNlcmlhbF9udW1iZXIiOiIifV0sImFjdGl2ZV9leHRydWRlciI6MCwiYW1zX21hcHBpbmciOltdLCJhbXNfZXh0cnVkZXJfbWFwIjp7fSwiYW1zX3N3aXRjaF9pbmxldCI6eyIwIjoiQiIsIjEiOiJCIiwiMTI4IjoiQSIsIjIiOiJBIn0sImZpbGFfc3dpdGNoIjp7Imluc3RhbGxlZCI6dHJ1ZX0sImN1cnJlbnRfcGxhdGVfaWQiOm51bGwsInN1YnRhc2tfbmFtZSI6ImZhYnJpYy01Mng1Ml9rZXljaGFpbiIsImN1cnJlbnRfcHJpbnQiOiJmYWJyaWMtNTJ4NTJfa2V5Y2hhaW4iLCJwcm9ncmVzcyI6MC4wLCJyZW1haW5pbmdfdGltZSI6MCwibGF5ZXJfbnVtIjowLCJ0b3RhbF9sYXllcnMiOjI1LCJjdXJyZW50X2FyY2hpdmVfaWQiOm51bGwsImF3YWl0aW5nX3BsYXRlX2NsZWFyIjp0cnVlLCJjb3Zlcl91cmwiOm51bGwsImhtc19lcnJvcnMiOlt7ImNvZGUiOiIweDIwMDA2IiwiZnVsbF9jb2RlIjoiMDUwMDA2MDAwMDAyMDAwNiIsInNldmVyaXR5Ijo2LCJkZXNjcmlwdGlvbiI6bnVsbCwiYWN0aW9ucyI6W119XX0sIndhcm5pbmdzIjpbXSwicHJpbnRlcl9tb2RlbCI6IkgyQyIsInByb2plY3QiOnsicHJvamVjdF9pZCI6bnVsbH19fQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "6",
+        "startedEventId": "7",
+        "identity": "36393@newoldboy"
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-10-18T20:07:15.395023601Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1050781",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "36393@newoldboy-4a267f305e1a469fa9c6045d40b35ba7",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "api-4862ef171c56-bambuddy"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-10-18T20:07:15.402752671Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1050785",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "9",
+        "identity": "36393@newoldboy",
+        "requestId": "356d8318-1850-4156-8905-efb334a63de4",
+        "historySizeBytes": "8152",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-10-18T20:07:15.419134051Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1050789",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "9",
+        "startedEventId": "10",
+        "identity": "36393@newoldboy",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-10-18T20:07:15.419250330Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1050790",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "2",
+        "activityType": {
+          "name": "print_insert"
+        },
+        "taskQueue": {
+          "name": "api-4862ef171c56-bambuddy",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {
+          "fields": {
+            "_tracer-data": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLTkxNGZkOWJmN2NkYjBlN2ItMDMifQ=="
+            }
+          }
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpbnB1dCI6eyJzdWJqZWN0IjoiMDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIiLCJzbHVnIjoiZGVtbyIsImtleSI6Ijc4ODk1YjUzMjdjZDUwYTRjMDJkMDI2ZjQ1NWU5NGEyMDBjODZmYjBmNWE2MmNmMWM2NTE4NzA1NDU2NzIwOTgiLCJzb3VyY2UiOnsia2luZCI6Im91dHB1dCIsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIiwiZmlsZV9pZCI6bnVsbCwic3RlbSI6bnVsbCwicHJpbnRfc2V0dGluZ3MiOnt9LCJmaWxhbWVudHMiOm51bGx9LCJyZXF1ZXN0Ijp7InByaW50ZXJfaWQiOjEsImZpbGFtZW50X3BsYW4iOnsic2xvdHMiOlt7InNsb3RfaWQiOjEsInNwb29sX2lkIjo5fSx7InNsb3RfaWQiOjIsInNwb29sX2lkIjo1fV19LCJjaG9pY2VzIjp7Im5venpsZXMiOlt7InNpemUiOiIwLjIifV0sInRpZXIiOiJmaW5lIn0sImNvcGllcyI6MX0sInJlcGVhdF93aW5kb3dfcyI6NjAwLjAsInNlYXJjaF9hdHRyaWJ1dGVzIjpmYWxzZX0sImNoZWNrZWQiOnsic291cmNlIjp7ImtpbmQiOiJvdXRwdXQiLCJvdXRwdXRfaWQiOiIwMTg2ZTFlODQ3Njg0MDBmOGVkZjhiNmZkYTRhODgxYiIsImZpbGVfaWQiOm51bGwsInN0ZW0iOm51bGwsInByaW50X3NldHRpbmdzIjp7fSwiZmlsYW1lbnRzIjpudWxsfSwicHJlcGFyZWQiOnsicGxhdGVfaWRzIjpbMV0sInByaW50ZXJfaWQiOjEsInByaW50ZXJfc3RhdHVzIjp7ImlkIjoxLCJuYW1lIjoiM0RQLTMxQi01OTgiLCJjb25uZWN0ZWQiOnRydWUsInN0YXRlIjoiRkFJTEVEIiwiYW1zIjpbeyJpZCI6MCwiaHVtaWRpdHkiOjMwLCJ0ZW1wIjo0Mi4wLCJpc19hbXNfaHQiOmZhbHNlLCJtb2R1bGVfdHlwZSI6Im4zZiIsInRyYXkiOlt7ImlkIjowLCJ0cmF5X2NvbG9yIjoiQTZBOUFBRkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgQmFzaWMiLCJ0cmF5X2lkX25hbWUiOiJBMDAtRDAxIiwidHJheV9pbmZvX2lkeCI6IkdGQTAwIiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjEsInRyYXlfY29sb3IiOiIwMEIxQjdGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1CMDUiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDAiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MiwidHJheV9jb2xvciI6IjAwMDAwMEZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtVDUiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MywidHJheV9jb2xvciI6IkZGOTQyNUZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtVDEiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX1dfSx7ImlkIjoxLCJodW1pZGl0eSI6MjEsInRlbXAiOjQ0LjUsImlzX2Ftc19odCI6ZmFsc2UsIm1vZHVsZV90eXBlIjoibjNmIiwidHJheSI6W3siaWQiOjAsInRyYXlfY29sb3IiOiJDNDhDRjNGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IiIsInRyYXlfaWRfbmFtZSI6IiIsInRyYXlfaW5mb19pZHgiOiJPRkRTcnpaOCIsInJlbWFpbiI6LTEsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjEsInRyYXlfY29sb3IiOiIwMDYyOUJGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBTaWxrIiwidHJheV9pZF9uYW1lIjoiQTA1LVQ5IiwidHJheV9pbmZvX2lkeCI6IkdGQTA1IiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MjEwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjIsInRyYXlfY29sb3IiOiIyNzI3MkNGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IiIsInRyYXlfaWRfbmFtZSI6IiIsInRyYXlfaW5mb19pZHgiOiJHRkw5OSIsInJlbWFpbiI6LTEsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjMsInRyYXlfY29sb3IiOiI5RDQzMkNGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1OMCIsInRyYXlfaW5mb19pZHgiOiJHRkEwMCIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjE5MCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfV19LHsiaWQiOjEyOCwiaHVtaWRpdHkiOjE1LCJ0ZW1wIjo0NS40LCJpc19hbXNfaHQiOnRydWUsIm1vZHVsZV90eXBlIjoibjNzIiwidHJheSI6W3siaWQiOjAsInRyYXlfY29sb3IiOiI3MjAwNjJGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBTaWxrIiwidHJheV9pZF9uYW1lIjoiQTA1LVQ3IiwidHJheV9pbmZvX2lkeCI6IkdGQTA1IiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MjEwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9XX0seyJpZCI6MiwiaHVtaWRpdHkiOjE3LCJ0ZW1wIjo0NS4yLCJpc19hbXNfaHQiOmZhbHNlLCJtb2R1bGVfdHlwZSI6Im4zZiIsInRyYXkiOlt7ImlkIjowLCJ0cmF5X2NvbG9yIjoiRUMwMDhDRkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgQmFzaWMiLCJ0cmF5X2lkX25hbWUiOiJBMDAtUDYiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDAiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MSwidHJheV9jb2xvciI6IkJFQ0YwMEZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIEJhc2ljIiwidHJheV9pZF9uYW1lIjoiQTAwLUczIiwidHJheV9pbmZvX2lkeCI6IkdGQTAwIiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjIsInRyYXlfY29sb3IiOiJFQzk4NENGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBTaWxrIiwidHJheV9pZF9uYW1lIjoiQTA1LU04IiwidHJheV9pbmZvX2lkeCI6IkdGQTA1IiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MjEwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjMsInRyYXlfY29sb3IiOiI2RjUwMzRGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1OMSIsInRyYXlfaW5mb19pZHgiOiJHRkEwMCIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjE5MCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfV19XSwiYW1zX2V4aXN0cyI6dHJ1ZSwidnRfdHJheSI6W3siaWQiOjI1NCwidHJheV9jb2xvciI6IjAwMDAwMDAwIiwidHJheV90eXBlIjoiIiwidHJheV9zdWJfYnJhbmRzIjoiIiwidHJheV9pZF9uYW1lIjoiIiwidHJheV9pbmZvX2lkeCI6IiIsInJlbWFpbiI6MCwibm96emxlX3RlbXBfbWluIjowLCJub3p6bGVfdGVtcF9tYXgiOjAsInN0YXRlIjpudWxsLCJleGlzdHMiOm51bGx9LHsiaWQiOjI1NSwidHJheV9jb2xvciI6IjAwMDAwMDAwIiwidHJheV90eXBlIjoiIiwidHJheV9zdWJfYnJhbmRzIjoiIiwidHJheV9pZF9uYW1lIjoiIiwidHJheV9pbmZvX2lkeCI6IiIsInJlbWFpbiI6MCwibm96emxlX3RlbXBfbWluIjowLCJub3p6bGVfdGVtcF9tYXgiOjAsInN0YXRlIjpudWxsLCJleGlzdHMiOm51bGx9XSwibm96emxlcyI6W3sibm96emxlX3R5cGUiOiJIUzAwIiwibm96emxlX2RpYW1ldGVyIjoiMC4yIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQifV0sIm5venpsZV9yYWNrIjpbeyJub3p6bGVfdHlwZSI6IkhTMDAiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjIiLCJpZCI6MCwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIyNzI3MkNGRiIsImZpbGFtZW50X2lkIjoiR0ZMOTkiLCJzZXJpYWxfbnVtYmVyIjoiIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQiLCJpZCI6MSwid2VhciI6MCwic3RhdCI6MCwiZmlsYW1lbnRfdHlwZSI6IiIsImZpbGFtZW50X2NvbG9yIjoiMDAwMDAwMDAiLCJmaWxhbWVudF9pZCI6IiIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSFMwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoxNywid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDYyOUJGRiIsImZpbGFtZW50X2lkIjoiR0ZBMDUiLCJzZXJpYWxfbnVtYmVyIjoiIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQiLCJpZCI6MTgsIndlYXIiOjEyOCwic3RhdCI6MCwiZmlsYW1lbnRfdHlwZSI6IiIsImZpbGFtZW50X2NvbG9yIjoiMDAwMDAwMDAiLCJmaWxhbWVudF9pZCI6IiIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSFMwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoxOSwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiJGRjZBMTNGRiIsImZpbGFtZW50X2lkIjoiR0ZBMDAiLCJzZXJpYWxfbnVtYmVyIjoiIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQiLCJpZCI6MjAsIndlYXIiOjEyOCwic3RhdCI6MCwiZmlsYW1lbnRfdHlwZSI6IiIsImZpbGFtZW50X2NvbG9yIjoiMDAwMDAwMDAiLCJmaWxhbWVudF9pZCI6IiIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSFMwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoyMSwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDAwMDBGRiIsImZpbGFtZW50X2lkIjoiR0ZBMDAiLCJzZXJpYWxfbnVtYmVyIjoiIn1dLCJhY3RpdmVfZXh0cnVkZXIiOjAsImFtc19tYXBwaW5nIjpbXSwiYW1zX2V4dHJ1ZGVyX21hcCI6e30sImFtc19zd2l0Y2hfaW5sZXQiOnsiMCI6IkIiLCIxIjoiQiIsIjEyOCI6IkEiLCIyIjoiQSJ9LCJmaWxhX3N3aXRjaCI6eyJpbnN0YWxsZWQiOnRydWV9LCJjdXJyZW50X3BsYXRlX2lkIjpudWxsLCJzdWJ0YXNrX25hbWUiOiJmYWJyaWMtNTJ4NTJfa2V5Y2hhaW4iLCJjdXJyZW50X3ByaW50IjoiZmFicmljLTUyeDUyX2tleWNoYWluIiwicHJvZ3Jlc3MiOjAuMCwicmVtYWluaW5nX3RpbWUiOjAsImxheWVyX251bSI6MCwidG90YWxfbGF5ZXJzIjoyNSwiY3VycmVudF9hcmNoaXZlX2lkIjpudWxsLCJhd2FpdGluZ19wbGF0ZV9jbGVhciI6dHJ1ZSwiY292ZXJfdXJsIjpudWxsLCJobXNfZXJyb3JzIjpbeyJjb2RlIjoiMHgyMDAwNiIsImZ1bGxfY29kZSI6IjA1MDAwNjAwMDAwMjAwMDYiLCJzZXZlcml0eSI6NiwiZGVzY3JpcHRpb24iOm51bGwsImFjdGlvbnMiOltdfV19LCJ3YXJuaW5ncyI6W10sInByaW50ZXJfbW9kZWwiOiJIMkMiLCJwcm9qZWN0Ijp7InByb2plY3RfaWQiOm51bGx9fX19"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "11",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "30s"
+        },
+        "useWorkflowBuildId": true,
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-10-18T20:07:15.426137770Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1050795",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "12",
+        "identity": "36393@newoldboy",
+        "requestId": "0f2b9c66-56c6-4637-aaa7-1afa0c3d9d31",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-10-18T20:07:15.476100426Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1050796",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpZCI6ImNlMGU3OGNjNDlkOTRiZDBiOWJjMjc5MDM5YmQ4Nzk2Iiwic3ViamVjdCI6Im91dHB1dDowMTg2ZTFlODQ3Njg0MDBmOGVkZjhiNmZkYTRhODgxYiIsInN0YXR1cyI6InJ1bm5pbmciLCJjcmVhdGVkX2F0IjoiMjAyNi0xMC0xOFQyMDowNzoxNS40NDU1MzJaIiwiZmluaXNoZWRfYXQiOm51bGwsInJlc3VsdCI6bnVsbCwiZXJyb3IiOm51bGwsIm1heV9oYXZlX3F1ZXVlZCI6ZmFsc2UsInJlcGVhdGVkIjpmYWxzZSwib3V0cHV0X2lkIjoiMDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIifQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "12",
+        "startedEventId": "13",
+        "identity": "36393@newoldboy"
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-10-18T20:07:15.476186596Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1050797",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "36393@newoldboy-4a267f305e1a469fa9c6045d40b35ba7",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "api-4862ef171c56-bambuddy"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-10-18T20:07:15.481717412Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1050801",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "15",
+        "identity": "36393@newoldboy",
+        "requestId": "b6cc8650-6ca7-41f0-940d-66bf1b7b4c1b",
+        "historySizeBytes": "15269",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-10-18T20:07:15.500613950Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1050805",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "15",
+        "startedEventId": "16",
+        "identity": "36393@newoldboy",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-10-18T20:07:15.500717659Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1050806",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "3",
+        "activityType": {
+          "name": "print_plan"
+        },
+        "taskQueue": {
+          "name": "api-4862ef171c56-bambuddy",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {
+          "fields": {
+            "_tracer-data": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLWQ0N2M2ODY2YTk3YjI5YWItMDMifQ=="
+            }
+          }
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpbnB1dCI6eyJzdWJqZWN0IjoiMDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIiLCJzbHVnIjoiZGVtbyIsImtleSI6Ijc4ODk1YjUzMjdjZDUwYTRjMDJkMDI2ZjQ1NWU5NGEyMDBjODZmYjBmNWE2MmNmMWM2NTE4NzA1NDU2NzIwOTgiLCJzb3VyY2UiOnsia2luZCI6Im91dHB1dCIsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIiwiZmlsZV9pZCI6bnVsbCwic3RlbSI6bnVsbCwicHJpbnRfc2V0dGluZ3MiOnt9LCJmaWxhbWVudHMiOm51bGx9LCJyZXF1ZXN0Ijp7InByaW50ZXJfaWQiOjEsImZpbGFtZW50X3BsYW4iOnsic2xvdHMiOlt7InNsb3RfaWQiOjEsInNwb29sX2lkIjo5fSx7InNsb3RfaWQiOjIsInNwb29sX2lkIjo1fV19LCJjaG9pY2VzIjp7Im5venpsZXMiOlt7InNpemUiOiIwLjIifV0sInRpZXIiOiJmaW5lIn0sImNvcGllcyI6MX0sInJlcGVhdF93aW5kb3dfcyI6NjAwLjAsInNlYXJjaF9hdHRyaWJ1dGVzIjpmYWxzZX0sImFjY2VwdGVkIjp7InJ1biI6eyJpZCI6ImNlMGU3OGNjNDlkOTRiZDBiOWJjMjc5MDM5YmQ4Nzk2Iiwic3ViamVjdCI6Im91dHB1dDowMTg2ZTFlODQ3Njg0MDBmOGVkZjhiNmZkYTRhODgxYiIsInN0YXR1cyI6InJ1bm5pbmciLCJjcmVhdGVkX2F0IjoiMjAyNi0xMC0xOFQyMDowNzoxNS40NDU1MzJaIiwiZmluaXNoZWRfYXQiOm51bGwsInJlc3VsdCI6bnVsbCwiZXJyb3IiOm51bGwsIm1heV9oYXZlX3F1ZXVlZCI6ZmFsc2UsInJlcGVhdGVkIjpmYWxzZSwib3V0cHV0X2lkIjoiMDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIifSwic291cmNlIjp7ImtpbmQiOiJvdXRwdXQiLCJvdXRwdXRfaWQiOiIwMTg2ZTFlODQ3Njg0MDBmOGVkZjhiNmZkYTRhODgxYiIsImZpbGVfaWQiOm51bGwsInN0ZW0iOm51bGwsInByaW50X3NldHRpbmdzIjp7fSwiZmlsYW1lbnRzIjpudWxsfSwicHJlcGFyZWQiOnsicGxhdGVfaWRzIjpbMV0sInByaW50ZXJfaWQiOjEsInByaW50ZXJfc3RhdHVzIjp7ImlkIjoxLCJuYW1lIjoiM0RQLTMxQi01OTgiLCJjb25uZWN0ZWQiOnRydWUsInN0YXRlIjoiRkFJTEVEIiwiYW1zIjpbeyJpZCI6MCwiaHVtaWRpdHkiOjMwLCJ0ZW1wIjo0Mi4wLCJpc19hbXNfaHQiOmZhbHNlLCJtb2R1bGVfdHlwZSI6Im4zZiIsInRyYXkiOlt7ImlkIjowLCJ0cmF5X2NvbG9yIjoiQTZBOUFBRkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgQmFzaWMiLCJ0cmF5X2lkX25hbWUiOiJBMDAtRDAxIiwidHJheV9pbmZvX2lkeCI6IkdGQTAwIiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjEsInRyYXlfY29sb3IiOiIwMEIxQjdGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1CMDUiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDAiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MiwidHJheV9jb2xvciI6IjAwMDAwMEZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtVDUiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MywidHJheV9jb2xvciI6IkZGOTQyNUZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIFNpbGsiLCJ0cmF5X2lkX25hbWUiOiJBMDUtVDEiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDUiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoyMTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX1dfSx7ImlkIjoxLCJodW1pZGl0eSI6MjEsInRlbXAiOjQ0LjUsImlzX2Ftc19odCI6ZmFsc2UsIm1vZHVsZV90eXBlIjoibjNmIiwidHJheSI6W3siaWQiOjAsInRyYXlfY29sb3IiOiJDNDhDRjNGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IiIsInRyYXlfaWRfbmFtZSI6IiIsInRyYXlfaW5mb19pZHgiOiJPRkRTcnpaOCIsInJlbWFpbiI6LTEsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjEsInRyYXlfY29sb3IiOiIwMDYyOUJGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBTaWxrIiwidHJheV9pZF9uYW1lIjoiQTA1LVQ5IiwidHJheV9pbmZvX2lkeCI6IkdGQTA1IiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MjEwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjIsInRyYXlfY29sb3IiOiIyNzI3MkNGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IiIsInRyYXlfaWRfbmFtZSI6IiIsInRyYXlfaW5mb19pZHgiOiJHRkw5OSIsInJlbWFpbiI6LTEsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjMsInRyYXlfY29sb3IiOiI5RDQzMkNGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1OMCIsInRyYXlfaW5mb19pZHgiOiJHRkEwMCIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjE5MCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfV19LHsiaWQiOjEyOCwiaHVtaWRpdHkiOjE1LCJ0ZW1wIjo0NS40LCJpc19hbXNfaHQiOnRydWUsIm1vZHVsZV90eXBlIjoibjNzIiwidHJheSI6W3siaWQiOjAsInRyYXlfY29sb3IiOiI3MjAwNjJGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBTaWxrIiwidHJheV9pZF9uYW1lIjoiQTA1LVQ3IiwidHJheV9pbmZvX2lkeCI6IkdGQTA1IiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MjEwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9XX0seyJpZCI6MiwiaHVtaWRpdHkiOjE3LCJ0ZW1wIjo0NS4yLCJpc19hbXNfaHQiOmZhbHNlLCJtb2R1bGVfdHlwZSI6Im4zZiIsInRyYXkiOlt7ImlkIjowLCJ0cmF5X2NvbG9yIjoiRUMwMDhDRkYiLCJ0cmF5X3R5cGUiOiJQTEEiLCJ0cmF5X3N1Yl9icmFuZHMiOiJQTEEgQmFzaWMiLCJ0cmF5X2lkX25hbWUiOiJBMDAtUDYiLCJ0cmF5X2luZm9faWR4IjoiR0ZBMDAiLCJyZW1haW4iOjEwMCwibm96emxlX3RlbXBfbWluIjoxOTAsIm5venpsZV90ZW1wX21heCI6MjMwLCJzdGF0ZSI6MTEsImV4aXN0cyI6dHJ1ZX0seyJpZCI6MSwidHJheV9jb2xvciI6IkJFQ0YwMEZGIiwidHJheV90eXBlIjoiUExBIiwidHJheV9zdWJfYnJhbmRzIjoiUExBIEJhc2ljIiwidHJheV9pZF9uYW1lIjoiQTAwLUczIiwidHJheV9pbmZvX2lkeCI6IkdGQTAwIiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MTkwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjIsInRyYXlfY29sb3IiOiJFQzk4NENGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBTaWxrIiwidHJheV9pZF9uYW1lIjoiQTA1LU04IiwidHJheV9pbmZvX2lkeCI6IkdGQTA1IiwicmVtYWluIjoxMDAsIm5venpsZV90ZW1wX21pbiI6MjEwLCJub3p6bGVfdGVtcF9tYXgiOjIzMCwic3RhdGUiOjExLCJleGlzdHMiOnRydWV9LHsiaWQiOjMsInRyYXlfY29sb3IiOiI2RjUwMzRGRiIsInRyYXlfdHlwZSI6IlBMQSIsInRyYXlfc3ViX2JyYW5kcyI6IlBMQSBCYXNpYyIsInRyYXlfaWRfbmFtZSI6IkEwMC1OMSIsInRyYXlfaW5mb19pZHgiOiJHRkEwMCIsInJlbWFpbiI6MTAwLCJub3p6bGVfdGVtcF9taW4iOjE5MCwibm96emxlX3RlbXBfbWF4IjoyMzAsInN0YXRlIjoxMSwiZXhpc3RzIjp0cnVlfV19XSwiYW1zX2V4aXN0cyI6dHJ1ZSwidnRfdHJheSI6W3siaWQiOjI1NCwidHJheV9jb2xvciI6IjAwMDAwMDAwIiwidHJheV90eXBlIjoiIiwidHJheV9zdWJfYnJhbmRzIjoiIiwidHJheV9pZF9uYW1lIjoiIiwidHJheV9pbmZvX2lkeCI6IiIsInJlbWFpbiI6MCwibm96emxlX3RlbXBfbWluIjowLCJub3p6bGVfdGVtcF9tYXgiOjAsInN0YXRlIjpudWxsLCJleGlzdHMiOm51bGx9LHsiaWQiOjI1NSwidHJheV9jb2xvciI6IjAwMDAwMDAwIiwidHJheV90eXBlIjoiIiwidHJheV9zdWJfYnJhbmRzIjoiIiwidHJheV9pZF9uYW1lIjoiIiwidHJheV9pbmZvX2lkeCI6IiIsInJlbWFpbiI6MCwibm96emxlX3RlbXBfbWluIjowLCJub3p6bGVfdGVtcF9tYXgiOjAsInN0YXRlIjpudWxsLCJleGlzdHMiOm51bGx9XSwibm96emxlcyI6W3sibm96emxlX3R5cGUiOiJIUzAwIiwibm96emxlX2RpYW1ldGVyIjoiMC4yIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQifV0sIm5venpsZV9yYWNrIjpbeyJub3p6bGVfdHlwZSI6IkhTMDAiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjIiLCJpZCI6MCwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIyNzI3MkNGRiIsImZpbGFtZW50X2lkIjoiR0ZMOTkiLCJzZXJpYWxfbnVtYmVyIjoiIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQiLCJpZCI6MSwid2VhciI6MCwic3RhdCI6MCwiZmlsYW1lbnRfdHlwZSI6IiIsImZpbGFtZW50X2NvbG9yIjoiMDAwMDAwMDAiLCJmaWxhbWVudF9pZCI6IiIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSFMwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoxNywid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDYyOUJGRiIsImZpbGFtZW50X2lkIjoiR0ZBMDUiLCJzZXJpYWxfbnVtYmVyIjoiIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQiLCJpZCI6MTgsIndlYXIiOjEyOCwic3RhdCI6MCwiZmlsYW1lbnRfdHlwZSI6IiIsImZpbGFtZW50X2NvbG9yIjoiMDAwMDAwMDAiLCJmaWxhbWVudF9pZCI6IiIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSFMwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoxOSwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiJGRjZBMTNGRiIsImZpbGFtZW50X2lkIjoiR0ZBMDAiLCJzZXJpYWxfbnVtYmVyIjoiIn0seyJub3p6bGVfdHlwZSI6IkhIMDEiLCJub3p6bGVfZGlhbWV0ZXIiOiIwLjQiLCJpZCI6MjAsIndlYXIiOjEyOCwic3RhdCI6MCwiZmlsYW1lbnRfdHlwZSI6IiIsImZpbGFtZW50X2NvbG9yIjoiMDAwMDAwMDAiLCJmaWxhbWVudF9pZCI6IiIsInNlcmlhbF9udW1iZXIiOiIifSx7Im5venpsZV90eXBlIjoiSFMwMSIsIm5venpsZV9kaWFtZXRlciI6IjAuNCIsImlkIjoyMSwid2VhciI6MTI4LCJzdGF0IjowLCJmaWxhbWVudF90eXBlIjoiIiwiZmlsYW1lbnRfY29sb3IiOiIwMDAwMDBGRiIsImZpbGFtZW50X2lkIjoiR0ZBMDAiLCJzZXJpYWxfbnVtYmVyIjoiIn1dLCJhY3RpdmVfZXh0cnVkZXIiOjAsImFtc19tYXBwaW5nIjpbXSwiYW1zX2V4dHJ1ZGVyX21hcCI6e30sImFtc19zd2l0Y2hfaW5sZXQiOnsiMCI6IkIiLCIxIjoiQiIsIjEyOCI6IkEiLCIyIjoiQSJ9LCJmaWxhX3N3aXRjaCI6eyJpbnN0YWxsZWQiOnRydWV9LCJjdXJyZW50X3BsYXRlX2lkIjpudWxsLCJzdWJ0YXNrX25hbWUiOiJmYWJyaWMtNTJ4NTJfa2V5Y2hhaW4iLCJjdXJyZW50X3ByaW50IjoiZmFicmljLTUyeDUyX2tleWNoYWluIiwicHJvZ3Jlc3MiOjAuMCwicmVtYWluaW5nX3RpbWUiOjAsImxheWVyX251bSI6MCwidG90YWxfbGF5ZXJzIjoyNSwiY3VycmVudF9hcmNoaXZlX2lkIjpudWxsLCJhd2FpdGluZ19wbGF0ZV9jbGVhciI6dHJ1ZSwiY292ZXJfdXJsIjpudWxsLCJobXNfZXJyb3JzIjpbeyJjb2RlIjoiMHgyMDAwNiIsImZ1bGxfY29kZSI6IjA1MDAwNjAwMDAwMjAwMDYiLCJzZXZlcml0eSI6NiwiZGVzY3JpcHRpb24iOm51bGwsImFjdGlvbnMiOltdfV19LCJ3YXJuaW5ncyI6W10sInByaW50ZXJfbW9kZWwiOiJIMkMiLCJwcm9qZWN0Ijp7InByb2plY3RfaWQiOm51bGx9fX19"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "heartbeatTimeout": "30s",
+        "workflowTaskCompletedEventId": "17",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true,
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-10-18T20:07:15.500829173Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED",
+      "taskId": "1050807",
+      "workflowExecutionUpdateCompletedEventAttributes": {
+        "meta": {
+          "updateId": "00a8bb46-f89e-428f-bea8-2932539e0177",
+          "identity": "36393@newoldboy"
+        },
+        "outcome": {
+          "success": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "eyJydW4iOnsiaWQiOiJjZTBlNzhjYzQ5ZDk0YmQwYjliYzI3OTAzOWJkODc5NiIsInN1YmplY3QiOiJvdXRwdXQ6MDE4NmUxZTg0NzY4NDAwZjhlZGY4YjZmZGE0YTg4MWIiLCJzdGF0dXMiOiJydW5uaW5nIiwiY3JlYXRlZF9hdCI6IjIwMjYtMTAtMThUMjA6MDc6MTUuNDQ1NTMyWiIsImZpbmlzaGVkX2F0IjpudWxsLCJyZXN1bHQiOm51bGwsImVycm9yIjpudWxsLCJtYXlfaGF2ZV9xdWV1ZWQiOmZhbHNlLCJyZXBlYXRlZCI6ZmFsc2UsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIn0sInJlZnVzYWwiOm51bGwsInJlcGVhdGVkIjpmYWxzZX0="
+              }
+            ]
+          }
+        },
+        "acceptedEventId": "5"
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2026-10-18T20:07:15.505728411Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1050813",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "18",
+        "identity": "36393@newoldboy",
+        "requestId": "1d23dea1-bfa1-4816-b320-44d14cbc6533",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "21",
+      "eventTime": "2026-10-18T20:07:18.051507478Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1050814",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJsaWJyYXJ5X2ZpbGVfaWQiOjQxLCJmb2xkZXJfaWQiOm51bGwsInByb2plY3RfaWQiOm51bGwsInByaW50ZXJfaWQiOjEsIm5venpsZV9zaXplIjoiMC4yIiwiY29waWVzIjoxLCJvcHRpb25zIjp7ImJlZF9sZXZlbGxpbmciOm51bGwsImZsb3dfY2FsaSI6bnVsbCwidmlicmF0aW9uX2NhbGkiOm51bGwsIm5venpsZV9vZmZzZXRfY2FsaSI6bnVsbCwibGF5ZXJfaW5zcGVjdCI6bnVsbCwidGltZWxhcHNlIjpudWxsLCJ1c2VfYW1zIjpudWxsLCJxdWFudGl0eSI6MSwibWFudWFsX3N0YXJ0IjpudWxsLCJpbnNlcnRfYXRfdG9wIjpudWxsLCJhdXRvX29mZl9hZnRlciI6bnVsbCwicHJvamVjdF9pZCI6bnVsbCwicHJlaGVhdF9vdmVycmlkZSI6bnVsbCwicHJlaGVhdF9jaGFtYmVyX3RhcmdldF9vdmVycmlkZSI6bnVsbH0sInBsYXRlcyI6W3sicGxhdGVfaWQiOjEsInBsYW4iOnsicHJpbnRlcl9wcmVzZXQiOnsic291cmNlIjoiY2xvdWQiLCJpZCI6IkdNMDQyIn0sInByb2Nlc3NfcHJlc2V0Ijp7InNvdXJjZSI6ImNsb3VkIiwiaWQiOiJHUDI0MyJ9LCJmaWxhbWVudF9wcmVzZXRzIjpbeyJzb3VyY2UiOiJjbG91ZCIsImlkIjoiR0ZTRzAwXzI0In0seyJzb3VyY2UiOiJjbG91ZCIsImlkIjoiR0ZTQTA1XzIxIn1dLCJmaWxhbWVudF9jb2xvdXJzIjpbIiM2ODgxOTciLCIjMDA0N0JCIl0sImJlZF90eXBlIjoiVGV4dHVyZWQgUEVJIFBsYXRlIiwicHJvY2Vzc19vdmVycmlkZXMiOnt9LCJ3aG9sZV9maWxlIjpmYWxzZX0sInNsaWNlZF9maWxlX2lkIjpudWxsLCJmaWxhbWVudHMiOnsiZmlsYW1lbnRfb3ZlcnJpZGVzIjpbeyJzbG90X2lkIjoxLCJ0eXBlIjoiUEVURyIsImNvbG9yIjoiIzY4ODE5NyJ9LHsic2xvdF9pZCI6MiwidHlwZSI6IlBMQSIsImNvbG9yIjoiIzAwNDdCQiJ9XSwicmVxdWlyZWRfZmlsYW1lbnRfdHlwZXMiOlsiUEVURyIsIlBMQSJdfSwic3Bvb2xzIjp7IjEiOnsic3Bvb2xfaWQiOjksIm1hdGVyaWFsIjoiUEVURyIsInN1YnR5cGUiOiJCYXNpYyIsImJyYW5kIjoiQmFtYnUgTGFiIiwiY29sb3JfbmFtZSI6Ik1pc3R5IEJsdWUiLCJjb2xvdXIiOiIjNjg4MTk3Iiwic2xpY2VyX2ZpbGFtZW50IjoiR0ZHMDAiLCJzbGljZXJfZmlsYW1lbnRfbmFtZSI6IkJhbWJ1IFBFVEcgQmFzaWMiLCJyZW1haW5pbmdfZyI6MTAwMC4wLCJzdG9yYWdlX2xvY2F0aW9uIjpudWxsLCJsb2FkZWQiOnsicHJpbnRlcl9pZCI6MSwicHJpbnRlcl9uYW1lIjoiM0RQLTMxQi01OTgiLCJhbXNfaWQiOjAsInRyYXlfaWQiOjF9LCJleHRydWRlciI6bnVsbCwic2lkZSI6bnVsbCwibGFiZWxfd2VpZ2h0X2ciOjEwMDAsInRyYXlfb25seSI6bnVsbH0sIjIiOnsic3Bvb2xfaWQiOjUsIm1hdGVyaWFsIjoiUExBIiwic3VidHlwZSI6IlRyaSBDb2xvciIsImJyYW5kIjoiQmFtYnUgTGFiIiwiY29sb3JfbmFtZSI6Ik5lb24gQ2l0eSIsImNvbG91ciI6IiMwMDQ3QkIiLCJzbGljZXJfZmlsYW1lbnQiOiJHRkEwNSIsInNsaWNlcl9maWxhbWVudF9uYW1lIjoiQmFtYnUgUExBIFNpbGsiLCJyZW1haW5pbmdfZyI6OTY1LjA1NzU4MzY5Mzc2NDEsInN0b3JhZ2VfbG9jYXRpb24iOm51bGwsImxvYWRlZCI6bnVsbCwiZXh0cnVkZXIiOm51bGwsInNpZGUiOm51bGwsImxhYmVsX3dlaWdodF9nIjoxMDAwLCJ0cmF5X29ubHkiOm51bGx9fX1dLCJ3YXJuaW5ncyI6W3sia2luZCI6Im5vdC1sb2FkZWQiLCJzbG90X2lkIjoyLCJtZXNzYWdlIjoiTG9hZCBCYW1idSBMYWIgUExBIFRyaSBDb2xvciBOZW9uIENpdHkgaW50byB0aGUgcHJpbnRlciBiZWZvcmUgdGhpcyBwcmludHMsIHRoZW4gc3RhcnQgdGhlIHByaW50LiJ9XSwicmFja19hbGdvcml0aG0iOiJsZWFzdF91c2VkIiwicmFja19wb3NpdGlvbiI6bnVsbCwiaGFzX3JhY2siOnRydWUsIm5venpsZV9wbGFuIjp7InNsb3RzIjpbeyJzbG90X2lkIjoxLCJzaWRlIjoiUiIsIm5hbWUiOiJNaXN0eSBCbHVlIiwiY29sb3VyIjoiIzY4ODE5NyIsIm1hdGVyaWFsIjoiUEVURyIsImJ5X2hhbmQiOmZhbHNlfSx7InNsb3RfaWQiOjIsInNpZGUiOiJSIiwibmFtZSI6Ik5lb24gQ2l0eSIsImNvbG91ciI6IiMwMDQ3QkIiLCJtYXRlcmlhbCI6IlBMQSIsImJ5X2hhbmQiOmZhbHNlfV0sInNpemUiOiIwLjIiLCJsZWZ0X2Zsb3ciOiJzdGFuZGFyZCIsInJpZ2h0X2Zsb3ciOiJzdGFuZGFyZCIsInRyYWNrX3N3aXRjaCI6dHJ1ZSwic3VtbWFyeSI6Ik1pc3R5IEJsdWUg4oaSIHJpZ2h0IMK3IE5lb24gQ2l0eSDihpIgcmlnaHQgwrcgMC4yIFN0YW5kYXJkIn0sInNsaWNlciI6Im5hdGl2ZSIsImxpYnJhcnlfcXVldWUiOiJhcGktNDg2MmVmMTcxYzU2LWxpYnJhcnkifQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "18",
+        "startedEventId": "20",
+        "identity": "36393@newoldboy"
+      }
+    },
+    {
+      "eventId": "22",
+      "eventTime": "2026-10-18T20:07:18.051545515Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1050815",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "36393@newoldboy-4a267f305e1a469fa9c6045d40b35ba7",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "api-4862ef171c56-bambuddy"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "23",
+      "eventTime": "2026-10-18T20:07:18.058445744Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1050819",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "22",
+        "identity": "36393@newoldboy",
+        "requestId": "c01fd330-7dc0-4928-9f1b-94fe75f88c5a",
+        "historySizeBytes": "25162",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "24",
+      "eventTime": "2026-10-18T20:07:18.086422368Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1050823",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "22",
+        "startedEventId": "23",
+        "identity": "36393@newoldboy",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "25",
+      "eventTime": "2026-10-18T20:07:18.086512238Z",
+      "eventType": "EVENT_TYPE_MARKER_RECORDED",
+      "taskId": "1050824",
+      "markerRecordedEventAttributes": {
+        "markerName": "core_patch",
+        "details": {
+          "patch-data": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "eyJpZCI6Im5hdGl2ZS1zbGljZXIiLCJkZXByZWNhdGVkIjpmYWxzZX0="
+              }
+            ]
+          }
+        },
+        "workflowTaskCompletedEventId": "24"
+      }
+    },
+    {
+      "eventId": "26",
+      "eventTime": "2026-10-18T20:07:18.087962943Z",
+      "eventType": "EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES",
+      "taskId": "1050825",
+      "upsertWorkflowSearchAttributesEventAttributes": {
+        "workflowTaskCompletedEventId": "24",
+        "searchAttributes": {
+          "indexedFields": {
+            "TemporalChangeVersion": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZExpc3Q="
+              },
+              "data": "WyJuYXRpdmUtc2xpY2VyIl0="
+            }
+          }
+        }
+      }
+    },
+    {
+      "eventId": "27",
+      "eventTime": "2026-10-18T20:07:18.088103428Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1050826",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "4",
+        "activityType": {
+          "name": "slice_run"
+        },
+        "taskQueue": {
+          "name": "api-4862ef171c56-library",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {
+          "fields": {
+            "_tracer-data": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLTYxYjdmNWJlZDE4YWE4ZTMtMDMifQ=="
+            }
+          }
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJsaWJyYXJ5X2ZpbGVfaWQiOjQxLCJwbGFuIjp7InByaW50ZXJfcHJlc2V0Ijp7InNvdXJjZSI6ImNsb3VkIiwiaWQiOiJHTTA0MiJ9LCJwcm9jZXNzX3ByZXNldCI6eyJzb3VyY2UiOiJjbG91ZCIsImlkIjoiR1AyNDMifSwiZmlsYW1lbnRfcHJlc2V0cyI6W3sic291cmNlIjoiY2xvdWQiLCJpZCI6IkdGU0cwMF8yNCJ9LHsic291cmNlIjoiY2xvdWQiLCJpZCI6IkdGU0EwNV8yMSJ9XSwiZmlsYW1lbnRfY29sb3VycyI6WyIjNjg4MTk3IiwiIzAwNDdCQiJdLCJiZWRfdHlwZSI6IlRleHR1cmVkIFBFSSBQbGF0ZSIsInByb2Nlc3Nfb3ZlcnJpZGVzIjp7fSwid2hvbGVfZmlsZSI6ZmFsc2V9LCJwbGF0ZV9pZCI6MSwic3ViamVjdCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIn0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "7800s",
+        "heartbeatTimeout": "30s",
+        "workflowTaskCompletedEventId": "24",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "100s",
+          "maximumAttempts": 3
+        },
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "28",
+      "eventTime": "2026-10-18T20:07:18.099210720Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1050898",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "27",
+        "identity": "36393@newoldboy",
+        "requestId": "de8e3ecb-6ecb-4091-959d-79b3101d7af0",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "unknown"
+        }
+      }
+    },
+    {
+      "eventId": "29",
+      "eventTime": "2026-10-18T20:07:19.380029286Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
+      "taskId": "1050899",
+      "activityTaskFailedEventAttributes": {
+        "failure": {
+          "message": "The slicer refused the plate: plate 99 is empty",
+          "stackTrace": "  File \"/home/elan/repos/eh-homelab/ScadBuddy/.claude/worktrees/native-slicer-flow/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 351, in _handle_start_activity_task\n    result = await self._execute_activity(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy/.claude/worktrees/native-slicer-flow/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 681, in _execute_activity\n    return await impl.execute_activity(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy/.claude/worktrees/native-slicer-flow/backend/.venv/lib/python3.12/site-packages/temporalio/contrib/opentelemetry/_interceptor.py\", line 384, in execute_activity\n    return await super().execute_activity(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy/.claude/worktrees/native-slicer-flow/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_interceptor.py\", line 135, in execute_activity\n    return await self.next.execute_activity(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy/.claude/worktrees/native-slicer-flow/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 889, in execute_activity\n    return await input.fn(*input.args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy/.claude/worktrees/native-slicer-flow/backend/scadbuddy/workflows/slicing_activities.py\", line 375, in slice_run\n    raise _run_failed(422 if result.refused else 502, \"The slice failed\", failure)\n",
+          "applicationFailureInfo": {
+            "type": "PrintFailed",
+            "nonRetryable": true,
+            "details": {
+              "payloads": [
+                {
+                  "metadata": {
+                    "encoding": "anNvbi9wbGFpbg=="
+                  },
+                  "data": "eyJ0eXBlIjoiYWJvdXQ6YmxhbmsiLCJzdGF0dXMiOjQyMiwidGl0bGUiOiJUaGUgc2xpY2UgZmFpbGVkIiwiZGV0YWlsIjoiVGhlIHNsaWNlciByZWZ1c2VkIHRoZSBwbGF0ZTogcGxhdGUgOTkgaXMgZW1wdHkiLCJleHRlbnNpb25zIjp7fX0="
+                }
+              ]
+            }
+          }
+        },
+        "scheduledEventId": "27",
+        "startedEventId": "28",
+        "identity": "36393@newoldboy",
+        "retryState": "RETRY_STATE_NON_RETRYABLE_FAILURE"
+      }
+    },
+    {
+      "eventId": "30",
+      "eventTime": "2026-10-18T20:07:19.380056474Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1050900",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "36393@newoldboy-4a267f305e1a469fa9c6045d40b35ba7",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "api-4862ef171c56-bambuddy"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "31",
+      "eventTime": "2026-10-18T20:07:19.387804370Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1050904",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "30",
+        "identity": "36393@newoldboy",
+        "requestId": "375b66c4-b434-4c44-8147-408f52018be4",
+        "historySizeBytes": "28458",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "32",
+      "eventTime": "2026-10-18T20:07:19.408772981Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1050908",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "30",
+        "startedEventId": "31",
+        "identity": "36393@newoldboy",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "33",
+      "eventTime": "2026-10-18T20:07:19.408881124Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1050909",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "5",
+        "activityType": {
+          "name": "print_fail"
+        },
+        "taskQueue": {
+          "name": "api-4862ef171c56-bambuddy",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {
+          "fields": {
+            "_tracer-data": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJ0cmFjZXBhcmVudCI6IjAwLWMwNDU3MzQ0MjBkZjZkNjdhOWJkZjA4MGQ3OWJlMzRjLWJjOWM1NTRiODRmNjFjNjEtMDMifQ=="
+            }
+          }
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJydW5faWQiOiJjZTBlNzhjYzQ5ZDk0YmQwYjliYzI3OTAzOWJkODc5NiIsInNsdWciOiJkZW1vIiwiZXJyb3IiOnsidHlwZSI6ImFib3V0OmJsYW5rIiwic3RhdHVzIjo0MjIsInRpdGxlIjoiVGhlIHNsaWNlIGZhaWxlZCIsImRldGFpbCI6IlRoZSBzbGljZXIgcmVmdXNlZCB0aGUgcGxhdGU6IHBsYXRlIDk5IGlzIGVtcHR5IiwiZXh0ZW5zaW9ucyI6e319LCJ1bnF1ZXVlZCI6ZmFsc2V9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "32",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "30s"
+        },
+        "useWorkflowBuildId": true,
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "34",
+      "eventTime": "2026-10-18T20:07:19.414531580Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1050914",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "33",
+        "identity": "36393@newoldboy",
+        "requestId": "1e1f4222-2080-45ed-b794-dd24d14fdee0",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "35",
+      "eventTime": "2026-10-18T20:07:19.481268195Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1050915",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpZCI6ImNlMGU3OGNjNDlkOTRiZDBiOWJjMjc5MDM5YmQ4Nzk2Iiwic3ViamVjdCI6Im91dHB1dDowMTg2ZTFlODQ3Njg0MDBmOGVkZjhiNmZkYTRhODgxYiIsInN0YXR1cyI6ImZhaWxlZCIsImNyZWF0ZWRfYXQiOiIyMDI2LTEwLTE4VDIwOjA3OjE1LjQ0NTUzMloiLCJmaW5pc2hlZF9hdCI6IjIwMjYtMTAtMThUMjA6MDc6MTkuNDMxMTE0WiIsInJlc3VsdCI6bnVsbCwiZXJyb3IiOnsidHlwZSI6ImFib3V0OmJsYW5rIiwic3RhdHVzIjo0MjIsInRpdGxlIjoiVGhlIHNsaWNlIGZhaWxlZCIsImRldGFpbCI6IlRoZSBzbGljZXIgcmVmdXNlZCB0aGUgcGxhdGU6IHBsYXRlIDk5IGlzIGVtcHR5IiwiZXh0ZW5zaW9ucyI6e319LCJtYXlfaGF2ZV9xdWV1ZWQiOmZhbHNlLCJyZXBlYXRlZCI6ZmFsc2UsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIn0="
+            }
+          ]
+        },
+        "scheduledEventId": "33",
+        "startedEventId": "34",
+        "identity": "36393@newoldboy"
+      }
+    },
+    {
+      "eventId": "36",
+      "eventTime": "2026-10-18T20:07:19.481294166Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1050916",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "36393@newoldboy-4a267f305e1a469fa9c6045d40b35ba7",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "api-4862ef171c56-bambuddy"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "37",
+      "eventTime": "2026-10-18T20:07:19.486343035Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1050920",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "36",
+        "identity": "36393@newoldboy",
+        "requestId": "fe26c3d8-9c32-4c48-835b-f7ec2336457b",
+        "historySizeBytes": "29917",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        }
+      }
+    },
+    {
+      "eventId": "38",
+      "eventTime": "2026-10-18T20:07:19.512058402Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1050924",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "36",
+        "startedEventId": "37",
+        "identity": "36393@newoldboy",
+        "workerVersion": {
+          "buildId": "00ecfd6d6538879f50858579ec0faf67"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "39",
+      "eventTime": "2026-10-18T20:07:19.512148691Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "taskId": "1050925",
+      "workflowExecutionCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJpZCI6ImNlMGU3OGNjNDlkOTRiZDBiOWJjMjc5MDM5YmQ4Nzk2Iiwic3ViamVjdCI6Im91dHB1dDowMTg2ZTFlODQ3Njg0MDBmOGVkZjhiNmZkYTRhODgxYiIsInN0YXR1cyI6ImZhaWxlZCIsImNyZWF0ZWRfYXQiOiIyMDI2LTEwLTE4VDIwOjA3OjE1LjQ0NTUzMloiLCJmaW5pc2hlZF9hdCI6IjIwMjYtMTAtMThUMjA6MDc6MTkuNDMxMTE0WiIsInJlc3VsdCI6bnVsbCwiZXJyb3IiOnsidHlwZSI6ImFib3V0OmJsYW5rIiwic3RhdHVzIjo0MjIsInRpdGxlIjoiVGhlIHNsaWNlIGZhaWxlZCIsImRldGFpbCI6IlRoZSBzbGljZXIgcmVmdXNlZCB0aGUgcGxhdGU6IHBsYXRlIDk5IGlzIGVtcHR5IiwiZXh0ZW5zaW9ucyI6e319LCJtYXlfaGF2ZV9xdWV1ZWQiOmZhbHNlLCJyZXBlYXRlZCI6ZmFsc2UsIm91dHB1dF9pZCI6IjAxODZlMWU4NDc2ODQwMGY4ZWRmOGI2ZmRhNGE4ODFiIn0="
+            }
+          ]
+        },
+        "workflowTaskCompletedEventId": "38"
+      }
+    }
+  ]
+}

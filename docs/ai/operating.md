@@ -1257,3 +1257,17 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.
+
+## 14. The slicer setting (#3822)
+
+`get_settings` shows `slicer_backend` (`bambuddy` or `native`) with the other stored
+settings, so an agent can say which slicer the print dialog and print runs use. No
+ScadBuddy tool changes it: `PUT /api/v1/settings`, where `slicer_backend` is written, is
+Settings-only (`agent/src/tools/coverage.ts`), and switching slicer is an operator's
+decision (`README.md` "Rolling out the native slicer"). Two other paths do write the
+settings store, and neither is a way to this setting by design: `set_print_options`
+writes the print options (`PUT /api/v1/settings/print-options`,
+`agent/src/tools/settings.ts`), an outward call; and `http_request` (§12), once enabled
+and each call approved, can reach any LAN URL, ScadBuddy's own `PUT /api/v1/settings`
+included, so approving such a call is approving a settings write. A print an agent starts slices
+on whichever slicer is set when its run is planned.

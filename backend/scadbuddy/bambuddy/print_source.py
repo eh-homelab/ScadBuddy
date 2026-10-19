@@ -489,7 +489,11 @@ class PrintPipeline:
         await self.uploads.record_sliced(
             self.subject.run_subject,
             library_file_id,
-            SlicedCopy(id=outcome.sliced_library_file_id, preset_key=outcome.preset_key),
+            SlicedCopy(
+                id=outcome.sliced_library_file_id,
+                preset_key=outcome.preset_key,
+                sliced_blob_key=outcome.sliced_blob_key,
+            ),
         )
         sent = sent + [
             PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)

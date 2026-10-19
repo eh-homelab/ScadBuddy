@@ -1531,7 +1531,7 @@ export function PrintPicker({
                         !previewSlice.stale &&
                         !(source.kind === 'output' && picker.plates.length > 1) &&
                         previewPlate === first
-                          ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
+                          ? previewSlice.toolpathUrl
                           : null
                       }
                     />
@@ -1714,6 +1714,7 @@ export function PrintPicker({
                 })}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}
+                progress={previewSlice.progress}
                 sliceError={previewSlice.error}
               />
             </div>

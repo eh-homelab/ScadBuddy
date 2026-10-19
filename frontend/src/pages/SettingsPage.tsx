@@ -111,6 +111,8 @@ const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
     'destination_sort',
     'store_backend',
     'library_backend',
+    // Plan 2026-10-16 Task 14: who slices, beside where print files are kept.
+    'slicer_backend',
     // The S3 store's, under the Blob store choice.
     'store_s3_endpoint',
     'store_s3_region',
@@ -198,7 +200,13 @@ type Problem = { problem: string }
 /** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
 function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
   if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
-  if (name === 'display_unit' || name === 'destination_sort' || name === 'library_backend') return raw
+  if (
+    name === 'display_unit' ||
+    name === 'destination_sort' ||
+    name === 'library_backend' ||
+    name === 'slicer_backend'
+  )
+    return raw
   if (name === 'store_s3_path_style') return raw === 'true'
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
@@ -1296,6 +1304,24 @@ function SettingsSections() {
                     ScadBuddy’s own library keeps its files in the blob store: choose the S3 or Bambuddy store first.
                   </p>
                 )}
+              </FieldRow>
+
+              <FieldRow
+                id="slicer-backend"
+                label="Slicer"
+                badge={badge('slicer_backend')}
+                error={errors.slicer_backend}
+                help="Who slices the print dialog’s plates and the prints it queues. Takes effect at once. ScadBuddy’s slicer runs the Bambu Studio CLI in the scadbuddy-slicer worker; Bambuddy still queues and prints."
+              >
+                <ChoiceSelect
+                  id="slicer-backend"
+                  value={value('slicer_backend') === 'native' ? 'native' : 'bambuddy'}
+                  onValueChange={(next) => setField('slicer_backend', next)}
+                  choices={[
+                    { value: 'bambuddy', label: 'Bambuddy’s slicer' },
+                    { value: 'native', label: 'ScadBuddy’s slicer (Bambu Studio CLI)' },
+                  ]}
+                />
               </FieldRow>
 
               <div role="group" aria-labelledby="store-s3-heading" className="space-y-4">

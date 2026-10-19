@@ -50,6 +50,7 @@ from scadbuddy.core.config import (
     READ_MAX_VISITS_CEILING,
     Config,
     LibraryBackend,
+    Slicer,
     StoreBackend,
 )
 from scadbuddy.core.proxies import Network, parse_cidr_list
@@ -149,6 +150,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_LIBRARY_BACKEND: whose library the print routes serve (`native` needs a
     # content store: `store_backend` s3 or bambuddy).
     library_backend: LibraryBackend = "bambuddy"
+    # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
+    # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
+    slicer_backend: Slicer = "bambuddy"
     # SCADBUDDY_STORE_S3_*: the S3 store (`store_backend` s3), seeded like the render key
     # and read by render workers from the stored values. The endpoint is Garage, MinIO or
     # any S3-compatible service; path-style addressing (`store_s3_path_style`) unless the
@@ -275,6 +279,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS: where the agent service serves its tools
     # as activities (#1055); a flow's `tool(...)` calls them there (#1057).
     temporal_task_queue_agent_tools: str = "agent-tools"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER: where the `scadbuddy-slicer` worker serves
+    # `slice_plate` (spec 2026-10-16 §5.2); `SliceWorkflow` runs it there.
+    temporal_task_queue_slicer: str = "slicer"
     # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
     # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
     # it off.
@@ -352,6 +359,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_library",
         "temporal_task_queue_projects",
         "temporal_task_queue_agent_tools",
+        "temporal_task_queue_slicer",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -568,6 +576,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_agent_tools": (
             "Paired with the agent service's worker, which serves its tools on that queue."
         ),
+        "temporal_task_queue_slicer": (
+            "Paired with the Temporal address: the API starts slices on it, and the"
+            " scadbuddy-slicer worker must name the same queue."
+        ),
         "agent_internal_url": (
             "Where the API reaches the agent sidecar in its own pod, which the deployment lays out."
         ),
@@ -676,6 +688,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # the store each process opens, its caps, and the key workers fetch with.
         "store_backend": "restart",
         "library_backend": "restart",
+        # Read from the store by every slice's start.
+        "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",
         "store_s3_endpoint": "restart",
         "store_s3_region": "restart",

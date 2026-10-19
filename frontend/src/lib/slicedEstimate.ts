@@ -18,6 +18,8 @@ export function slicedEstimate(
   return {
     job_id: 0,
     status: 'completed',
+    // ScadBuddy read the sliced file itself; no slicer's job to read back.
+    slicer: 'bambuddy',
     print_time_seconds: sliced.print_seconds ?? null,
     filament_used_g: sliced.weight_g ?? null,
     slots: (filamentsPlate === plate ? (filaments?.slots ?? []) : [])

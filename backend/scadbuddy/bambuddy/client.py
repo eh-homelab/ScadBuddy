@@ -1519,6 +1519,16 @@ async def client_for(settings: StoredSettings) -> AsyncIterator[BambuddyClient]:
 ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]
 
 
+def preset_reader(client: BambuddyClient | None, read: ReadPresetValues | None) -> ReadPresetValues:
+    """``read`` when given, else ``client``'s own read: a native run passes a reader of
+    the image's profiles and no client (#3818 tier A, ``slicing/values.py``)."""
+    if read is not None:
+        return read
+    if client is None:
+        raise ValueError("reading preset values needs a Bambuddy client or a reader")
+    return client.preset_values
+
+
 def read_once(client: BambuddyClient) -> ReadPresetValues:
     """``client.preset_values``, read at most once per preset by whoever shares it
     (#2804 review): a print's filament profiles and its supports change the same process

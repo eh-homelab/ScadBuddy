@@ -65,6 +65,7 @@ from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.rack.usage import RackUsage
+from scadbuddy.slicing.start import NativeSliceStarter
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
@@ -127,6 +128,9 @@ class PrintDeps:
     #: The native library a native file is read from (#3827): the API's own in-process,
     #: the API's internal routes on the print worker; ``None`` on ``bambuddy``.
     library: LibraryReads | None = None
+    #: The native slicer's starter (plan 2026-10-16 Task 13): ``print_plan`` keys a
+    #: reprint's reuse by it. ``None`` outside the image, where a native run is a 503.
+    native: NativeSliceStarter | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -273,7 +277,14 @@ class PrintActivities:
             async with client_for(settings) as client:
                 source = await self._source(client, input.accepted.source, settings)
                 return await heartbeating(
-                    plan_run(client, source, settings, input.input.request, input.accepted.prepared)
+                    plan_run(
+                        client,
+                        source,
+                        settings,
+                        input.input.request,
+                        input.accepted.prepared,
+                        native=self.d.native,
+                    )
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
@@ -399,7 +410,7 @@ class PrintActivities:
         deleted file's id to the next file (#2691 review). Best effort: the plate is
         queued already, so a failed read only leaves the slice unreused, never fails
         the run."""
-        if outcome.slice_job_id is None:
+        if outcome.slice_job_id is None and outcome.native_slice_id is None:
             return  # nothing sliced: a sliced file queued as it is (#2671)
         sliced_id = outcome.sliced_library_file_id
         try:
