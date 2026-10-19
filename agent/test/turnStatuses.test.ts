@@ -12,3 +12,8 @@ const doc = JSON.parse(readFileSync(new URL('./fixtures/turn-statuses.json', imp
 it("sweeps exactly the statuses agent-durable's session holds a turn in", () => {
   expect([...TURN_STATUSES]).toEqual(doc.turn)
 })
+
+it('keeps the parked statuses a part of a turn\'s, on this side too', () => {
+  expect(doc.waiting.length).toBeGreaterThan(0)
+  expect(doc.waiting.filter((s) => !TURN_STATUSES.includes(s))).toEqual([])
+})
