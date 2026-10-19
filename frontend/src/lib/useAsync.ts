@@ -31,6 +31,12 @@ export interface AsyncState<T> {
 export const RESYNC_WAIT_MS = 500
 /** The least time between two reads a hook's topic signals start (#4149). */
 export const SIGNAL_READ_MIN_MS = 250
+/**
+ * How long a signal's read waits on the read in flight before it starts anyway (#4165):
+ * a stalled fetch (a half-open connection, a proxy holding the request) must not leave
+ * the view deaf to its topics until it remounts.
+ */
+export const SIGNAL_READ_STALL_MS = 5_000
 
 interface Snapshot<T> {
   key: string
@@ -207,7 +213,10 @@ export function useAsync<T>(
     state.waiting = true
     const start = () => {
       state.timer = undefined
-      void reading.current.then(() => {
+      let stalled: ReturnType<typeof setTimeout> | undefined
+      const stall = new Promise<void>((resolve) => (stalled = setTimeout(resolve, SIGNAL_READ_STALL_MS)))
+      void Promise.race([reading.current, stall]).then(() => {
+        clearTimeout(stalled)
         if (!mounted.current) return
         state.waiting = false
         state.last = Date.now()
@@ -220,7 +229,14 @@ export function useAsync<T>(
   }, [refresh])
   useEffect(() => {
     const state = signals.current
-    return () => clearTimeout(state.timer)
+    return () => {
+      clearTimeout(state.timer)
+      // A read left waiting here never runs (unmounted): an effect replayed in place
+      // (StrictMode, Fast Refresh) must hear its topics again.
+      state.timer = undefined
+      state.waiting = false
+      state.last = -Infinity
+    }
   }, [])
 
   const staleFor = useCallback(

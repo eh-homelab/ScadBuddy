@@ -13,6 +13,7 @@ import pytest
 from scadbuddy import main
 from scadbuddy.core.settings import Settings
 from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.printers.component import PRINTERS
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
@@ -91,6 +92,8 @@ async def _bambuddy_serves() -> None:
 
 #: The print library on ``library_backend=bambuddy`` (#3827).
 BAMBUDDY_LIBRARY = SimpleNamespace(serving_native=_bambuddy_serves)
+#: The printer registry (#3823): its watch activity is built over these, never run.
+REGISTRY = SimpleNamespace(store=None, reports=None)
 
 
 def _state() -> SimpleNamespace:
@@ -106,7 +109,12 @@ def _state() -> SimpleNamespace:
         print_follower=None,
         metrics=SimpleNamespace(print_follows_running=None),
         print_links=None,
-        components=SimpleNamespace(get=lambda key: OPS if key is OPERATIONS else BAMBUDDY_LIBRARY),
+        events=None,
+        components=SimpleNamespace(
+            get=lambda key: (
+                OPS if key is OPERATIONS else REGISTRY if key is PRINTERS else BAMBUDDY_LIBRARY
+            )
+        ),
         projection=SimpleNamespace(pool=None),
     )
 

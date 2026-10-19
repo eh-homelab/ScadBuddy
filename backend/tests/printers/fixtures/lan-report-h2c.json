@@ -1,0 +1,88 @@
+{
+  "serial": "REDACTED",
+  "received_at": "2026-10-18T12:00:00Z",
+  "print": {
+    "command": "push_status",
+    "gcode_state": "RUNNING",
+    "mc_percent": 55,
+    "mc_remaining_time": 50,
+    "layer_num": 40,
+    "total_layer_num": 79,
+    "subtask_name": "Name_Keychain_Font_Basic_Plate_1",
+    "print_error": 0,
+    "hms": [{"attr": 117449216, "code": 131109}],
+    "ams": {
+      "ams": [
+        {
+          "id": "0",
+          "humidity": "4",
+          "temp": "22.7",
+          "tray": [
+            {"id": "0"},
+            {
+              "id": "1",
+              "tray_color": "000000FF",
+              "tray_type": "PLA",
+              "tray_sub_brands": "PLA Basic",
+              "tray_id_name": "A00-K0",
+              "tray_info_idx": "GFA00",
+              "remain": 80,
+              "nozzle_temp_min": "190",
+              "nozzle_temp_max": "240",
+              "state": 11,
+              "tag_uid": "REDACTED",
+              "tray_uuid": "REDACTED"
+            }
+          ]
+        },
+        {
+          "id": "128",
+          "humidity": "3",
+          "temp": "24.1",
+          "tray": [
+            {
+              "id": "0",
+              "tray_color": "F95959FF",
+              "tray_type": "PETG",
+              "tray_sub_brands": "",
+              "tray_id_name": "",
+              "tray_info_idx": "GFG00",
+              "remain": -1,
+              "nozzle_temp_min": "220",
+              "nozzle_temp_max": "260"
+            }
+          ]
+        }
+      ],
+      "ams_exist_bits": "1",
+      "tray_now": "1"
+    },
+    "vt_tray": {
+      "id": "254",
+      "tray_color": "00000000",
+      "tray_type": "",
+      "tray_info_idx": "",
+      "remain": 0,
+      "nozzle_temp_min": "0",
+      "nozzle_temp_max": "0"
+    },
+    "device": {
+      "extruder": {
+        "info": [
+          {"id": 0, "snow": 1, "temp": 14418140},
+          {"id": 1, "snow": 32768, "temp": 5767327}
+        ],
+        "state": 18
+      },
+      "nozzle": {
+        "exist": 196611,
+        "info": [
+          {"id": 0, "diameter": "0.4", "type": "HS01", "sn": "REDACTED"},
+          {"id": 1, "diameter": "0.4", "type": "HH01", "sn": "REDACTED"},
+          {"id": 16, "diameter": "0.2", "type": "HS00", "sn": "REDACTED-16", "wear": 3, "stat": 1},
+          {"id": 17, "diameter": "0.6", "type": "HH01", "sn": "N/A", "stat": 0}
+        ]
+      }
+    }
+  }
+}
