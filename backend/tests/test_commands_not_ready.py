@@ -52,10 +52,6 @@ class Deferred:
     async def accepted(self) -> str:
         return "accepted"
 
-    @workflow.signal
-    async def poke(self) -> None:
-        pass
-
 
 @workflow.defn(name="NotReadyBroken")
 class Broken:
@@ -201,7 +197,9 @@ async def test_a_history_that_cannot_be_read_is_refused(
         monkeypatch.setattr(
             client.workflow_service, "get_workflow_execution_history_reverse", unreadable
         )
-        with pytest.raises(TemporalRefusedError):
-            await _start(client, id, queue)
-        monkeypatch.undo()
-        await client.get_workflow_handle(id).terminate()
+        try:
+            with pytest.raises(TemporalRefusedError):
+                await _start(client, id, queue)
+        finally:
+            monkeypatch.undo()
+            await client.get_workflow_handle(id).terminate()
