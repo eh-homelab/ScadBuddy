@@ -1358,7 +1358,13 @@ def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
         assert still.status_code == 202, still.text
     finally:
         held.set()
+    # A follow waits `FOLLOW_WAIT` (1 s here) and answers 202 while the Update is still
+    # running, as on a loaded CI runner: follow again, as a client does.
     answered = client.post(accepting["follow_url"])
+    for _ in range(10):
+        if answered.status_code != 202:
+            break
+        answered = client.post(accepting["follow_url"])
 
     assert answered.status_code == 200, answered.text
     run = answered.json()
