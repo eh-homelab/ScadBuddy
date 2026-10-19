@@ -1704,6 +1704,7 @@ export const prints: PrintDetail[] = [
         url: '/api/v1/prints/35/timelapse',
         poster_url: '/api/v1/prints/35/timelapse/frames/0',
         frames_url: '/api/v1/prints/35/timelapse/frames',
+        filename: 'print-35-timelapse.mp4',
       },
       plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],

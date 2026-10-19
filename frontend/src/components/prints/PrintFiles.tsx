@@ -1,7 +1,7 @@
 import { Suspense, lazy, useState, type ReactNode } from 'react'
 import { api } from '../../api/client'
-import type { Job, ParamValue, PrintDetail } from '../../api/types'
-import { DownloadBlockedError, downloadBlob } from '../../lib/embed'
+import type { Job, Output, ParamValue, PrintDetail } from '../../api/types'
+import { DownloadBlockedError, downloadBlob, isEmbedded } from '../../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { CheckIcon, CopyIcon, DownloadIcon } from 'lucide-react'
@@ -39,7 +39,23 @@ const FILE_LABELS: Record<Kind, string> = {
   timelapse: 'Timelapse',
 }
 
-async function download(url: string, name: string): Promise<void> {
+/** Videos, which can run to gigabytes. */
+const LARGE: ReadonlySet<Kind> = new Set(['video', 'timelapse'])
+
+async function download(url: string, name: string, large = false): Promise<void> {
+  // #3107 — outside the frame, a video is saved from its URL by the browser, never read
+  // into memory first; the frame's sandbox drops such a download (CLAUDE.md, "Bambuddy
+  // iframe facts"), so there it takes `downloadBlob`'s popup.
+  if (large && !isEmbedded()) {
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = name
+    anchor.rel = 'noopener'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    return
+  }
   await downloadBlob(async () => {
     const response = await fetch(url)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -81,7 +97,7 @@ function entries(print: PrintDetail): Entry[] {
     rows.push({
       key: 'timelapse',
       kind: 'timelapse',
-      name: `print-${print.archive_id}-timelapse.mp4`,
+      name: media.timelapse.filename,
       size: null,
       url: media.timelapse.url,
     })
@@ -157,7 +173,7 @@ export function PrintFiles({ print }: { print: PrintDetail }) {
     setError(null)
     try {
       if (entry.url) {
-        await download(entry.url, entry.name)
+        await download(entry.url, entry.name, LARGE.has(entry.kind))
       } else if (print.provenance) {
         const json = JSON.stringify(print.provenance.params, null, 2) + '\n'
         await downloadBlob(async () => new Blob([json], { type: 'application/json' }), entry.name)
@@ -236,9 +252,11 @@ function FileView({ print, entry }: { print: PrintDetail; entry: Entry }) {
     case 'output_3mf':
       return <ModelView print={print} meshUrl={print.files.find((file) => file.kind === 'preview_glb')?.url ?? null} />
     case 'sliced':
+      return <SlicedView print={print} />
+    // #3108 — the print's slicing, which need not be this file's own: said so.
     case 'source':
     case 'library_file':
-      return <SlicedView print={print} />
+      return <SlicedView print={print} ofThePrint />
     case 'parameters':
       return <ParametersView print={print} />
     case 'photo':
@@ -264,7 +282,22 @@ function MeshView({ print, url }: { print: PrintDetail; url: string }) {
     async () => (print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
     [print.output_id],
   )
-  if (output.loading) {
+  return <Mesh print={print} url={url} output={output.data ?? null} loading={output.loading} />
+}
+
+/** The mesh, given its output as read by the view it is in (#3108: read once). */
+function Mesh({
+  print,
+  url,
+  output,
+  loading,
+}: {
+  print: PrintDetail
+  url: string
+  output: Output | null
+  loading: boolean
+}) {
+  if (loading) {
     return (
       <div role="status" aria-label="Loading the 3D preview">
         <Skeleton className="aspect-[4/3] w-full rounded-lg" />
@@ -275,10 +308,10 @@ function MeshView({ print, url }: { print: PrintDetail; url: string }) {
     id: print.output_id ?? `print-${print.archive_id}`,
     slug: print.slug ?? '',
     status: 'done',
-    created_at: output.data?.created_at ?? '',
+    created_at: output?.created_at ?? '',
     preview_url: url,
-    bbox_mm: output.data?.bbox_mm ?? null,
-    colors: output.data?.colors ?? null,
+    bbox_mm: output?.bbox_mm ?? null,
+    colors: output?.colors ?? null,
   }
   return (
     <div data-testid="file-mesh" className="aspect-[4/3] w-full overflow-hidden rounded-lg">
@@ -289,7 +322,6 @@ function MeshView({ print, url }: { print: PrintDetail; url: string }) {
   )
 }
 
-/** The editable 3MF: its mesh, the colours it uses, and each plate's image. */
 /** The editable 3MF: its mesh when ScadBuddy still has the preview, colours, and plates. */
 function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | null }) {
   const id = print.output_id
@@ -299,7 +331,7 @@ function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | n
   const colours = output.data?.colors ?? []
   return (
     <div className="space-y-3">
-      {meshUrl && <MeshView print={print} url={meshUrl} />}
+      {meshUrl && <Mesh print={print} url={meshUrl} output={output.data ?? null} loading={output.loading} />}
       {colours.length > 0 && (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           Colours
@@ -326,11 +358,16 @@ function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | n
   )
 }
 
-/** The sliced file: its plate images and what the slicer said of it. */
-function SlicedView({ print }: { print: PrintDetail }) {
+/**
+ * The sliced file: its plate images and what the slicer said of it. `ofThePrint` for a
+ * file that is not the sliced one (the slicer project, the library file), whose own
+ * slicing this may not be (#3108).
+ */
+function SlicedView({ print, ofThePrint = false }: { print: PrintDetail; ofThePrint?: boolean }) {
   const { slicing, outcome, media } = print
   return (
     <div className="space-y-3">
+      {ofThePrint && <h3 className="text-[13px] font-medium text-foreground">How this print was sliced</h3>}
       {media.plate_thumbnails.length > 0 && (
         <ul aria-label="Plates as sliced" className="flex flex-wrap gap-2">
           {media.plate_thumbnails.map((plate) => (
