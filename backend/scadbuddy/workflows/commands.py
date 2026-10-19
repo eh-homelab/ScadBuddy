@@ -160,9 +160,12 @@ def workflow_not_ready(error: RPCError) -> bool:
 #: The failure type an ``Operation`` fails its workflow task with to defer a kind its
 #: build does not register (operation.py `UnregisteredKindError`, #4139).
 DEFERRED_KIND = "UnregisteredKindError"
-#: How many of an execution's newest events `deferred_kind` reads: a failing task adds
-#: only its transient scheduled and started events above its failure.
+#: How many of an execution's newest events `deferred_kind` reads per page: a failing
+#: task adds only its transient scheduled and started events above its failure, but
+#: signals that arrive meanwhile stack up there too, so it reads on, page by page.
 NOT_READY_EVENTS = 20
+#: The most pages `deferred_kind` reads before it answers no (all within `DESCRIBE_SECONDS`).
+NOT_READY_PAGES = 5
 
 
 async def deferred_kind(client: Client, id: str) -> bool:
@@ -171,25 +174,38 @@ async def deferred_kind(client: Client, id: str) -> bool:
     task is `DEFERRED_KIND`. That task goes on once a build with the kind is current, so
     the command is still accepting. A task failing for any other reason (nondeterminism,
     a bug in workflow code) waits for nothing (#4156), nor does one whose history cannot
-    be read within `DESCRIBE_SECONDS`. Never raises."""
+    be read within `DESCRIBE_SECONDS`. Never raises.
+
+    The limit: Temporal records only a task's first failure, and the SDK lets later
+    attempts time out rather than report them. An ``Operation`` that deferred and then
+    fails on the new build for another reason still reads as a deferral, and is answered
+    still accepting until it completes a task or is terminated."""
+    token = b""
     try:
         async with asyncio.timeout(DESCRIBE_SECONDS):
-            page = await client.workflow_service.get_workflow_execution_history_reverse(
-                GetWorkflowExecutionHistoryReverseRequest(
-                    namespace=client.namespace,
-                    execution=WorkflowExecution(workflow_id=id),
-                    maximum_page_size=NOT_READY_EVENTS,
-                ),
-                timeout=timedelta(seconds=DESCRIBE_SECONDS),
-            )
-    except Exception:
+            for _ in range(NOT_READY_PAGES):
+                page = await client.workflow_service.get_workflow_execution_history_reverse(
+                    GetWorkflowExecutionHistoryReverseRequest(
+                        namespace=client.namespace,
+                        execution=WorkflowExecution(workflow_id=id),
+                        maximum_page_size=NOT_READY_EVENTS,
+                        next_page_token=token,
+                    ),
+                    timeout=timedelta(seconds=DESCRIBE_SECONDS),
+                )
+                for event in page.history.events:
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+                        return False
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+                        failure = event.workflow_task_failed_event_attributes.failure
+                        return failure.application_failure_info.type == DEFERRED_KIND
+                token = page.next_page_token
+                if not token:
+                    return False
+    except Exception as e:
+        logger.debug("command %s: could not read its history to tell a deferral: %r", id, e)
         return False
-    for event in page.history.events:
-        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
-            return False
-        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
-            failure = event.workflow_task_failed_event_attributes.failure
-            return failure.application_failure_info.type == DEFERRED_KIND
+    logger.debug("command %s: no workflow task event in its newest %d pages", id, NOT_READY_PAGES)
     return False
 
 
