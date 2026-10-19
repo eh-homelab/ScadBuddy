@@ -4,6 +4,7 @@ import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
+import { useSubscription } from '../../lib/realtime'
 import { CameraIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -21,8 +22,13 @@ import { cn } from '@/lib/utils'
 import { mergeCards, type NowCard } from './nowCards'
 import { PlateWarning } from './PlateWarning'
 
-/** How often the printers are read while the page is visible. */
+/** How often the printers are read while the page is visible: the fallback when no
+ * `printers` signal comes (realtime down, or a printer only Bambuddy knows). */
 export const NOW_POLL_MS = 15_000
+/** The least time between two reads the `printers` topic starts: a LAN printer's watch
+ * announces about once a second while it prints (`printers/watch.py`), and every read asks
+ * Bambuddy about each of its printers. */
+export const NOW_SIGNAL_MS = 2_000
 
 const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> = {
   printing: { label: 'Printing', tone: 'border-primary/30 bg-muted' },
@@ -37,7 +43,9 @@ const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> 
 /**
  * #977 — what each printer is doing now, whoever started the job: a print ScadBuddy
  * queued, one from Bambuddy's library, or one started on the printer. Read every
- * `NOW_POLL_MS` while the page is visible, and at once when it becomes visible again.
+ * `NOW_POLL_MS` while the page is visible, and at once when it becomes visible again,
+ * and (#3823) on a `printers` signal, at most every `NOW_SIGNAL_MS`. Each card says
+ * which link answered for it: the printer's own LAN report or Bambuddy.
  */
 export function NowPrinting() {
   const [cards, setCards] = useState<NowCard[] | null>(null)
@@ -45,6 +53,12 @@ export function NowPrinting() {
   /** #981 — the printer whose camera is open, by id, so its status stays current. */
   // The registry printer whose camera is open (#3823): only a Bambuddy-linked one has one.
   const [watching, setWatching] = useState<string | null>(null)
+  const signalled = useRef<() => void>(() => undefined)
+  // A `resync` (the subscription confirmed, or the socket back) is no news here: the
+  // poll and the visibility read cover what a dropped socket missed.
+  useSubscription('printers', (signal) => {
+    if (signal !== 'resync') signalled.current()
+  })
 
   useEffect(() => {
     let live = true
@@ -68,12 +82,25 @@ export function NowPrinting() {
           setCards((previous) => previous && previous.map((card) => ({ ...card, stale: card.stale ?? why })))
         })
     }
+    let lastSignalRead = 0
+    let pending: ReturnType<typeof setTimeout> | undefined
+    signalled.current = () => {
+      if (pending !== undefined) return
+      const wait = Math.max(0, lastSignalRead + NOW_SIGNAL_MS - Date.now())
+      pending = setTimeout(() => {
+        pending = undefined
+        lastSignalRead = Date.now()
+        read()
+      }, wait)
+    }
     read()
     const timer = setInterval(read, NOW_POLL_MS)
     document.addEventListener('visibilitychange', read)
     return () => {
       live = false
       clearInterval(timer)
+      clearTimeout(pending)
+      signalled.current = () => undefined
       document.removeEventListener('visibilitychange', read)
     }
   }, [])
@@ -131,6 +158,14 @@ export function NowPrinting() {
   )
 }
 
+/** Which link answered for a card (`PrinterNow.path`); a printer never heard from has none. */
+const PATH_LABEL: Record<PrinterNow['path'], string | null> = { native: 'LAN', bambuddy: 'Bambuddy', none: null }
+const PATH_TITLE: Record<PrinterNow['path'], string> = {
+  native: "From the printer's own report over the LAN",
+  bambuddy: 'From Bambuddy',
+  none: '',
+}
+
 function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }) {
   const { printer, stale } = card
   const activity = ACTIVITY[printer.activity]
@@ -141,7 +176,17 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
         className={cn('h-full gap-0 px-3 text-[12.5px]', stale && 'border border-dashed ring-0')}
       >
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate font-medium">{printer.name}</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-medium">{printer.name}</span>
+            {PATH_LABEL[printer.path] && (
+              <span
+                className="shrink-0 rounded border px-1 text-[10.5px] text-muted-foreground"
+                title={PATH_TITLE[printer.path]}
+              >
+                {PATH_LABEL[printer.path]}
+              </span>
+            )}
+          </span>
           <Badge variant="outline" className={cn('font-normal', activity.tone)}>
             {activity.label}
           </Badge>

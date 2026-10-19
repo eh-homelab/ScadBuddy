@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
+  PrinterRow,
   AnalysisTarget,
   BatchSummary,
   FilamentOptions,
@@ -230,6 +231,9 @@ interface Props {
   content?: { outputIds?: readonly string[]; libraryFileIds?: readonly number[] }
 }
 
+/** No registry rows: one constant, so a render without them keeps its dependencies. */
+const NO_ROWS: PrinterRow[] = []
+
 export function PrintPicker({
   open,
   source: given,
@@ -309,6 +313,22 @@ export function PrintPicker({
   const picker = usePrintChoices(open, source, carry)
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
+  /**
+   * #3823 — the printer registry, read with the dialog: the row that links the chosen
+   * Bambuddy printer goes out as `printer` beside `printer_id` (plan 2026-10-16 Task 10;
+   * the backend reads `printer` from Task 8, and ignores it before). A row no Bambuddy
+   * printer backs is listed but not choosable until the run can print over the LAN
+   * (Tasks 8 and 9). Unreadable, the dialog works as before, on Bambuddy ids alone.
+   */
+  const registry = useAsync(
+    async () => (open ? await api.listPrinters().catch(() => [] as PrinterRow[]) : ([] as PrinterRow[])),
+    [open],
+  )
+  const registryRows = registry.data ?? NO_ROWS
+  const registryPrinter = registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
+  const lanOnly = registryRows.filter(
+    (row) => row.bambuddy_printer_id == null || !printers.some((entry) => entry.id === row.bambuddy_printer_id),
+  )
   const { nozzles, tier, processName, bedType, overrides } = selection
   /**
    * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only
@@ -650,6 +670,7 @@ export function PrintPicker({
     source,
     choices,
     printerId,
+    registryPrinter,
     selection: { ...selection, plate },
     plan,
     planChanged,
@@ -1054,6 +1075,7 @@ export function PrintPicker({
     if (!batch || !printChoices) return null
     const request = printRunBody({
       printerId,
+      registryPrinter,
       plan,
       printChoices,
       copies,
@@ -1293,6 +1315,12 @@ export function PrintPicker({
                             <SelectItem key={entry.id} value={String(entry.id)}>
                               {entry.name}
                               {entry.model ? ` (${entry.model})` : ''}
+                            </SelectItem>
+                          ))}
+                          {lanOnly.map((row) => (
+                            <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
+                              {row.name}
+                              {row.model ? ` (${row.model})` : ''}: not in Bambuddy, so not yet printable from here
                             </SelectItem>
                           ))}
                         </SelectContent>

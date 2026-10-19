@@ -22,7 +22,7 @@ import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 import { chooseProject, openPicker } from '../test/projectPicker'
-import { choose, optionNames } from '../test/select'
+import { choose, optionDisabled, optionNames } from '../test/select'
 
 /** #3669 — the option text for the value a native select took, in the shadcn select that replaced it. */
 const OPTION_TEXT: Record<string, string | RegExp> = {
@@ -386,6 +386,8 @@ describe('PrintPicker', () => {
 
     expect(bodies).toHaveLength(1)
     expect(bodies[0]).toEqual({
+      // #3823 — the registry printer, and its Bambuddy id for a backend that reads only that.
+      printer: '00000000-0000-4000-8000-000000000001',
       printer_id: 1,
       filament_plan: {
         slots: [
@@ -1604,6 +1606,30 @@ describe('PrintPicker · Printer', () => {
     expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-31B-598')
     await pick(user, screen.getByLabelText('Printer'), '2')
     await waitFor(() => expect(urls.at(-1)).toContain('printer_id=2'))
+  })
+
+  it('names the registry printer only for a Bambuddy printer the registry links (#3823)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await pick(user, screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114'))
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    const body = bodies[0] as { printer?: unknown; printer_id?: unknown }
+    expect(body.printer_id).toBe(2)
+    expect(body).not.toHaveProperty('printer')
+  })
+
+  it('lists a printer reached only over the LAN, not yet choosable (#3823)', async () => {
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(await optionDisabled(user, screen.getByLabelText('Printer'), /^Garage/)).toBe(true)
+    await user.click(screen.getByLabelText('Printer'))
+    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not in Bambuddy')
   })
 
   it('does not ask which printer when there is only one', async () => {

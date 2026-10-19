@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PRINTERS_NOW, setPrintersNow } from '../../mocks/features/printersNow'
 import { server } from '../../mocks/server'
+import { emitRealtime } from '../../mocks/realtime'
 import { renderPage } from '../../test/utils'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import type * as Embed from '../../lib/embed'
@@ -158,6 +159,36 @@ describe('NowPrinting (#977)', () => {
     expect(card).toHaveTextContent('Garage')
     expect(within(card).queryByRole('button', { name: /Camera/ })).toBeNull()
     expect(screen.getByRole('button', { name: 'Camera of 3DP-31B-598' })).toBeInTheDocument()
+  })
+
+  it("labels each card with the link that answered (#3823)", async () => {
+    const lan: PrinterNow = {
+      ...(PRINTERS_NOW[2] as PrinterNow),
+      id: '00000000-0000-4000-8000-0000000000aa',
+      path: 'native',
+      printer_id: null,
+      name: 'Garage',
+    }
+    const silent: PrinterNow = { ...lan, id: '00000000-0000-4000-8000-0000000000bb', path: 'none', name: 'Attic', activity: 'offline' }
+    setPrintersNow([...PRINTERS_NOW, lan, silent])
+    renderPage(<NowPrinting />)
+
+    const card = await screen.findByTestId(`printer-now-${lan.id}`)
+    expect(within(card).getByText('LAN')).toBeInTheDocument()
+    expect(within(screen.getByTestId('printer-now-1')).getByText('Bambuddy')).toBeInTheDocument()
+    expect(within(screen.getByTestId(`printer-now-${silent.id}`)).queryByText(/^(LAN|Bambuddy)$/)).toBeNull()
+  })
+
+  it('reads the printers again when one changes, without waiting for the poll (#3823)', async () => {
+    renderPage(<NowPrinting />)
+    const card = await screen.findByTestId('printer-now-2')
+    expect(card).toHaveTextContent('66%')
+
+    setPrintersNow(PRINTERS_NOW.map((printer) => (printer.printer_id === 2 ? { ...printer, progress: 80 } : printer)))
+    await waitFor(() => {
+      emitRealtime('printer.report', ['printers', `printer:${PRINTERS_NOW[1]!.id}`], {})
+      expect(screen.getByText('80%')).toBeInTheDocument()
+    })
   })
 
   it('is absent with no printers', async () => {

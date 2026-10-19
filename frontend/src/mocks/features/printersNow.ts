@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { PrinterNow, PrintersNow } from '../../api/types'
+import { printersState } from './printers'
 
 /**
  * #977 — what each printer is doing now: the H2C paused on the 2026-10-01 spaghetti
@@ -79,8 +80,35 @@ export function setPrintersNow(printers: PrinterNow[]): void {
   state.printers = printers
 }
 
+/**
+ * #3823 — the registry's LAN links show as the backend reports them: a linked row's
+ * card is answered by its own LAN report (`path: 'native'`), and a row only the LAN
+ * reaches is a card with no Bambuddy id.
+ */
+function withLan(cards: PrinterNow[]): PrinterNow[] {
+  const lan = printersState().filter((row) => row.lan_host)
+  const shown = cards.map((card) => {
+    const row = lan.find((entry) => entry.bambuddy_printer_id === card.printer_id)
+    return row ? { ...card, id: row.id, path: 'native' as const } : card
+  })
+  const lanOnly = lan
+    .filter((row) => row.bambuddy_printer_id == null)
+    .map(
+      (row): PrinterNow => ({
+        ...IDLE,
+        id: row.id,
+        path: 'native',
+        printer_id: null,
+        name: row.name,
+      }),
+    )
+  return [...shown, ...lanOnly]
+}
+
+const IDLE = PRINTERS_NOW[2]!
+
 export const handlers = [
   http.get('/api/v1/print/printers/now', () =>
-    HttpResponse.json({ printers: state.printers } satisfies PrintersNow),
+    HttpResponse.json({ printers: withLan(state.printers) } satisfies PrintersNow),
   ),
 ]
