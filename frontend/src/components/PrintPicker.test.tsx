@@ -4206,9 +4206,16 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
   /** Holds each algorithm PUT until the test answers it, in any order. */
   function heldSaves() {
+    /** Answers each save, by the order its `version` was first sent. */
     const answers: ((status: number) => void)[] = []
-    /** The `version` each save was sent with, in the order sent. */
+    /** The `version` each save was sent with, in the order sent, each once. */
     const versions: number[] = []
+    // Every PUT the handler holds for each save, and the answer once given. A save can
+    // reach the handler twice: the test setup resends one MSW let through after an aborted
+    // request (src/test/resend.ts), and here the handler had seen that one too, so a count
+    // of PUTs read three for two saves. A save is its version, which a resend repeats.
+    const held: ((status: number) => void)[][] = []
+    const given: (number | undefined)[] = []
     // The printer's stored algorithm, as the choices read reports it.
     let stored = 'least_used'
     // While set, each choices read answers with what was stored when it started, but only
@@ -4225,8 +4232,20 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       }),
       http.put('/api/v1/print/printers/:id/rack-algorithm', async ({ request }) => {
         const { algorithm, version } = (await request.json()) as { algorithm: string; version: number }
-        versions.push(version)
-        const status = await new Promise<number>((resolve) => answers.push(resolve))
+        let index = versions.indexOf(version)
+        if (index === -1) {
+          index = versions.push(version) - 1
+          held.push([])
+          answers.push((status) => {
+            given[index] = status
+            held[index]?.splice(0).forEach((resolve) => resolve(status))
+          })
+        }
+        const status = await new Promise<number>((resolve) => {
+          const answered = given[index]
+          if (answered === undefined) held[index]?.push(resolve)
+          else resolve(answered)
+        })
         if (status !== 200) return HttpResponse.json({ title: 'Service Unavailable', status }, { status })
         stored = algorithm
         return HttpResponse.json({ algorithm })
@@ -4250,6 +4269,24 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     const storedNow = () => stored
     return { answers, answer, saves, versions, heldReads, holdChoiceReads, releaseReads, stored: storedNow }
   }
+
+  it('counts a save its handler sees twice once, and answers both', async () => {
+    // What the test setup's resend can do (see heldSaves): one save, two PUTs.
+    const { answers, answer, versions } = heldSaves()
+    const send = () =>
+      fetch('/api/v1/print/printers/1/rack-algorithm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ algorithm: 'oldest_first', version: 7 }),
+      })
+    const first = send()
+    const resent = send()
+    await waitFor(() => expect(answers).toHaveLength(1))
+    answer(0, 200)
+    expect((await first).status).toBe(200)
+    expect((await resent).status).toBe(200)
+    expect(versions).toEqual([7])
+  })
 
   it('lets only the latest of two saves say it was not remembered', async () => {
     // #1086 review: an earlier save failing after a later one succeeded said the later
