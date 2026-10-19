@@ -75,6 +75,8 @@ export type AgentWorkerOptions = {
   deployment?: { name: string; buildId: string }
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
+  /** How often each activity heartbeats (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
+  activityHeartbeatMs?: number
   shutdownGraceMs?: number
   /** When the SDK gives up on running activities and the worker stops regardless. */
   shutdownForceMs?: number
@@ -172,7 +174,7 @@ export class AgentWorker {
           taskQueue: options.taskQueue ?? TASK_QUEUE,
           ...(options.identity !== undefined ? { identity: options.identity } : {}),
           activities: options.activities,
-          interceptors: { activity: [heartbeatingActivities()] },
+          interceptors: { activity: [heartbeatingActivities(options.activityHeartbeatMs)] },
           ...options.workflows,
           ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
           ...(options.deployment
