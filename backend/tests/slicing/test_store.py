@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import pytest
@@ -52,17 +52,24 @@ async def test_start_twice_with_one_workflow_id_is_one_row(store: NativeSliceSto
 
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
 async def test_start_on_an_unfinished_row_reads_running_at_once(
-    store: NativeSliceStore, status: Literal["failed", "cancelled"]
+    store: NativeSliceStore,
+    pool: Pool,  # noqa: F811
+    status: Literal["failed", "cancelled"],
 ) -> None:
     """Task 12 review I1: the dialog reads the row the moment the start answers, before
     the new execution's first activity; it must not read the old failure and stop. A
-    start that no execution follows is the lost-row stop's (`started_at` refreshed)."""
+    start that no execution follows is the lost-row stop's (`started_at` refreshed).
+
+    The refresh is checked against a start put far in the past, not against the first
+    start's: two reads of a wall clock can go backwards (WSL steps it), and the store
+    promises only that the restart writes the clock's time, not a later one."""
     slice_id = await _start(store)
     await store.finish(
         slice_id, status=status, sliced_blob_key=None, failure="The slicer failed: x", warnings=[]
     )
-    before = await store.get(slice_id, "out-1")
-    assert before is not None
+    long_ago = datetime(2000, 1, 1, tzinfo=UTC)
+    with pool.connection() as conn:
+        conn.execute("UPDATE native_slices SET started_at = %s WHERE id = %s", (long_ago, slice_id))
     again = await store.start(
         workflow_id="slice-1-a", subject="out-1", library_file_id=1, plate_id=1, preset_key="k"
     )
@@ -72,9 +79,10 @@ async def test_start_on_an_unfinished_row_reads_running_at_once(
         None,
         None,
     )
-    assert again.started_at > before.started_at
+    assert again.started_at - long_ago > timedelta(days=365)
     found = await store.get(slice_id, "out-1")
     assert found is not None and found.status == "running"
+    assert found.started_at == again.started_at
 
 
 async def test_a_start_on_a_running_row_leaves_its_start(store: NativeSliceStore) -> None:
