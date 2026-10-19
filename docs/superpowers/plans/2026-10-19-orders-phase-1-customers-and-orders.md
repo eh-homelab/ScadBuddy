@@ -32,7 +32,7 @@ Where the spec leaves a choice open, or phase 1 needs something a later phase ow
 1. **The full `order_item_quotes` table lands in phase 1, with `manual` quotes only.** Spec §3.5 lets no order be accepted while an item has no accepted quote, so without quotes phase 1 could never accept an order. The table carries every §3.4 column (`sliced_sha256` and `sliced_blob_key` nullable, `plates`, `lines`, the four money columns, `source`, `accepted`), so phase 2 adds the slice path and no migration. A `manual` quote is `POST …/quotes` with `{"unit_price_minor": N, "label": "…"}`: one line of kind `manual`, `unit_cost_minor = unit_price_minor`, both file fields null, no blob ref (spec §3.4's last amendment). Its `quantity` is the item's at the time; a quantity change drops the accepted quote as a reference change does (§4's `PATCH` row).
 2. **`order_shipments` and `order_shipment_items` land in phase 1.** Spec §3.5 reaches `shipped` only through a shipment covering every fulfilled item, and §11 says "close works" in phase 1, so the two §6.3 tables and the routes `POST /orders/{id}/shipments`, `PATCH …/{shipment}` are built here, exactly as §6.3 says them. Phase 3 (#4251) keeps the packed-photo attachment and `/costs`. The plan's PR says so on #4251.
 3. **`order_item_fulfilments` lands in phase 1 with the hand-written columns only:** `id`, `order_item_id`, `attempt`, `quantity`, `outcome`, `failure_reason`, `started_at`, `finished_at`, `notes`, `accepted_at`, `created_by`, `created_at`. Phase 3 adds the print path's columns (`print_run_id`, `sliced_sha256`, `sliced_blob_key`, `printer`, `actual_seconds`, `actual_grams`, `archive_id`, `timelapse_blob_key`) in its own migration. "Manual fulfilment" is `POST …/fulfilments` by a person, then `POST …/fulfilments/{f}/accept`.
-4. **Phase 1's item states are `draft`, `quoted`, `approved`, `fulfilled`, `cancelled`, plus `failed` from a hand-recorded failed attempt.** `queued`, `printing` and `printed` arrive with the print path (phase 3) and are in the `CHECK` constraint now, so phase 3 adds no migration for them. `in_production` is derived as "any item has an attempt and not every item is settled".
+4. **Phase 1's item states are `draft`, `quoted`, `approved`, `fulfilled`, `cancelled`, plus `failed` from a hand-recorded failed attempt.** `queued`, `printing` and `printed` arrive with the print path (phase 3) and are in the `CHECK` constraint now, so phase 3 adds no migration for them. A `failed` item leaves that state the way spec §6.1 says: recording its next fulfilment attempt returns it to `approved` (a cancel still takes it to `cancelled`). `in_production` is derived in phase 1 as "any item has an attempt and not every item is settled", which is spec §3.5's "any item past `approved`" restricted to the states phase 1 has (an attempt is the only way past `approved` here); once phase 3 adds `queued`, the derivation must read "any item `queued` or beyond, or with an attempt" so it still agrees with §3.5, and Task 12's spec edit says so.
 5. **Order numbers are `ORD-<yyyy>-<n>` from a per-year counter row** (`order_numbers(year int primary key, last int)`), taken under `SELECT … FOR UPDATE` in the order's insert transaction, so numbers never skip on a rolled-back insert and never repeat across replicas. A Postgres sequence would skip.
 6. **The reference is validated at write time against the catalogue:** the slug must exist (or be a tombstone, for a re-pointed item of a deleted template, which is refused with 409 `template_deleted`), the commit must be a commit of that model's history (`library/history.py` `ModelHistory`, `COMMIT_ID_PATTERN`), and `inputs` must pass `render/inputs.py` `normalize_inputs` against that commit's schema. An invalid reference is 422 naming the field. `libraries` is copied from the output's `meta.json` when the item is made from an output, else resolved as a render at that commit would resolve them (`render/submit.py`'s library pins), so a later render reproduces the item.
 7. **`colours` is filled from the render, never typed:** from the output's `meta.json` `colors` when the item is made from an output, else from the model's default-render preview record when one exists (`render/previews.py`), else left empty for the quote (phase 2) to fill. A `filament_id` is null in phase 1 (the price book is phase 2).
@@ -89,13 +89,15 @@ Where the spec leaves a choice open, or phase 1 needs something a later phase ow
 **Files:**
 - Create: `backend/scadbuddy/migrations/<ts>_orders.sql`
 - Create: `backend/scadbuddy/orders/__init__.py`, `backend/scadbuddy/orders/models.py`, `backend/scadbuddy/orders/store.py`, `backend/scadbuddy/orders/numbers.py`
-- Test: `backend/tests/orders/test_store.py`, `backend/tests/orders/test_numbers.py` (`requires_postgres`, the `pg_conninfo` fixture)
+- Modify: `backend/scadbuddy/core/events.py` (`OrderChanged`, `OrderItemChanged` after `ActivityEvent` :209; the `Event` union :329)
+- Test: `backend/tests/orders/test_store.py`, `backend/tests/orders/test_numbers.py` (`requires_postgres`, the `pg_conninfo` fixture), `backend/tests/test_events.py` (the union round-trips)
 
 **Interfaces:**
 - Produces:
   - Schema, spec §3.1-3.4, §6.1 (Ruling 3), §6.3, Ruling 5: `customers`, `customer_contacts` (`kind` CHECK in `phone|email|instagram|facebook|tiktok|etsy|website|other`; a partial unique index on `(customer_id, kind) WHERE "primary"`), `customer_addresses`, `orders` (`status` CHECK over §3.5's list, `currency char(3)`, `on_hold boolean`, `shipping_address_id`/`billing_address_id` nullable references with `ON DELETE SET NULL`, the two jsonb snapshots, `number text UNIQUE`), `order_numbers(year int primary key, last int not null)`, `order_charges`, `order_payments`, `order_events`, `order_items` (`status` CHECK over the full §3.5 list, `commit` CHECK `~ '^[0-9a-f]{40}$'`, `quantity >= 1`), `order_item_quotes` (partial unique index `(order_item_id) WHERE accepted`), `order_item_fulfilments` (unique `(order_item_id, attempt)`), `order_shipments`, `order_shipment_items`. Indexes: `orders (customer_id)`, `orders (status, created_at desc)`, `order_items (order_id, position)`, `order_events (order_id, id)`.
   - `models.py`: pydantic models `Customer`, `Contact`, `Address`, `Order`, `OrderItem`, `Reference` (`slug`, `commit`, `inputs: dict`, `libraries: list[LibraryPin]`, `template_name`, `render_key`), `ColourSlot`, `Quote`, `QuoteLine`, `Charge`, `Payment`, `Fulfilment`, `Shipment`, `ShipmentItem`, `OrderEvent`; `OrderStatus`/`ItemStatus` literals; `Money = int` with a `minor` suffix convention documented once.
   - `store.py`: `class OrderStore` (sync, autocommit pool, `dict_row`), with `transaction()` (a context manager yielding a connection in a transaction), `lock_order(conn, order_id) -> Order` (`SELECT … FOR UPDATE`), and plain CRUD per table: `insert_customer/update_customer/archive_customer/customer/customers(q, include_archived)`, `replace_contacts`, `replace_addresses`, `insert_order(conn, …)`, `order(id)`, `orders(filter, cursor, limit) -> (rows, next_cursor)` (cursor as `activity/index.py` encodes one), `update_order_fields`, `set_order_status(conn, id, status, at)`, `insert_item/update_item/delete_draft_item/items(order_id)`, `insert_quote/accept_quote(conn, item_id, quote_id)` (clears the other accepted one in the same statement), `insert_fulfilment/update_fulfilment/accept_fulfilment`, `insert_shipment/update_shipment`, `charges/replace_charges`, `payments/insert_payment`, `insert_event(conn, order_id, by, kind, detail)`, `events(order_id)`, `item_inputs() -> Iterator[dict]` (for the asset scan).
+  - `events.py`: `class OrderChanged(BaseEvent): kind: Literal["order.changed"]; order_id: str; status: OrderStatus`; `class OrderItemChanged(BaseEvent): kind: Literal["order_item.changed"]; order_id: str; item_id: str; status: ItemStatus; attempt: int | None` (the bus carries ids and the new status only, spec §7.1; Task 4 publishes them, Task 5 routes them).
   - `numbers.py`: `next_number(conn, year: int) -> str` → `ORD-<yyyy>-<n>`, under `SELECT last FROM order_numbers WHERE year = %s FOR UPDATE` (inserting the year's row with `ON CONFLICT DO NOTHING` first).
 
 - [ ] **Step 1: Write the failing tests**
@@ -120,6 +122,9 @@ def test_a_customer_has_at_most_one_primary_per_kind(rows) -> None: ...
 def test_an_item_keeps_at_most_one_accepted_quote(rows) -> None: ...
 def test_order_list_pages_newest_first_by_cursor(rows) -> None: ...
 def test_fulfilment_attempts_are_numbered_per_item(rows) -> None: ...
+
+# tests/test_events.py (beside the existing union round-trips)
+def test_order_events_round_trip() -> None: ...
 ```
 
 - [ ] **Step 2: Run to verify they fail**: `uv run --frozen pytest tests/orders -v` → FAIL (no module).
@@ -155,10 +160,10 @@ def test_fulfilment_attempts_are_numbered_per_item(rows) -> None: ...
 - Test: `backend/tests/orders/test_lifecycle.py` (`requires_postgres`)
 
 **Interfaces:**
-- Produces: `class Lifecycle(store: OrderStore, bus)` with one method per transition, each opening `store.transaction()`, taking `lock_order`, checking, writing, deriving, writing the audit row and publishing after commit: `accept_order(order_id, by)` (every item `approved`, else 409 `items_not_quoted` naming them; snapshots the addresses, Ruling 11; `accepted_at`), `cancel_order(order_id, by, reason)` (refused past `shipped`; cancels open items, keeps attempts), `hold(order_id, by)` / `release(order_id, by)` (the `on_hold` flag), `close_order(order_id, by)` (refused with 409 `order_not_closable` listing every item not `fulfilled`/`cancelled` and every fulfilled item not covered by a shipment), `accept_quote(order_id, item_id, quote_id, by)` (item → `approved`; order `draft` → `quoted` when every item is approved), `record_fulfilment(order_id, item_id, body, by)` (attempt numbered per item; `failed` outcome → item `failed`), `accept_fulfilment(order_id, item_id, f, by)` (item → `fulfilled` when accepted quantities reach the item's), `cancel_item(order_id, item_id, by)`, `add_shipment(order_id, body, by)` / `update_shipment`; and `def derive(order, items, shipments) -> OrderStatus` (pure: `in_production` / `ready` / whether `shipped`, `closed` are allowed; Ruling 4), unit-tested without Postgres.
-- Every transition's refusal is an `ApiError` with a `type_` under `https://scadbuddy.dev/problems/orders/<slug>` and the offending ids in `detail`, as `api/activity.py` builds `BAD_CURSOR`.
+- Produces: `class Lifecycle(store: OrderStore, bus)` with one method per transition, each opening `store.transaction()`, taking `lock_order`, checking, writing, deriving, writing the audit row and publishing after commit: `accept_order(order_id, by)` (every item not `cancelled` is `approved`, else `items_not_quoted` naming the others; cancelled items are exempt, and an order whose every item is cancelled is refused with `no_open_items`; snapshots the addresses, Ruling 11; `accepted_at`), `cancel_order(order_id, by, reason)` (refused past `shipped`; cancels open items, keeps attempts), `hold(order_id, by)` / `release(order_id, by)` (the `on_hold` flag), `close_order(order_id, by)` (refused with 409 `order_not_closable` listing every item not `fulfilled`/`cancelled` and every fulfilled item not covered by a shipment), `accept_quote(order_id, item_id, quote_id, by)` (item → `approved`; order `draft` → `quoted` when every item not `cancelled` is approved), `record_fulfilment(order_id, item_id, body, by)` (attempt numbered per item; `failed` outcome → item `failed`; a new attempt on a `failed` item → `approved` first, Ruling 4), `accept_fulfilment(order_id, item_id, f, by)` (item → `fulfilled` when accepted quantities reach the item's), `cancel_item(order_id, item_id, by)`, `add_shipment(order_id, body, by)` / `update_shipment`; and `def derive(order, items, shipments) -> OrderStatus` (pure: `in_production` / `ready` / whether `shipped`, `closed` are allowed; Ruling 4), unit-tested without Postgres.
+- Every transition's refusal is a domain exception, `class LifecycleError(Exception)` with `slug` and the offending ids (`items`, `shipments`), raised by `orders/lifecycle.py` without any HTTP shape, as `flows/store.py` raises `GrantStateError`. Task 7's `api/orders.py` maps each one to an `ApiError` (`core/problems.py`) with status 409, a `type_` of `https://scadbuddy.dev/problems/orders/<slug>` and the ids in `detail`, as `api/flows.py` maps `GrantStateError` in `_grant_state`; `orders/` never imports from `api/`.
 
-- [ ] **Step 1: Write the failing tests**: the Review Focus cases 2, 3, 4, 6; plus `test_accept_needs_every_item_quoted`, `test_quoted_falls_back_to_draft_when_an_item_is_added`, `test_a_failed_attempt_then_a_good_one_fulfils`, `test_shipped_needs_every_fulfilled_item_covered`, `test_derive_is_pure` (table-driven over `derive`).
+- [ ] **Step 1: Write the failing tests**: the Review Focus cases 2, 3, 4, 6; plus `test_accept_needs_every_item_quoted`, `test_quoted_falls_back_to_draft_when_an_item_is_added`, `test_a_failed_attempt_then_a_good_one_fulfils` (the second attempt first returns the item to `approved`), `test_accept_ignores_cancelled_items`, `test_accept_refuses_an_order_of_only_cancelled_items`, `test_shipped_needs_every_fulfilled_item_covered`, `test_derive_is_pure` (table-driven over `derive`).
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `uv run --frozen pytest tests/orders` → PASS; mypy.
@@ -166,22 +171,22 @@ def test_fulfilment_attempts_are_numbered_per_item(rows) -> None: ...
 
 ---
 
-### Task 5: Events, the realtime topic and the component
+### Task 5: The realtime topic and the component
 
 **Files:**
-- Modify: `backend/scadbuddy/core/events.py` (`OrderChanged`, `OrderItemChanged` after `ActivityEvent` :209; the `Event` union :329)
 - Modify: `backend/scadbuddy/api/realtime.py` (`COLLECTION_TOPICS` gains `"orders"`; `_TOPIC` gains `order:[0-9a-f-]{36}`; `topics_of` arms)
 - Create: `backend/scadbuddy/orders/component.py` (`ORDERS`, `OrdersComponent` with `store`, `lifecycle`, built lazily as `PrintLibrary` is, since the pool opens after `build_all`)
-- Test: `backend/tests/test_events.py` (the union round-trips), `backend/tests/api/test_realtime_orders.py` (modelled on `test_realtime_activity.py`)
+- Test: `backend/tests/api/test_realtime_orders.py` (modelled on `test_realtime_activity.py`)
 
 **Interfaces:**
-- Produces: `class OrderChanged(BaseEvent): kind: Literal["order.changed"]; order_id: str; status: OrderStatus`; `class OrderItemChanged(BaseEvent): kind: Literal["order_item.changed"]; order_id: str; item_id: str; status: ItemStatus; attempt: int | None`; `topics_of` → `["orders", f"order:{order_id}"]` for both; `ORDERS: Key[OrdersComponent]`, `OrdersDep = Annotated[OrdersComponent, component_dep(ORDERS)]`.
+- Consumes: `OrderChanged`, `OrderItemChanged` (Task 2).
+- Produces: `topics_of` → `["orders", f"order:{order_id}"]` for both; `ORDERS: Key[OrdersComponent]`, `OrdersDep = Annotated[OrdersComponent, component_dep(ORDERS)]`.
 
-- [ ] **Step 1: Write the failing tests**: `test_order_events_round_trip`, `test_an_order_change_is_news_for_orders_and_its_order` (a socket following `orders` hears a `PATCH`).
+- [ ] **Step 1: Write the failing tests**: `test_an_order_change_is_news_for_orders_and_its_order` (a socket following `orders` hears a `PATCH`).
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement.** `assert_never` in `topics_of` forces the arms.
 - [ ] **Step 4: Run** the two test modules; mypy.
-- [ ] **Step 5: Commit** `feat(orders): order.changed and order_item.changed on the bus, the orders topic, the ORDERS component (#4249)`
+- [ ] **Step 5: Commit** `feat(orders): the orders realtime topic and the ORDERS component (#4249)`
 
 ---
 
@@ -290,7 +295,7 @@ def test_fulfilment_attempts_are_numbered_per_item(rows) -> None: ...
 
 **Files:**
 - Modify: `CLAUDE.md` ("Layout": a `backend/scadbuddy/orders/` entry naming the component, the store, the lifecycle's lock-and-derive rule, the two events, the pages and the mocks)
-- Modify: `docs/superpowers/specs/2026-10-18-orders-design.md` (§4: the manual quote body; §11 phases 1 and 3: shipments moved, per Ruling 2)
+- Modify: `docs/superpowers/specs/2026-10-18-orders-design.md` (§4: the manual quote body; §11 phases 1 and 3: shipments moved, per Ruling 2; §3.5: a note that phase 1 derives `in_production` from attempts, and that phase 3's `queued` writer must widen `derive` to "any item `queued` or beyond, or with an attempt" so the derivation keeps meaning "any item past `approved`", Ruling 4)
 - Modify: `README.md` "Features" (one line: orders)
 
 - [ ] **Step 1: Write** the three edits.
@@ -300,7 +305,7 @@ def test_fulfilment_attempts_are_numbered_per_item(rows) -> None: ...
 
 ## Self-review
 
-- Spec coverage. §3.1-3.3: Tasks 2, 3, 6, 7. §3.4 (manual only, Ruling 1): Tasks 2, 7. §3.5 and Ruling 5: Task 4. §3.6: Task 2's column types and Task 11's formatting. §4 (phase 1's rows): Tasks 6, 7; the quote operation, print, attachments, costs and the price book are phases 2 and 3. §6.1 by hand and §6.3: Rulings 2, 3, Tasks 2, 4, 7. §7.1's events: Task 5 (the trigger kinds are phase 4). §7.3: Task 8 with Ruling 14. §9's last paragraphs (first-party pages, the extracted components, "Add to order…", "Order this"): Tasks 9, 11. Ruling 1 (commit, never HEAD): Task 3. Ruling 6: Task 4, Ruling 10. Ruling 12: Tasks 6, 7.
+- Spec coverage. §3.1-3.3: Tasks 2, 3, 6, 7. §3.4 (manual only, Ruling 1): Tasks 2, 7. §3.5 and Ruling 5: Task 4. §3.6: Task 2's column types and Task 11's formatting. §4 (phase 1's rows): Tasks 6, 7; the quote operation, print, attachments, costs and the price book are phases 2 and 3. §6.1 by hand and §6.3: Rulings 2, 3, Tasks 2, 4, 7. §7.1's events: Task 2, their topic Task 5 (the trigger kinds are phase 4). §7.3: Task 8 with Ruling 14. §9's last paragraphs (first-party pages, the extracted components, "Add to order…", "Order this"): Tasks 9, 11. Ruling 1 (commit, never HEAD): Task 3. Ruling 6: Task 4, Ruling 10. Ruling 12: Tasks 6, 7.
 - Dependencies between tasks: Task 1 before 7 (the currency at create). Task 2 before 3, 4, 5. Task 5 before 6, 7 (the component and the events). Task 7 before 8 and 10 (the schema). Task 9 before 11. Task 12 last.
-- Types used across tasks: `Reference`, `ColourSlot` (Task 2) in Tasks 3, 7, 10; `Lifecycle.derive` (Task 4) in Task 7; `OrderChanged`/`OrderItemChanged` (Task 5) in Tasks 4, 7; `OrderPage` and the problem types (Task 7) in Tasks 10, 11.
+- Types used across tasks: `Reference`, `ColourSlot` (Task 2) in Tasks 3, 7, 10; `Lifecycle.derive` (Task 4) in Task 7; `OrderChanged`/`OrderItemChanged` (Task 2) in Tasks 4, 5, 7; `LifecycleError` (Task 4) in Task 7; `OrderPage` and the problem types (Task 7) in Tasks 10, 11.
 - What phase 2 and 3 will touch again, on purpose: `order_item_quote` widens from manual to the slice operation (Tasks 7, 8); `order_item_fulfilments` gains the print-path columns in a new migration (Ruling 3); `colours[].filament_id` is filled by the price book (Ruling 7); item states `queued`/`printing`/`printed` get their writers (Ruling 4).
