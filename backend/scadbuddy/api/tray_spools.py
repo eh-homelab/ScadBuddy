@@ -22,7 +22,7 @@ from fastapi import APIRouter, Path, Response, status
 from psycopg.errors import ForeignKeyViolation
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from scadbuddy.bambuddy.trays import seen_trays, tray_label
+from scadbuddy.bambuddy.trays import EXTERNAL, seen_trays, tray_label
 from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.models import PrinterRow
@@ -34,6 +34,9 @@ from scadbuddy.spools.overlay import report_status
 router = APIRouter(prefix="/printers", tags=["printers"])
 
 TRAY_PATH = "/{printer_id}/trays/{ams_id}/{tray_id}/spool"
+#: ``20261019T0304Z_tray_spool_links_printer_fkey.sql``: the one foreign key a deleted
+#: printer breaks; the spool's would be a different failure.
+PRINTER_FKEY = "tray_spool_links_printer_fkey"
 AmsId = Annotated[int, Path(ge=0, le=255)]
 TrayId = Annotated[int, Path(ge=0, le=15)]
 
@@ -59,6 +62,24 @@ class TraySpoolLink(BaseModel):
 
 def _no_printer(printer_id: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+
+
+def _known_slot(ams_id: int, tray_id: int) -> None:
+    """422 for a unit or slot no printer has (#4336 review M1): an AMS 0-15 with slots
+    0-3, an AMS-HT 128-135 with slot 0, the external holders 255 with 0-1, the spaces
+    `trays.unit_label` names."""
+    if 0 <= ams_id <= 15:
+        known = tray_id <= 3
+    elif 128 <= ams_id <= 135:
+        known = tray_id == 0
+    else:
+        known = ams_id == EXTERNAL and tray_id <= 1
+    if not known:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"no printer has unit {ams_id} slot {tray_id}: an AMS is 0-15 with slots 0-3, an"
+            " AMS-HT 128-135 with slot 0, and the external holders 255 with slots 0-1",
+        )
 
 
 async def _row(printers: PrintersDep, printer_id: str) -> PrinterRow:
@@ -93,7 +114,9 @@ async def _written[T](printer_id: str, write: Awaitable[T]) -> T:
     (the #4186 review's handoff to this task)."""
     try:
         return await write
-    except ForeignKeyViolation:
+    except ForeignKeyViolation as error:
+        if error.diag.constraint_name != PRINTER_FKEY:
+            raise
         raise _no_printer(printer_id) from None
     except LookupError as error:
         raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
@@ -122,6 +145,7 @@ async def put_tray_spool(
     tray_id: TrayId,
     body: TraySpoolLink,
 ) -> TraySpool:
+    _known_slot(ams_id, tray_id)
     row = await _row(printers, printer_id)
     tray = await _tray(printers, row, ams_id, tray_id)
     return await _written(
@@ -150,6 +174,7 @@ async def delete_tray_spool(
     ams_id: AmsId,
     tray_id: TrayId,
 ) -> Response:
+    _known_slot(ams_id, tray_id)
     row = await _row(printers, printer_id)
     await spools.store.unlink(UUID(row.id), ams_id, tray_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

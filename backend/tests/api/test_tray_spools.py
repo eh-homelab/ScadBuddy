@@ -259,3 +259,40 @@ def test_a_printer_deleted_during_the_link_is_404_not_500(
     monkeypatch.setattr(store, "link", deleted_first)
     answer = client.put(_path(lan_printer), json={"provider": "bambuddy", "record_id": "16"})
     assert answer.status_code == 404, answer.text
+
+
+@pytest.mark.parametrize(("ams_id", "tray_id"), [(60, 0), (0, 4), (128, 1), (255, 2), (200, 0)])
+def test_a_unit_no_printer_has_is_422(
+    client: TestClient, lan_printer: str, ams_id: int, tray_id: int
+) -> None:
+    """#4336 review M1: AMS 0-15 with trays 0-3, an AMS-HT 128-135 with tray 0, the
+    external holders 255 with trays 0-1 (`trays.unit_label`'s spaces)."""
+    body = {"provider": "bambuddy", "record_id": "16"}
+    assert client.put(_path(lan_printer, ams_id, tray_id), json=body).status_code == 422
+    assert client.delete(_path(lan_printer, ams_id, tray_id)).status_code == 422
+
+
+def test_bambuddys_own_assignment_seeds_the_registry_printers_tray(
+    client: TestClient, lan_printer: str
+) -> None:
+    """#4336 review M4, the #4180 handoff end to end: the registry row's Bambuddy link
+    (`BambuddyProvider.printer_key`) is the ``located`` the overlay matches a record's
+    own location against."""
+    _printers(client).store.link_bambuddy(lan_printer, 5)
+    _bambuddy_record(
+        client,
+        location={"printer": "bambuddy:5", "ams_id": 0, "tray_id": 1, "fingerprint": "PLA|FFFFFF"},
+    )
+    tray = _tray(_overlay(client, lan_printer), 0, 1)
+    assert tray.linked_by == "provider" and tray.records["bambuddy"].record_id == "16"
+
+
+def test_another_bambuddy_printers_assignment_is_not_this_trays(
+    client: TestClient, lan_printer: str
+) -> None:
+    _printers(client).store.link_bambuddy(lan_printer, 5)
+    _bambuddy_record(
+        client,
+        location={"printer": "bambuddy:6", "ams_id": 0, "tray_id": 1, "fingerprint": "PLA|FFFFFF"},
+    )
+    assert _tray(_overlay(client, lan_printer), 0, 1).linked_by is None

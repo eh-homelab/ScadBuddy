@@ -6,6 +6,7 @@ import {
   checkPlan,
   facets,
   filterSpools,
+  fromTrays,
   loadedLabel,
   seedPlan,
   slicedPlateSlots,
@@ -304,6 +305,14 @@ describe('checkPlan', () => {
 
   it('says so when a slot has nothing chosen', () => {
     expect(checkPlan(options(), [], 1).map((w) => w.kind)).toEqual(['no-choice'])
+  })
+})
+
+describe('fromTrays', () => {
+  it('reads only an explicit trays source as trays; a missing one is the inventory', () => {
+    expect(fromTrays({ source: 'trays' })).toBe(true)
+    expect(fromTrays({ source: 'inventory' })).toBe(false)
+    expect(fromTrays({})).toBe(false)
   })
 })
 

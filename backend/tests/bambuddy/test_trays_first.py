@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.models import (
     AmsUnit,
     FilamentRequirement,
     FilamentRequirements,
+    NozzleInfo,
     PrinterStatus,
     SlotChoice,
 )
@@ -36,6 +37,9 @@ from scadbuddy.bambuddy.trays import (
     tray_spool_id,
     unknown_trays,
 )
+from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.status import status_from_report
 from scadbuddy.slicing.catalogue import native_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.spools.models import Overlay, SpoolSnapshot, TraySpool
@@ -88,6 +92,18 @@ def h2c_status() -> PrinterStatus:
             ),
         ],
         vt_tray=[_tray(254, "PLA", "FF0000FF", remain=-1)],
+    )
+
+
+def h2c_two_nozzles() -> PrinterStatus:
+    """:func:`h2c_status` with both extruders named, as an H2C reports them."""
+    return h2c_status().model_copy(
+        update={
+            "nozzles": [
+                NozzleInfo(nozzle_type="HS01", nozzle_diameter="0.4"),
+                NozzleInfo(nozzle_type="HS01", nozzle_diameter="0.4"),
+            ]
+        }
     )
 
 
@@ -154,7 +170,7 @@ def test_every_filled_tray_is_a_choice() -> None:
 
 
 def test_two_external_holders_are_named_by_side() -> None:
-    status = h2c_status().model_copy(
+    status = h2c_two_nozzles().model_copy(
         update={
             "vt_tray": [
                 _tray(254, "PLA", "FF0000FF"),
@@ -188,6 +204,78 @@ def test_an_rfid_flagged_tray_is_filled_on_the_bambuddy_path_too() -> None:
     status = PrinterStatus.model_validate(recording("printer-status.json"))
     found = {(tray.ams_id, tray.tray_id) for tray in unknown_trays(status, 1, [])}
     assert (1, 1) in found
+
+
+def test_a_false_presence_bit_vetoes_the_state() -> None:
+    """#4336 review I1: Bambuddy's ``exists`` (the firmware's ``tray_exist_bits``,
+    "authoritative where it exists", ``services/ams_slot_presence.py`` at ``0d427510``)
+    outranks ``state``: the recorded empty AMS 1 slot 3 with a stale ``tray_type``
+    echoed back (an AMS-HT does this, Bambuddy #2670) is not a tray."""
+    status = PrinterStatus.model_validate(recording("printer-status.json"))
+    unit = next(u for u in status.ams if u.id == 1)
+    stale = unit.tray[2]
+    assert (stale.exists, stale.state) == (False, 9)
+    unit.tray[2] = stale.model_copy(update={"tray_type": "PLA", "tray_color": "000000FF"})
+    assert (1, 2) not in {(t.ams_id, t.tray_id) for t in unknown_trays(status, 1, [])}
+    assert tray_spool_id(1, 2) not in {o.spool_id for o in loaded_trays(status, 1, None)}
+
+
+def test_state_10_is_hidden_on_the_bambuddy_path() -> None:
+    """The bitfield's change there (#4336 M4): 10 is METADATA|STEADY with no SPOOL,
+    "spool present but not in the feeder", and a ``True`` presence bit does not
+    overrule it, as Bambuddy's own assign path does not (``inventory.py:2270-2283``)."""
+    status = PrinterStatus.model_validate(recording("printer-status.json"))
+    unit = next(u for u in status.ams if u.id == 1)
+    unit.tray[1] = unit.tray[1].model_copy(update={"state": 10, "exists": True})
+    assert (1, 1) not in {(t.ams_id, t.tray_id) for t in unknown_trays(status, 1, [])}
+
+
+def test_one_external_holder_on_a_two_nozzle_printer_is_named_by_its_side() -> None:
+    """#4336 review I3: the label is the holder's side, never a count of the list."""
+    status = PrinterStatus.model_validate(recording("printer-status.json"))
+    status = status.model_copy(update={"vt_tray": [_tray(255, "PETG", "00FF00FF")]})
+    (external,) = [o for o in loaded_trays(status, 1, None) if o.loaded and o.loaded.ams_id == 255]
+    assert (external.label, external.side) == ("External R", "R")
+
+
+def test_the_lan_reports_external_holders_are_labelled_by_side() -> None:
+    """The LAN report's shape (`status_from_report`): both H2 holders from ``vir_slot``."""
+    report = LanReport(
+        serial="S",
+        received_at=NOW,
+        print={
+            "device": {
+                "nozzle": {
+                    "info": [
+                        {"id": 0, "diameter": "0.4", "type": "HS01"},
+                        {"id": 1, "diameter": "0.4", "type": "HS01"},
+                    ]
+                }
+            },
+            "vt_tray": {"id": "255", "tray_type": "PETG", "tray_color": "00FF00FF"},
+            "vir_slot": [
+                {"id": "254", "tray_type": "PLA", "tray_color": "FF0000FF", "state": 11},
+                {"id": "255", "tray_type": "PETG", "tray_color": "00FF00FF", "state": 11},
+            ],
+        },
+    )
+    now = datetime.now(UTC)
+    row = PrinterRow(id=str(uuid4()), serial="S", name="H2C", created_at=now, updated_at=now)
+    status = status_from_report(row, report, now=NOW)
+    labels = [(o.label, o.side, o.material) for o in loaded_trays(status, 0, "H2C")]
+    assert labels == [("External L", "L", "PLA"), ("External R", "R", "PETG")]
+
+
+def test_a_single_nozzle_lan_reports_holder_is_external() -> None:
+    report = LanReport(
+        serial="S",
+        received_at=NOW,
+        print={"vt_tray": {"id": "254", "tray_type": "PLA", "tray_color": "FF0000FF"}},
+    )
+    now = datetime.now(UTC)
+    row = PrinterRow(id=str(uuid4()), serial="S", name="P1S", created_at=now, updated_at=now)
+    (option,) = loaded_trays(status_from_report(row, report, now=NOW), 0, "P1S")
+    assert option.label == "External"
 
 
 def test_seen_trays_carry_the_keys_and_the_fingerprint() -> None:
@@ -392,3 +480,11 @@ async def test_the_inventory_path_is_unchanged() -> None:
         "/api/v1/printers/1",
         "/api/v1/printers/1/inventory-remain",
     ]
+
+
+def test_the_rfid_keys_stay_in_the_backend() -> None:
+    """#4336 review M6: read by the overlay, never served in a status."""
+    tray = AmsTray(id=0, tray_type="PLA", tray_uuid=UUID_A, tag_uid="0102030405060708")
+    assert tray.tray_uuid == UUID_A
+    assert "tray_uuid" not in tray.model_dump() and "tag_uid" not in tray.model_dump(mode="json")
+    assert "tray_uuid" not in AmsTray.model_json_schema(mode="serialization")["properties"]

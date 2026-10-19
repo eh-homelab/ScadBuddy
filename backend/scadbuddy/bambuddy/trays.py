@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from scadbuddy.bambuddy.extruders import extruder_of, side_of
+from scadbuddy.bambuddy.extruders import extruder_of, side_of, two_nozzles
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     LoadedAt,
@@ -127,11 +127,19 @@ def spool_loaded(state: int) -> bool:
 
 
 def _filled(tray: AmsTray) -> bool:
+    """A tray with a material whose spool is loaded. A presence bit that says no spool
+    (``exists`` false: the firmware's ``tray_exist_bits``, "authoritative where it
+    exists", Bambuddy ``services/ams_slot_presence.py`` at ``0d427510``) vetoes before the
+    state is read: an AMS-HT echoes a stale ``tray_type`` after its spool is pulled
+    (Bambuddy #2670). A ``True`` bit does not overrule a state without SPOOL (10), as
+    Bambuddy lets it overrule only its own stamped 9 (``inventory.py:2270-2283``)."""
     if not (tray.tray_type or "").strip():
+        return False
+    if tray.exists is False:
         return False
     if tray.state is not None:
         return spool_loaded(tray.state)
-    return tray.exists is not False
+    return True
 
 
 def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
@@ -247,12 +255,11 @@ def tray_material_colour(
     return None
 
 
-def _external_label(tray_id: int, holders: int) -> str:
-    """The external holder as a person reads it: "External", or by side when the printer
-    has two (254 the left, 255 the right, `extruders.extruder_of`)."""
-    if holders < 2:
-        return "External"
-    return "External L" if tray_id == 0 else "External R"
+def _external_label(side: str | None, status: PrinterStatus) -> str:
+    """The external holder as a person reads it: "External", or "External L"/"R" by the
+    side it feeds on a printer with two nozzles (254 the left, 255 the right,
+    `extruders.extruder_of`), so the label never disagrees with ``side``."""
+    return f"External {side}" if side is not None and two_nozzles(status) else "External"
 
 
 def _sorted_trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
@@ -292,7 +299,6 @@ def loaded_trays(
     spool in it. ``slicer_filament`` is the tray's ``tray_info_idx`` (the BBL preset's
     ``filament_id``, `resolver._by_filament_id`); the weight, brand and label weight are
     the first provider record's that has them, in the overlay's (priority) order."""
-    holders = len(status.vt_tray)
     by_tray = {(tray.ams_id, tray.tray_id): tray for tray in (overlay.trays if overlay else [])}
     options: list[SpoolOption] = []
     for ams_id, tray in _sorted_trays(status):
@@ -319,7 +325,7 @@ def loaded_trays(
                 side=side_of(extruder),
                 tray_only=True,
                 label=(
-                    _external_label(tray.id, holders)
+                    _external_label(side_of(extruder), status)
                     if ams_id == EXTERNAL
                     else tray_label(ams_id, tray.id)
                 ),
