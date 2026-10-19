@@ -320,12 +320,15 @@ def resolve_url(url: str, file: str = "") -> str | None:
     ``cc383a2c``), plus ``file:///sdcard/<path>``. With no ``url``, the command's
     ``file``. Which form a real printer takes is plan 3a Task 7's measurement. A path with
     a ``..`` segment names nothing (#4205): a typo that climbed out of the card would
-    otherwise "find" a file there and pass a test that should fail."""
+    otherwise "find" a file there and pass a test that should fail. So does a card root
+    that only starts like one (``file:///mnt/sdcardX/...``)."""
     if not url:
         return _card_path(file)
-    for prefix in ("file:///mnt/sdcard", "file:///sdcard", "ftp://"):
-        if url.startswith(prefix):
-            return _card_path(url[len(prefix) :])
+    for root in ("file:///mnt/sdcard", "file:///sdcard"):
+        if url == root or url.startswith(root + "/"):
+            return _card_path(url[len(root) :])
+    if url.startswith("ftp://"):
+        return _card_path(url[len("ftp://") :])
     return None
 
 
