@@ -29,7 +29,9 @@ from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.slicing.profiles import Profiles
 from tests.bambuddy.conftest import BASE_URL, recording
+from tests.slicing.conftest import PROFILES
 
 API = f"{BASE_URL}/api/v1"
 
@@ -169,6 +171,32 @@ async def test_the_printer_reads_do_not_wait_on_the_preset_catalogue(
     assert view.printer_id == 1
     assert view.processes["0.4"]
     assert view.filaments.slots
+
+
+@respx.mock
+async def test_a_native_catalogue_reads_no_presets_from_bambuddy(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3818 tier A: given the image's profiles, the dialog's presets are theirs, and
+    neither preset route is asked (respx refuses any route not mocked here)."""
+    _filament_routes()
+    respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
+    respx.get(f"{API}/printers/1/status").mock(return_value=_ok("printer-status-rack.json"))
+
+    view = await choices_for(
+        bambuddy,
+        _source(),
+        StoredSettings(),
+        remembered=None,
+        printer_id=1,
+        cache=tmp_path,
+        catalogue_key=None,
+        native=Profiles(PROFILES),
+    )
+
+    assert view.processes["0.4"] == ["0.20mm Standard @BBL H2C"]
+    assert [row.name for row in view.filament_presets["0.4"]] == ["Bambu PLA Basic @BBL H2C"]
+    assert not (tmp_path / catalogue.CATALOGUE_DIRNAME).exists()
 
 
 @respx.mock

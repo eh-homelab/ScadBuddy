@@ -262,15 +262,32 @@ SlicePlateOutput {
 }
 ```
 
-On `store_backend=s3` the caller mints presigned GET and PUT URLs (two hours, longer
-than any slice). On `bambuddy` or `local` it mints URLs to new internal API routes,
-`GET` and `PUT /api/v1/internal/blobs/{key}` (`api/internal.py`, a per-call signed
-token as `RemoteOutputs` already uses for outputs), and the API moves the bytes to and
-from its store. So the native slicer works on every store backend, tier 2 does not
-depend on tier 1, and the only credentials outside Python are the API's internal key
-the print worker already holds. The caller records the `store_blobs` row for the
-output after the worker reports its sha256 and size (`slicing/transfer.py`:
-`mint_get`, `mint_put`, `finish_put`). A new `BlobKind`, `slice`, swept like `piece`.
+On `store_backend=s3` a GET is S3's presigned URL of an object already stored
+(`S3ContentBackend.presign_get`, two hours, longer than any slice). Every other GET, and
+every PUT on any backend, is a new internal API route, `GET` and
+`PUT /api/v1/internal/blobs/{key}` (`api/internal_blobs.py`, hidden from the OpenAPI
+document), and the API moves the bytes to and from its content store (plan
+2026-10-16-native-slicer-rust-worker, Ruling C3). Presigned PUT, with the backend adopting
+the object the worker wrote under `pending/`, is a follow-up (#4231): a presigned PUT to
+a key `sweep_unrecorded` never writes would never be swept (`store/s3.py`). The routes
+serve every backend that has a content store, `s3` and `bambuddy`; `local` has none
+(`store/factory.py` returns no `ContentStore` for it), so the native slicer needs
+`store_backend` `s3` or `bambuddy`, and on `local` a slice fails with a 503 saying so
+(§5.5). The route's token is new, not something `RemoteOutputs` has (its
+`/internal/outputs` reads carry none): an HMAC over the method, the key and the expiry,
+under a key derived by HKDF from the KEK (`slicing/transfer_token.py` `transfer_key`),
+checked before the route touches the store (#4215). So the native slicer needs
+`SCADBUDDY_SECRET_KEY_FILE` on the API, and `SCADBUDDY_API_INTERNAL_URL`, the base the
+slicer pod reaches the routes at; without either `slice_prepare` fails the slice saying
+so. Tier 2 does not depend on tier 1, and no store credential leaves Python. The caller
+records the `store_blobs` row for the output after the worker reports its sha256 and
+size (`slicing/transfer.py`: `mint_get`, `mint_put`, `finish_put`; the pending PUTs in
+`transfer_puts`, pruned on the housekeeping prune Schedule). A new `BlobKind`, `slice`,
+swept like `piece`. Every `slice` blob a slice reads or writes (the copy as downloaded,
+each preset file, the sliced 3MF) is held in `blob_refs` under holder `native_slice` and
+the row's id while its `native_slices` row stands (Ruling C5): a row that fails or is
+cancelled drops its holds in the same transaction, and the TTL sweep that deletes a
+finished row drops the rest (`slicing/store.py`).
 Every transfer URL is a bearer credential (the internal route's token in a header, or
 S3's signature in the query) valid for two hours (`slicing/transfer.py` `TRANSFER_TTL`),
 and it crosses the `library` queue's Temporal history in plaintext, since that queue has
@@ -314,30 +331,82 @@ three kinds of files:
   2026-10-13 is the authority on the override keys);
 - one filament JSON per slot, flattened.
 
-Flattening reads the profiles dir shipped in the slicer image, mirrored into the store
-as a `preset_bundle` blob per Bambu Studio version at image build time, so the Python
-side reads one archive and never needs the binary. `local:` presets (Bambuddy's
-OrcaSlicer imports) are still fetched from Bambuddy when a Bambuddy is configured, so
-a user's custom filament keeps working on both slicers. `preset_key` stays the dedupe
-key, extended with the slicer's name (`bambuddy` or `native`) and the Bambu Studio
-version.
+Flattening reads Bambu Studio's profile tree, copied into the API image at build time
+from the Dockerfile's `slicer-dist` stage, the same checked download the slicer image
+installs (`/opt/slicer-profiles`: `BBL.json`, `VERSION` and `BBL/{machine,process,filament}`;
+`settings.slicer_profiles_dir`). No store blob carries it and there is no
+`preset_bundle` kind: the Python side reads files and never needs the binary. The
+preset key is `native@<version>/` before Bambuddy's preset key, where the version is that
+tree's `VERSION`, the API image's `BAMBU_STUDIO_VERSION` (`Profiles.version`,
+`slicing/presets.py` `native_preset_key`; Ruling C7), so a native slice never answers for
+a Bambuddy one and a new Bambu Studio slices again (§8). A process preset the tree does
+not hold (`local`, a cloud user preset) is built from Bambuddy's values
+(`GET /slicer/preset-values?slot=process`), and the key then carries their sha256 as well.
+A `local` filament or printer preset is refused on the native slicer, as the plan's 422:
+Bambuddy serves process values only (re-measured 2026-10-18 against the live Bambuddy,
+`ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`: `slot=filament` answers
+`400 "Only the 'process' slot is supported"`). A user's OrcaSlicer-imported filament
+therefore slices on `slicer_backend` `bambuddy` only, until #4233.
 
 ### 5.4 Where the slice sits in the print flow
 
 `PrintRunWorkflow` today runs `print_slice_start` and `print_slice_wait` per plate
 against Bambuddy. A `slicer` setting (`slicer_backend`: `bambuddy` | `native`, applies
-live, default `bambuddy` until the owner flips it) chooses: with `native`, the
-workflow runs `slice_plate` instead, behind `workflow.patched("native-slicer")`, and
-the sliced blob replaces the "sliced library file" in `print_record` and
-`output_bambuddy_slices` (a new nullable `sliced_blob_key` column beside
-`sliced_library_file_id`). The print dialog's preview slice (`start_preview`,
-`read_preview`) gets the same switch: with `native`, `preview_slice` starts
-`slice_plate` as its own one-activity workflow (`SliceWorkflow`, one activity, no
-other logic, until Temporal 1.31's standalone activities let it be the bare activity)
-and `read_preview` reads the workflow's heartbeat details for progress. The browser
-polls as it does today (every 2 s), and the heartbeat's `total_percent` rides that
-answer, so the pane shows a progress bar instead of "Slicing…"; no realtime topic
-(realtime events carry ids, not content).
+live, default `bambuddy` until the owner flips it) chooses, read once by `print_plan`
+(`PlannedRun.slicer`, so a run never switches slicer halfway).
+
+With `native`, one `SliceWorkflow` per copy, subject and presets slices the plate, on the
+`library` queue (the API process: the content store, the Bambuddy client, the native
+library). Its activities are `slice_prepare` (reads the copy and builds the presets, so
+neither bytes nor preset documents enter a history), `slice_plate` on `slicer`, and
+`slice_record`. The print worker never runs it: the dialog's `preview_run` (on
+`bambuddy`, the storeless print worker) only starts it, and the run shares it through
+its own `library`-queue activity `slice_run`, which starts it or joins the dialog's and
+waits (Rulings C1, C2; behind `workflow.patched("native-slicer")`). A child workflow was
+not used: temporalio 1.34.0's `start_child_workflow` takes no `id_conflict_policy`, so a
+running dialog slice of the same id would fail its start. `slice_run` heartbeats, and
+every retryable failure (a Bambuddy blip in its reads among them) retries without a
+limit up to `SLICE_RUN_BOUND`, about 4 h 25 min: one realistic round of the slice
+(`workflows/slicing.py` `SLICE_ROUND`: the prepare's three attempts of five minutes, one
+wait of up to two hours for a slicer worker, since Temporal does not retry a
+schedule-to-start timeout, and four `slice_plate` attempts of up to 30 minutes) and a
+ten-minute margin (Task 13 review M2, bounded by the Task 14/15 review's ruling). A slice
+can outlast that only when attempts that are each taken just before their wait ends then
+die, or a `TransferRefused` prepares again; the run then fails with a 504 saying to print
+again, both on the schedule-to-close timeout and on a last attempt's own timeout whose
+retry would land past it (`printing.py` `outlived_slice`). Printing again joins the slice
+if it still runs (`USE_EXISTING`) or takes its completed row at once, so an open run gains
+nothing by waiting longer. A cancelled run stops waiting and never cancels the slice the
+dialog shares.
+
+The execution's id is `slice-<file id>-<sha256(subject, copy sha256, preset key)>`, known
+before any byte is read, so the dialog and the run name one (Ruling C2). The copy's
+sha256 (Bambuddy's `file_hash`) is in it as well as its id because Bambuddy's SQLite
+library hands a deleted newest file's id out again: its `INTEGER PRIMARY KEY` has no
+`AUTOINCREMENT` (measured at Bambuddy 3acc52d9, and reproduced in SQLite in the Task 13
+review), so the id alone may name another file. `slice_prepare` compares the bytes it read
+with that sha256 and refuses other bytes (409, §5.5). Reuse across copies of identical
+bytes and presets is `slice_prepare`'s, by the bytes' sha256 and the preset key (Ruling
+C1).
+
+Until tier 3 (and the native library's own layout, Tier A Task 4), Bambuddy's queue
+prints only a file in Bambuddy's library, so the run still uploads the sliced 3MF beside
+the copy in Bambuddy's library (`print_sliced_upload`, `<copy stem>.plate<N>.gcode.3mf`;
+idempotent across its retries, by the file's bytes) and queues that file, on
+`library_backend` `native` too. `output_bambuddy_slices` records the uploaded file as
+before and gains a nullable `sliced_blob_key`: provenance, whose blob is held by its
+`native_slices` row and swept with it, not a second copy the print reads.
+
+The print dialog's preview slice (`start_preview`, `read_preview`) gets the same
+switch: with `native` it starts the same `SliceWorkflow` (one execution per copy,
+subject and presets, until Temporal 1.31's standalone activities let `slice_plate` be
+the bare activity), and `read_preview` reads `slice_plate`'s heartbeat details for
+progress. The read routes, the toolpath included, take `?slicer=native` (a native row's
+id and a Bambuddy job's may be equal). The browser polls as it does today (every 2 s),
+and the heartbeat's `total_percent` rides that answer, so the pane shows "Slicing… 40%"
+and a progress bar; no realtime topic (realtime events carry ids, not content). A native
+slice's slots carry no `side` (`slicing/preview.py`), so the side-mismatch warning does
+not fire for it until #4232.
 
 Filament requirements (grams per slot, side) and filament changes today come from
 Bambuddy's `filament-requirements` and ScadBuddy's own G-code parse. With the native
@@ -350,8 +419,25 @@ stays. A new `backend/scadbuddy/slicing/slice_info.py` reads `slice_info.config`
 A `SlicerError` with exit 192 is shown as the slicer's own message (the CLI prints the
 validation failure to stderr before exiting; `stderr_tail` carries it). The preview
 pane's `slice-error` alert shows it verbatim, and the run fails with it as its
-`failure`. A retryable exit (a crash) retries three times with the activity's retry
-policy, then fails the same way. An exit 0 that leaves no sliced 3MF (a plate with
+`failure`. The row's failure text decodes details for a `SlicerError` only: `"The slicer
+refused the plate: <stderr_tail>"` for 192, `"The slicer failed: <stderr_tail>"`
+otherwise, and for any other error type `"The slicer worker failed (<type>)."`, never
+its message (Ruling C4). A retryable exit (a crash) is retried by `slice_plate`'s
+policy, four attempts in all (three retries; a worker shutdown and a heartbeat timeout
+take attempts too), then fails the same way. A `TransferRefused` (an expired or refused
+transfer URL) prepares again once, with new URLs (Ruling C4). No slicer worker taking the
+activity within two hours fails it as "No slicer worker took the slice".
+
+A run reports a failed slice by why it failed (`workflows/slicing.py` `failure_status`,
+Task 13 review M3): 422 for a refusal of the plan (exit 192, a preset neither the tree
+nor Bambuddy holds); 409 for a slice to start again (its row swept, the copy's bytes or
+Bambuddy's process values changed since the start, the copy gone); 503 for what this
+server lacks (no profiles, no content store or transfers, the native library not serving,
+no Bambuddy where the copy is); 502 for any other failure, an exit 0 with no sliced 3MF
+and a worker crash among them. The dialog's start, which builds the preset key before
+the workflow exists, answers 422 for a refused preset and 503 for missing profiles or
+content store; a slice that fails after it started shows its failure text in the
+`slice-error` alert. An exit 0 that leaves no sliced 3MF (a plate with
 nothing to slice) is a non-retryable `SlicerError` with details `{exit_code: 0,
 stderr_tail}`, since the same input exports nothing again.
 
@@ -524,7 +610,11 @@ nothing.
 | per printer `preferred_path` | `bambuddy` / `native` / `auto` | live | `bambuddy` for a row created from a Bambuddy id, `auto` otherwise |
 
 Order on prod: deploy Garage, run `store_migrate`, flip `store_backend` (tier 1);
-deploy the slicer worker, flip `slicer_backend` (tier 2); link printers, set
+deploy the slicer worker, flip `slicer_backend` (tier 2; `README.md` "Rolling out" has
+the steps). The slicer image and the API image deploy together, from one build: a
+native slice's preset key carries the API image's `BAMBU_STUDIO_VERSION`, which must be
+the version the slicer runs (Ruling C7), or the key would name a slicer that did not
+cut the file; link printers, set
 `preferred_path` per printer (tier 3); turn on `render_rust_stages` one at a time as
 each lands.
 

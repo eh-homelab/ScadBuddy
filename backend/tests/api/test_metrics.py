@@ -72,8 +72,13 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
             )
             assert f"{latency} 0.0" in text
     # Only outcomes something emits: a series stuck at 0 reads as "never happens"
-    # (review #1066 4.2).
-    assert 'outcome="cancelled"' not in text
+    # (review #1066 4.2). No render job ends cancelled.
+    render = [line for line in text.splitlines() if line.startswith("scadbuddy_render_")]
+    assert not [line for line in render if 'outcome="cancelled"' in line]
+    # A native slice does end cancelled (its workflow cancelled), so each of its three
+    # outcomes starts at 0 (plan 2026-10-16 Task 15).
+    for outcome in ("completed", "failed", "cancelled"):
+        assert f'scadbuddy_native_slice_seconds_count{{outcome="{outcome}"}} 0.0' in text
 
 
 def _metrics_once(client: TestClient, line: str) -> str:

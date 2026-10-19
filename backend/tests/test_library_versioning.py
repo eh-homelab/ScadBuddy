@@ -198,6 +198,7 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
         "Operation": VersioningBehavior.AUTO_UPGRADE,
         "FlowTriggerFire": VersioningBehavior.AUTO_UPGRADE,
         "StoreMigration": VersioningBehavior.AUTO_UPGRADE,
+        "SliceWorkflow": VersioningBehavior.AUTO_UPGRADE,
         "SpoolRefresh": VersioningBehavior.AUTO_UPGRADE,
     }
 

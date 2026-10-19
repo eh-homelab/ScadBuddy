@@ -133,6 +133,8 @@ from scadbuddy.print_library.reads import (
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
 from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
@@ -1369,9 +1371,16 @@ async def post_library_preview_slice(
     summary="How a background slice stands, and what it came to",
 )
 async def get_library_preview_slice(
-    file_id: FileIdPath, job_id: int, store: SettingsStoreDep, uploads: UploadsDep
+    file_id: FileIdPath,
+    job_id: int,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    slicing: SlicingDep,
+    slicer: SlicerQuery = "bambuddy",
 ) -> SlicePreview:
     """As ``/print/outputs/{id}/preview-slices/{job}``, for a file in Bambuddy's library."""
+    if slicer == "native":
+        return await read_native_preview(slicing, job_id, PrintSubject.library(file_id).run_subject)
     async with client_for(store.load()) as client:
         return await read_preview(
             client, uploads, job_id, PrintSubject.library(file_id).run_subject
@@ -1390,9 +1399,19 @@ async def get_library_preview_slice(
     summary="The toolpath of a finished background slice",
 )
 async def get_library_preview_toolpath(
-    file_id: FileIdPath, job_id: int, store: SettingsStoreDep, uploads: UploadsDep
+    file_id: FileIdPath,
+    job_id: int,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    slicing: SlicingDep,
+    slicer: SlicerQuery = "bambuddy",
 ) -> Response:
     """As ``/print/outputs/{id}/preview-slices/{job}/toolpath``, for a library file's."""
+    if slicer == "native":
+        body = await read_native_toolpath(
+            slicing, job_id, PrintSubject.library(file_id).run_subject
+        )
+        return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
     async with client_for(store.load()) as client:
         body = await read_toolpath(
             client, uploads, job_id, PrintSubject.library(file_id).run_subject

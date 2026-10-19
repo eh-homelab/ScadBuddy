@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Basic @BBL H2C",
+    "inherits": "Bambu PLA Basic @base",
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GFSA00_99",
+    "default_filament_colour": [
+        "#FFFFFF"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

@@ -249,6 +249,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
     monkeypatch.setattr(main, "sweep_gone_archives", _broken_async)
+    monkeypatch.setattr(main, "sweep_native_slices", _broken_async)
+    monkeypatch.setattr(main, "stop_lost_native_slices", _broken_async)
     monkeypatch.setattr(main, "ensure_watches", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
@@ -269,6 +271,8 @@ async def test_a_failing_sweep_fails_its_activity(
                 store=None,
                 index=SimpleNamespace(repair=_broken_async, prune=_broken_async),
                 serving_native=_broken_async,
+                temporal=object,
+                puts=SimpleNamespace(prune=_broken(OSError("the database is gone"))),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -376,13 +380,20 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return []
 
     monkeypatch.setattr(main, "sweep_library", slow_library)
+    monkeypatch.setattr(main, "stop_lost_native_slices", slow_previews)
     monkeypatch.setattr(main, "ensure_watches", slow_watches)
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
     state.components = SimpleNamespace(
         get=lambda key: SimpleNamespace(
-            index=SlowIndex(), prune=slow_batches, serving_native=serving_native, store=None
+            index=SlowIndex(),
+            prune=slow_batches,
+            serving_native=serving_native,
+            # The transfer PUTs' prune (plan 2026-10-16 Task 12).
+            puts=SimpleNamespace(prune=lambda older_than: time.sleep(0.1)),
+            temporal=object,
+            store=None,
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
