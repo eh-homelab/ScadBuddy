@@ -87,9 +87,23 @@ def test_a_painted_part_keeps_its_codes_beside_its_mesh() -> None:
         [ReadObject(name="Carrot", count=1, parts=[part(0, "#F08A24", mesh, paint)])], SOURCE
     )
     assert scene.objects[0].parts[0].painted
-    assert json.loads(files["meshes/o1-p1.paint.json"])["codes"][-1] == "4"
+    written = json.loads(files["meshes/o1-p1.paint.json"])
+    assert written["codes"][-1] == "4"
+    # Only what the readers take: a refused mirrored painting leaves `reversed` false (#4073).
+    assert set(written) == {"codes", "colours"}
     # The render carries the paint (meshmodel/paint.py), so no note says it does not.
     assert scene.notes == []
+
+
+def test_a_painted_mirrored_object_is_refused() -> None:
+    """Its codes follow the reverse of its faces' corner order, which the editor's carrying
+    of a painting does not (#4015, #4073)."""
+    mesh = trimesh.creation.box((1, 1, 1))
+    paint = Paint(("",) * len(mesh.faces), ("#F08A24",), reversed=True)
+    with pytest.raises(UnreadableObjectsError, match="Eye is painted and mirrored"):
+        scene_from_objects(
+            [ReadObject(name="Eye", count=1, parts=[part(0, "#F08A24", mesh, paint)])], SOURCE
+        )
 
 
 def test_a_negative_part_is_kept_as_one() -> None:

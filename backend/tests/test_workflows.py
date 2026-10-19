@@ -100,7 +100,7 @@ class FakeActivities:
     ) -> None:
         self.calls: list[str] = []
         #: What `prepare` answers as the piece's geometry key, and what `reuse_geometry`
-        #: then does: "hit", "miss" or "fail".
+        #: then does: "hit", "miss", "fail" or "flaky" (a retryable failure every time).
         self.geometry_key = geometry_key
         self.reuse = reuse
         self.finished_keys: list[str | None] = []
@@ -142,6 +142,8 @@ class FakeActivities:
         self.calls.append("reuse_geometry")
         if self.reuse == "fail":
             raise ApplicationError("the index went away", non_retryable=True)
+        if self.reuse == "flaky":
+            raise ApplicationError("the source layout is unreadable")
         return RenderMainResult(log_tail=["reused"]) if self.reuse == "hit" else None
 
     @activity.defn(name="render_main")
@@ -446,6 +448,28 @@ async def test_a_geometry_miss_or_a_failed_reuse_renders_the_piece() -> None:
             ], reuse
             assert acts.finished_keys == ["g" * 64], reuse
             assert acts.projections[-1].state == "done"
+
+
+async def test_a_reuse_that_keeps_failing_gives_up_after_its_capped_attempts() -> None:
+    """#3449: the reuse is only a shortcut, so a failure that will recur is tried
+    `REUSE_RETRY`'s twice, not `RETRY`'s three times with backoff, before the render."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities(geometry_key="g" * 64, reuse="flaky")
+        async with _worker(client, queue, acts):
+            job = _job(width=1)
+            await client.execute_workflow(
+                TemplatePipeline.run, start_of(job), id=f"render-{job.id}", task_queue=queue
+            )
+        assert acts.calls == [
+            "prepare",
+            "reuse_geometry",
+            "reuse_geometry",
+            "render_main",
+            "render_solids",
+            "finish_piece",
+        ]
+        assert acts.projections[-1].state == "done"
 
 
 async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:

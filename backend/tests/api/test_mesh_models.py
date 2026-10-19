@@ -329,9 +329,11 @@ def test_an_invalid_scene_is_a_422_naming_eject_and_eject_still_works(
     (paths.model_dir(slug) / "scene.json").write_text('{"objects": "nope"}', encoding="utf-8")
     read = client.get(f"/api/v1/models/{slug}/scene")
     assert read.status_code == 422, read.text
-    assert "eject" in read.json()["detail"]
+    # The hint names the model's own eject route, not a placeholder (#3160, #3301).
+    assert f"POST /models/{slug}/scene/eject" in read.json()["detail"]
     refused = edit(client, slug, {"edit": "rename", "object": "o1", "name": "x"})
-    assert refused.status_code == 422 and "eject" in refused.json()["detail"]
+    assert refused.status_code == 422
+    assert f"POST /models/{slug}/scene/eject" in refused.json()["detail"]
     ejected = client.post(f"/api/v1/models/{slug}/scene/eject", headers=press())
     assert ejected.status_code == 200, ejected.text
     assert client.get(f"/api/v1/models/{slug}/scene").status_code == 404

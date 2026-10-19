@@ -8,8 +8,10 @@ anything the program computes, and only rendering it tells, so it keeps only the
 piece cache.
 
 `geometry_key` hashes the scene's objects with each colour replaced by its *class*,
-the place it first appears in the scene (`scene_classes`), with the meshes' and paint
-codes' contents, the template file, the libraries and the parameters. Recolouring a
+the place it first appears in the scene (`scene_classes`), and the ``model.scad`` they
+compile to, classed the same way (so a change to `compile_scene` is another key), with
+the meshes' and paint codes' contents, the template file, the libraries and the
+parameters. Recolouring a
 part is a scene edit, a new revision and a new piece key, but the same geometry key
 while the colours that are equal stay equal: the piece is then the first one's meshes
 with each class's colour swapped (`recolour_piece`), followed by the ordinary finish
@@ -39,6 +41,7 @@ from pydantic import ValidationError
 
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Add,
@@ -57,9 +60,12 @@ from scadbuddy.render.split import ColourPart, Paint, split_by_material
 
 #: Part of every key: bump it when what a geometry key promises changes, or when what a
 #: row holds does (`RenderMainResult`, a piece's files), so no older row is read under
-#: the new meaning.
-GEOMETRY_VERSION = 4
+#: the new meaning. A change to what `compile_scene` writes needs no bump: the compiled
+#: source is in the key (#3448).
+GEOMETRY_VERSION = 5
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
+#: A colour as `compile_scene` writes it, around each piece.
+_COLOUR_CALL = re.compile(r'color\("(#[0-9A-Fa-f]{6})"\)')
 
 
 def mesh_scene(root: Path, file: str) -> Scene | None:
@@ -118,6 +124,18 @@ def _classed(scene: Scene, classes: Sequence[str]) -> list[dict[str, Any]]:
     return objects
 
 
+def _classed_source(scene: Scene, classes: Sequence[str]) -> str:
+    """The ``model.scad`` the scene compiles to (`mesh_scene` checked that it is the one
+    on disk) with each class's ``color("#…")`` its class's index: the compiler's output,
+    whatever the colours."""
+
+    def classed(match: re.Match[str]) -> str:
+        colour = match.group(1)
+        return f"color({classes.index(colour)})" if colour in classes else match.group(0)
+
+    return _COLOUR_CALL.sub(classed, compile_scene(scene))
+
+
 def _file_digests(root: Path, scene: Scene) -> dict[str, str]:
     return {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
@@ -135,13 +153,15 @@ def geometry_key(
 ) -> str:
     """The key of the mesh model's geometry: the same for two scenes that differ only
     in which colours their colour classes are."""
-    objects = _classed(scene, scene_classes(scene))
+    classes = scene_classes(scene)
+    objects = _classed(scene, classes)
     raw = json.dumps(
         [
             GEOMETRY_VERSION,
             slug,
             file,
             objects,
+            _classed_source(scene, classes),
             _file_digests(root, scene),
             [library.model_dump(mode="json") for library in libraries],
             dict(params),
@@ -196,6 +216,10 @@ def _swap(colour: str, mapping: Mapping[str, str]) -> str:
 
 
 def _swap_text(text: str, mapping: Mapping[str, str]) -> str:
+    """``text`` with each class's colour swapped, a hex value that is no class left as it
+    is. Every hex in a mesh model's warnings is a colour the render names (a solid's
+    fallback, a colour on no plate): it has no colour, font or text parameter, the only
+    other warnings that quote a value (#3448)."""
     return _HEX.sub(lambda match: _swap(match.group(0), mapping), text)
 
 

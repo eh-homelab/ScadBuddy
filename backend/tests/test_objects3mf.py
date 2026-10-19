@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.bambuddy.library_view import plate_glb
 from scadbuddy.render.bambu3mf import (
     IDENTITY,
     PlateParts,
@@ -18,8 +20,8 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
     write_plates_3mf,
 )
-from scadbuddy.render.geometry import NoSuchPlateError, parts_from_3mf
-from scadbuddy.render.glb import bounding_box
+from scadbuddy.render.geometry import NoSuchPlateError, analyze_geometry, parts_from_3mf
+from scadbuddy.render.glb import bounding_box, read_glb
 from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
     OverBudgetError,
@@ -906,3 +908,36 @@ def test_a_mirrored_painting_survives_a_pieces_layout(tmp_path: Path) -> None:
     (painted,) = [part for part in layout.plates[0].parts if part.paint is not None]
     assert painted.paint is not None and painted.paint.reversed
     assert _triangles(list(layout.plates[0].parts)) == _triangles(mirrored.parts)
+
+
+def test_a_plate_with_a_mirrored_and_an_unmirrored_painting_of_one_colour() -> None:
+    """#4074: a mirrored painting joins only its like, so the plate read has two parts of
+    the one colour. Its consumers number parts by extruder slot, never key them by
+    colour: the preview draws both, and the checks measure both."""
+    payload = bambu_project(
+        items=["1 0 0 0 1 0 0 0 1 0 0 0", "-1 0 0 0 1 0 0 0 1 60 0 0"],
+        parts={1: (_box(20, 10, 5), "normal_part", None)},
+        triangle_extra=f' paint_color="{SPLIT}"',
+    )
+    read = read_plate_parts(payload, 1)
+
+    assert [part.colour for part in read.parts] == ["#FF0000", "#FF0000"]
+    assert [part.paint is not None and part.paint.reversed for part in read.parts] == [
+        False,
+        True,
+    ]
+    assert len({part.material_index for part in read.parts}) == 2
+    assert len({part.name for part in read.parts}) == 2
+    with tempfile.TemporaryDirectory() as scratch:
+        preview = Path(scratch) / "plate.glb"
+        preview.write_bytes(plate_glb(payload, 1))
+        drawn = read_glb(preview)
+    # Both objects drawn, each in its painting's two colours.
+    pieces = painted_pieces(read.parts)
+    assert sorted((p.colour, len(p.mesh.faces)) for p in drawn) == sorted(
+        (p.colour, len(p.mesh.faces)) for p in pieces
+    )
+    assert {p.colour for p in drawn} == {"#FF0000", "#00FF00"}
+    analysis = analyze_geometry(read.parts, extruders=[part.material_index for part in read.parts])
+    assert [part.part for part in analysis.parts] == [1, 2]
+    assert all(part.triangles for part in analysis.parts)

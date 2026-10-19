@@ -241,14 +241,15 @@ async def test_a_waiter_trusts_a_piece_for_its_whole_retried_budget(
     stages = [
         pipelines.CACHED_TIMEOUT,
         pipelines._prepare_timeout(),
-        pipelines.REUSE_TIMEOUT,
         pipelines._main_timeout(),
         pipelines._solids_timeout(),
         pipelines.FINISH_TIMEOUT,
     ]
     # Three attempts each, 2 s then 4 s of backoff between them.
     retried = sum((3 * stage + timedelta(seconds=6) for stage in stages), timedelta())
-    assert pipelines._waiter_recheck() == retried + pipelines.SHORT
+    # The reuse, only a shortcut, has two (#3449): 2 s of backoff between them.
+    reuse = 2 * pipelines.REUSE_TIMEOUT + timedelta(seconds=2)
+    assert pipelines._waiter_recheck() == retried + reuse + pipelines.SHORT
 
 
 def test_render_solids_has_an_openscad_budget_per_plate_and_object(

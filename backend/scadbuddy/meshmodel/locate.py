@@ -36,9 +36,12 @@ def _keeps(cut: Cut, local: np.ndarray) -> bool:
 def _nearness(
     world: np.ndarray, m: np.ndarray, t: np.ndarray, printed: Sequence[trimesh.Trimesh]
 ) -> float:
-    """How far ``world`` is outside the placed ``printed`` meshes: 0 inside (the side the
-    nearest triangle's outward normal turns from), else the distance to the nearest
-    triangle."""
+    """How far ``world`` is outside the placed ``printed`` meshes: 0 inside (their winding
+    number about it is past one half), else the distance to the nearest triangle.
+
+    Not the side of the nearest triangle: where the nearest feature is an edge or a
+    corner, several triangles are as near, and on a thin wall their faces turn nearly
+    opposite ways, so one of them says inside a point that is not (#3749)."""
     triangles = np.concatenate(
         [
             np.asarray(mesh.vertices, dtype=float)[np.asarray(mesh.faces)] @ m.T + t
@@ -46,12 +49,24 @@ def _nearness(
         ]
     )
     distance = point_triangle_distance(np.tile(world, (len(triangles), 1)), triangles)
-    nearest = int(distance.argmin())
-    a, b, c = triangles[nearest]
-    # A mirrored placement winds its triangles the other way: the normal points inward.
-    outward = np.cross(b - a, c - a) * np.sign(np.linalg.det(m))
-    inside = float(np.dot(world - a, outward)) < 0.0
-    return 0.0 if inside else float(distance[nearest])
+    # A mirrored placement winds its triangles the other way: the number turns negative.
+    inside = _winding_number(world, triangles) * np.sign(np.linalg.det(m)) > 0.5
+    return 0.0 if inside else float(distance.min())
+
+
+def _winding_number(point: np.ndarray, triangles: np.ndarray) -> float:
+    """The triangles' generalised winding number about ``point``: each one's solid angle
+    seen from it (Van Oosterom and Strackee's formula), summed over 4π. About 1 inside a
+    closed mesh wound outward, 0 outside it (Jacobson, Kavan and Sorkine-Hornung,
+    "Robust Inside-Outside Segmentation using Generalized Winding Numbers", 2013,
+    https://igl.ethz.ch/projects/winding-number/)."""
+    a, b, c = (triangles[:, i] - point for i in range(3))
+    la, lb, lc = (np.linalg.norm(v, axis=1) for v in (a, b, c))
+    numerator = np.einsum("ij,ij->i", a, np.cross(b, c))
+    dots = np.einsum("ij,ij->i", a, b) * lc
+    dots += np.einsum("ij,ij->i", a, c) * lb + np.einsum("ij,ij->i", b, c) * la
+    angles = 2.0 * np.arctan2(numerator, la * lb * lc + dots)
+    return float(angles.sum() / (4.0 * np.pi))
 
 
 def object_at(scene: Scene, mesh_of: MeshOf, point: Sequence[float]) -> str | None:

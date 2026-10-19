@@ -174,6 +174,22 @@ def test_a_geometry_change_is_another_geometry_key(tmp_path: Path) -> None:
     assert base != _key(tmp_path, _scene())
 
 
+def test_a_compiler_change_is_another_geometry_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3448: an unchanged scene that compiles to other geometry after a deploy must not
+    reuse the meshes the old compiler built; colours alone still share the key."""
+    _write_model(tmp_path, _scene())
+    base = _key(tmp_path, _scene())
+    monkeypatch.setattr(
+        geometry_cache,
+        "compile_scene",
+        lambda scene: compile_scene(scene).replace("{", "{ union() {"),
+    )
+    assert _key(tmp_path, _scene()) != base
+    assert _key(tmp_path, _scene()) == _key(tmp_path, _scene("#0000FF", "#ABCDEF"))
+
+
 def test_only_a_mesh_models_compiled_scene_has_a_scene(tmp_path: Path) -> None:
     (tmp_path / "model.scad").write_text('color("#FF0000") cube();\n', encoding="utf-8")
     assert mesh_scene(tmp_path, "model.scad") is None  # a .scad template
@@ -220,6 +236,21 @@ def test_a_layout_is_recoloured_in_one_pass() -> None:
     assert swapped["colours"] == ["#00FF00", "#FF0000"]
     assert [p["colour"] for p in swapped["plates"][0]["parts"]] == ["#00FF00", "#FF0000"]
     assert swapped["warnings"] == ["#00FF00: no closed solid; used the split mesh"]
+
+
+def test_a_warnings_hex_value_that_is_no_class_is_left_alone() -> None:
+    """#3448: only a class's colour is swapped in a warning's text; any other hex value
+    stays as it was written."""
+    layout = _layout("#FF0000")
+    layout["warnings"] = [
+        "#FF0000 is drawn only with every plate at once; it is on no plate",
+        "#123456 is drawn only with every plate at once; it is on no plate",
+    ]
+    swapped = recolour_layout(layout, {"#FF0000": "#0000FF"})
+    assert swapped["warnings"] == [
+        "#0000FF is drawn only with every plate at once; it is on no plate",
+        "#123456 is drawn only with every plate at once; it is on no plate",
+    ]
 
 
 def test_only_a_layout_every_colour_of_which_is_a_class_is_reusable() -> None:
@@ -424,22 +455,31 @@ async def test_a_scene_in_other_colours_is_recoloured_without_rendering(
 
 
 @pytest.mark.requires_postgres
-async def test_a_painted_piece_is_rendered_again_not_recoloured(
-    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+@pytest.mark.parametrize("source", ["painted", "missing", "corrupt"])
+async def test_an_unreusable_source_is_rendered_again_and_forgotten(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex], source: str
 ) -> None:
-    acts, _, _ = geometry_acts
+    """#3449: the row is forgotten, so a later recolour of the geometry does not fetch the
+    piece only to refuse it again; an unreadable layout is refused at once, not retried."""
+    acts, _, index = geometry_acts
     env = ActivityEnvironment()
     first = _piece(acts, 1, _scene(), width=12)
-    await _render(acts, first)
-    # As `paint_layout` leaves a piece whose painting it carried.
+    rendered, _, _ = await _render(acts, first)
     path = acts.deps.blobs.dir_for(first.piece_key) / LAYOUT_NAME
-    layout = json.loads(path.read_text())
-    layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
-    path.write_text(json.dumps(layout))
+    if source == "painted":
+        # As an older build left a piece whose painting `paint_layout` carried.
+        layout = json.loads(path.read_text())
+        layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
+        path.write_text(json.dumps(layout))
+    elif source == "missing":
+        path.unlink()
+    else:
+        path.write_text("{not json")
 
     second = _piece(acts, 2, _scene("#0000FF"), width=12)
     prepared = await env.run(acts.prepare, second)
     assert await env.run(acts.reuse_geometry, second, prepared) is None
+    assert rendered.geometry_key is not None and index.get(rendered.geometry_key) is None
 
 
 @pytest.mark.requires_postgres
@@ -463,6 +503,34 @@ async def test_a_painted_piece_is_never_recorded_as_a_geometry_source(
     prepared, _, _ = await _render(acts, _piece(acts, 1, _scene(), width=12))
     assert prepared.geometry_key is not None
     assert index.get(prepared.geometry_key) is None
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize("layout", ["missing", "corrupt"])
+async def test_an_unreadable_layout_costs_the_hint_never_the_render(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+) -> None:
+    """#3748: the piece is published before the hint is read, so `finish_piece` still
+    answers it, and records no geometry it cannot tell is reusable."""
+    acts, _, index = geometry_acts
+
+    async def unreadable(*args: Any, **kwargs: Any) -> Any:
+        result = await finish_piece_stage(*args, **kwargs)
+        path = args[2] / LAYOUT_NAME
+        if layout == "missing":
+            path.unlink()
+        else:
+            path.write_bytes(b"\xff{")
+        return result
+
+    monkeypatch.setattr(activities_module, "finish_piece_stage", unreadable)
+    req = _piece(acts, 1, _scene(), width=12)
+    prepared, _, piece = await _render(acts, req)
+    assert piece.result.colors == ["#FF0000", "#00FF00"]
+    assert (acts.deps.blobs.dir_for(req.piece_key) / PIECE_NAME).is_file()
+    assert prepared.geometry_key is not None and index.get(prepared.geometry_key) is None
 
 
 @pytest.mark.requires_postgres
@@ -541,3 +609,32 @@ def test_a_recolour_swaps_a_painted_parts_painting_too(
     )
     drawn = {part.colour for part in read_glb(work / "preview.glb")}
     assert drawn == {"#0000FF", "#00FF00"}
+
+
+def test_a_recolour_keeps_a_mirrored_painting_mirrored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4075: the swapped painting keeps `Paint.reversed`, or a mirrored painting's codes
+    would be drawn out of order (#4015)."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ("4",) + ("",) * (len(box.faces) - 1)
+    painted = ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",), reversed=True))
+    monkeypatch.setattr(geometry_cache, "split_by_material", lambda path: [painted])
+    drawn: list[ColourPart] = []
+    monkeypatch.setattr(geometry_cache, "write_glb", lambda parts, path: drawn.extend(parts))
+    source, work = tmp_path / "source", tmp_path / "work"
+    source.mkdir()
+    work.mkdir()
+    recolour_piece(
+        source,
+        work,
+        {"colours": [], "warnings": [], "plates": []},
+        "raw.3mf",
+        classes=["#FFFFFF", "#FF0000"],
+        colours=["#0000FF", "#00FF00"],
+        skip=frozenset(),
+        layout_name="layout.json",
+        preview_name="preview.glb",
+    )
+    [part] = drawn
+    assert part.paint == Paint(codes, ("#00FF00",), reversed=True)
