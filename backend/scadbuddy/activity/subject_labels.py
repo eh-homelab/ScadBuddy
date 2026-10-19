@@ -24,7 +24,9 @@ class SubjectLabels:
         self._entries: dict[str, tuple[float, str | None]] = {}
 
     def known(self, values: Iterable[str]) -> tuple[dict[str, str], set[str]]:
-        """The names kept for ``values``, and the values with nothing kept."""
+        """The names kept for ``values``, and the values with nothing kept. Expired
+        entries are dropped by `keep` only: what one read can add is bounded by
+        `LABELLED_SUBJECTS`, so the map stays small between reads."""
         now = self._clock()
         labels: dict[str, str] = {}
         missing: set[str] = set()

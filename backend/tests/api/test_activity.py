@@ -268,6 +268,31 @@ def test_a_name_a_failed_read_left_unknown_is_asked_again() -> None:
     }
 
 
+def test_an_output_whose_meta_could_not_be_read_is_asked_again() -> None:
+    """#4002: an output whose meta.json could not be read is not kept as "no name"; a
+    deleted one is, and is not read again."""
+    reads: list[str] = []
+    unreadable = [True]
+
+    def name_and_slug(output_id: str) -> tuple[str | None, str]:
+        reads.append(output_id)
+        if output_id == "b" * 32:
+            raise OutputNotFoundError(output_id)
+        if unreadable[0]:
+            raise OSError("meta.json unreadable")
+        return "Mine", "demo"
+
+    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    outputs = SimpleNamespace(name_and_slug=name_and_slug)
+    kept = SubjectLabels()
+    subjects = [Count("output:" + "a" * 32, 2), Count("output:" + "b" * 32, 1)]
+    assert _subject_labels(subjects, catalogue, outputs, kept) == {}  # type: ignore[arg-type]
+    unreadable[0] = False
+    labels = _subject_labels(subjects, catalogue, outputs, kept)  # type: ignore[arg-type]
+    assert labels == {"output:" + "a" * 32: "Mine"}
+    assert sorted(reads) == ["a" * 32, "a" * 32, "b" * 32]
+
+
 def test_the_facets_say_how_much_of_a_name_a_chip_shows(client: TestClient) -> None:
     """#4003: the chips clip a project's name as the titles do, by the server's count."""
     body = client.get("/api/v1/activity/facets").json()
