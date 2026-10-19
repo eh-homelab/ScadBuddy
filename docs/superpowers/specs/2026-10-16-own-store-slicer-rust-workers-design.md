@@ -391,7 +391,7 @@ C1).
 
 Until tier 3 (and the native library's own layout, Tier A Task 4), Bambuddy's queue
 prints only a file in Bambuddy's library, so the run still uploads the sliced 3MF beside
-the copy in Bambuddy's library (`print_sliced_upload`, `<copy stem>.plate<N>.sliced.3mf`;
+the copy in Bambuddy's library (`print_sliced_upload`, `<copy stem>.plate<N>.gcode.3mf`;
 idempotent across its retries, by the file's bytes) and queues that file, on
 `library_backend` `native` too. `output_bambuddy_slices` records the uploaded file as
 before and gains a nullable `sliced_blob_key`: provenance, whose blob is held by its
