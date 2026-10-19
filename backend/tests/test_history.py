@@ -1184,6 +1184,33 @@ def test_an_export_survives_the_prune_taking_its_slug_directory_mid_make(
     assert (directory / "model.scad").is_file()
 
 
+def test_an_export_the_prune_races_every_time_fails_and_leaves_no_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4401 review: when every try races, the FileNotFoundError still comes out, and
+    no staging directory is left behind."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    mkdir = Path.mkdir
+    raced: list[Path] = []
+
+    def racing(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.parent == directory.parent and self != directory:
+            raced.append(self)
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        mkdir(self, *args, **kwargs)
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            raise AssertionError("nothing is exported into a staging directory never made")
+
+    monkeypatch.setattr(Path, "mkdir", racing)
+    with pytest.raises(FileNotFoundError):
+        export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert len(raced) == 3
+    assert not directory.parent.exists() or not list(directory.parent.iterdir())
+
+
 def test_two_pods_exporting_one_revision_never_share_a_staging_directory(
     tmp_path: Path,
 ) -> None:

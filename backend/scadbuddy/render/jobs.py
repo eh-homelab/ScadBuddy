@@ -978,7 +978,11 @@ def _make_staging(staging: Path) -> None:
     mid-make (#4400). `prune_revision_exports` calls ``rmdir`` on a slug directory it
     emptied; landing between ``mkdir`` making the parent and the leaf, it fails the
     leaf with ``FileNotFoundError``. Once the staging directory is in the slug
-    directory, that ``rmdir`` cannot take it, so only this make is exposed."""
+    directory, that ``rmdir`` cannot take it, so only this make is exposed.
+
+    That rests on the prune's ``rmtree`` also passing it by: it takes only exports
+    older than its TTL (``job_ttl``, hours), and a staging directory is seconds old for
+    as long as ``git archive`` runs. A TTL that short would reopen the race."""
     for attempt in range(_STAGING_TRIES):
         try:
             staging.mkdir(parents=True, exist_ok=True)
