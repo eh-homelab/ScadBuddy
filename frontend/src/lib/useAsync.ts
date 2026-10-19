@@ -209,7 +209,8 @@ export function useAsync<T>(
     waiting: boolean
     last: number
     timer?: ReturnType<typeof setTimeout>
-    stalled?: ReturnType<typeof setTimeout>
+    /** The read in flight's stall timer, and what ends its wait at once. */
+    stalled?: { timer: ReturnType<typeof setTimeout>; end: () => void }
     /** Bumped when the effects are torn down: a wait from before that ends doing nothing. */
     generation: number
   }>({ waiting: false, last: -Infinity, generation: 0 })
@@ -220,11 +221,13 @@ export function useAsync<T>(
     const mine = state.generation
     const start = () => {
       state.timer = undefined
-      const stall = new Promise<void>((resolve) => (state.stalled = setTimeout(resolve, SIGNAL_READ_STALL_MS)))
+      const stall = new Promise<void>(
+        (end) => (state.stalled = { timer: setTimeout(end, SIGNAL_READ_STALL_MS), end }),
+      )
       void Promise.race([reading.current, stall]).then(() => {
         // Torn down and replayed in place meanwhile: that replay's own signals read.
         if (state.generation !== mine) return
-        clearTimeout(state.stalled)
+        clearTimeout(state.stalled?.timer)
         state.stalled = undefined
         if (!mounted.current) return
         state.waiting = false
@@ -240,11 +243,14 @@ export function useAsync<T>(
     const state = signals.current
     return () => {
       clearTimeout(state.timer)
-      clearTimeout(state.stalled)
       // A read left waiting here never runs: an effect replayed in place (StrictMode,
       // Fast Refresh, <Activity>) must hear its topics again, and a wait from before
       // must not start a read beside the replay's own.
       state.generation++
+      // Ended, not only its timer cleared: a read that never settles would otherwise
+      // hold the wait (#4318 review). The generation above makes it do nothing.
+      clearTimeout(state.stalled?.timer)
+      state.stalled?.end()
       state.timer = undefined
       state.stalled = undefined
       state.waiting = false
