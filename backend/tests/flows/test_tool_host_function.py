@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -762,6 +763,48 @@ async def test_a_read_on_agent_replicas_that_never_beat_is_asked_again_without_b
         served.calls
         == [("turn:scadbuddy_http__http_request", f"tool-{step.call_id}", {"method": "GET"})] * 4
     )
+
+
+async def test_a_pinned_read_whose_replica_goes_after_its_missed_beats_moves_to_the_live_one(
+    outward: Outward,
+) -> None:
+    """#4372 review: a read pinned to a replica that never beats misses its beats three
+    times, and the replica is gone (a deploy) before the attempt with no heartbeat
+    timeout is picked up. That attempt is not a move, so the re-homing try (#4152) is
+    still there: the read goes to the replica the agent names then, and answers."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    gone = f"{queue}.gone"
+    live = f"{queue}.live"
+    served = TurnTools(gone)
+    served.call_delay_s = 2.5
+    # Tiered once for the call, and once more when nothing picked up its last attempt.
+    served.next_hosts = [gone, live]
+    answered = TurnTools(live)
+    async with (
+        Worker(outward.client, task_queue=queue, activities=[served.tier()]),
+        Worker(outward.client, task_queue=live, activities=[answered.call()]),
+    ):
+        # A graceful shutdown stops polling at once and lets the attempt in hand run on:
+        # the third attempt then ends on its missed beats, and nothing takes the next.
+        async with Worker(
+            outward.client,
+            task_queue=gone,
+            activities=[served.call()],
+            graceful_shutdown_timeout=timedelta(seconds=5),
+        ):
+            run_id = await outward.run(
+                script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
+                tools_queue=queue,
+                agent_heartbeat_s=1,
+                host_queue_start_s=2,
+            )
+            while len(served.calls) < 3:
+                await asyncio.sleep(0.05)
+        run = await outward.finished(run_id)
+    assert run.result == "result: 'GET done'"
+    assert len(served.calls) == 3
+    assert [call[2] for call in answered.calls] == [{"method": "GET"}]
+    assert served.tiered == ["scadbuddy_http__http_request"] * 2
 
 
 async def test_a_write_that_missed_its_beats_is_not_sent_again_and_says_it_may_have_run(
