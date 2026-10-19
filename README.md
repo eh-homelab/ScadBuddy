@@ -892,11 +892,11 @@ workers restart.
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
     The renders dashboard's "Worker event loops" panel charts the render, print and
     projects workers by `job=~"scadbuddy-(render|print|projects)"`. Each `job` is the
-    name of the worker's Service (eh-homelab/clusters
-    `applications/scadbuddy/scadbuddy-{render,print,projects}.yaml`), which its
-    ServiceMonitor scrapes with no `jobLabel`
-    (`clusters/prod/scadbuddy/servicemonitor-{render,print,projects}.yaml`; the
-    projects worker's since clusters#2504), so renaming a Service empties its series.
+    name of the worker's Service in eh-homelab/clusters
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/applications/scadbuddy/scadbuddy-projects.yaml)),
+    which its ServiceMonitor scrapes with no `jobLabel`
+    ([render](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-render.yaml), [print](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-print.yaml), [projects](https://github.com/eh-homelab/clusters/blob/2be8f5a75ad5c76c41a1edd1f527bd60f077faa3/clusters/prod/scadbuddy/servicemonitor-projects.yaml);
+    the projects worker's since clusters#2504), so renaming a Service empties its series.
   - Every worker's `/metrics` also carries the Temporal SDK's own series (#3788):
     `temporal_workflow_task_execution_latency`, `temporal_workflow_task_schedule_to_start_latency`,
     `temporal_activity_schedule_to_start_latency` and the rest, in seconds. The SDK exports
