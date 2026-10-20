@@ -620,8 +620,10 @@ class _Reader:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         # A painted mesh stays a part of its own: its faces are its painting's (#1965).
         painted: list[tuple[str, trimesh.Trimesh, Paint]] = []
-        # Negative parts, joined: what the slicer cuts out of this object.
-        negatives: list[trimesh.Trimesh] = []
+        # Negative parts, each its own as in the source: what the slicer cuts out of this
+        # object. Joined into one mesh, two that overlap made a part Bambu Studio's
+        # toolpath stage failed on (exit 156, #4061).
+        negatives: list[list[trimesh.Trimesh]] = []
         notes: list[str] = []
 
         def add(pieces: Iterator[_Piece]) -> None:
@@ -643,6 +645,7 @@ class _Reader:
                 part = settings.parts.get(cid, _PartSettings(None, "normal_part"))
                 if part.subtype == "negative_part":
                     path = (component.get(_PATH) or "").lstrip("/") or model
+                    negatives.append([])
                     for _, points, faces, _ in self.meshes(
                         path,
                         cid,
@@ -652,7 +655,7 @@ class _Reader:
                         # Its painting, if any, is never printed: only its volume is.
                         cut = trimesh.Trimesh(vertices=points, faces=faces, process=False)
                         cut.remove_unreferenced_vertices()
-                        negatives.append(cut)
+                        negatives[-1].append(cut)
                     continue
                 if part.subtype in _DROPPED:
                     note = f"a {part.subtype.replace('_', ' ')} was left out"
@@ -677,14 +680,19 @@ class _Reader:
         for colour, mesh, paint in painted:
             index = len(parts) + 1
             parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
-        cuts = [mesh for mesh in negatives if not mesh.is_empty]
-        if parts and cuts:
-            joined = cuts[0] if len(cuts) == 1 else trimesh.util.concatenate(cuts)
+        cuts: list[trimesh.Trimesh] = []
+        for meshes in negatives:
+            kept = [mesh for mesh in meshes if not mesh.is_empty]
+            if not kept:
+                continue
+            joined = kept[0] if len(kept) == 1 else trimesh.util.concatenate(kept)
             if isinstance(joined, trimesh.Trimesh):
+                cuts.append(joined)
+        if parts:
+            for number, cut in enumerate(cuts, start=1):
+                name = "Negative part" if len(cuts) == 1 else f"Negative part {number}"
                 index = len(parts) + 1
-                parts.append(
-                    ColourPart(index, "Negative part", parts[0].colour, joined, negative=True)
-                )
+                parts.append(ColourPart(index, name, parts[0].colour, cut, negative=True))
         return parts, notes
 
 

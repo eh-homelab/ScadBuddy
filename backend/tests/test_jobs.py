@@ -1431,9 +1431,11 @@ async def _object_layout(
     *,
     plates: int = 1,
     objects: int,
+    missing: tuple[str, ...] = (),
 ) -> tuple[PlateLayout, list[tuple[int | None, int | None]], list[object]]:
     """`plate_layout` with a stand-in OpenSCAD drawing ``drawn[($plate, $object)]``;
-    a key missing from ``drawn`` draws nothing, as OpenSCAD refuses to export it."""
+    a key missing from ``drawn`` draws nothing, as OpenSCAD refuses to export it,
+    logging that it could not open the files ``missing``."""
     asked: list[tuple[int | None, int | None]] = []
     solid_defines: list[object] = []
 
@@ -1446,7 +1448,12 @@ async def _object_layout(
         )
         asked.append(key)
         if not drawn.get(key):
-            raise OpenSCADError("openscad exited with 1", ["Current top level object is empty."], 1)
+            raise OpenSCADError(
+                "openscad exited with 1",
+                [*(f"WARNING: Can't open file '{name}'" for name in missing), jobs.EMPTY_TOP_LEVEL],
+                1,
+                missing_files=missing,
+            )
         write_openscad_3mf(out, drawn[key])
         return mock.Mock(log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0)
 
@@ -1497,7 +1504,9 @@ async def test_an_object_on_some_plates_only_is_on_those(tmp_path: Path) -> None
     )
 
     assert asked == [(1, 1), (1, 2), (2, 1), (2, 2)]
-    assert [plate.objects for plate in layout.plates] == [(1,), (1,)]
+    # Each part keeps the object the template declared it with (#3219): plate 2's one
+    # object is object 2, though the writer numbers it first on its plate.
+    assert [plate.objects for plate in layout.plates] == [(1,), (2,)]
     assert [[part.colour for part in plate.parts] for plate in layout.plates] == [
         ["#0047BB"],
         ["#FFFFFF"],
@@ -1537,6 +1546,67 @@ async def test_a_colour_only_one_object_draws_is_named_by_plate_and_object(
 
     assert layout.warnings == [
         "object 3: #FFFFFF is not in the everything-at-once render; it gets extruder 2"
+    ]
+
+
+async def test_no_object_drawing_anything_fails_with_the_log_of_why(tmp_path: Path) -> None:
+    """#3218: with objects and no plates, every object may draw nothing because of a
+    file it could not open; the error keeps that render's log and missing files, as an
+    empty plate's does (#451)."""
+    with pytest.raises(OpenSCADError, match="no geometry for any of its objects") as failed:
+        await _object_layout(tmp_path, {(None, None): [TRAY]}, objects=2, missing=("logo.svg",))
+
+    assert failed.value.missing_files == ("logo.svg",)
+    assert failed.value.log_tail == ["WARNING: Can't open file 'logo.svg'", jobs.EMPTY_TOP_LEVEL]
+
+
+async def test_objects_that_all_draw_the_same_are_warned_about(tmp_path: Path) -> None:
+    """#3218: a template that declares objects but never reads $object draws the whole
+    model for each, so the objects would sit on top of each other."""
+    every = [TRAY, LID]
+    layout, _, _ = await _object_layout(
+        tmp_path, {(None, None): every, (None, 1): every, (None, 2): every}, objects=2
+    )
+
+    assert layout.warnings == [
+        "the 2 objects that drew something all drew the same geometry in the same"
+        " place; the template declares echo(objects = 2), but does it read $object?"
+    ]
+
+
+async def test_objects_of_one_box_but_other_shapes_are_not_warned_about(tmp_path: Path) -> None:
+    """#4417 review: two shapes of one colour in one box (a block, and one more finely
+    meshed) are different objects, not one template ignoring $object."""
+    finer = (TRAY[0], TRAY[1], TRAY[2].subdivide())
+    layout, _, _ = await _object_layout(
+        tmp_path, {(None, None): [TRAY], (None, 1): [TRAY], (None, 2): [finer]}, objects=2
+    )
+
+    assert layout.warnings == []
+
+
+async def test_two_of_three_objects_drawing_alike_names_the_two_not_all_three(
+    tmp_path: Path,
+) -> None:
+    """#4417 review: on a plate where only 2 of 3 declared objects drew anything, the
+    warning must count those 2, not claim every declared object draws alike. The third
+    object draws on the other plate, so it is not an undrawn object either."""
+    every = [TRAY, LID]
+    layout, _, _ = await _object_layout(
+        tmp_path,
+        {
+            (None, None): every,
+            (1, 1): every,
+            (1, 2): every,
+            (2, 3): [TRAY],
+        },
+        plates=2,
+        objects=3,
+    )
+
+    assert layout.warnings == [
+        "plate 1: the 2 objects that drew something all drew the same geometry in the"
+        " same place; the template declares echo(objects = 3), but does it read $object?"
     ]
 
 

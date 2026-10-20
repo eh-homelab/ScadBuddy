@@ -1693,6 +1693,36 @@ def test_a_plate_of_several_objects_is_named_as_a_plate(tmp_path: Path) -> None:
     assert plate.metadata["plater_name"] == ""  # a one-object plate is left unnamed
 
 
+def test_objects_take_the_plates_names_or_their_declared_numbers(tmp_path: Path) -> None:
+    """#3212: a plate may name each object (Arrange names a copy after its piece).
+    #3219: unnamed, an object is numbered as the template declared it, though the
+    writer numbers the plate's objects from 1."""
+    left, right = _two_objects().parts
+    named, declared = tmp_path / "named.3mf", tmp_path / "declared.3mf"
+    write_plates_3mf(
+        [PlateParts((left, right), (1, 1), (4, 9), ("bin 1", "lid 1"))],
+        ["#FF6AC1"],
+        named,
+        thumbnails=None,
+        model_name="bins",
+    )
+    write_plates_3mf(
+        [PlateParts((left, right), (1, 1), (3, 5))],
+        ["#FF6AC1"],
+        declared,
+        thumbnails=None,
+        model_name="bins",
+    )
+
+    assert [obj.name for obj in read_objects(named.read_bytes())] == ["bin 1", "lid 1"]
+    assert [obj.name for obj in read_objects(declared.read_bytes())] == [
+        "bins (object 3)",
+        "bins (object 5)",
+    ]
+    with pytest.raises(ValueError, match="one name per object"):
+        PlateParts((left, right), (1, 1), (1, 2), ("bin",))
+
+
 def test_re_placing_moves_every_object_of_a_plate_together(tmp_path: Path) -> None:
     out = tmp_path / "objects.3mf"
     write_plates_3mf([_two_objects()], ["#FF6AC1"], out, thumbnails=None)
@@ -1712,6 +1742,32 @@ def test_objects_in_two_colours_still_get_a_prime_tower(tmp_path: Path) -> None:
         [_two_objects(("#FF6AC1", "#1F6FEB"))], ["#FF6AC1", "#1F6FEB"], out, thumbnails=None
     )
     moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+    assert "wipe_tower_x" in _settings_of_bytes(moved)
+
+
+def test_objects_whose_settings_name_no_extruders_keep_a_tower(tmp_path: Path) -> None:
+    """#3211: a plate of several objects whose ``model_settings.config`` lists the plate
+    but none of its objects' parts: the filaments are unknown, so the tower is reserved
+    (room to spare), though the objects here are in one colour."""
+    out = tmp_path / "objects.3mf"
+    write_plates_3mf([_two_objects()], ["#FF6AC1"], out, thumbnails=None)
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(out) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as rewritten,
+    ):
+        for info in archive.infolist():
+            data = archive.read(info.filename)
+            if info.filename == "Metadata/model_settings.config":
+                data = re.sub(rb" <object id=.*?</object>\n", b"", data, flags=re.DOTALL)
+                assert b"<object" not in data and b"<plate>" in data
+            rewritten.writestr(info, data)
+    with zipfile.ZipFile(buffer) as archive:
+        [laid_out] = laid_out_plates(archive)
+    assert len(laid_out.assembly_ids) == 2 and laid_out.extruders is None
+
+    moved = replate_3mf(buffer.getvalue(), plate_for("Bambu Lab H2C"))
+
     assert "wipe_tower_x" in _settings_of_bytes(moved)
 
 

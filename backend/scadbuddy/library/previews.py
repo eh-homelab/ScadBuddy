@@ -91,6 +91,11 @@ class PreviewRecord(BaseModel):
     error: str | None = None
     rendered_at: datetime
 
+    def made_from(self, key: str) -> bool:
+        """Whether this preview was made -- or failed -- from ``key``: the one rule for
+        a record being current (#3059)."""
+        return self.key == key
+
 
 def source_key(paths: DataPaths, slug: str) -> str | None:
     """What a default render of ``slug`` depends on: its ``model.scad`` and the
@@ -190,7 +195,7 @@ class PreviewStore:
     def current(self, slug: str, key: str) -> bool:
         """Whether the preview on record was made -- or failed -- from ``key``."""
         record = self.record(slug)
-        return record is not None and record.key == key
+        return record is not None and record.made_from(key)
 
     def slugs(self) -> list[str]:
         """Every model id with a preview or a failure on record: the orphan sweep's

@@ -16,7 +16,7 @@ import numpy as np
 import trimesh
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.core.paths import BUILTIN_PREFIX
+from scadbuddy.core.paths import BUILTIN_PREFIX, SOURCE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
 from scadbuddy.render.job_models import FILE_NAME_PATTERN, JobResult, ManifestObject, PipelineOutput
@@ -261,6 +261,17 @@ def _stated_materials(req: OutputRequest) -> tuple[dict[str, str], set[str]]:
     return {c: m for c, m in materials.items() if c not in conflicting}, conflicting
 
 
+def _piece_name(req: OutputRequest, part: Part, model_name: str) -> str:
+    """What a packed copy of ``part`` is called in the 3MF (#3212): the model or the
+    library object Arrange took it from, else the file it was rendered from, or the
+    output's model for the template's own ``model.scad``."""
+    source = req.provenance.get(part.piece_key)
+    if source is not None:
+        return source.slug.removeprefix(BUILTIN_PREFIX) or source.file
+    stem = Path(part.file).stem
+    return model_name if part.file == SOURCE_NAME or not stem else stem
+
+
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
     blobs = deps.blobs
     parts = {p.piece_key: p for p in req.parts}
@@ -275,6 +286,15 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         for index, plate in enumerate(req.layout.plates)
         for item in plate.items
     }
+    # Each copy is named after its piece (#3212), numbered when the output has several.
+    model_name = req.slug.removeprefix(BUILTIN_PREFIX)
+    copies = Counter(
+        _piece_name(req, parts[item.piece_key], model_name)
+        for plate in req.layout.plates
+        for item in plate.items
+        if item.piece_key in parts
+    )
+    named: Counter[str] = Counter()
     for index, plate in enumerate(req.layout.plates):
         # #956: each placed copy is an object of its own (and each object a copy's
         # template declared), so a by-object print can finish one before the next. Within
@@ -282,10 +302,14 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         plate_parts: list[ColourPart] = []
         plate_extruders: list[int] = []
         plate_objects: list[int] = []
+        plate_names: list[str] = []
         number = 0
         for placed in plate.items:
             if placed.piece_key not in parts:
                 raise _unknown_piece(placed.piece_key)
+            piece = _piece_name(req, parts[placed.piece_key], model_name)
+            named[piece] += 1
+            copy = piece if copies[piece] == 1 else f"{piece} {named[piece]}"
             if placed.piece_key not in layouts:
                 if not await _fetch(deps, placed.piece_key):
                     raise _refuse(f"piece {placed.piece_key} is not in the store")
@@ -296,7 +320,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
             source = layouts[placed.piece_key].plates[0]
             # This copy's colours swapped (#3637): its painting's too.
             swap = {k.upper(): v.upper() for k, v in placed.recolour.items()}
-            for owner in dict.fromkeys(source.objects):
+            owners = list(dict.fromkeys(source.objects))
+            for owner in owners:
                 by_colour: dict[str, list[trimesh.Trimesh]] = {}
                 names: dict[str, str] = {}
                 # Each painted part is a part of its own: its faces are its painting's (#1965).
@@ -349,10 +374,19 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                 plate_parts += [*printed, *cut]
                 plate_extruders += [*extruders, *(extruders[0] for _ in cut)]
                 plate_objects += [number] * (len(printed) + len(cut))
+                # A piece's declared objects by the number its template gave them.
+                plate_names.append(copy if len(owners) == 1 else f"{copy} (object {owner})")
         if not plate_parts:
             # Skipped, it would renumber every later plate against the layout.
             raise _refuse(f"plate {index + 1} of the layout has nothing to print")
-        plates.append(PlateParts(tuple(plate_parts), tuple(plate_extruders), tuple(plate_objects)))
+        plates.append(
+            PlateParts(
+                tuple(plate_parts),
+                tuple(plate_extruders),
+                tuple(plate_objects),
+                tuple(plate_names),
+            )
+        )
         for done in [piece for piece in layouts if last[piece] == index]:
             del layouts[done]
     if not plates:
@@ -378,7 +412,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         colours,
         work / MODEL_NAME,
         thumbnails=thumbnails,
-        model_name=req.slug.removeprefix(BUILTIN_PREFIX),
+        model_name=model_name,
         plate=plate_for(req.plate_model),
         materials=_materials(req),
     )

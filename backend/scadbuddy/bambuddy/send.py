@@ -420,6 +420,8 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     try:
         # Read within the read budget, model settings included: a library file is
         # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
+        # Every plate's boxes are read, though only the plates in `unreachable` need
+        # theirs: cheap at today's plate counts; read only those if counts grow (#4076).
         read = plate_boxes(payload)
     except UnreadableObjectsError:
         return payload

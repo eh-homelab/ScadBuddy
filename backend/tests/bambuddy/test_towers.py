@@ -9,10 +9,8 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
-import pytest
 import trimesh
 
-from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy.send import towers_within_reach
 from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
@@ -152,11 +150,31 @@ def test_a_file_with_no_model_settings_is_one_plate_and_still_sends(tmp_path: Pa
 
 def test_objects_that_leave_no_room_keep_the_authors_tower(tmp_path: Path) -> None:
     """A plate filled edge to edge has nowhere every extruder reaches clear of it: the
-    tower stays, and the slicer says why rather than ScadBuddy guessing."""
-    payload = _laid_out_on_an_a1_mini(tmp_path)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(send, "tower_beside", lambda rect, plate: None)
-        assert towers_within_reach(payload, H2C) is payload
+    tower stays, and the slicer says why rather than ScadBuddy guessing. A real crowded
+    plate, not a stubbed placement (#4076): one object past every side of the H2C's bed,
+    with the author's tower at x 15, which the H2C cannot reach."""
+    slab = trimesh.creation.box(extents=(400, 400, 5))
+    out = tmp_path / "slab.3mf"
+    write_plates_3mf(
+        [PlateParts((ColourPart(1, "Slab", "#D3CFB5", slab),), (1,))],
+        ["#D3CFB5"],
+        out,
+        thumbnails=None,
+    )
+    payload = out.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings.update(
+        printable_area=["0x0", "180x0", "180x180", "0x180"],
+        wipe_tower_x=["15"],
+        wipe_tower_y=["145"],
+        prime_tower_width="22",
+    )
+    crowded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    assert not tower_reaches((15, 145), H2C)
+    assert plate_boxes(crowded).boxes[1] is not None
+
+    assert towers_within_reach(crowded, H2C) is crowded
 
 
 def test_a_painted_mirrored_object_is_boxed(tmp_path: Path) -> None:

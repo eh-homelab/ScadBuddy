@@ -383,7 +383,7 @@ class PreviewScheduler:
         if not self._keeps_preview(slug):
             return record is not None
         key = source_key(self.catalogue.paths, slug)
-        return key is not None and (record is None or record.key != key)
+        return key is not None and (record is None or not record.made_from(key))
 
     def _keeps_preview(self, slug: str) -> bool:
         """Whether ``slug`` shows a preview: it exists, with no thumbnail of its own
