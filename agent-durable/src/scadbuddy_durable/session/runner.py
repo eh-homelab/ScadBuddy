@@ -574,10 +574,12 @@ class SegmentCalls:
     A subagent's call names the ``Agent`` call that runs it as ``parent``. The hooks do
     not say which that is (#4184): a subagent's ``SubagentStart`` names its ``agent_id``
     and type, so it is the one open ``Agent`` call of that ``subagent_type``, or the one
-    open ``Agent`` call at all; of several alike none is named, never the wrong one.
+    open ``Agent`` call at all; of several alike none is named, never the wrong one. A
+    claimed subagent whose ``Agent`` call has ended names none either, not another one.
 
-    An attempt that fails leaves the calls it opened with no end: ``close_open`` ends
-    each as ``failed``, so the panel shows none of them running past it (#4184)."""
+    An attempt that fails or answers with an error leaves the calls it opened with no end:
+    ``close_open`` ends each as ``failed``, so the panel shows none of them running past it
+    (#4184)."""
 
     def __init__(self, activities: list[str]) -> None:
         self._activities = activities
@@ -596,9 +598,10 @@ class SegmentCalls:
         )
 
     def _parent(self, agent_id: str) -> str | None:
-        owner = self._owners.get(agent_id)
-        if owner in self._agents:
-            return owner
+        if agent_id in self._owners:
+            # Claimed: its own Agent call, or none once that has ended, never another's.
+            owner = self._owners[agent_id]
+            return owner if owner in self._agents else None
         return next(iter(self._agents)) if len(self._agents) == 1 else None
 
     async def _started(self, data: Any, tool_use_id: str | None, _context: Any) -> Any:
@@ -655,8 +658,9 @@ class SegmentCalls:
         return {}
 
     def close_open(self, publish: Callable[[dict[str, Any]], None]) -> None:
-        """Ends every call still open as ``failed``: its attempt failed, and a retry or the
-        next credential opens its calls again under new ids."""
+        """Ends every call still open as ``failed``: its attempt ended with an error, raised or
+        returned (the budget cap among them), and a retry or the next credential opens its
+        calls again under new ids."""
         opened, self._open = self._open, {}
         self._agents.clear()
         self._owners.clear()
@@ -873,6 +877,10 @@ class ScadBuddyRunner:
             token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
+                if out.is_error and calls is not None and publish is not None:
+                    # An attempt that answers with an error has ended too: so have its calls.
+                    # Once only: `_report` below never raises, and a later close finds none open.
+                    calls.close_open(publish)
                 # The endpoint answered: the key works, whatever became of the segment.
                 await self._report(session, credential, "used")
                 if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
