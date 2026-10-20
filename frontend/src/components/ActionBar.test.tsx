@@ -85,6 +85,19 @@ describe("Generate's menu", () => {
     getJobColours.mockRestore()
   })
 
+  it('offers "Add to order…" once an output exists, opening its dialog (#4249)', async () => {
+    const { user, unmount } = setup()
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    expect(screen.getByRole('menuitem', { name: /Add to order/ })).toHaveAttribute('aria-disabled', 'true')
+    await user.keyboard('{Escape}')
+    unmount()
+    const output = { id: 'a'.repeat(32), slug: 'name-keychain', name: 'Reagan' } as unknown as Output
+    const { user: again } = setup(false, job, output)
+    await again.click(screen.getByRole('button', { name: 'More to generate' }))
+    await again.click(screen.getByRole('menuitem', { name: /Add to order/ }))
+    expect(await screen.findByRole('dialog', { name: 'Add to order' })).toBeInTheDocument()
+  })
+
   it('closes on a click outside it, and not on one inside it', async () => {
     const { user } = setup()
     await user.click(screen.getByRole('button', { name: 'More to generate' }))
