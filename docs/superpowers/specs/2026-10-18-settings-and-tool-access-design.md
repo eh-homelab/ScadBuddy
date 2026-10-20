@@ -272,8 +272,12 @@ The printer camera becomes the access of `get_printer_camera` in `builtin:scadbu
 A package's `allow_refused` built-ins are one set per turn (§2), so their access applies
 per tool name: when two loaded packages set `Bash` differently, the stricter wins.
 
-Hooks have no stable id, so they are keyed by event and position in the package's hooks
-file. A re-pin clears a package's hook overrides and says so on the package card.
+Hooks have no stable id, so a hook's item id is a fingerprint of its content:
+`hook:<event>:<sha256 of its canonical JSON, first 16 hex>` (#4209). An unchanged hook keeps
+its override across a re-pin. A hook that changed or is new comes back at its default
+(`on`), and the package card marks it "new since you last reviewed"; a re-pin is approved
+by a person anyway (#297), so that is where it is seen. Overrides naming a fingerprint the
+new pin no longer has are deleted with the re-pin.
 
 ### 4.3 Storage (agent migrations)
 
@@ -302,6 +306,9 @@ file. A re-pin clears a package's hook overrides and says so on the package card
   languages share vectors (`agent/test/fixtures/access-vectors.json`, written by the
   TypeScript test, opened by `agent-durable/tests`), as the pending-input and payload
   vectors do.
+- A change applies from the next call, in either direction, including to a turn or a
+  flow run already under way (#4209): a lowered tier stops parking on that run's next
+  call; a raised one starts.
 - Backend flows: `_live_tier` (`workflows/flow_tools.py:807`) takes the tier it is given
   in either direction, behind `workflow.patched("flow-access-2171")` (the projects
   worker replays `tests/fixtures/project_workflow_histories/`).
@@ -323,9 +330,12 @@ file. A re-pin clears a package's hook overrides and says so on the package card
   (`routes/subagentMcp.ts`) stops refusing outward calls: it opens the same approval
   (`approvals/service.ts`, the session's `ai_approvals` row, the badge and panel) and
   waits inside the MCP call until a person decides, the way a classic call waits inside
-  `canUseTool`. A deny or expiry returns an error to the subagent. The wait is bounded by
-  the turn; the plan's first task measures how long a durable segment and Claude Code's
-  MCP client let a subagent's tool call wait, and sets the bound from that.
+  `canUseTool`. The wait is bounded by the shorter of the approval's own expiry
+  (`approval_expiry_seconds`) and the rest of the turn; the plan measures how long a
+  durable segment and Claude Code's MCP client let a subagent's tool call wait, and caps
+  the bound below that. A deny returns the main agent's denied result; an approval that
+  expires, or a turn that ends first, returns the same "nobody decided; the approval
+  expired" result the main agent gets, and the approval is voided (#4209).
 - **Durable subagents get every configured tool** (#2660): the loopback serves the turn's
   remote plugin and package servers (through the forwarder) and `http_request` beside
   ScadBuddy's own, each resolved as in §4.4.
@@ -405,7 +415,10 @@ A stack of PRs, bottom-up, each with its issue:
   unchanged and passing; the camera off refused by flows and the durable gate; a
   filtered package copy omits a disabled skill, subagent and hook in both runtimes, and
   two variants of one pin coexist; a subagent's outward call parks, runs once on
-  approval, and errors on deny and expiry.
+  approval, gets the denied result on deny and the expired result on expiry or turn end;
+  a hook override survives a re-pin that leaves the hook unchanged and resets for a
+  changed hook; a tier lowered mid-turn stops parking on the next call.
 - agent-durable: the shared access vectors; `gate_settings` with lowered and raised
   items; a durable subagent sees a remote plugin's tools.
-- Backend: a flow run takes a lowered tier (with replay of the existing histories).
+- Backend: a flow run takes a lowered tier, including one lowered while the run is under
+  way (its next call), with replay of the existing histories.
