@@ -24,6 +24,8 @@ type PrintRun struct {
 	may_have_queued *bool
 	// The subject as clients read it before #1750: an output's id, or“library:<file id>“. Kept so they work unchanged; read “subject“.
 	output_id *string
+	// The printer property
+	printer PrintRun_PrintRun_printerable
 	// The repeated property
 	repeated *bool
 	// The result property
@@ -120,12 +122,106 @@ func (m *PrintRun_PrintRun_finished_at) SetPrintRunFinishedAtMember1(value Print
 	m.printRun_finished_atMember1 = value
 }
 
+// PrintRun_PrintRun_printer composed type wrapper for classes PrintRun_printerMember1able, string
+type PrintRun_PrintRun_printer struct {
+	// Composed type representation for type PrintRun_printerMember1able
+	printRun_printerMember1 PrintRun_printerMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewPrintRun_PrintRun_printer instantiates a new PrintRun_PrintRun_printer and sets the default values.
+func NewPrintRun_PrintRun_printer() *PrintRun_PrintRun_printer {
+	m := &PrintRun_PrintRun_printer{}
+	return m
+}
+
+// CreatePrintRun_PrintRun_printerFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreatePrintRun_PrintRun_printerFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewPrintRun_PrintRun_printer()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreatePrintRun_printerMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(PrintRun_printerMember1able); ok {
+				result.SetPrintRunPrinterMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *PrintRun_PrintRun_printer) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *PrintRun_PrintRun_printer) GetIsComposedType() bool {
+	return true
+}
+
+// GetPrintRunPrinterMember1 gets the PrintRun_printerMember1 property value. Composed type representation for type PrintRun_printerMember1able
+// returns a PrintRun_printerMember1able when successful
+func (m *PrintRun_PrintRun_printer) GetPrintRunPrinterMember1() PrintRun_printerMember1able {
+	return m.printRun_printerMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PrintRun_PrintRun_printer) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *PrintRun_PrintRun_printer) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetPrintRunPrinterMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetPrintRunPrinterMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetPrintRunPrinterMember1 sets the PrintRun_printerMember1 property value. Composed type representation for type PrintRun_printerMember1able
+func (m *PrintRun_PrintRun_printer) SetPrintRunPrinterMember1(value PrintRun_printerMember1able) {
+	m.printRun_printerMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *PrintRun_PrintRun_printer) SetString(value *string) {
+	m.string = value
+}
+
 type PrintRun_PrintRun_finished_atable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetDateTimeOffset() *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time
 	GetPrintRunFinishedAtMember1() PrintRun_finished_atMember1able
 	SetDateTimeOffset(value *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time)
 	SetPrintRunFinishedAtMember1(value PrintRun_finished_atMember1able)
+}
+
+type PrintRun_PrintRun_printerable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetPrintRunPrinterMember1() PrintRun_printerMember1able
+	GetString() *string
+	SetPrintRunPrinterMember1(value PrintRun_printerMember1able)
+	SetString(value *string)
 }
 
 // NewPrintRun instantiates a new PrintRun and sets the default values.
@@ -227,6 +323,16 @@ func (m *PrintRun) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896
 		}
 		return nil
 	}
+	res["printer"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintRun_PrintRun_printerFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrinter(val.(PrintRun_PrintRun_printerable))
+		}
+		return nil
+	}
 	res["repeated"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetBoolValue()
 		if err != nil {
@@ -294,6 +400,12 @@ func (m *PrintRun) GetOutputId() *string {
 	return m.output_id
 }
 
+// GetPrinter gets the printer property value. The printer property
+// returns a PrintRun_PrintRun_printerable when successful
+func (m *PrintRun) GetPrinter() PrintRun_PrintRun_printerable {
+	return m.printer
+}
+
 // GetRepeated gets the repeated property value. The repeated property
 // returns a *bool when successful
 func (m *PrintRun) GetRepeated() *bool {
@@ -346,6 +458,12 @@ func (m *PrintRun) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c01
 	}
 	{
 		err := writer.WriteBoolValue("may_have_queued", m.GetMayHaveQueued())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("printer", m.GetPrinter())
 		if err != nil {
 			return err
 		}
@@ -419,6 +537,11 @@ func (m *PrintRun) SetOutputId(value *string) {
 	m.output_id = value
 }
 
+// SetPrinter sets the printer property value. The printer property
+func (m *PrintRun) SetPrinter(value PrintRun_PrintRun_printerable) {
+	m.printer = value
+}
+
 // SetRepeated sets the repeated property value. The repeated property
 func (m *PrintRun) SetRepeated(value *bool) {
 	m.repeated = value
@@ -448,6 +571,7 @@ type PrintRunable interface {
 	GetId() *string
 	GetMayHaveQueued() *bool
 	GetOutputId() *string
+	GetPrinter() PrintRun_PrintRun_printerable
 	GetRepeated() *bool
 	GetResult() PrintRunResultable
 	GetStatus() *PrintRun_status
@@ -458,6 +582,7 @@ type PrintRunable interface {
 	SetId(value *string)
 	SetMayHaveQueued(value *bool)
 	SetOutputId(value *string)
+	SetPrinter(value PrintRun_PrintRun_printerable)
 	SetRepeated(value *bool)
 	SetResult(value PrintRunResultable)
 	SetStatus(value *PrintRun_status)
