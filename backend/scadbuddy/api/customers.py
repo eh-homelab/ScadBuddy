@@ -40,6 +40,12 @@ def _one_primary_per_kind(contacts: list[ContactInput] | None) -> None:
             seen.add(contact.kind)
 
 
+def _one_default_per_role(addresses: list[AddressInput] | None) -> None:
+    for role in ("default_shipping", "default_billing"):
+        if sum(1 for address in addresses or [] if getattr(address, role)) > 1:
+            raise ValueError(f"addresses: more than one {role} address")
+
+
 class CustomerCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -53,6 +59,7 @@ class CustomerCreate(BaseModel):
     @model_validator(mode="after")
     def _checked(self) -> "CustomerCreate":
         _one_primary_per_kind(self.contacts)
+        _one_default_per_role(self.addresses)
         contact_ids = [c.id for c in self.contacts if c.id is not None]
         address_ids = [a.id for a in self.addresses if a.id is not None]
         if contact_ids or address_ids:
@@ -76,6 +83,7 @@ class CustomerPatch(BaseModel):
     @model_validator(mode="after")
     def _checked(self) -> "CustomerPatch":
         _one_primary_per_kind(self.contacts)
+        _one_default_per_role(self.addresses)
         return self
 
 

@@ -354,6 +354,22 @@ def test_reference_change_drops_the_quote(shop: Shop) -> None:
     assert shop.get(order).status == "draft"
 
 
+def test_a_replaced_reference_drops_the_output_it_came_from(shop: Shop) -> None:
+    """Review: a reference replaced without an output_id kept the old one, pointing at
+    an output the item no longer matched."""
+    order = shop.order()
+    item = shop.lifecycle.add_item(order.id, BY, resolved(), output_id="out-1", quantity=1)
+    assert item.output_id == "out-1"
+    item = shop.lifecycle.update_item(order.id, item.id, BY, reference=resolved("other"))
+    assert item.output_id is None
+    item = shop.lifecycle.update_item(
+        order.id, item.id, BY, reference=resolved("demo"), output_id="out-2"
+    )
+    assert item.output_id == "out-2"
+    # A quantity or note change alone leaves it.
+    assert shop.lifecycle.update_item(order.id, item.id, BY, quantity=2).output_id == "out-2"
+
+
 def test_quantity_change_drops_the_quote(shop: Shop) -> None:
     order = shop.order()
     item = shop.item(order)

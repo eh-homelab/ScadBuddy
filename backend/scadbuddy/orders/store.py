@@ -317,8 +317,22 @@ class OrderStore:
     ) -> list[Contact]:
         """Ruling 11: a row the body names by ``id`` is updated in place, one without is
         inserted, and the rest are deleted. An ``id`` of another customer's row raises
-        :class:`RowNotOwnedError`."""
-        kept: list[str] = []
+        :class:`RowNotOwnedError`.
+
+        The rows the body drops go first, and every primary is cleared before the body's
+        rows are written: `customer_contacts_primary` is a partial unique index checked
+        per row as each statement runs, not deferrable (as `accept_quote`), so writing in
+        the body's order would refuse a body that replaces the primary email, or that
+        lists the new primary before the old one, as a second primary."""
+        named = [contact.id for contact in contacts if contact.id is not None]
+        conn.execute(
+            "DELETE FROM customer_contacts WHERE customer_id = %s AND NOT (id = ANY(%s))",
+            (customer_id, named),
+        )
+        conn.execute(
+            'UPDATE customer_contacts SET "primary" = false WHERE customer_id = %s AND "primary"',
+            (customer_id,),
+        )
         for position, contact in enumerate(contacts):
             if contact.id is None:
                 row = conn.execute(
@@ -352,11 +366,6 @@ class OrderStore:
                 if row is None:
                     raise RowNotOwnedError("contact", contact.id, customer_id)
             assert row is not None
-            kept.append(row["id"])
-        conn.execute(
-            "DELETE FROM customer_contacts WHERE customer_id = %s AND NOT (id = ANY(%s))",
-            (customer_id, kept),
-        )
         conn.execute("UPDATE customers SET updated_at = now() WHERE id = %s", (customer_id,))
         rows = conn.execute(
             f"SELECT {_CONTACT} FROM customer_contacts WHERE customer_id = %s ORDER BY position",

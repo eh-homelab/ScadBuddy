@@ -571,7 +571,9 @@ class Lifecycle:
         notes: str | None = None,
     ) -> OrderItem:
         """The reference (replaced whole) and the quantity while `draft` or `quoted`,
-        each dropping the accepted quote (Ruling 1); title and notes in any open state."""
+        each dropping the accepted quote (Ruling 1); title and notes in any open state.
+        A reference replaced without an ``output_id`` clears the item's: the output it
+        pointed at no longer matches what the item says."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -584,6 +586,8 @@ class Lifecycle:
             fields: dict[str, Any] = {}
             if reference is not None:
                 fields.update(reference=reference.reference, colours=reference.colours)
+                if isinstance(output_id, UnsetType):
+                    output_id = None
             if not isinstance(output_id, UnsetType):
                 fields["output_id"] = output_id
             if quantity is not None:

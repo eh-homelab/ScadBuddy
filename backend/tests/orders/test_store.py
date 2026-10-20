@@ -102,6 +102,48 @@ def test_a_customer_has_at_most_one_primary_per_kind(rows: OrderStore) -> None:
     assert rows.customers() == []
 
 
+def _ada_with_emails(rows: OrderStore, *values: str) -> tuple[str, list[str]]:
+    customer = rows.insert_customer(
+        display_name="Ada",
+        company=None,
+        notes="",
+        tags=[],
+        contacts=[
+            ContactInput(kind="email", value=value, primary=i == 0)
+            for i, value in enumerate(values)
+        ],
+        addresses=[],
+    )
+    return customer.id, [c.id for c in customer.contacts]
+
+
+def test_replacing_the_primary_email_is_not_a_second_primary(rows: OrderStore) -> None:
+    """Review: the partial unique index is checked per row, so a body that drops the
+    primary email and brings a new one was refused while the old row still stood."""
+    customer_id, _ = _ada_with_emails(rows, "old@example.test")
+    with rows.transaction() as conn:
+        contacts = rows.replace_contacts(
+            conn, customer_id, [ContactInput(kind="email", value="new@example.test", primary=True)]
+        )
+    assert [(c.value, c.primary) for c in contacts] == [("new@example.test", True)]
+
+
+def test_moving_the_primary_does_not_depend_on_the_bodys_order(rows: OrderStore) -> None:
+    """Review: the new primary listed before the old one was refused, since its row was
+    written while the old one was still primary."""
+    customer_id, (a, b) = _ada_with_emails(rows, "a@example.test", "b@example.test")
+    with rows.transaction() as conn:
+        contacts = rows.replace_contacts(
+            conn,
+            customer_id,
+            [
+                ContactInput(id=b, kind="email", value="b@example.test", primary=True),
+                ContactInput(id=a, kind="email", value="a@example.test", primary=False),
+            ],
+        )
+    assert [(c.id, c.primary) for c in contacts] == [(b, True), (a, False)]
+
+
 def test_replacing_contacts_keeps_rows_by_id(rows: OrderStore) -> None:
     customer = rows.insert_customer(
         display_name="Ada",

@@ -97,6 +97,22 @@ def test_a_second_primary_of_a_kind_is_422(client: TestClient) -> None:
     assert len(client.get(f"/api/v1/customers/{customer['id']}").json()["contacts"]) == 3
 
 
+def test_a_second_default_address_of_a_role_is_422(client: TestClient) -> None:
+    addresses = [
+        {"recipient": "Ada", "lines": ["1 Way"], "default_shipping": True},
+        {"recipient": "Ada", "lines": ["2 Way"], "default_shipping": True},
+    ]
+    response = client.post("/api/v1/customers", json={**ADA, "addresses": addresses})
+    assert response.status_code == 422
+    assert "default_shipping" in response.text
+    assert client.get("/api/v1/customers").json() == []
+    customer = create(client)
+    before = client.get(f"/api/v1/customers/{customer['id']}").json()["addresses"]
+    patched = client.patch(f"/api/v1/customers/{customer['id']}", json={"addresses": addresses})
+    assert patched.status_code == 422
+    assert client.get(f"/api/v1/customers/{customer['id']}").json()["addresses"] == before
+
+
 def test_an_unknown_query_parameter_is_400(client: TestClient) -> None:
     response = client.get("/api/v1/customers", params={"name": "Ada"})
     assert response.status_code == 400

@@ -16,6 +16,13 @@ function onePrimaryPerKind(contacts: CustomerCreate['contacts'] | undefined): st
   return null
 }
 
+function oneDefaultPerRole(addresses: CustomerCreate['addresses'] | undefined): string | null {
+  for (const role of ['default_shipping', 'default_billing'] as const) {
+    if ((addresses ?? []).filter((address) => address[role]).length > 1) return `more than one ${role} address`
+  }
+  return null
+}
+
 /** Ruling 11: a row named by `id` is kept, one without is inserted, the rest are deleted. */
 function replaceRows<Row extends { id: string; position: number }, Input extends { id?: string | null }>(
   current: Row[],
@@ -35,6 +42,8 @@ function replaceRows<Row extends { id: string; position: number }, Input extends
 function patch(customer: Customer, body: CustomerPatch): Customer | string {
   const primary = onePrimaryPerKind(body.contacts ?? undefined)
   if (primary) return `contacts: ${primary}`
+  const defaults = oneDefaultPerRole(body.addresses ?? undefined)
+  if (defaults) return `addresses: ${defaults}`
   const next: Customer = { ...customer, updated_at: now() }
   if (body.display_name !== undefined && body.display_name !== null) next.display_name = body.display_name
   if ('company' in body) next.company = typeof body.company === 'string' ? body.company : null
