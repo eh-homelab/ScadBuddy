@@ -895,10 +895,19 @@ describe('ArrangeDialog', () => {
       const found = await optionNames(user, select)
       expect(found.length).toBeGreaterThan(0)
       expect(found.every((o) => /keychain/i.test(o))).toBe(true)
-      await choose(user, select, nameOf('name-keychain'))
-      // The date is relative to now ("2 days ago", then "last month" once the fixture is 30 days
-      // old), so any phrase between the separators: a fixed "ago" stopped matching on 2026-10-20.
-      expect(await screen.findByRole('checkbox', { name: /^Nova · [^·]+ · .*mm · needs a re-render$/ })).toBeInTheDocument()
+      // The date is relative to now, so the clock is pinned five days after the fixture's
+      // (a month on it reads "last month", #4452).
+      const nova = fixtures.outputs.find((output) => output.name === 'Nova')!
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date(nova.created_at).getTime() + 5 * 24 * 60 * 60 * 1000)
+      try {
+        await choose(user, select, nameOf('name-keychain'))
+        expect(
+          await screen.findByRole('checkbox', { name: /^Nova · 5 days ago · .*mm · needs a re-render$/ }),
+        ).toBeInTheDocument()
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('finds a model by its slug as well as its name (#2754 review)', async () => {
