@@ -853,7 +853,10 @@ async def check_print(
     ``printers`` and ``reports`` are the registry, read as the run reads it (#4442 I2):
     a ``printer`` it refuses is an error here in the run's words, and on the LAN path
     the status judged is the LAN report's. A print worker without the key is the run's
-    503, raised as it is."""
+    503, raised as it is. Like the run, a check makes the registry row of a Bambuddy
+    printer that has none (`PrinterStore.ensure_bambuddy`): that row is the printer's
+    identity, made once and idempotently, as the printers strip makes it on a read
+    (`printers_now`), so a check that writes it changes nothing a run would not."""
     named = request.printer is not None and printers is not None
     if not named and (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
@@ -1556,10 +1559,6 @@ async def prepare_run(
     )
 
 
-#: A native run on a print worker that cannot open the access code (Review Focus 4).
-LAN_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the print worker"
-
-
 async def _named_printer(
     request: PrintRunRequest, settings: StoredSettings, printers: PrinterStore | None
 ) -> tuple[PrinterRow | None, int | None]:
@@ -1619,7 +1618,12 @@ async def _registry_path(
 ) -> tuple[RunPath, PrinterStatus | None]:
     """The run's path to ``row`` and, on the native path, its status from the LAN
     report, which must be as fresh as `printers_now` needs it to call the printer
-    online (#4442 I3): an older one is no report."""
+    online (#4442 I3): an older one is no report.
+
+    A print worker without the key cannot open the access code, so an ``auto`` row it
+    reaches through Bambuddy too takes that path (#4442 review): the run still queues
+    through Bambuddy until LAN printing lands (plan Task 9). Only a row set to
+    ``native`` is the key's 503."""
     if printers is None or row is None:
         return "bambuddy", None
     report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
@@ -1628,6 +1632,8 @@ async def _registry_path(
     if path == "bambuddy":
         return path, None
     if printers.kek is None:
+        if row.preferred_path == "auto" and row.bambuddy_printer_id is not None:
+            return "bambuddy", None
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, LAN_NEEDS_KEK)
     if report is None:
         raise RunRefusalError(

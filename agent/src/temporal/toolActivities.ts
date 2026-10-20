@@ -517,6 +517,13 @@ async function runGated(
   if (effective.gated && tool.resolvesApproval) {
     const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
     const waits = deps.resolveBackoffMs ?? RESOLVE_BACKOFF_MS
+    const unavailable = (tries: number, why: string): Promise<never> =>
+      refuse(
+        `the backend was unavailable after ${tries} tries: ${why}`,
+        `${tool.name} was not run: what it names could not be checked (${why}), so this call's approval is spent; call it again to ask for a new one`,
+        BACKEND_UNAVAILABLE,
+        'error',
+      )
     for (let attempt = 0; ; attempt++) {
       try {
         const resolved = (await tool.prepareApproval(input, ctx)).input
@@ -526,15 +533,10 @@ async function runGated(
         if (isRefusal(err)) await refuseOrRetry(err, refuse, tool.name)
         const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
         const wait = waits[attempt]
-        if (wait === undefined || call.signal.aborted) {
-          await refuse(
-            `the backend was unavailable after ${attempt + 1} tries: ${why}`,
-            `${tool.name} was not run: what it names could not be checked (${why}), so this call's approval is spent; call it again to ask for a new one`,
-            BACKEND_UNAVAILABLE,
-            'error',
-          )
-        }
+        if (wait === undefined || call.signal.aborted) await unavailable(attempt + 1, why)
         await sleep(wait, undefined, { signal: call.signal }).catch(() => {})
+        // Cancelled while it waited: refused now, never one more read (#4442 review).
+        if (call.signal.aborted) await unavailable(attempt + 1, why)
       }
     }
   }

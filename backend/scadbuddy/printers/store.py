@@ -133,8 +133,6 @@ def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> No
     repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
-#: Everything a merge repoints (I7 of the #4186 review). The extension point for every
-#: later table keyed by ``printers.id``.
 def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> None:
     # A print run's activity row names its printer in the ``printer`` facet (#3823 Task
     # 8), a JSON value rather than a column, so no foreign key keeps it.
@@ -153,6 +151,8 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
+#: Everything a merge repoints (I7 of the #4186 review). The extension point for every
+#: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
     PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),

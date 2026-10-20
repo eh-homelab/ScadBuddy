@@ -285,6 +285,22 @@ async def test_native_run_refused_without_kek(
 
 
 @respx.mock
+async def test_an_auto_printer_prints_through_bambuddy_without_kek(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """Task 8 queues a linked row through Bambuddy and never opens the access code, so a
+    worker without the key takes Bambuddy's path for an ``auto`` row, not the 503."""
+    status = bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports)
+    printers_with_kek.kek = None
+
+    prepared = await prepare(printers_with_kek, reports, run_request(printer=pid))
+
+    assert (prepared.printer, prepared.path, prepared.printer_id) == (pid, "bambuddy", 1)
+    assert status.called
+
+
+@respx.mock
 async def test_a_native_printer_that_never_reported_is_refused(
     printers_with_kek: PrinterStore, reports: PrinterReportStore
 ) -> None:
