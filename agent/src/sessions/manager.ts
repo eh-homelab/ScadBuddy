@@ -2265,22 +2265,24 @@ export class SessionManager {
     // The child's history through the paused calls; undefined when the log lacks one of them,
     // and then the parent forks before them, as without their results.
     const pausedHistory = historyThroughCalls(all, paused)
+    // The conversation through the checkpoint, when the workflow holds every result it lacks.
+    const atCheckpoint = answered(source.checkpoint, source.owed.pending)
     let at = upTo
-    if (at === undefined && (source.busy || !pausedHistory || !answered(source.checkpoint, source.owed.pending))) {
+    if (at === undefined && (source.busy || !pausedHistory || !atCheckpoint)) {
       at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
       if (at === undefined) {
         throw new SessionError(
           'no_transcript',
           source.busy
             ? `session ${id} has no finished reply to fork yet; wait for its turn to answer`
-            : !pausedHistory && answered(source.checkpoint, source.owed.pending)
+            : !pausedHistory && atCheckpoint
               ? // The result is held, but the log has no record of the call to end the child's history at.
                 `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; send it a turn first`
               : `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`,
         )
       }
     }
-    const entries = at === undefined ? answered(source.checkpoint, source.owed.pending) : answered(replies.get(at))
+    const entries = at === undefined ? atCheckpoint : answered(replies.get(at))
     if (!entries && through(at === undefined ? source.checkpoint : replies.get(at))) {
       throw new SessionError('invalid', `session ${id}'s conversation through reply ${at} leaves a call unanswered; fork from an earlier reply`)
     }

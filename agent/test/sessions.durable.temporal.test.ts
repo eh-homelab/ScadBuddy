@@ -103,7 +103,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
   let drop: () => Promise<void>
   beforeAll(async () => {
     env = await localTemporal()
-    worker = await Worker.create({ connection: env.nativeConnection, taskQueue: QUEUE, workflowsPath: WORKFLOWS })
+    // A cache that never evicts: the stand-in's `owed_reads` count lives in a Query, in no
+    // history, and would start again on a replay (support/durableSessionWorkflows.ts).
+    worker = await Worker.create({ connection: env.nativeConnection, taskQueue: QUEUE, workflowsPath: WORKFLOWS, maxCachedWorkflows: 10_000 })
     running = worker.run()
   }, 120_000)
   afterAll(async () => {

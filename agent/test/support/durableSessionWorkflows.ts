@@ -13,7 +13,8 @@ import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate,
 // owed state in turn (the last one after), as a parent whose turn stops between reads. That
 // count is kept by the `fork_point` Query, which a real Query never does, and is in no
 // history: it holds only while the worker's cache keeps the workflow, and starts again if
-// the workflow is evicted and replayed mid-test.
+// the workflow is evicted and replayed mid-test (the test's worker sets `maxCachedWorkflows`
+// so none is).
 
 type Message = { turn_id: string; text: string; author: unknown; images: { name: string; mediaType: string }[] }
 
