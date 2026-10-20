@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -24,6 +24,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
 from scadbuddy.main import create_app, sweep_assets
+from scadbuddy.orders.component import ORDERS, OrdersComponent
+from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.worker import worker_deps_from_state
@@ -565,6 +567,59 @@ def _never(*args: object, **kwargs: object) -> Any:
     raise AssertionError("read after the sweep was stopped")
 
 
+def test_sweep_keeps_an_ordered_asset(app: FastAPI, client: TestClient, pg_conninfo: str) -> None:
+    """#4249: an upload named only by a line item's inputs survives the sweep (spec
+    2026-10-18 §3.3), and one nothing names still goes."""
+    ordered, unused = (str(_upload(client, _svg(n))["id"]) for n in range(2))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    store = state.components.get(ORDERS).store
+    customer = store.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    with store.transaction() as conn:
+        order = store.insert_order(
+            conn, customer_id=customer.id, currency="USD", created_by=Actor(kind="browser")
+        )
+        store.insert_item(
+            conn,
+            order.id,
+            reference=Reference(
+                slug=MODEL_SLUG,
+                commit="a" * 40,
+                inputs={"params": {"label": ordered}, "v": 0},
+                template_name="Demo",
+                render_key="c" * 64,
+            ),
+            colours=[],
+            output_id=None,
+            quantity=1,
+        )
+    for asset_id in (ordered, unused):
+        _age(pg_conninfo, asset_id, 30 * 86400)
+    assert sweep_assets(state) == [unused]
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{ordered}").status_code == 200
+
+
+def test_sweep_skips_when_orders_are_unavailable(
+    app: FastAPI, client: TestClient, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4249: the sweep fails closed. Without every item's inputs it would take an
+    ordered upload, so a store that cannot answer skips the whole pass, logged."""
+    unused = str(_upload(client, _svg(1))["id"])
+    _age(pg_conninfo, unused, 30 * 86400)
+    state: AppState = getattr(app.state, STATE_ATTR)
+
+    def broken() -> Iterator[dict[str, Any]]:
+        raise psycopg.OperationalError("the orders pool is closed")
+
+    unanswering = SimpleNamespace(store=SimpleNamespace(item_inputs=broken))
+    state.components.override(ORDERS, cast(OrdersComponent, unanswering))
+    with caplog.at_level("WARNING"):
+        assert sweep_assets(state) == []
+    assert any("orders" in record.getMessage() for record in caplog.records)
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{unused}").status_code == 200
+
+
 def test_a_stopped_sweep_reads_no_references() -> None:
     """#2554: a shutdown before the sweep starts reads nothing: the reference reads
     cannot be interrupted once begun, and would hold the shutdown's join."""
@@ -583,7 +638,7 @@ def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
     """#2554: stopped during the reference reads, it returns before the per-asset pass."""
     stop = threading.Event()
 
-    def referenced(paths: object, params: object) -> set[str]:
+    def referenced(paths: object, params: object, extra: object = ()) -> set[str]:
         stop.set()  # the shutdown arrives while the templates are read
         return set()
 
@@ -591,6 +646,9 @@ def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
     state = SimpleNamespace(
         render=SimpleNamespace(store=SimpleNamespace(list_jobs=list)),
         presets=SimpleNamespace(saved_params=list),
+        components=SimpleNamespace(
+            get=lambda key: SimpleNamespace(store=SimpleNamespace(item_inputs=list))
+        ),
         paths=None,
         assets=SimpleNamespace(sweep=_never),
         config=SimpleNamespace(asset_sweep_grace=0),
