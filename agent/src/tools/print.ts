@@ -271,6 +271,108 @@ function seedPlan(
   })
 }
 
+const PRINT_OUTPUT_INPUT = withSource({
+  printer_id: z.number().int().optional(),
+  printer: z
+    .string()
+    .uuid()
+    .optional()
+    .describe(
+      "A registry printer's `id` (list_printers, get_printers_now), in place of `printer_id`: the run prints " +
+        'on the Bambuddy printer it links and records the printer by this id.',
+    ),
+  copies: z.number().int().min(1).max(1000).optional(),
+  plate_id: z.number().int().min(1).default(1),
+  all_plates: z.boolean().default(false),
+  filament_plan: z
+    .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
+    .optional(),
+  nozzles: nozzles.optional().describe('One size for the job; a second entry is the other extruder'),
+  tier: tier.optional(),
+  process_name: z.string().max(200).optional().describe('A Bambu process by name, in place of `tier`'),
+  bed_type: z.string().max(64).optional(),
+  // `catchall`, not `z.record`: see `params` in common.ts.
+  filament_overrides: z
+    .object({})
+    .catchall(presetRef)
+    .optional()
+    .describe('A filament preset per slot id, in place of the spool\'s own'),
+  project_id: nullable(z.number().int()).describe('Omit for the default project; null for "No project"'),
+  folder_id: z.number().int().optional().describe('A library folder of no project, in place of a project'),
+  options: printOptions,
+  print_sequence: z
+    .enum(['by layer', 'by object'])
+    .optional()
+    .describe("'by object' finishes each object before the next starts; omit for the template's own"),
+  filament_profiles: z
+    .array(z.string().max(64))
+    .max(8)
+    .optional()
+    .describe(
+      'Filament profiles to apply, by id (get_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
+        "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
+        "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
+    ),
+  supports: z
+    .object({
+      enabled: z
+        .boolean()
+        .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
+      type: z.enum(['tree', 'normal']).optional().describe("'tree' or 'normal'; omit for the template's, else tree"),
+      threshold_angle: z
+        .number()
+        .int()
+        .min(0)
+        .max(90)
+        .optional()
+        .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
+      on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
+    })
+    .optional()
+    .describe(
+      'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
+        "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
+    ),
+  prime_tower: z
+    .object({
+      enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
+      no_sparse_layers: z
+        .boolean()
+        .optional()
+        .describe(
+          "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
+        ),
+    })
+    .optional()
+    .describe(
+      "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
+        'else the process (on whenever a plate uses more than one filament).',
+    ),
+})
+type PrintOutputArgs = z.infer<typeof PRINT_OUTPUT_INPUT>
+
+/** print_output's approval line; `printerName` is the registry printer's name, when read. */
+function printSummary(args: PrintOutputArgs, printerName?: string): string {
+  const { printer_id, printer, copies, plate_id, all_plates, nozzles, tier, process_name } = args
+  const defaulted =
+    nozzles === undefined ||
+    (tier === undefined && process_name === undefined) ||
+    args.filament_plan === undefined ||
+    args.bed_type === undefined
+  return (
+    `Print ${sourceName(args)}: ${copies ?? 1} cop${(copies ?? 1) === 1 ? 'y' : 'ies'} of ${
+      all_plates ? 'every plate' : `plate ${plate_id}`
+    }` +
+    `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
+    `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
+    `${printer !== undefined ? ` on printer ${printerName === undefined ? printer : JSON.stringify(printerName)}` : printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
+    `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
+    `${supportsPhrase(args.supports)}` +
+    `${towerPhrase(args.prime_tower)}` +
+    `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
+  )
+}
+
 export const printTools: Tool[] = [
   // ── read: farm context and planning ─────────────────────────────────────
   defineTool({
@@ -871,111 +973,24 @@ export const printTools: Tool[] = [
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
-    input: withSource({
-      printer_id: z.number().int().optional(),
-      printer: z
-        .string()
-        .uuid()
-        .optional()
-        .describe(
-          "A registry printer's `id` (list_printers, get_printers_now), in place of `printer_id`: the run prints " +
-            'on the Bambuddy printer it links and records the printer by this id.',
-        ),
-      copies: z.number().int().min(1).max(1000).optional(),
-      plate_id: z.number().int().min(1).default(1),
-      all_plates: z.boolean().default(false),
-      filament_plan: z
-        .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
-        .optional(),
-      nozzles: nozzles.optional().describe('One size for the job; a second entry is the other extruder'),
-      tier: tier.optional(),
-      process_name: z.string().max(200).optional().describe('A Bambu process by name, in place of `tier`'),
-      bed_type: z.string().max(64).optional(),
-      // `catchall`, not `z.record`: see `params` in common.ts.
-      filament_overrides: z
-        .object({})
-        .catchall(presetRef)
-        .optional()
-        .describe('A filament preset per slot id, in place of the spool\'s own'),
-      project_id: nullable(z.number().int()).describe('Omit for the default project; null for "No project"'),
-      folder_id: z.number().int().optional().describe('A library folder of no project, in place of a project'),
-      options: printOptions,
-      print_sequence: z
-        .enum(['by layer', 'by object'])
-        .optional()
-        .describe("'by object' finishes each object before the next starts; omit for the template's own"),
-      filament_profiles: z
-        .array(z.string().max(64))
-        .max(8)
-        .optional()
-        .describe(
-          'Filament profiles to apply, by id (get_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
-            "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
-            "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
-        ),
-      supports: z
-        .object({
-          enabled: z
-            .boolean()
-            .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
-          type: z.enum(['tree', 'normal']).optional().describe("'tree' or 'normal'; omit for the template's, else tree"),
-          threshold_angle: z
-            .number()
-            .int()
-            .min(0)
-            .max(90)
-            .optional()
-            .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
-          on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
-        })
-        .optional()
-        .describe(
-          'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
-            "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
-        ),
-      prime_tower: z
-        .object({
-          enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
-          no_sparse_layers: z
-            .boolean()
-            .optional()
-            .describe(
-              "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
-            ),
-        })
-        .optional()
-        .describe(
-          "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
-            'else the process (on whenever a plate uses more than one filament).',
-        ),
-    }),
+    input: PRINT_OUTPUT_INPUT,
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
     routes: [
       'POST /api/v1/print/outputs/{output_id}/run',
       'POST /api/v1/print/library/{file_id}/run',
       'GET /api/v1/print/runs/{run_id}',
+      'GET /api/v1/printers/{printer_id}',
     ],
     title: (args) => `Print ${sourceName(args)}${args.copies && args.copies > 1 ? ` × ${args.copies}` : ''}`,
-    summarize: (args) => {
-      const { printer_id, printer, copies, plate_id, all_plates, nozzles, tier, process_name } = args
-      const defaulted =
-        nozzles === undefined ||
-        (tier === undefined && process_name === undefined) ||
-        args.filament_plan === undefined ||
-        args.bed_type === undefined
-      return (
-        `Print ${sourceName(args)}: ${copies ?? 1} cop${(copies ?? 1) === 1 ? 'y' : 'ies'} of ${
-          all_plates ? 'every plate' : `plate ${plate_id}`
-        }` +
-        `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
-        `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
-        `${printer !== undefined ? ` on printer ${printer}` : printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
-        `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
-        `${supportsPhrase(args.supports)}` +
-        `${towerPhrase(args.prime_tower)}` +
-        `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
-      )
+    summarize: (args) => printSummary(args),
+    // #4442 M6: the approval names the registry printer as a person knows it.
+    summarizeFor: async (args, ctx) => {
+      if (args.printer === undefined) return printSummary(args)
+      const { data } = await ctx.backend
+        .GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } } })
+        .catch(() => ({ data: undefined }))
+      return printSummary(args, data?.name)
     },
     // Its own wait for the print run, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,

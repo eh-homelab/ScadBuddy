@@ -1004,6 +1004,7 @@ async def post_check(
     store: SettingsStoreDep,
     rack: RackUsageDep,
     catalogue: CatalogueDep,
+    printers: PrintersDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -1021,7 +1022,16 @@ async def post_check(
         print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:
         return await check_for_output(
-            client, outputs, uploads, meta, settings, body, rack=rack, print_settings=print_settings
+            client,
+            outputs,
+            uploads,
+            meta,
+            settings,
+            body,
+            rack=rack,
+            print_settings=print_settings,
+            printers=printers.store,
+            reports=printers.reports,
         )
 
 

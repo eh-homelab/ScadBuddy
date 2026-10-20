@@ -7,7 +7,7 @@ queued. A job whose archive ScadBuddy linked points at its print; any other at
 Bambuddy's archives.
 
 Since the printer registry (#3823) a card is a registry printer's. A LAN-linked one
-with a report fresher than `STALE_AFTER` shows that report, whether or not it is also in
+with a fresh report (`is_fresh`) shows that report, whether or not it is also in
 Bambuddy, and costs no Bambuddy call (hot-path plan 2026-10-18 D4); otherwise a
 Bambuddy-linked one shows Bambuddy's status. A Bambuddy that is configured but does not
 answer costs only the cards only it could fill: each of those says so (#4186 review I1).
@@ -30,7 +30,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore
-from scadbuddy.printers.status import STALE_AFTER, status_from_report
+from scadbuddy.printers.status import is_fresh, status_from_report
 from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ Reports = dict[str, tuple[dict[str, Any], datetime]]
 def _fresh(row: PrinterRow, latest: Reports, now: datetime) -> bool:
     """Whether the row's own LAN report answers for it (D4)."""
     report = latest.get(row.id)
-    return row.lan_host is not None and report is not None and now - report[1] < STALE_AFTER
+    return row.lan_host is not None and report is not None and is_fresh(report[1], now)
 
 
 def _unreachable(row: PrinterRow, error: str) -> PrinterNow:

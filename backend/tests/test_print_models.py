@@ -76,13 +76,15 @@ def test_the_printer_crosses_the_history() -> None:
     assert round_trip(request(printer=PRINTER)).printer == PRINTER
 
 
-def test_a_change_of_printer_is_a_new_run() -> None:
+def test_the_printer_is_part_of_the_key_only_without_a_bambuddy_id() -> None:
+    """#4442 M1: beside ``printer_id``, which decides, ``printer`` adds nothing, so the
+    dialog's body (which has sent it since Task 10) keys as it did before the deploy."""
     plain = run_key("o" * 32, request(printer_id=1))
-    named = run_key("o" * 32, request(printer_id=1, printer=PRINTER))
-    other = run_key("o" * 32, request(printer_id=1, printer="00000000-0000-4000-8000-0000000000bb"))
-    assert len({plain, named, other}) == 3
-    # No printer named: the key it had before the field existed.
-    assert plain == run_key("o" * 32, request(printer_id=1, printer=None))
+    assert run_key("o" * 32, request(printer_id=1, printer=PRINTER)) == plain
+    assert run_key("o" * 32, request(printer_id=2, printer=PRINTER)) != plain
+    alone = run_key("o" * 32, request(printer=PRINTER))
+    other = run_key("o" * 32, request(printer="00000000-0000-4000-8000-0000000000bb"))
+    assert len({plain, alone, other}) == 3
 
 
 def test_a_printer_that_is_not_a_registry_id_is_refused() -> None:

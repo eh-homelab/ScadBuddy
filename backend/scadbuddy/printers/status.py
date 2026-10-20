@@ -40,6 +40,14 @@ from scadbuddy.printers.models import PrinterRow
 
 #: A printer whose last report is older than this is offline (Review Focus 5).
 STALE_AFTER = timedelta(seconds=90)
+
+
+def is_fresh(seen_at: datetime, now: datetime) -> bool:
+    """Whether a LAN report seen at ``seen_at`` still answers for its printer: the one
+    rule for the card's ``connected``, `printers_now`'s path and a run's (#4442 I3)."""
+    return now - seen_at < STALE_AFTER
+
+
 #: The first rack slot's id in ``device.nozzle.info`` (ha-bambulab ``RACK_SLOT_IDS``).
 RACK_FIRST_ID = 16
 
@@ -225,7 +233,7 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
         {
             "id": row.bambuddy_printer_id or 0,
             "name": row.name,
-            "connected": now - report.received_at < STALE_AFTER,
+            "connected": is_fresh(report.received_at, now),
             "state": data.get("gcode_state") if isinstance(data.get("gcode_state"), str) else None,
             "progress": data.get("mc_percent"),
             "remaining_time": data.get("mc_remaining_time"),

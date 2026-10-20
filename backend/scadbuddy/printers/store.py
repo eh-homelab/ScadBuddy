@@ -145,6 +145,14 @@ def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> 
     )
 
 
+def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
+    conn.execute(
+        "UPDATE activity SET facets = facets - 'printer'"
+        " WHERE kind = 'print_run' AND facets->>'printer' = %s",
+        (printer_id,),
+    )
+
+
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
     PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),
@@ -550,3 +558,7 @@ class PrinterStore:
             gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
             if gone.rowcount == 0:
                 raise PrinterNotFoundError(printer_id)
+            # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
+            # activity facets follow in the same transaction, so the Printer filter never
+            # offers a printer that is gone (#4442 M3).
+            _forget_run_activity(conn, str(key))

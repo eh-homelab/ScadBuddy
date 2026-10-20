@@ -251,6 +251,12 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   /** A human-readable line for the pending action a gated call creates. */
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
   /**
+   * As `summarize`, for a line that needs a read to say what an argument names (a
+   * registry printer's name for its id, #4442). It runs where the pending action is
+   * prepared; anything it cannot read it says as `summarize` would.
+   */
+  summarizeFor?: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<string>
+  /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
    * the action ("Render cable-clip"), since the panel shows whether it is
    * running or done beside it. Defaults to the name in words, with the `slug`
@@ -289,6 +295,8 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
+  /** The pending action's line (ToolSpec.summarizeFor, else `summarize`). */
+  summarizeFor(args: unknown, ctx: ToolContext): Promise<string>
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
   title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
@@ -337,6 +345,9 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     summarize(args) {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
+    },
+    async summarizeFor(args, ctx) {
+      return spec.summarizeFor ? spec.summarizeFor(spec.input.parse(args), ctx) : this.summarize(args)
     },
     title(args) {
       const parsed = spec.input.safeParse(args)
@@ -562,7 +573,7 @@ async function runJudgedByResult(
       const action = await ctx.pending.prepare(ctx.principal, {
         tool: tool.name,
         input,
-        summary: tool.summarize(args),
+        summary: await tool.summarizeFor(args, ctx),
         workspace: workspaceOf(ctx),
       })
       return {

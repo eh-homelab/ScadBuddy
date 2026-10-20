@@ -307,6 +307,30 @@ def test_a_merge_moves_the_runs_that_printed_on_the_gone_row(
     assert facets is not None and facets["facets"] == {"subject": "o", "printer": mine.id}
 
 
+def test_deleting_a_printer_forgets_it_on_its_runs(printers: PrinterStore, pg_pool: PgPool) -> None:
+    """#4442 M3: the run keeps no printer that is gone, nor does its activity facet."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, printer)"
+            " VALUES ('r1', 'o', 'k', 'running', %s)",
+            (row.id,),
+        )
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, facets, source, source_id)"
+            " VALUES ('print_run:r1', 'print_run', 'running', 'Print', %s, 'print_run', 'r1')",
+            (Jsonb({"subject": "o", "printer": row.id}),),
+        )
+
+    printers.delete(row.id)
+
+    with pg_pool.connection() as conn:
+        run = conn.execute("SELECT printer FROM print_runs WHERE id = 'r1'").fetchone()
+        facets = conn.execute("SELECT facets FROM activity WHERE id = 'print_run:r1'").fetchone()
+    assert run is not None and run["printer"] is None
+    assert facets is not None and facets["facets"] == {"subject": "o"}
+
+
 def test_link_bambuddy_takeover_merges_and_announces(
     printers: PrinterStore, bus: RecordingBus
 ) -> None:

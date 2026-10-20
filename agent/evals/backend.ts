@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { KEYCHAIN_HEIGHTS, type LoggedRequest, type ScenarioBackend } from './render.js'
 import { writeZip } from './threemf.js'
@@ -45,10 +46,47 @@ export type EvalJob = { id: string; slug: string; params: Record<string, unknown
 
 export type EvalOutput = { id: string; slug: string; job_id: string; name: string }
 
-/** `METHOD /path/{param}` → a regex for a logged `METHOD /path/value`, anchored. */
-export function routePattern(route: string): RegExp {
-  const escaped = route.replace(/[.*+?^$()|[\]\\]/g, '\\$&').replace(/\{[^/}]+\}/g, '[^/]+')
-  return new RegExp(`^${escaped}$`)
+const isParam = (segment: string) => /^\{[^/}]+\}$/.test(segment)
+const escape = (text: string) => text.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&')
+
+/** Every route the agent knows of: its tools' and the coverage list's (NOT_A_TOOL). */
+const KNOWN_ROUTES: readonly string[] = [
+  ...ALL_TOOLS.flatMap((t) => t.routes),
+  ...NOT_A_TOOL.map((entry) => entry.operation),
+]
+
+/**
+ * `METHOD /path/{param}` → a regex for a logged `METHOD /path/value`, anchored. A
+ * parameter never matches a literal segment that another known route of the same method
+ * has in its place, as the backend routes it (#4442): `GET /printers/{printer_id}` is
+ * not `GET /printers/discover`.
+ */
+export function routePattern(route: string, known: readonly string[] = KNOWN_ROUTES): RegExp {
+  const [method, segments] = parts(route)
+  const siblings = known
+    .map(parts)
+    .filter(([m, other]) => m === method && other.length === segments.length)
+    .map(([, other]) => other)
+  const pattern = segments.map((segment, at) => {
+    if (!isParam(segment)) return escape(segment)
+    const literals = new Set<string>()
+    for (const other of siblings) {
+      const here = other[at] ?? ''
+      const sameBefore = other.slice(0, at).every((s, i) => {
+        const mine = segments[i] ?? ''
+        return s === mine || isParam(s) || isParam(mine)
+      })
+      if (sameBefore && !isParam(here)) literals.add(escape(here))
+    }
+    return literals.size ? `(?!(?:${[...literals].join('|')})(?:/|$))[^/]+` : '[^/]+'
+  })
+  return new RegExp(`^${escape(method)} ${pattern.join('/')}$`)
+}
+
+/** `METHOD /a/b` → the method and the path's segments. */
+function parts(route: string): [string, string[]] {
+  const space = route.indexOf(' ')
+  return [route.slice(0, space), route.slice(space + 1).split('/')]
 }
 
 /**
@@ -57,7 +95,7 @@ export function routePattern(route: string): RegExp {
  * list cannot drift from the tools, plus the non-tool additions below.
  */
 export const OUTWARD_ROUTES: readonly RegExp[] = [
-  ...ALL_TOOLS.filter((t) => t.risk === 'outward').flatMap((t) => t.routes.map(routePattern)),
+  ...ALL_TOOLS.filter((t) => t.risk === 'outward').flatMap((t) => t.routes.map((route) => routePattern(route))),
   // Not tools (src/tools/coverage.ts NOT_A_TOOL), and no agent call should ever reach them:
   // the Bambuddy URL and API key, and the edit to Bambuddy's own sidebar.
   routePattern('PUT /api/v1/settings'),

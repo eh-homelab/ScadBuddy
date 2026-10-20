@@ -125,6 +125,14 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
         assert {"print_check", "print_record", "op.send.run", "op.output_inbox_delete.run"} <= names
         # Only the Bambuddy kinds: a library kind needs the volume.
         assert "op.output_delete.run" not in names
+        # #3823 Task 8: the run's check reads the printer registry and its reports.
+        [check] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "print_check"
+        ]
+        print_deps = check.__self__.d  # type: ignore[attr-defined]
+        assert print_deps.printers is not None and print_deps.reports is not None
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

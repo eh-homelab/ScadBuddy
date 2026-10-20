@@ -692,9 +692,30 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(refused?.message).toMatch(/Garage is reached only over the LAN/)
     })
 
-    it('names the registry printer in its approval line', () => {
-      const t = tool('print_output')
-      expect(t.summarize({ ...chosen, printer: PRINTER })).toContain(`on printer ${PRINTER}`)
+    it('names the registry printer by its name in its approval line (#4442 M6)', async () => {
+      server.use(row(2))
+      const line = await tool('print_output').summarizeFor({ ...chosen, printer: PRINTER }, ctx())
+      expect(line).toContain('on printer "Garage"')
+      expect(line).not.toContain(PRINTER)
+    })
+
+    it('names it by its id when the registry cannot be read', async () => {
+      server.use(http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, () => HttpResponse.json({ detail: 'gone' }, { status: 404 })))
+      const line = await tool('print_output').summarizeFor({ ...chosen, printer: PRINTER }, ctx())
+      expect(line).toContain(`on printer ${PRINTER}`)
+    })
+
+    it('says its line in the pending action a gated call creates', async () => {
+      server.use(row(2))
+      const prepared: { summary?: string } = {}
+      const pending = {
+        prepare: async (_principal: unknown, action: { summary: string }) => {
+          prepared.summary = action.summary
+          return { id: 'a1', summary: action.summary, expiresAt: new Date('2026-10-20T00:00:00Z') }
+        },
+      }
+      await runTool(tool('print_output'), { ...chosen, printer: PRINTER }, { ...ctx(), gate: undefined, pending } as never)
+      expect(prepared.summary).toContain('on printer "Garage"')
     })
   })
 
