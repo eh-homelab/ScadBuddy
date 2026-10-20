@@ -251,11 +251,16 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   /** A human-readable line for the pending action a gated call creates. */
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
   /**
-   * As `summarize`, for a line that needs a read to say what an argument names (a
-   * registry printer's name for its id, #4442). It runs where the pending action is
-   * prepared; anything it cannot read it says as `summarize` would.
+   * What a gated call parks for approval, when that needs a read (#4442): the input a
+   * person approves, which may name what the arguments resolve to (a registry printer's
+   * Bambuddy id), and the line that says it. confirm_action must send that input, so
+   * what runs is what was approved. It may refuse the call, before anything is parked.
+   * Without it, the call's parsed arguments and `summarize`.
    */
-  summarizeFor?: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<string>
+  prepareApproval?: (
+    args: z.infer<z.ZodObject<S>>,
+    ctx: ToolContext,
+  ) => Promise<{ input: z.infer<z.ZodObject<S>>; summary: string }>
   /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
    * the action ("Render cable-clip"), since the panel shows whether it is
@@ -295,8 +300,8 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
-  /** The pending action's line (ToolSpec.summarizeFor, else `summarize`). */
-  summarizeFor(args: unknown, ctx: ToolContext): Promise<string>
+  /** What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`). */
+  prepareApproval(args: unknown, ctx: ToolContext): Promise<{ input: Record<string, unknown>; summary: string }>
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
   title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
@@ -346,8 +351,11 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
-    async summarizeFor(args, ctx) {
-      return spec.summarizeFor ? spec.summarizeFor(spec.input.parse(args), ctx) : this.summarize(args)
+    async prepareApproval(args, ctx) {
+      const parsed = spec.input.parse(args)
+      if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }
+      const prepared = await spec.prepareApproval(parsed, ctx)
+      return { input: spec.input.parse(prepared.input), summary: prepared.summary }
     },
     title(args) {
       const parsed = spec.input.safeParse(args)
@@ -569,11 +577,14 @@ async function runJudgedByResult(
   try {
     if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
-      const input = tool.parse(args)
+      const { input, summary } = await tool.prepareApproval(args, ctx)
+      // The approved input differs from the call's when the tool resolved what an argument
+      // names (#4442); confirm_action must then send it, so the answer carries it.
+      const resolved = JSON.stringify(input) !== JSON.stringify(tool.parse(args))
       const action = await ctx.pending.prepare(ctx.principal, {
         tool: tool.name,
         input,
-        summary: await tool.summarizeFor(args, ctx),
+        summary,
         workspace: workspaceOf(ctx),
       })
       return {
@@ -582,10 +593,12 @@ async function runJudgedByResult(
           pending_action_id: action.id,
           summary: action.summary,
           expires_at: action.expiresAt.toISOString(),
+          ...(resolved ? { arguments: input } : {}),
           next:
             'Nothing was sent. Outward actions need a human approval in the ScadBuddy UI. Once the user has ' +
-            'approved it there, call confirm_action with this pending_action_id and exactly the same arguments; ' +
-            'until then confirm_action answers pending_approval.',
+            `approved it there, call confirm_action with this pending_action_id and ${
+              resolved ? 'exactly these `arguments` (what the user approves)' : 'exactly the same arguments'
+            }; until then confirm_action answers pending_approval.`,
         }),
         outcome: 'refused',
         detail: `waiting for approval (pending action ${action.id}); nothing was sent`,

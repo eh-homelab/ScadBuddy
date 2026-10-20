@@ -3,6 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ACCEPTING_MS, command, reattach, reattachFollowing, RESPOND_ASYNC } from './command.js'
 import { binary } from './binary.js'
+import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
@@ -351,7 +352,41 @@ const PRINT_OUTPUT_INPUT = withSource({
 })
 type PrintOutputArgs = z.infer<typeof PRINT_OUTPUT_INPUT>
 
-/** print_output's approval line; `printerName` is the registry printer's name, when read. */
+/**
+ * The Bambuddy printer a print_output call prints on, and its name, resolved as the backend
+ * resolves it (#4442). A registry `printer` must still link the `printer_id` sent beside it,
+ * or the call is refused: the backend would print on `printer_id`'s printer instead.
+ */
+async function printerOf(
+  args: PrintOutputArgs,
+  backend: BackendClient,
+): Promise<{ printerId?: number; name?: string }> {
+  if (args.printer !== undefined) {
+    const row = await ok(
+      backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } } }),
+      'read the printer',
+    )
+    if (row.bambuddy_printer_id == null) {
+      throw new ToolError(
+        `${row.name} is reached only over the LAN, which ScadBuddy cannot print to yet. ` +
+          'Ask the user to link it to Bambuddy in Settings > Printers.',
+      )
+    }
+    if (args.printer_id !== undefined && args.printer_id !== row.bambuddy_printer_id) {
+      throw new ToolError(
+        `${row.name} is Bambuddy printer ${row.bambuddy_printer_id}, not printer_id ${args.printer_id}. ` +
+          'Send only one of them, or the pair list_printers shows now.',
+      )
+    }
+    return { printerId: row.bambuddy_printer_id, name: row.name }
+  }
+  if (args.printer_id === undefined) return {}
+  // Only for the approval's line: a printer the registry does not name yet is said by its id.
+  const { data } = await backend.GET('/api/v1/printers').catch(() => ({ data: undefined }))
+  return { printerId: args.printer_id, name: data?.find((row) => row.bambuddy_printer_id === args.printer_id)?.name }
+}
+
+/** print_output's approval line; `printerName` is the name of the printer that prints, when read. */
 function printSummary(args: PrintOutputArgs, printerName?: string): string {
   const { printer_id, printer, copies, plate_id, all_plates, nozzles, tier, process_name } = args
   const defaulted =
@@ -365,7 +400,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string): string {
     }` +
     `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
     `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
-    `${printer !== undefined ? ` on printer ${printerName === undefined ? printer : JSON.stringify(printerName)}` : printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
+    `${printerName !== undefined ? ` on printer ${JSON.stringify(printerName)}` : printer_id !== undefined ? ` on printer ${printer_id}` : printer !== undefined ? ` on printer ${printer}` : ''}` +
     `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
@@ -984,13 +1019,13 @@ export const printTools: Tool[] = [
     ],
     title: (args) => `Print ${sourceName(args)}${args.copies && args.copies > 1 ? ` × ${args.copies}` : ''}`,
     summarize: (args) => printSummary(args),
-    // #4442 M6: the approval names the registry printer as a person knows it.
-    summarizeFor: async (args, ctx) => {
-      if (args.printer === undefined) return printSummary(args)
-      const { data } = await ctx.backend
-        .GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } } })
-        .catch(() => ({ data: undefined }))
-      return printSummary(args, data?.name)
+    // #4442: the approval names the printer that prints, and approves the pair it is: a
+    // registry `printer` is sent with the `printer_id` it links, so confirm_action runs
+    // exactly what the person saw.
+    prepareApproval: async (args, ctx) => {
+      const { printerId, name } = await printerOf(args, ctx.backend)
+      const input = args.printer === undefined ? args : { ...args, printer_id: printerId }
+      return { input, summary: printSummary(input, name) }
     },
     // Its own wait for the print run, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
@@ -999,21 +1034,9 @@ export const printTools: Tool[] = [
       const source = sourceOf(args)
       let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
       // #3823 — a registry printer prints on the Bambuddy printer it links; both go to the
-      // backend, which refuses a pair that disagrees. One only the LAN reaches cannot be
-      // printed to until LAN printing lands, so it is refused here, before any read.
-      if (args.printer !== undefined) {
-        const row = await ok(
-          backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } } }),
-          'read the printer',
-        )
-        if (row.bambuddy_printer_id == null) {
-          throw new ToolError(
-            `${row.name} is reached only over the LAN, which ScadBuddy cannot print to yet. ` +
-              'Ask the user to link it to Bambuddy in Settings > Printers.',
-          )
-        }
-        printerId ??= row.bambuddy_printer_id
-      }
+      // backend. A pair the registry no longer links is refused here (#4442 security
+      // review), so the backend never falls back to a printer nobody approved.
+      if (args.printer !== undefined) printerId = (await printerOf(args, backend)).printerId
       let slots = args.filament_plan?.slots
       let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
       let processName: string | null | undefined = args.process_name

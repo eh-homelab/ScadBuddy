@@ -692,30 +692,61 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(refused?.message).toMatch(/Garage is reached only over the LAN/)
     })
 
-    it('names the registry printer by its name in its approval line (#4442 M6)', async () => {
-      server.use(row(2))
-      const line = await tool('print_output').summarizeFor({ ...chosen, printer: PRINTER }, ctx())
-      expect(line).toContain('on printer "Garage"')
-      expect(line).not.toContain(PRINTER)
-    })
-
-    it('names it by its id when the registry cannot be read', async () => {
-      server.use(http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, () => HttpResponse.json({ detail: 'gone' }, { status: 404 })))
-      const line = await tool('print_output').summarizeFor({ ...chosen, printer: PRINTER }, ctx())
-      expect(line).toContain(`on printer ${PRINTER}`)
-    })
-
-    it('says its line in the pending action a gated call creates', async () => {
-      server.use(row(2))
-      const prepared: { summary?: string } = {}
-      const pending = {
-        prepare: async (_principal: unknown, action: { summary: string }) => {
-          prepared.summary = action.summary
-          return { id: 'a1', summary: action.summary, expiresAt: new Date('2026-10-20T00:00:00Z') }
-        },
+    // #4442 security review: what a person approves is the printer that prints.
+    /** The in-memory store, recording the input each prepared action approves. */
+    class Recorded extends PendingActionStore {
+      readonly inputs: Record<string, unknown>[] = []
+      override async prepare(...call: Parameters<PendingActionStore['prepare']>) {
+        this.inputs.push(call[1].input)
+        return super.prepare(...call)
       }
-      await runTool(tool('print_output'), { ...chosen, printer: PRINTER }, { ...ctx(), gate: undefined, pending } as never)
-      expect(prepared.summary).toContain('on printer "Garage"')
+    }
+    const pendingCtx = () => {
+      const pending = new Recorded()
+      return { context: { ...ctx(), pending }, pending }
+    }
+
+    it('refuses a printer and a printer_id that no longer agree, before anything is parked', async () => {
+      server.use(row(2))
+      const { context, pending } = pendingCtx()
+      const result = await runTool(tool('print_output'), { ...chosen, printer: PRINTER, printer_id: 3 }, context)
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toMatch(/Garage is Bambuddy printer 2, not printer_id 3/)
+      expect(await pending.list(context.principal)).toEqual([])
+    })
+
+    it('refuses that pair when it runs too, rather than printing on the printer_id', async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      server.use(row(2), ...capturedRun(run))
+      const result = await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER, printer_id: 3 }, ctx())
+      expect(result.isError).toBe(true)
+      expect(run.body).toBeUndefined()
+    })
+
+    it('names the printer that prints when only printer_id is given', async () => {
+      server.use(
+        http.get(`${BACKEND}/api/v1/printers`, () =>
+          HttpResponse.json([{ id: PRINTER, serial: '01P00A0000000AA', name: 'Bench', bambuddy_printer_id: 2, preferred_path: 'auto' }]),
+        ),
+      )
+      const { context } = pendingCtx()
+      const result = await runTool(tool('print_output'), { ...chosen, printer_id: 2 }, context)
+      expect(firstText(result)).toMatchObject({ status: 'pending_approval', summary: expect.stringContaining('on printer "Bench"') })
+    })
+
+    it('approves the pair the registry links, and those are the arguments it runs with', async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      server.use(row(2), ...capturedRun(run))
+      const { context, pending } = pendingCtx()
+      const result = await runTool(tool('print_output'), { ...chosen, printer: PRINTER }, context)
+      const answer = firstText(result) as { pending_action_id: string; summary: string; arguments: Record<string, unknown> }
+      expect(answer.summary).toContain('on printer "Garage"')
+      expect(answer.summary).not.toContain(PRINTER)
+      expect(answer.arguments).toMatchObject({ printer: PRINTER, printer_id: 2 })
+      expect(pending.inputs).toEqual([answer.arguments])
+      // confirm_action runs exactly what was approved.
+      await runTool({ ...tool('print_output'), gated: false }, answer.arguments, ctx())
+      expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2 })
     })
   })
 
