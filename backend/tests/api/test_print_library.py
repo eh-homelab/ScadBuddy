@@ -1319,6 +1319,33 @@ def test_a_library_files_check_reads_the_dialogs_kept_catalogue(client: TestClie
 
 
 @respx.mock
+def test_a_library_files_check_passes_a_preset_gone_since_it_was_kept_and_the_run_refuses_it(
+    client: TestClient,
+) -> None:
+    """#4196 review, on a library file: the check reads the copy the dialog kept, the
+    run reads fresh, so a preset Bambuddy has lost since is refused only by the run."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    kept = client.post("/api/v1/print/library/89/check", json=body())
+    no_presets: dict[str, dict[str, list[Any]]] = {
+        tier: {"printer": [], "process": [], "filament": []}
+        for tier in ("cloud", "standard", "local", "orca_cloud")
+    }
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(200, json=no_presets))
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+    ran = run_library(client, 89, json=body())
+
+    assert (kept.status_code, kept.json()["errors"]) == (200, []), kept.text
+    assert (check.status_code, check.json()["errors"]) == (200, []), check.text
+    assert ran.status_code == 422, ran.text
+    assert not sliced.called
+
+
+@respx.mock
 def test_a_library_run_is_attributed_to_who_started_it(
     client: TestClient, gate: Gate, activity_index: ActivityIndex
 ) -> None:

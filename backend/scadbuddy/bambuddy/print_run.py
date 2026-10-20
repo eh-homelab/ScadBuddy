@@ -825,7 +825,9 @@ async def check_print(
     ``catalogue`` is where the presets are read from, the dialog's kept copy of
     Bambuddy's (#4196): the check slices nothing, so it judges the choices against what
     the dialog's choices read, and only the run reads them fresh. A dialog served
-    natively offers the image's catalogue instead, and its check still reads Bambuddy's."""
+    natively offers the image's catalogue instead, and its check still reads Bambuddy's.
+    So everything the check derives from its :class:`PreparedRun` judges a copy that may
+    be old: never hand a check's ``PreparedRun`` to a run."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
