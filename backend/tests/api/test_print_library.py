@@ -1303,6 +1303,22 @@ def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
 
 
 @respx.mock
+def test_a_library_files_check_reads_the_dialogs_kept_catalogue(client: TestClient) -> None:
+    """#4196 on a library file: only the first check reads ``/slicer/presets``."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        return_value=httpx.Response(200, json=recording("slicer-presets-h2c.json"))
+    )
+
+    checks = [client.post("/api/v1/print/library/89/check", json=body()) for _ in "ab"]
+
+    assert [check.status_code for check in checks] == [200, 200], checks[-1].text
+    assert presets.call_count == 1
+
+
+@respx.mock
 def test_a_library_run_is_attributed_to_who_started_it(
     client: TestClient, gate: Gate, activity_index: ActivityIndex
 ) -> None:

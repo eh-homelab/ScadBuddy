@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Annotated, Any
 
 import httpx
@@ -59,7 +60,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
-from scadbuddy.bambuddy.catalogue import catalogue_name_key
+from scadbuddy.bambuddy.catalogue import cached_catalogue, catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
@@ -1004,6 +1005,7 @@ async def post_check(
     store: SettingsStoreDep,
     rack: RackUsageDep,
     catalogue: CatalogueDep,
+    paths: PathsDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -1011,6 +1013,7 @@ async def post_check(
     advisories it would carry back.
 
     Nothing is uploaded, sliced or queued; the used slots are read from the local 3MF.
+    The presets are the dialog's kept catalogue, as ``/choices`` reads them (#4196).
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -1021,7 +1024,17 @@ async def post_check(
         print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:
         return await check_for_output(
-            client, outputs, uploads, meta, settings, body, rack=rack, print_settings=print_settings
+            client,
+            outputs,
+            uploads,
+            meta,
+            settings,
+            body,
+            rack=rack,
+            print_settings=print_settings,
+            catalogue=partial(
+                cached_catalogue, client, paths.cache, name_key=catalogue_name_key(store.kek)
+            ),
         )
 
 

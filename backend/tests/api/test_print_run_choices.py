@@ -413,6 +413,32 @@ def test_the_spools_read_together_are_capped(
 
 
 @respx.mock
+def test_the_check_reads_the_dialogs_kept_catalogue_and_the_run_reads_it_fresh(
+    client: TestClient, model: str
+) -> None:
+    """#4196: the check judges the choices against the catalogue the dialog keeps, so
+    only the first check of an open reads ``/slicer/presets``; the run, which slices
+    with what it resolves, still reads it fresh."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        return_value=httpx.Response(200, json=recording("slicer-presets-h2c.json"))
+    )
+
+    checks = [client.post(f"/api/v1/print/outputs/{output_id}/check", json=body()) for _ in "ab"]
+    read_by_checks = presets.call_count
+    ran = run_print(client, output_id, json=body())
+
+    assert [check.status_code for check in checks] == [200, 200], checks[-1].text
+    assert read_by_checks == 1
+    assert ran.status_code == 200, ran.text
+    assert presets.call_count > read_by_checks
+
+
+@respx.mock
 @pytest.mark.parametrize(("first", "second"), [(404, 403), (403, 404)])
 def test_the_spools_read_together_fail_as_the_serial_reads_did(
     client: TestClient, model: str, first: int, second: int
