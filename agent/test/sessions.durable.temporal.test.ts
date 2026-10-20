@@ -727,6 +727,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const child = await m.fork(changed.id, browser)
     expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2', fork_next: true, recent_call_ids: ['toolu_9'] } })
     // First page, re-read (changed), then both again: four, or the states went to other reads.
+    // An unexpected count may be an evicted stand-in, not a regression: see its header.
     expect((await recorded(changed.id)).firstReads).toBe(4)
     // The same map in another key order is no change: no second read (which would answer the third state).
     const reordered = await twoTurns(m, {
@@ -816,7 +817,12 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
         JSON.stringify(e),
       ),
     })
-    await expect(m.fork(fresh.id, browser)).rejects.toMatchObject({ code: 'no_transcript' })
+    // Its result is not held: the advice is to wait for the answer, not the missing-record one.
+    await expect(m.fork(fresh.id, browser)).rejects.toMatchObject({
+      code: 'no_transcript',
+      message: expect.stringContaining('once that call is answered'),
+    })
+    await expect(m.fork(fresh.id, browser)).rejects.toMatchObject({ message: expect.not.stringContaining('no record') })
   }, 60_000)
 
   it('refuses to fork a durable session with no conversation yet, and leaves no child', async () => {

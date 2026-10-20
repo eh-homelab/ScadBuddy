@@ -2277,7 +2277,7 @@ export class SessionManager {
             ? `session ${id} has no finished reply to fork yet; wait for its turn to answer`
             : !pausedHistory && atCheckpoint
               ? // The result is held, but the log has no record of the call to end the child's history at.
-                `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; fork it once that call is answered or the session has resumed past it`
+                `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; fork it once the session has resumed past that call`
               : `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`,
         )
       }
