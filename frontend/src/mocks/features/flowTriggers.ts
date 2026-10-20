@@ -12,11 +12,10 @@ import type { FlowGrantSpec, FlowStandingGrant, FlowTrigger, FlowTriggerCreate }
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 10, 9, minutes)).toISOString()
 const CHANGED = 'https://scadbuddy.dev/problems/flow-trigger-changed'
-// The grant's expiry is checked against the real clock when it is reviewed (`grantProblems`
-// in `GrantEditor`, at most `MAX_GRANT_MS` ahead), so it is measured from now, not from the
-// fixture's day: a fixed date went stale and failed the approval tests.
 const SPEC: FlowGrantSpec = {
-  expires_at: new Date(Date.now() + 3 * 24 * 60 * 60_000).toISOString(),
+  // From now, never a fixed date: the grant editor refuses an expiry in the past, and a
+  // fixed one passed on 2026-10-20 (#4447). Three days is inside both grant caps.
+  expires_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
   rules: [{ fn: 'queue_print', printers: [1], max_prints: 2 }],
   sessions: false,
   ask_starter_session: false,
