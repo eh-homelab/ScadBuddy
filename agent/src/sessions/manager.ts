@@ -2262,8 +2262,11 @@ export class SessionManager {
       return prefix && unansweredCalls(prefix).every((call) => call in owed) ? prefix : undefined
     }
     const paused = unansweredCalls(through(source.checkpoint) ?? [])
+    // The child's history through the paused calls; undefined when the log lacks one of them,
+    // and then the parent forks before them, as without their results.
+    const pausedHistory = historyThroughCalls(all, paused)
     let at = upTo
-    if (at === undefined && (source.busy || !answered(source.checkpoint, source.owed.pending))) {
+    if (at === undefined && (source.busy || !pausedHistory || !answered(source.checkpoint, source.owed.pending))) {
       at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
       if (at === undefined) {
         throw new SessionError(
@@ -2278,7 +2281,7 @@ export class SessionManager {
     if (!entries && through(at === undefined ? source.checkpoint : replies.get(at))) {
       throw new SessionError('invalid', `session ${id}'s conversation through reply ${at} leaves a call unanswered; fork from an earlier reply`)
     }
-    const history = at === undefined ? historyThroughCalls(all, paused) : await forkHistory(this.events, id, at)
+    const history = at === undefined ? pausedHistory : await forkHistory(this.events, id, at)
     if (!entries || !history) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
     }
@@ -2286,7 +2289,9 @@ export class SessionManager {
     // At the parent's checkpoint the child takes what the parent still owes there (#4173):
     // a turn stopped at a paused call left its result for the next segment, which the
     // child's first segment must deliver. A reply before it owes nothing; the calls that
-    // already ran never run again either way.
+    // already ran never run again either way. An `upTo` whose reply is the checkpoint
+    // takes it too: it is the same state, and a prefix with no unanswered call owes no
+    // result, only `fork_next` (a stopped turn's: the next segment runs in a copy).
     const owed = checkpoint === source.checkpoint ? source.owed : { pending: {}, fork_next: false, recent_call_ids: source.owed.recent_call_ids }
     return {
       turns,
