@@ -360,10 +360,11 @@ type PrintOutputArgs = z.infer<typeof PRINT_OUTPUT_INPUT>
 async function printerOf(
   args: PrintOutputArgs,
   backend: BackendClient,
+  signal: AbortSignal,
 ): Promise<{ printerId?: number; name?: string }> {
   if (args.printer !== undefined) {
     const row = await ok(
-      backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } } }),
+      backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } }, signal }),
       'read the printer',
     )
     if (row.bambuddy_printer_id == null) {
@@ -382,7 +383,7 @@ async function printerOf(
   }
   if (args.printer_id === undefined) return {}
   // Only for the approval's line: a printer the registry does not name yet is said by its id.
-  const { data } = await backend.GET('/api/v1/printers').catch(() => ({ data: undefined }))
+  const { data } = await backend.GET('/api/v1/printers', { signal }).catch(() => ({ data: undefined }))
   return { printerId: args.printer_id, name: data?.find((row) => row.bambuddy_printer_id === args.printer_id)?.name }
 }
 
@@ -1023,7 +1024,7 @@ export const printTools: Tool[] = [
     // registry `printer` is sent with the `printer_id` it links, so confirm_action runs
     // exactly what the person saw.
     prepareApproval: async (args, ctx) => {
-      const { printerId, name } = await printerOf(args, ctx.backend)
+      const { printerId, name } = await printerOf(args, ctx.backend, ctx.signal)
       const input = args.printer === undefined ? args : { ...args, printer_id: printerId }
       return { input, summary: printSummary(input, name) }
     },
@@ -1036,7 +1037,7 @@ export const printTools: Tool[] = [
       // #3823 — a registry printer prints on the Bambuddy printer it links; both go to the
       // backend. A pair the registry no longer links is refused here (#4442 security
       // review), so the backend never falls back to a printer nobody approved.
-      if (args.printer !== undefined) printerId = (await printerOf(args, backend)).printerId
+      if (args.printer !== undefined) printerId = (await printerOf(args, backend, ctx.signal)).printerId
       let slots = args.filament_plan?.slots
       let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
       let processName: string | null | undefined = args.process_name

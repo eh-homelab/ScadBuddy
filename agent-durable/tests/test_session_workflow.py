@@ -691,8 +691,9 @@ async def test_a_call_the_agent_refuses_to_describe_tells_the_model_why(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
     """#4442: a print_output naming a printer that no longer links its printer_id is
-    refused before it parks, and the segment runner is given why (`with_refusals`), so
-    the model is told the agent's reason, never that a person rejected it."""
+    refused before it parks, and the segment runner is given the agent's reason in place
+    of the plugin's rejection (`with_refusals`), so the model never reads that a person
+    rejected it."""
     why = "Garage is Bambuddy printer 2, not printer_id 3."
     harness.stand_in.describe_tool_error = why
     await harness.agent.shutdown()
@@ -703,7 +704,8 @@ async def test_a_call_the_agent_refuses_to_describe_tells_the_model_why(
         [entry] = await _parked(handle)
         assert entry["kind"] == "answer"
         context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
-        assert list(context.refusals.values()) == [f"print_output was not run: {why}"]
+        assert list(context.replaced.values()) == [why]
+        assert context.refusals == {}
         assert harness.stand_in.ran == []
         await _replays(harness, handle)
 

@@ -358,7 +358,12 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const parsed = spec.input.parse(args)
       if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }
       const prepared = await spec.prepareApproval(parsed, ctx)
-      return { input: spec.input.parse(prepared.input), summary: prepared.summary }
+      const input = spec.input.parse(prepared.input)
+      // It may fill what the call left out, never change what the model chose (#4442 gate review).
+      const resolved: Record<string, unknown> = input
+      const changed = Object.entries(parsed).find(([key, value]) => value !== undefined && JSON.stringify(resolved[key]) !== JSON.stringify(value))
+      if (changed) throw new Error(`${spec.name}'s prepareApproval changed the supplied argument ${changed[0]}`)
+      return { input, summary: prepared.summary }
     },
     title(args) {
       const parsed = spec.input.safeParse(args)
@@ -410,6 +415,15 @@ export class ToolError extends Error {
     this.untrusted = untrusted
     this.summary = message
   }
+}
+
+/**
+ * Whether an error is the tool's own refusal (#4442 gate review): a ToolError that is not
+ * the backend away (5xx) or rate-limiting (429). Those, and a network error, are worth
+ * trying again, so a gate leaves them to its retries rather than refusing the call.
+ */
+export function isRefusal(err: unknown): err is ToolError {
+  return err instanceof ToolError && !(err.status !== undefined && (err.status >= 500 || err.status === 429))
 }
 
 /** Where a backend error's reason comes from, for the envelope around it. */

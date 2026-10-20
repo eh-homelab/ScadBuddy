@@ -9,7 +9,7 @@ import type { TitleResolver } from '../sessions/sdkEvents.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ALL_TOOLS } from './index.js'
 import { createHarnessServer, SERVER_NAME } from './projections.js'
-import type { Tool, ToolServices, WaitForTab } from './registry.js'
+import { effectiveTool, isRefusal, type Tool, ToolError, toolErrorText, type ToolServices, type WaitForTab } from './registry.js'
 
 // The registry's harness side, as the session manager takes it
 // (sessions/manager.ts SessionManagerDeps `tierOf` and `mcpServers`), so that
@@ -54,18 +54,28 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
     prepareApproval: (session, turn) => {
       const principal = turnPrincipal(session.owner, turn)
       const lookup = (name: string) => tools.find((t) => t.name === name)
-      return async (name, input) => {
+      return async (name, input, signal) => {
         const tool = byName.get(name)
         if (!tool?.resolvesApproval) return undefined
-        return tool.prepareApproval(input, {
-          ...services,
-          principal,
-          ...(session.id !== undefined ? { session: session.id } : {}),
-          progress: async () => {},
-          signal: new AbortController().signal,
-          lookup,
-          gate: 'harness',
-        })
+        // Resolved only for a call that could run: the tool enabled, its tier one the turn holds.
+        const effective = await effectiveTool(tool, services)
+        if (effective.disabled || !hasTier(principal, effective.risk)) return undefined
+        try {
+          return await tool.prepareApproval(input, {
+            ...services,
+            principal,
+            ...(session.id !== undefined ? { session: session.id } : {}),
+            progress: async () => {},
+            signal,
+            lookup,
+            gate: 'harness',
+          })
+        } catch (err) {
+          // The tool's refusal, its backend text in the envelope; the backend away is worth another try.
+          if (isRefusal(err)) throw new Error(toolErrorText(err, tool.name), { cause: err })
+          const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
+          throw new Error(`what it names could not be checked just now (${why}); try the call again`, { cause: err })
+        }
       }
     },
     mcpServers: (session, turn, extras) => {

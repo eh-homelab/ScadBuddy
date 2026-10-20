@@ -209,6 +209,7 @@ export type ApprovalGate = (request: ApprovalRequest) => Promise<ApprovalVerdict
 export type ApprovalPreparer = (
   toolName: string,
   input: Record<string, unknown>,
+  signal: AbortSignal,
 ) => Promise<{ input: Record<string, unknown>; summary: string } | undefined>
 
 /** Observes each decision (session events, audit log, tests). Must not throw. */
@@ -235,7 +236,7 @@ export function makeCanUseTool(
     if (!gate) return { behavior: 'deny', message: noGateMessage(decision.reason) }
     let prepared: Awaited<ReturnType<ApprovalPreparer>>
     try {
-      prepared = await prepare?.(toolName, input)
+      prepared = await prepare?.(toolName, input, options.signal)
     } catch (err) {
       // Refused as it was described (#4442): nothing parks, and the model is told why.
       return { behavior: 'deny', message: `${toolName} was not run: ${describeError(err)}` }

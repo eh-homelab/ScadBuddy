@@ -728,6 +728,8 @@ const temporalWorker =
             // A tool that resolves what it names parks that, by name (#4442).
             tools: DURABLE_TOOLS,
             services: durableToolDeps.services,
+            // Resolved with the tiers the owner holds now, as the call will run (#4442 gate review).
+            currentTiers: durableToolDeps.currentTiers,
           }),
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           ...sessionGateActivities(temporal.sql),

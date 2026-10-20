@@ -125,6 +125,16 @@ describe('with an approval gate (#258)', () => {
     expect(parked).toEqual({ input: { printer: 'p', printer_id: 2 }, summary: 'Print on printer "Garage"' })
   })
 
+  it("canUseTool resolves under the call's abort signal (#4442 gate review)", async () => {
+    let given: AbortSignal | undefined
+    const canUseTool = makeCanUseTool(tierOf, undefined, (request) => Promise.resolve({ approved: true, input: request.input }), undefined, async (_name, _input, s) => {
+      given = s
+      return undefined
+    })
+    await canUseTool('mcp__scadbuddy__send_to_printer', {}, opts('t7'))
+    expect(given).toBe(signal)
+  })
+
   it('canUseTool refuses a call its tool will not resolve, before anything parks', async () => {
     let asked = false
     const canUseTool = makeCanUseTool(

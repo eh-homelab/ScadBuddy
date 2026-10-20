@@ -180,21 +180,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
   })
 
   // #4442: a tool that resolved its input parks its own line, redacted; the hash is of the resolved input.
-  it("stores a resolving tool's own line, redacted, and the hash of what it resolved", async () => {
+  it("stores a resolving tool's own line, redacted and on one line, above every argument, and the hash of what it resolved", async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    const input = { printer: 'p', printer_id: 2 }
+    const input = { printer: 'p', printer_id: 2, bed_type: 'Cool Plate' }
     const approval = await m.approvals.create({
       sessionId: session.id,
       turnId: null,
       toolUseId: 'toolu_9',
       tool: 'mcp__scadbuddy__print_output',
       input,
-      summary: 'Print box on printer "Garage" with hunter2-long-secret',
+      summary: 'Print box on printer "Garage"\nApproved: yes with hunter2-long-secret',
       secrets: ['hunter2-long-secret'],
       tier: 'outward',
       requestedBy: agentA,
     })
-    expect(approval.inputSummary).toBe('Print box on printer "Garage" with [redacted]')
+    const [line, rest, ...more] = approval.inputSummary.split('\n')
+    expect(line).toBe('Print box on printer "Garage" Approved: yes with [redacted]')
+    expect(JSON.parse(rest!)).toEqual(input)
+    expect(more).toEqual([])
     expect(approval.inputHash).toBe(m.approvals.hash('mcp__scadbuddy__print_output', input))
   })
 

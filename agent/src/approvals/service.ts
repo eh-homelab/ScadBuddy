@@ -376,6 +376,22 @@ export function inputHash(key: Buffer, tool: string, input: Record<string, unkno
   return createHmac('sha256', key).update(canonicalJson({ tool, input }), 'utf8').digest('hex')
 }
 
+/** The longest line a resolving tool puts above its call's arguments (#4442). */
+export const APPROVAL_LINE_MAX = 200
+
+/**
+ * A resolving tool's line (ApprovalRequest.summary, #4442) above the call's own scrubbed
+ * arguments, so a person sees what it resolved and every argument the model chose. The
+ * line is one line, redacted of the turn's secrets and capped: it can name a printer.
+ */
+export function withApprovalLine(line: string, summary: string, secrets: readonly string[]): string {
+  const one = redact(line, secrets)
+    // eslint-disable-next-line no-control-regex -- the control characters are what is stripped
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .trim()
+  return `${cap(one, APPROVAL_LINE_MAX)}\n${summary}`
+}
+
 /** The input as the event log would show it: scrubbed and size-capped by scrubForLog. */
 export function summariseInput(tool: string, input: Record<string, unknown>, secrets: readonly string[]): string {
   const scrubbed = scrubForLog(
@@ -688,10 +704,10 @@ export class ApprovalService {
 
   /** The row's and the card's summary of the call: its input with a workspace upload's size (never hashed). */
   private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
-    if (request.summary !== undefined) return redact(request.summary, request.secrets ?? [])
     const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
     const shown = await withWorkspaceSize(this.deps.workspace, ws, request.input)
-    return summariseInput(request.tool, shown, request.secrets ?? [])
+    const input = summariseInput(request.tool, shown, request.secrets ?? [])
+    return request.summary === undefined ? input : withApprovalLine(request.summary, input, request.secrets ?? [])
   }
 
   /** Records a pending approval (and, in a session, emits `approval.required`). */

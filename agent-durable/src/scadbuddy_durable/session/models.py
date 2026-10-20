@@ -82,6 +82,9 @@ class TurnStart:
     # Why each of its calls refused at the gate was not run, by tool_use id (#2392): the
     # segment runner adds it to the plugin's fixed rejection the model is given.
     refusals: dict[str, str] = field(default_factory=dict)
+    # What the model is told in place of the plugin's fixed rejection, by tool_use id: a
+    # call the agent refused as it described it (#4442), which no person rejected.
+    replaced: dict[str, str] = field(default_factory=dict)
     # workflow.now() as the turn started (ISO 8601), the plugin's events' `at` clock:
     # a subscriber of a turn carried over by continue-as-new ignores an end before it.
     started_at: str | None = None
@@ -184,6 +187,9 @@ class SegmentContext:
     # The turn's refused calls, by tool_use id: what the model is told besides the
     # plugin's fixed rejection, in a classic turn's words (#2392).
     refusals: dict[str, str] = field(default_factory=dict)
+    # The turn's calls the agent refused before they parked (#4442), by tool_use id: what
+    # the model is told in place of the plugin's fixed rejection.
+    replaced: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -5,7 +5,19 @@ import type { AuditLog } from '../audit/log.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import { effectiveTool, type FlowImages, parsedOrRaw, runToolWithOutcome, type Tool, ToolError, type ToolRun, type ToolServices } from '../tools/registry.js'
+import { withApprovalLine } from '../approvals/service.js'
+import {
+  effectiveTool,
+  type FlowImages,
+  isRefusal,
+  parsedOrRaw,
+  runToolWithOutcome,
+  type Tool,
+  ToolError,
+  toolErrorText,
+  type ToolRun,
+  type ToolServices,
+} from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
@@ -163,6 +175,11 @@ export type ToolActivity = (input: unknown) => Promise<unknown>
 
 /** The failure type of a call that ran and did not succeed: never retried. */
 export const TOOL_ERROR = 'ToolError'
+/**
+ * The failure type of a resolving tool's read that met the backend away or rate-limiting
+ * (#4442 gate review): retried, and never taken for the tool's refusal.
+ */
+export const BACKEND_UNAVAILABLE = 'BackendUnavailable'
 /** The failure type of a call from a workflow that is no known session. */
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
@@ -476,15 +493,17 @@ async function runGated(
   const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
   const services = deps.services
   // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
-  // must be what the approval was given: a printer re-linked since hashes otherwise.
+  // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
+  // approval is of the script's raw arguments (the backend hashes those), so a flow's call
+  // runs them as sent, resolved only to refuse a pair its registry row no longer links.
   let runInput = input
   if (effective.gated && tool.resolvesApproval) {
     try {
       const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
-      runInput = (await tool.prepareApproval(input, ctx)).input
+      const resolved = (await tool.prepareApproval(input, ctx)).input
+      if (flow === undefined) runInput = resolved
     } catch (err) {
-      if (!(err instanceof ToolError)) throw err
-      await refuse(err.message, `${tool.name} was not run: ${err.message}`, TOOL_ERROR)
+      await refuseOrRetry(err, refuse, tool.name)
     }
   }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
@@ -656,6 +675,21 @@ async function answerAsActivity(
   return answer.text
 }
 
+/**
+ * A resolving tool's failure (#4442 gate review): its own refusal refuses the call, its
+ * backend text in the untrusted-data envelope; the backend away, rate-limiting or out of
+ * reach is thrown to be retried.
+ */
+async function refuseOrRetry(
+  err: unknown,
+  refuse: (detail: string, message: string, type: string) => Promise<never>,
+  tool: string,
+): Promise<never> {
+  if (isRefusal(err)) return refuse(err.summary, `${tool} was not run: ${toolErrorText(err, tool)}`, TOOL_ERROR)
+  if (err instanceof ToolError) throw ApplicationFailure.retryable(err.summary, BACKEND_UNAVAILABLE)
+  throw err
+}
+
 /** The activity that describes a call for its gate entry (gateActivities). */
 export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
 
@@ -667,7 +701,7 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  * scrubbing rules. Served on `agent-tools` beside the tools.
  */
 export function gateActivities(
-  deps: Pick<ToolActivityDeps, 'audit' | 'sessions'> & {
+  deps: Pick<ToolActivityDeps, 'audit' | 'sessions' | 'currentTiers'> & {
     workspace?: SessionFiles | undefined
     /**
      * The tools whose own `prepareApproval` decides what a call parks (#4442), and the
@@ -694,15 +728,47 @@ export function gateActivities(
       // parks the resolved input, by the line that names it; the call's activity resolves it
       // again and runs only if it hashes the same (runGated). A ToolError refuses it unparked.
       const own = lookup(tool.startsWith(HARNESS_PREFIX) ? tool.slice(HARNESS_PREFIX.length) : tool)
-      if (own?.resolvesApproval && deps.services) {
-        const principal = turnPrincipal(owner, sent ? { tiers: [...sent] } : undefined)
-        const prepared = await own
-          .prepareApproval(fields, { ...deps.services, principal, session, progress: async () => {}, signal: Context.current().cancellationSignal, lookup, gate: 'workflow' })
-          .catch((err: unknown) => {
-            // The tool's own refusal; anything else (the backend away) is the retry policy's.
-            throw err instanceof ToolError ? ApplicationFailure.nonRetryable(err.message, TOOL_ERROR) : err
+      const services = deps.services
+      const audit = deps.audit
+      // Resolved only for a call that could run: the tool enabled, and its tier one the owner holds now.
+      const effective = own && services ? await effectiveTool(own, services) : undefined
+      const tiers = await turnTiers(owner, sent, deps)
+      const principal = turnPrincipal(owner, tiers ? { tiers: [...tiers] } : undefined)
+      if (own?.resolvesApproval && services && effective && !effective.disabled && principal.tiers.includes(effective.risk)) {
+        const { request_id: requestId } = args as { request_id?: unknown }
+        const refuse = async (detail: string, message: string, type: string): Promise<never> => {
+          const parsed = parsedOrRaw(own, fields)
+          const now = new Date()
+          await audit.record({
+            kind: 'tool_call',
+            action: own.name,
+            surface: 'harness',
+            actor: owner,
+            sessionId: session,
+            ...(typeof requestId === 'string' ? { requestId } : {}),
+            tier: effective.risk,
+            inputHash: audit.hash(own.name, parsed),
+            inputSummary: audit.summarise(own.name, parsed),
+            outcome: 'refused',
+            detail,
+            startedAt: now,
+            finishedAt: now,
           })
-        return { summary: prepared.summary, input_hash: deps.audit.hash(tool, prepared.input) }
+          throw ApplicationFailure.nonRetryable(message, type)
+        }
+        let prepared: { input: Record<string, unknown>; summary: string }
+        try {
+          const ctx = { ...services, principal, session, progress: async () => {}, signal: Context.current().cancellationSignal, lookup, gate: 'workflow' as const }
+          prepared = await own.prepareApproval(fields, ctx)
+        } catch (err) {
+          return refuseOrRetry(err, refuse, own.name)
+        }
+        const secrets = (await services.secrets?.()) ?? []
+        const shown = await withWorkspaceSize(deps.workspace, { kind: 'session', sessionId: session }, prepared.input)
+        return {
+          summary: withApprovalLine(prepared.summary, audit.summarise(tool, shown, secrets), secrets),
+          input_hash: audit.hash(tool, prepared.input),
+        }
       }
       // A workspace upload's size is shown (#2396), from the session's own workspace; the hash is of the call's input.
       const shown = await withWorkspaceSize(deps.workspace, { kind: 'session', sessionId: session }, fields)
