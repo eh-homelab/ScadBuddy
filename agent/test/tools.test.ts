@@ -792,8 +792,9 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       )
       const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
       const thrown = await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, turn.signal).catch((e: Error) => e)
-      expect(thrown).toBeInstanceOf(Error)
-      expect((thrown as Error).message).not.toMatch(/try the call again/)
+      // The turn's own abort, as the read raised it: nothing wrapped it as a refusal or a retry.
+      expect(thrown).toMatchObject({ name: 'AbortError' })
+      expect((thrown as Error).cause).toBeUndefined()
     })
 
     it('reads the printers list for a bare printer_id only when the line is wanted (#4442 review)', async () => {
