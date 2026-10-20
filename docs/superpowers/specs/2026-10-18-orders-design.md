@@ -118,8 +118,9 @@ pickers. A customer's own record is editable by anyone who can edit the library
 
 ### 3.2 Orders
 
-- `orders`: `id` (uuid), `number` (a short human id, `ORD-<yyyy>-<n>` from a sequence
-  per year), `customer_id`, `status` (§3.5), `currency` (ISO 4217, from the setting
+- `orders`: `id` (uuid), `number` (a short human id, `ORD-<yyyy>-<n>` from a per-year
+  counter row, never a sequence, which skips on a rolled-back insert: Ruling 5 of the
+  phase 1 plan), `customer_id`, `status` (§3.5), `currency` (ISO 4217, from the setting
   `orders_currency`, fixed when the order is made), `shipping_address` (jsonb snapshot
   of the address chosen, so a later edit to the customer does not move a shipped
   order), `billing_address` (jsonb snapshot, nullable), `notes`, `due_at`,
@@ -204,6 +205,14 @@ or the customer said yes; sets `accepted_at` and publishes `order.changed`, §7.
 fulfilled item, §6.3) → `closed`; `cancelled` from any state before `shipped`;
 `on_hold` as a flag, not a state, which pauses the flow's work (§7.2).
 
+Phase 1 (#4249) reaches `draft`, `quoted`, `approved`, `fulfilled`, `cancelled` and `failed`
+(from a hand-recorded attempt); `queued`, `printing` and `printed` wait for the print path
+(phase 3). Phase 1 derives `in_production` as "any item has a fulfilment attempt and not
+every item is settled", the "any item past `approved`" above restricted to the states it
+has (an attempt is the only way past `approved` there); phase 3's `queued` writer must widen
+`orders/lifecycle.py` `derive` to "any item `queued` or beyond, or with an attempt", so the
+derivation keeps meaning "any item past `approved`" (Ruling 4 of the phase 1 plan).
+
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed
 from the items and shipments, in the same transaction as the item change, under the
@@ -233,7 +242,7 @@ agent's follow a 202.
 | `POST /orders/{id}/items`, `PATCH/DELETE /orders/{id}/items/{item}` | line items; the reference is set on create and replaced whole on `PATCH` while `draft` or `quoted` (a new reference drops the accepted quote); `DELETE` only while the item is `draft` (never quoted), else it is a cancel (§3.5) |
 | `POST /orders/{id}/items/{item}/quote` (operation `order_item_quote`) | render if needed, slice, price (§5); 202 then the quote |
 | `POST /orders/{id}/items/{item}/quotes/{quote}/accept` | pins the quote; the item becomes `approved` |
-| `POST /orders/{id}/items/{item}/quotes` with a `manual` body | a typed price |
+| `POST /orders/{id}/items/{item}/quotes` with `{unit_price_minor, label?}` | a typed price: one `manual` line, `unit_cost_minor = unit_price_minor`, the item's quantity as it is now (Ruling 1 of the phase 1 plan) |
 | `POST /orders/{id}/accept`, `/cancel`, `/hold`, `/release`, `/close` | lifecycle (§3.5); `accept` publishes the event |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
@@ -536,8 +545,12 @@ What this relies on, and what the design adds for it:
   on. That is the "subflow" the user asked about, kept as a run that is not a child
   workflow (Ruling 21): a parent's Reset does not reset its children, and a child
   outlives a terminated parent and says so.
-- `on_hold` on the order makes every order tool answer 409 `order_on_hold`; a script
-  sees the error and `wait_for_human`s, or the shop's own script sleeps and retries.
+- `on_hold` on the order makes every tool that advances it (accepting, a quote's
+  acceptance, an attempt, a shipment, closing) answer 409 `order_on_hold`, from the
+  lifecycle (`orders/lifecycle.py`), never from each tool; `release`, the cancels, a
+  payment and the plain edits go through, so a person can fix what the hold was for
+  (Ruling 14 of the phase 1 plan). A script sees the error and `wait_for_human`s, or
+  the shop's own script sleeps and retries.
 
 ### 7.3 Agent tools
 
@@ -545,12 +558,18 @@ What this relies on, and what the design adds for it:
 
 - `read`: `customer_list`, `customer_get`, `order_list`, `order_get`, `order_costs`,
   `price_book_get`.
-- `write`, a record the shop keeps: `customer_upsert`, `order_create`, `order_item_add`,
-  `order_item_quote`, `order_attach` (by `workspace_path`, as uploads are, #2329),
-  `price_book_set`.
+- `write`, a record the shop keeps: `customer_upsert`, `order_create`, `order_update`
+  (notes, due date, addresses, charges, hold and release, and payments: a payment row
+  records money the shop already received and sends nothing), `order_item_add`,
+  `order_item_update` (a `PATCH`, or the delete of a draft item), `order_item_quote`,
+  `order_attach` (by `workspace_path`, as uploads are, #2329), `price_book_set`.
 - `outward`, a step that commits the shop to the customer or counts work as done:
   `order_accept`, `order_item_accept_quote` (the price), `order_item_fulfil` (the
-  made quantity), `order_ship`, and `order_notify_customer`, which composes from a
+  made quantity), `order_ship`, `order_close`, `order_cancel` (both `POST
+  /orders/{id}/cancel` and `POST …/items/{item}/cancel`: a cancel is terminal and commits
+  the shop to the customer as an accept does, so the agent never cancels without a
+  person or a grant rule naming the tool; Ruling 14 of the phase 1 plan), and
+  `order_notify_customer`, which composes from a
   message template and sends through a plugin the shop configured (an email or
   messaging MCP plugin, #297), or, with none, returns the text for the person to send.
   In the panel an outward call parks for the person as any does; in a flow it is
@@ -704,13 +723,16 @@ usable on its own.
 
 1. **Customers and orders** (§3.1-3.3, §3.5 without print states, §4's reads and
    writes, the three pages, agent tools, mocks) (#4249). An item can be added from Customize
-   and from an output. Close works with manual fulfilment (§6.1 by hand).
+   and from an output. Close works with manual fulfilment (§6.1 by hand), so §6.3's
+   shipment tables and routes land here too (Ruling 2 of the phase 1 plan): `shipped`
+   and `closed` need them.
 2. **Pricing** (§5) (#4250): the price book, the `order_item_quote` operation over
    `slice_info.read_sliced` (F4, on main), accept, the rough estimate. Slices through
    the Bambuddy slicer until #3822's remaining parts put the native one in
    `PrintRunWorkflow`; the reader is the same either way.
 3. **Fulfilment and provenance** (§6) (#4251): attempts from the print path (`subject`
-   `order_item:<id>`), the `attachments` table and routes, shipments, costs.
+   `order_item:<id>`), the `attachments` table and routes (the packed photo among them),
+   costs; shipments came with phase 1.
 4. **Flows** (§7) (#4252): the two bus-named trigger kinds, `match`, the subject generalisation, `trigger()`
    models, the `orders` grant bound, `parent_run_id`, the built-in `order-fulfilment`
    flow, `order_notify_customer`. Needs #2484's trigger work, which is in.

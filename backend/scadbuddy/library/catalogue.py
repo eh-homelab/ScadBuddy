@@ -514,6 +514,20 @@ def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
     return ModelMeta.model_validate({"name": default_name, **cleaned})
 
 
+def declares_pipeline(directory: Path, slug: str) -> bool:
+    """Whether the template's model.json in ``directory`` (a revision's) declares a
+    pipeline (spec 2026-09-27 §5.1), read as the catalogue reads it. A malformed
+    declaration counts: the job then reaches the worker, whose `load_pipeline` names
+    what is wrong with it. An unreadable model.json declares none, and the job renders
+    `model.scad`'s parameters."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return False
+    return meta.pipeline is not None or meta.pipeline_raw is not None
+
+
 class ModelPatch(BaseModel):
     name: str | None = None
     description: Description | None = None

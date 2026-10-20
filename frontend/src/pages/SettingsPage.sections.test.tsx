@@ -1258,6 +1258,34 @@ describe('SettingsPage S3 store', () => {
   })
 })
 
+describe('SettingsPage Orders (#4249)', () => {
+  it('shows the orders currency, USD by default, in its own section', async () => {
+    renderPage(<SettingsPage />)
+    await seeded()
+    const orders = region('Orders')
+    expect(within(orders).getByLabelText('Orders currency')).toHaveValue('USD')
+    // Applies to the next order, never a restart: no restart badge.
+    expect(within(orders).queryByText(/restart/i)).toBeNull()
+  })
+
+  it('saves a three-letter code and shows the server refusing a lowercase one', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const field = () => within(region('Orders')).getByLabelText('Orders currency')
+    await user.clear(field())
+    await enter(user, field(), 'usd')
+    await user.click(within(region('Orders')).getByRole('button', { name: 'Save Orders' }))
+    await within(region('Orders')).findByRole('alert')
+    expect(mockSettings().orders_currency).toBe('USD')
+
+    await user.clear(field())
+    await enter(user, field(), 'EUR')
+    await user.click(within(region('Orders')).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().orders_currency).toBe('EUR'))
+    expect(mockSettings().sources?.['orders_currency']).toBe('stored')
+  })
+})
+
 describe('SettingsPage Administration (#668)', () => {
   it('shows no Temporal UI link while its URL is empty', async () => {
     renderPage(<SettingsPage />)
