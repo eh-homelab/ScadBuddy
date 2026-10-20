@@ -78,7 +78,9 @@ describe('FlowTriggers', () => {
       resetFlowTriggers()
       const { user } = render()
       await approveRenderGrant(user)
-      expect(flowTriggerRequests().filter((r) => r.path === '/flow-triggers/trig-render/grant/approve')).toHaveLength(1)
+      const sent = flowTriggerRequests().filter((r) => r.path === '/flow-triggers/trig-render/grant/approve')
+      expect(sent).toHaveLength(1)
+      expect(sent[0]!.body?.['seen']).toBe('seen-trig-render-0')
     } finally {
       vi.useRealTimers()
     }

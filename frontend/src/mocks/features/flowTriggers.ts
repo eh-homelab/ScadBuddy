@@ -197,6 +197,9 @@ export const handlers = [
     }
     if (action === 'grant') {
       if (sent?.['seen'] !== trigger.seen) return changed()
+      // Refused as the backend's body validation would, so a request that drops its spec
+      // fails here rather than taking the default one.
+      if (!sent['spec']) return HttpResponse.json({ detail: 'spec is required' }, { status: 422 })
       const grant = standing(`sg-${id}`, { spec: sent['spec'] as FlowGrantSpec })
       return HttpResponse.json(update(id, (t) => ({ ...t, grant })).grant)
     }
