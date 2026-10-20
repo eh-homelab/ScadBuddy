@@ -71,6 +71,8 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
             gate: 'harness',
           })
         } catch (err) {
+          // An interrupted turn is not the backend away: the abort goes on as it is (#4442 review).
+          if (signal.aborted) throw err
           // The tool's refusal, its backend text in the envelope; the backend away is worth another try.
           if (isRefusal(err)) throw new Error(toolErrorText(err, tool.name), { cause: err })
           // An error no retry would change (arguments that do not parse) says what went wrong (#4442 review).

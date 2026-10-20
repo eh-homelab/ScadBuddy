@@ -782,6 +782,20 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       )
     })
 
+    it("passes an interrupted turn's abort on as it is, never 'try again' (#4442 review)", async () => {
+      const turn = new AbortController()
+      server.use(
+        http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, () => {
+          turn.abort()
+          return HttpResponse.error()
+        }),
+      )
+      const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
+      const thrown = await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, turn.signal).catch((e: Error) => e)
+      expect(thrown).toBeInstanceOf(Error)
+      expect((thrown as Error).message).not.toMatch(/try the call again/)
+    })
+
     it('reads the printers list for a bare printer_id only when the line is wanted (#4442 review)', async () => {
       let listReads = 0
       server.use(
