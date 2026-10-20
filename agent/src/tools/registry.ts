@@ -260,6 +260,7 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   prepareApproval?: (
     args: z.infer<z.ZodObject<S>>,
     ctx: ToolContext,
+    needs: ApprovalNeeds,
   ) => Promise<{ input: z.infer<z.ZodObject<S>>; summary: string }>
   /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
@@ -286,6 +287,13 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<CallToolResult>
 }
 
+/**
+ * What a prepareApproval caller needs besides the input (#4442 review): `summary: false` when
+ * only the input is wanted (a durable call's hash check as it runs), so the tool skips reads
+ * made only to word the line a person sees; it still returns a line, worded without them.
+ */
+export type ApprovalNeeds = { summary: boolean }
+
 /** A registry entry with its argument types erased, so tools of any shape share one list. */
 export type Tool = {
   readonly name: string
@@ -301,7 +309,7 @@ export type Tool = {
   readonly source: string
   summarize(args: unknown): string
   /** What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`). */
-  prepareApproval(args: unknown, ctx: ToolContext): Promise<{ input: Record<string, unknown>; summary: string }>
+  prepareApproval(args: unknown, ctx: ToolContext, needs?: ApprovalNeeds): Promise<{ input: Record<string, unknown>; summary: string }>
   /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
   readonly resolvesApproval: boolean
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
@@ -354,10 +362,10 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
     resolvesApproval: spec.prepareApproval !== undefined,
-    async prepareApproval(args, ctx) {
+    async prepareApproval(args, ctx, needs = { summary: true }) {
       const parsed = spec.input.parse(args)
       if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }
-      const prepared = await spec.prepareApproval(parsed, ctx)
+      const prepared = await spec.prepareApproval(parsed, ctx, needs)
       const input = spec.input.parse(prepared.input)
       // It may fill what the call left out, never change what the model chose (#4442 gate review).
       const resolved: Record<string, unknown> = input
@@ -427,6 +435,25 @@ export function isRefusal(err: unknown): err is ToolError {
   return err instanceof ToolError && !(err.status !== undefined && (err.status >= 500 || err.status === 429))
 }
 
+/** A socket's codes for a backend it could not reach, on undici's `fetch failed` cause. */
+const UNREACHED = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'EADDRNOTAVAIL', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'])
+
+/**
+ * Whether an error is worth another try (#4442 review): the backend away (5xx) or
+ * rate-limiting (429), or a request that never reached it (fetch's network failure, a
+ * timeout or abort). Anything else, a ToolError refusal or an error in the tool itself
+ * (its arguments not parsing), will fail the same way again.
+ */
+export function isTransient(err: unknown): boolean {
+  if (err instanceof ToolError) return !isRefusal(err)
+  if (!(err instanceof Error)) return false
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return true
+  // Node's fetch (undici) says `fetch failed`; the WHATWG wording, msw's too, `Failed to fetch`.
+  if (err instanceof TypeError && (err.message === 'fetch failed' || err.message === 'Failed to fetch')) return true
+  const code = (err.cause as { code?: unknown } | undefined)?.code ?? (err as { code?: unknown }).code
+  return typeof code === 'string' && UNREACHED.has(code)
+}
+
 /** Where a backend error's reason comes from, for the envelope around it. */
 export const ERROR_DETAIL_SOURCE =
   "the backend's error detail, which can relay Bambuddy's or another upstream's own message"
@@ -439,6 +466,21 @@ export function toolErrorText(err: ToolError, tool: string): string {
   return err.untrusted === undefined
     ? err.message
     : `${err.summary}: ${wrapUntrustedText(tool, ERROR_DETAIL_SOURCE, err.untrusted)}`
+}
+
+/**
+ * What went wrong, for an error that is neither a ToolError nor worth another try (#4442
+ * review): arguments that do not parse said as such, else the error's own message, which
+ * the model gets in the untrusted-data envelope (it can quote an upstream). `detail` is the
+ * audit row's, unwrapped.
+ */
+export function unexpectedErrorText(err: unknown, tool: string): { text: string; detail: string } {
+  if (err instanceof z.ZodError) {
+    const text = `its arguments are not valid (${z.prettifyError(err)})`
+    return { text, detail: text }
+  }
+  const reason = err instanceof Error ? err.message : String(err)
+  return { text: `it failed: ${wrapUntrustedText(tool, UNEXPECTED_ERROR_SOURCE, reason)}`, detail: `it failed: ${reason}` }
 }
 
 export function errorResult(message: string): CallToolResult {

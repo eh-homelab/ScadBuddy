@@ -716,7 +716,7 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     bed_type: 'Cool Plate',
   }
   /** `status` answers the row's read instead, for the first `failures` reads (every read when unset). */
-  type Registry = { linked: number; status?: number; failures?: number; detail?: string; reads: number; posted: Record<string, unknown>[] }
+  type Registry = { linked: number; status?: number; failures?: number; detail?: string; reads: number; listReads?: number; posted: Record<string, unknown>[] }
   /** Bambuddy's printer `linked` behind registry row PRINTER, and the print routes; `status` answers the row's read instead. */
   function backendOf(state: Registry) {
     return createBackendClient(BACKEND, async (request) => {
@@ -726,6 +726,10 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
         state.reads++
         if (state.status !== undefined && (state.failures === undefined || state.reads <= state.failures)) return Response.json({ detail: state.detail ?? 'unavailable' }, { status: state.status })
         return Response.json({ id: PRINTER, serial: '01P00A0000000AA', name: 'Garage', bambuddy_printer_id: state.linked, preferred_path: 'auto' })
+      }
+      if (url.pathname === '/api/v1/printers') {
+        state.listReads = (state.listReads ?? 0) + 1
+        return Response.json([{ id: PRINTER, serial: '01P00A0000000AA', name: 'Garage', bambuddy_printer_id: state.linked, preferred_path: 'auto' }])
       }
       if (url.pathname === `/api/v1/print/outputs/${OUT}/run` && req.method === 'POST') {
         state.posted.push((await req.json()) as Record<string, unknown>)
@@ -875,6 +879,61 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     // Revoked to read: an outward tool is not resolved for it, so its row is never read.
     await env().run(describeCall, { tool: 'print_output', input: { ...chosen, printer: PRINTER } })
     expect(state.reads).toBe(0)
+  })
+
+  // #4442 review: the printers list is read only to name a bare printer_id in the line a person sees.
+  it('names a bare printer_id at describe, and runs it reading no printers list', async () => {
+    const state = registry()
+    const raw: unknown = await env().run(describeWith(state), { tool: 'print_output', input: { ...chosen, printer_id: 2 } })
+    const described = raw as { summary: string; input_hash: string }
+    expect(described.summary).toContain('on printer "Garage"')
+    expect(state.listReads).toBe(1)
+    const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === described.input_hash }
+    const h = harness({ approvals, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
+    await env(undefined, 'tool-toolu_17').run(h.activities.print_output!, { ...chosen, printer_id: 2 })
+    expect(state.posted).toEqual([expect.objectContaining({ printer_id: 2 })])
+    expect(state.listReads).toBe(1)
+    expect(state.reads).toBe(0)
+  })
+
+  // #4442 review: an error no retry would change is refused at once, saying what went wrong.
+  it('refuses arguments that do not parse at once, saying so, never as the backend away', async () => {
+    const state = registry()
+    const audits: AuditEntry[] = []
+    let asked = 0
+    const approvals = { approved: async () => (asked++, true) }
+    const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [60_000, 60_000] }, [printOutput])
+    const ran = await failure(env(undefined, 'tool-toolu_18').run(h.activities.print_output!, { ...chosen, printer: PRINTER, copies: 'two' }))
+    expect(ran.nonRetryable).toBe(true)
+    expect(ran.type).toBe('ToolError')
+    expect(ran.message).toContain('print_output was not run: its arguments are not valid')
+    expect(ran.message).toContain('copies')
+    expect(ran.message).not.toContain('unavailable')
+    expect(state.reads).toBe(0)
+    expect(asked).toBe(0)
+    expect(state.posted).toEqual([])
+    expect(audits).toEqual([expect.objectContaining({ action: 'print_output', outcome: 'refused', toolUseId: 'toolu_18' })])
+  })
+
+  it('refuses arguments that do not parse at describe, audited, rather than retrying', async () => {
+    const audits: AuditEntry[] = []
+    const refused = await failure(env().run(describeWith(registry(), audits), { tool: 'print_output', input: { ...chosen, printer: PRINTER, copies: 'two' } }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('ToolError')
+    expect(refused.message).toContain('its arguments are not valid')
+    expect(audits).toEqual([expect.objectContaining({ action: 'print_output', outcome: 'refused' })])
+  })
+
+  it('leaves a backend out of reach at describe to the retry policy', async () => {
+    const unreachable = createBackendClient(BACKEND, async () => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+    })
+    const audits: AuditEntry[] = []
+    const describeCall = gateActivities({ audit: auditInto(audits), sessions, tools: [printOutput], services: services({ backend: unreachable }) })[DESCRIBE_CALL_ACTIVITY]!
+    const described = await failure(env().run(describeCall, { tool: 'print_output', input: { ...chosen, printer: PRINTER } }))
+    expect(described.nonRetryable).toBe(false)
+    expect(described.type).toBe(BACKEND_UNAVAILABLE)
+    expect(audits).toEqual([])
   })
 
   describe('in a flow run (I1)', () => {

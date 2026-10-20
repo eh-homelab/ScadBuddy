@@ -4,6 +4,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
+import { makeCanUseTool } from '../src/harness/permissions.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { RENDER_LIMITS, RenderLimiter } from '../src/tools/renderLimits.js'
@@ -760,6 +761,42 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       const refused = await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, new AbortController().signal).catch((e: Error) => e.message)
       expect(refused).toContain('untrusted_data')
       expect(refused).not.toMatch(/try the call again/)
+    })
+
+    it("refuses a session's arguments that do not parse at once, saying so, never 'try again' (#4442 review)", async () => {
+      const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
+      const refused = await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER, copies: 'two' }, new AbortController().signal).catch((e: Error) => e.message)
+      expect(refused).toMatch(/^its arguments are not valid .*copies/s)
+      expect(refused).not.toMatch(/try the call again/)
+      // As canUseTool tells the model: denied, nothing parked.
+      const canUse = makeCanUseTool(() => 'outward', undefined, async () => ({ approved: true, input: {}, source: 'human' }) as never, undefined, prepare)
+      const verdict = await canUse('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER, copies: 'two' }, { signal: new AbortController().signal, toolUseID: 't' } as never)
+      expect(verdict).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/was not run: its arguments are not valid/) })
+    })
+
+    it("leaves a session's backend out of reach to another try (#4442 review)", async () => {
+      server.use(http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, () => HttpResponse.error()))
+      const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
+      await expect(prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, new AbortController().signal)).rejects.toThrow(
+        /could not be checked just now .*try the call again/,
+      )
+    })
+
+    it('reads the printers list for a bare printer_id only when the line is wanted (#4442 review)', async () => {
+      let listReads = 0
+      server.use(
+        http.get(`${BACKEND}/api/v1/printers`, () => {
+          listReads++
+          return HttpResponse.json([{ id: PRINTER, serial: 'x', name: 'Garage', bambuddy_printer_id: 2, preferred_path: 'auto' }])
+        }),
+      )
+      const named = await tool('print_output').prepareApproval({ ...chosen, printer_id: 2 }, ctx())
+      expect(named.summary).toContain('on printer "Garage"')
+      expect(listReads).toBe(1)
+      const bare = await tool('print_output').prepareApproval({ ...chosen, printer_id: 2 }, ctx(), { summary: false })
+      expect(bare.input).toEqual(named.input)
+      expect(bare.summary).toContain('on printer 2')
+      expect(listReads).toBe(1)
     })
 
     it("reads the printer under the turn's abort signal (#4442 gate review)", async () => {

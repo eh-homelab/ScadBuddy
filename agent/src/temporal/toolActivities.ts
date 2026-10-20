@@ -11,11 +11,13 @@ import {
   effectiveTool,
   type FlowImages,
   isRefusal,
+  isTransient,
   parsedOrRaw,
   runToolWithOutcome,
   type Tool,
   ToolError,
   toolErrorText,
+  unexpectedErrorText,
   type ToolRun,
   type ToolServices,
 } from '../tools/registry.js'
@@ -526,11 +528,13 @@ async function runGated(
       )
     for (let attempt = 0; ; attempt++) {
       try {
-        const resolved = (await tool.prepareApproval(input, ctx)).input
+        // Only the input: the line naming the printer was the approval's, so its reads are skipped.
+        const resolved = (await tool.prepareApproval(input, ctx, { summary: false })).input
         if (flow === undefined) runInput = resolved
         break
       } catch (err) {
-        if (isRefusal(err)) await refuseOrRetry(err, refuse, tool.name)
+        // A refusal, or an error no retry would change (arguments that do not parse), ends it now.
+        if (isRefusal(err) || !(isTransient(err) || call.signal.aborted)) await refuseOrRetry(err, refuse, tool.name)
         const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
         const wait = waits[attempt]
         if (wait === undefined || call.signal.aborted) await unavailable(attempt + 1, why)
@@ -712,16 +716,19 @@ async function answerAsActivity(
 /**
  * A resolving tool's failure (#4442 gate review): its own refusal refuses the call, its
  * backend text in the untrusted-data envelope; the backend away, rate-limiting or out of
- * reach is thrown to be retried.
+ * reach is thrown to be retried; anything else (arguments that do not parse) is refused
+ * too, saying what went wrong, since no retry would change it.
  */
 async function refuseOrRetry(
   err: unknown,
   refuse: (detail: string, message: string, type: string) => Promise<never>,
   tool: string,
 ): Promise<never> {
+  if (err instanceof CancelledFailure) throw err
   if (isRefusal(err)) return refuse(err.summary, `${tool} was not run: ${toolErrorText(err, tool)}`, TOOL_ERROR)
-  if (err instanceof ToolError) throw ApplicationFailure.retryable(err.summary, BACKEND_UNAVAILABLE)
-  throw err
+  if (isTransient(err)) throw ApplicationFailure.retryable(err instanceof ToolError ? err.summary : (err as Error).message, BACKEND_UNAVAILABLE)
+  const { text, detail } = unexpectedErrorText(err, tool)
+  return refuse(detail, `${tool} was not run: ${text}`, TOOL_ERROR)
 }
 
 /** The activity that describes a call for its gate entry (gateActivities). */

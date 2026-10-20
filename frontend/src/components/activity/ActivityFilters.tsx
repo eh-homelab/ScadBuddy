@@ -22,6 +22,16 @@ interface Props {
 /** Radix Select takes no empty value: this stands for "no `since`". */
 const ANY_TIME = 'any'
 
+/** Radix Select takes no empty value: this stands for "any value" of a facet with options; no real value holds a NUL (the backend refuses one). */
+const ANY_VALUE = '\u0000any'
+
+type FacetOption = NonNullable<ActivityFacets['kinds'][number]['facets'][number]['options']>[number]
+
+/** A facet's options, plus a selected value they do not name (a printer deleted since), by its value. */
+function optionsWith(options: FacetOption[], selected: string | undefined): FacetOption[] {
+  return selected && !options.some((o) => o.value === selected) ? [...options, { value: selected, label: selected }] : options
+}
+
 /** The values of one facet as chips, plus any selected value the facets do not list. */
 type Counted = ActivityFacets['subjects'][number]
 
@@ -234,11 +244,31 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
               <Label htmlFor={`activity-facet-${f.name}`} className="text-xs font-normal text-muted-foreground">
                 {f.label}
               </Label>
-              <DebouncedInput
-                id={`activity-facet-${f.name}`}
-                value={query.facets[f.name] ?? ''}
-                onCommit={(v) => setFacet(f.name, v, true)}
-              />
+              {f.options ? (
+                // Values the backend names (#4442 review: a printer's uuid by its name): chosen by name, filtered by value.
+                <Select
+                  value={query.facets[f.name] || ANY_VALUE}
+                  onValueChange={(v) => setFacet(f.name, v === ANY_VALUE ? '' : v, false)}
+                >
+                  <SelectTrigger id={`activity-facet-${f.name}`} className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    <SelectItem value={ANY_VALUE}>Any</SelectItem>
+                    {optionsWith(f.options, query.facets[f.name]).map((o) => (
+                      <SelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <DebouncedInput
+                  id={`activity-facet-${f.name}`}
+                  value={query.facets[f.name] ?? ''}
+                  onCommit={(v) => setFacet(f.name, v, true)}
+                />
+              )}
             </div>
           ))}
         </div>

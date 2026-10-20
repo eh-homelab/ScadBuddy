@@ -12,9 +12,12 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex, Count
 from scadbuddy.activity.subject_labels import SubjectLabels
-from scadbuddy.api.activity import _subject_labels
+from scadbuddy.api.activity import _printer_options, _subject_labels
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.library.outputs import OutputNotFoundError
 from scadbuddy.operations.activity import TITLE_NAME_CHARS
+from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.models import PrinterCreate
 from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
 from tests.api.test_send import make_output
 from tests.support.operations import press
@@ -111,12 +114,51 @@ def test_facets_from_data(client: TestClient, seed_activity: SeedActivity) -> No
     assert {"value": "render_model", "count": 1, "label": None} in body["tools"]
     assert {"value": "box", "count": 1, "label": None} in body["subjects"]
     render = next(k for k in body["kinds"] if k["key"] == "render")
-    assert {"name": "slug", "type": "keyword", "label": "Model", "filterable": True} in render[
-        "facets"
-    ]
+    assert {
+        "name": "slug",
+        "type": "keyword",
+        "label": "Model",
+        "filterable": True,
+        "options": None,
+    } in render["facets"]
     assert body["statuses"] == ["queued", "running", "waiting", "succeeded", "failed", "cancelled"]
     later = client.get("/api/v1/activity/facets", params={"since": "2999-01-01T00:00:00Z"}).json()
     assert later["principals"] == []
+
+
+def test_the_printer_facet_offers_the_registry_by_name(
+    client: TestClient, seed_activity: SeedActivity
+) -> None:
+    """#4442 review: a print run's ``printer`` facet holds registry uuids, so its filter
+    offers each printer by name, filtering on the uuid."""
+    store = _printers(client).store
+    garage = store.create(PrinterCreate(serial="01P00A0000000AA", name="Garage"))
+    attic = store.create(PrinterCreate(serial="01P00A0000000AB", name="Attic"))
+    seed_activity(id="print_run:a", kind="print_run", facets={"printer": garage.id})
+    seed_activity(id="print_run:b", kind="print_run", facets={"printer": attic.id})
+    kinds = {k["key"]: k for k in client.get("/api/v1/activity/facets").json()["kinds"]}
+    printer = next(f for f in kinds["print_run"]["facets"] if f["name"] == "printer")
+    assert printer["options"] == [
+        {"value": attic.id, "label": "Attic"},
+        {"value": garage.id, "label": "Garage"},
+    ]
+    page = client.get(
+        "/api/v1/activity", params={"kind": "print_run", "facet.printer": garage.id}
+    ).json()
+    assert ids(page) == ["print_run:a"]
+
+
+def test_the_printer_facet_is_free_text_when_the_registry_cannot_be_read() -> None:
+    def broken() -> list[object]:
+        raise psycopg.OperationalError("the pool is closed")
+
+    printers = SimpleNamespace(store=SimpleNamespace(list=broken))
+    assert _printer_options(printers) is None  # type: ignore[arg-type]
+
+
+def _printers(client: TestClient) -> Printers:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state.components.get(PRINTERS)
 
 
 def test_a_model_subject_is_labelled_with_its_name(

@@ -38,6 +38,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
 from scadbuddy.operations.activity import TITLE_NAME_CHARS
+from scadbuddy.printers.component import Printers, PrintersDep
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +117,21 @@ class ActivityPage(BaseModel):
     next_cursor: str | None
 
 
+class FacetOption(BaseModel):
+    #: What the filter sends (`facet.<name>=<value>`).
+    value: str
+    #: How it reads.
+    label: str
+
+
 class FacetOut(BaseModel):
     name: str
     type: FacetType
     label: str
     filterable: bool
+    #: The values the filter offers, named (#4442 review: a printer's uuid by its name);
+    #: none for a free-text filter, or when they could not be read.
+    options: list[FacetOption] | None = None
 
 
 class KindOut(BaseModel):
@@ -342,12 +353,32 @@ def _output_labels(
     return labels
 
 
+def _printer_options(printers: Printers) -> list[FacetOption] | None:
+    """The registry's printers, by name; none when the registry cannot be read."""
+    try:
+        return [FacetOption(value=row.id, label=row.name) for row in printers.store.list()]
+    except Exception:  # the facets are the activity index's; a name is only a nicety
+        logger.warning("activity facets: no printer names from the registry", exc_info=True)
+        return None
+
+
+def _facet_out(facet: Facet, options: Mapping[str, list[FacetOption] | None]) -> FacetOut:
+    return FacetOut(
+        name=facet.name,
+        type=facet.type,
+        label=facet.label,
+        filterable=facet.filterable,
+        options=None if facet.options is None else options.get(facet.options),
+    )
+
+
 @router.get("/facets", response_model=ActivityFacets)
 async def activity_facets(
     request: Request,
     activity: ActivityDep,
     catalogue: CatalogueDep,
     outputs: OutputsDep,
+    printers: PrintersDep,
     since: datetime | None = None,
 ) -> ActivityFacets:
     """What the filter bar offers: every kind with its facets, the statuses, and the
@@ -356,16 +387,14 @@ async def activity_facets(
     _unknown(request, frozenset({"since"}))
     kinds = await asyncio.to_thread(activity.kinds)
     counts = await activity.index.counts(since=since)
+    # Read only when a kind's facet is named by the registry.
+    wanted = {f.options for k in kinds.all() for f in k.facets if f.options is not None}
+    options: dict[str, list[FacetOption] | None] = {}
+    if "printers" in wanted:
+        options["printers"] = await asyncio.to_thread(_printer_options, printers)
     return ActivityFacets(
         kinds=[
-            KindOut(
-                key=k.key,
-                label=k.label,
-                facets=[
-                    FacetOut(name=f.name, type=f.type, label=f.label, filterable=f.filterable)
-                    for f in k.facets
-                ],
-            )
+            KindOut(key=k.key, label=k.label, facets=[_facet_out(f, options) for f in k.facets])
             for k in kinds.all()
         ],
         statuses=list(STATUSES),

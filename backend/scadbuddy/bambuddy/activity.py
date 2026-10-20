@@ -48,7 +48,8 @@ PRINT_RUN = ActivityKind(
     facets=(
         Facet("subject", "keyword", "Subject"),
         Facet("may_have_queued", "bool", "May have queued", filterable=False),
-        Facet("printer", "keyword", "Printer"),
+        # A registry uuid, so the filter offers the registry's printers by name (#4442 review).
+        Facet("printer", "keyword", "Printer", options="printers"),
     ),
 )
 ACTIVITY_KINDS = (PRINT_RUN,)

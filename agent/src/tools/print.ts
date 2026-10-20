@@ -6,7 +6,7 @@ import { binary } from './binary.js'
 import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
+import { type ApprovalNeeds, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { errorName } from '../telemetry/scrub.js'
@@ -361,6 +361,7 @@ async function printerOf(
   args: PrintOutputArgs,
   backend: BackendClient,
   signal: AbortSignal,
+  needs: ApprovalNeeds = { summary: true },
 ): Promise<{ printerId?: number; name?: string }> {
   if (args.printer !== undefined) {
     const row = await ok(
@@ -382,7 +383,9 @@ async function printerOf(
     return { printerId: row.bambuddy_printer_id, name: row.name }
   }
   if (args.printer_id === undefined) return {}
-  // Only for the approval's line: a printer the registry does not name yet is said by its id.
+  // Only for the approval's line (#4442 review: not read when only the input is wanted): a
+  // printer the registry does not name yet is said by its id.
+  if (!needs.summary) return { printerId: args.printer_id }
   const { data } = await backend.GET('/api/v1/printers', { signal }).catch(() => ({ data: undefined }))
   return { printerId: args.printer_id, name: data?.find((row) => row.bambuddy_printer_id === args.printer_id)?.name }
 }
@@ -1023,8 +1026,8 @@ export const printTools: Tool[] = [
     // #4442: the approval names the printer that prints, and approves the pair it is: a
     // registry `printer` is sent with the `printer_id` it links, so confirm_action runs
     // exactly what the person saw.
-    prepareApproval: async (args, ctx) => {
-      const { printerId, name } = await printerOf(args, ctx.backend, ctx.signal)
+    prepareApproval: async (args, ctx, needs) => {
+      const { printerId, name } = await printerOf(args, ctx.backend, ctx.signal, needs)
       const input = args.printer === undefined ? args : { ...args, printer_id: printerId }
       return { input, summary: printSummary(input, name) }
     },

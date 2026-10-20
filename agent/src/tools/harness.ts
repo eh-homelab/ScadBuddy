@@ -9,7 +9,7 @@ import type { TitleResolver } from '../sessions/sdkEvents.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ALL_TOOLS } from './index.js'
 import { createHarnessServer, SERVER_NAME } from './projections.js'
-import { effectiveTool, isRefusal, type Tool, ToolError, toolErrorText, type ToolServices, type WaitForTab } from './registry.js'
+import { effectiveTool, isRefusal, isTransient, type Tool, ToolError, toolErrorText, type ToolServices, unexpectedErrorText, type WaitForTab } from './registry.js'
 
 // The registry's harness side, as the session manager takes it
 // (sessions/manager.ts SessionManagerDeps `tierOf` and `mcpServers`), so that
@@ -73,6 +73,8 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
         } catch (err) {
           // The tool's refusal, its backend text in the envelope; the backend away is worth another try.
           if (isRefusal(err)) throw new Error(toolErrorText(err, tool.name), { cause: err })
+          // An error no retry would change (arguments that do not parse) says what went wrong (#4442 review).
+          if (!isTransient(err)) throw new Error(unexpectedErrorText(err, tool.name).text, { cause: err })
           const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
           throw new Error(`what it names could not be checked just now (${why}); try the call again`, { cause: err })
         }
