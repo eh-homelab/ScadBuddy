@@ -896,9 +896,10 @@ describe('ArrangeDialog', () => {
       expect(found.length).toBeGreaterThan(0)
       expect(found.every((o) => /keychain/i.test(o))).toBe(true)
       // The date is relative to now, so the clock is pinned five days after the fixture's
-      // 2026-09-20 (a month on it reads "last month", #4452).
+      // (a month on it reads "last month", #4452).
+      const nova = fixtures.outputs.find((output) => output.name === 'Nova')!
       vi.useFakeTimers({ toFake: ['Date'] })
-      vi.setSystemTime(new Date('2026-09-25T11:22:00Z'))
+      vi.setSystemTime(new Date(nova.created_at).getTime() + 5 * 24 * 60 * 60 * 1000)
       try {
         await choose(user, select, nameOf('name-keychain'))
         expect(
