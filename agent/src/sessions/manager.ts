@@ -2271,15 +2271,13 @@ export class SessionManager {
     if (at === undefined && (source.busy || !pausedHistory || !atCheckpoint)) {
       at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
       if (at === undefined) {
-        throw new SessionError(
-          'no_transcript',
-          source.busy
-            ? `session ${id} has no finished reply to fork yet; wait for its turn to answer`
-            : !pausedHistory && atCheckpoint
-              ? // The result is held, but the log has no record of the call to end the child's history at.
-                `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; fork it once the session has resumed past that call`
-              : `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`,
-        )
+        let reason = `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`
+        if (source.busy) reason = `session ${id} has no finished reply to fork yet; wait for its turn to answer`
+        else if (!pausedHistory && atCheckpoint) {
+          // The result is held, but the log has no record of the call to end the child's history at.
+          reason = `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; fork it once the session has resumed past that call`
+        }
+        throw new SessionError('no_transcript', reason)
       }
     }
     const entries = at === undefined ? atCheckpoint : answered(replies.get(at))
