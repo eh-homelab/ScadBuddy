@@ -282,7 +282,9 @@ func TestA404OnReadDropsTheEntry(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	// Which one, so a runner image that changes it again shows in the log.
-	t.Logf("read errno: %v", err)
+	var errno syscall.Errno
+	errors.As(err, &errno)
+	t.Logf("read errno: %d (%v)", int(errno), errno)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat after: %v", err)
 	}
