@@ -423,6 +423,17 @@ class PrintPipeline:
             sliced_kind = is_native_id(sliced.id) or is_sliced(file.file_type)
             if sliced_kind and file.file_hash == sliced.file_hash:
                 return sliced.id
+            if file.file_hash is None or file.file_hash == sliced.file_hash:
+                # No hash to compare, or the same file read as another type for now:
+                # nothing says the id holds another file, so the row stays (#3896). It
+                # still counts toward MAX_RECORDED_SLICES: the cap bounds the GETs, and
+                # this one was made. At worst an older slice goes unchecked and the plate
+                # is sliced again, which is what a miss always costs.
+                logger.info(
+                    "a recorded slice cannot be checked now; it is not reused",
+                    extra={"library_file_id": sliced.id},
+                )
+                continue
             logger.info(
                 "a recorded slice's id now holds another file; it is not reused",
                 extra={"library_file_id": sliced.id},

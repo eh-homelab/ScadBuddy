@@ -4,8 +4,9 @@ Postgres so a reload resumes it, and queued as each file's own library run."""
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
+from typing import Any, LiteralString
 
 import httpx
 import pytest
@@ -21,7 +22,7 @@ from scadbuddy.api.printing import STILL_CHECKING_DETAIL
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
-from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome
+from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome, PrintBatchStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.main import BATCH_TTL, PENDING_BATCH_TTL
 from tests.api.test_print_filaments import queue_route, slice_routes
@@ -470,11 +471,11 @@ async def test_a_batch_nobody_touched_for_a_week_is_forgotten(client: TestClient
     for good; the claims sweep forgets one untouched past BATCH_TTL."""
     stale, fresh = new_batch(client, 104), new_batch(client, 105)
     store = _state(client).components.get(PRINT_BATCHES)
-    with store._pool.connection() as conn:
-        conn.execute(
-            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
-            (BATCH_TTL + timedelta(hours=1), stale["id"]),
-        )
+    _sql(
+        store,
+        "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
+        (BATCH_TTL + timedelta(hours=1), stale["id"]),
+    )
 
     assert (await store.prune(BATCH_TTL, pending_older_than=PENDING_BATCH_TTL)).count == 1
 
@@ -484,10 +485,7 @@ async def test_a_batch_nobody_touched_for_a_week_is_forgotten(client: TestClient
 
 def _age(client: TestClient, batch_id: str, by: timedelta) -> None:
     store = _state(client).components.get(PRINT_BATCHES)
-    with store._pool.connection() as conn:
-        conn.execute(
-            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s", (by, batch_id)
-        )
+    _sql(store, "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s", (by, batch_id))
 
 
 async def test_a_batch_following_a_pending_file_is_kept_longer_and_named(
@@ -587,8 +585,7 @@ async def test_a_queued_batchs_step_holds_against_a_late_move(client: TestClient
     landing in between still moved a queued batch's step."""
     batch = new_batch(client, 104)
     store = _state(client).components.get(PRINT_BATCHES)
-    with store._pool.connection() as conn:
-        conn.execute("UPDATE print_batches SET status = 'queued' WHERE id = %s", (batch["id"],))
+    _sql(store, "UPDATE print_batches SET status = 'queued' WHERE id = %s", (batch["id"],))
 
     assert await store.set_step(batch["id"], 1) is None
     assert (await store.get(batch["id"])).step == 0  # type: ignore[union-attr]
@@ -604,8 +601,7 @@ async def test_a_step_move_racing_a_queue_all_is_a_409(
     real = store.set_step
 
     async def queued_first(batch_id: str, step: int) -> object:
-        with store._pool.connection() as conn:
-            conn.execute("UPDATE print_batches SET status = 'queued' WHERE id = %s", (batch_id,))
+        _sql(store, "UPDATE print_batches SET status = 'queued' WHERE id = %s", (batch_id,))
         return await real(batch_id, step)
 
     monkeypatch.setattr(store, "set_step", queued_first)
@@ -616,16 +612,24 @@ async def test_a_step_move_racing_a_queue_all_is_a_409(
     assert (await store.get(batch["id"])).step == 0  # type: ignore[union-attr]
 
 
+def _sql(store: PrintBatchStore, query: LiteralString, params: Sequence[object]) -> None:
+    """The one place these tests write the tables under the store (#4068): a state its
+    interface never makes (a batch untouched for a week, queued between a route's read
+    and its write, a run failed after its 202)."""
+    with store._pool.connection() as conn:
+        conn.execute(query, params)
+
+
 def _fail_run(client: TestClient, run_id: str, *, may_have_queued: bool) -> None:
     """The run failed after the 202 (a slice or an upload), as the workflow records it."""
     store = _state(client).components.get(PRINT_BATCHES)
     error = {"status": 502, "title": "Bad Gateway", "detail": "Bambuddy's slice failed."}
-    with store._pool.connection() as conn:
-        conn.execute(
-            "UPDATE print_runs SET status = 'failed', result = NULL, error = %s,"
-            " enqueue_attempted = %s WHERE id = %s",
-            (Jsonb(error), may_have_queued, run_id),
-        )
+    _sql(
+        store,
+        "UPDATE print_runs SET status = 'failed', result = NULL, error = %s,"
+        " enqueue_attempted = %s WHERE id = %s",
+        (Jsonb(error), may_have_queued, run_id),
+    )
 
 
 @respx.mock
@@ -723,11 +727,11 @@ async def test_queue_all_counts_as_touching_the_batch(client: TestClient) -> Non
     queued a week after its last choice was pruned as untouched."""
     batch = new_batch(client, 104)
     store = _state(client).components.get(PRINT_BATCHES)
-    with store._pool.connection() as conn:
-        conn.execute(
-            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
-            (BATCH_TTL + timedelta(hours=1), batch["id"]),
-        )
+    _sql(
+        store,
+        "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
+        (BATCH_TTL + timedelta(hours=1), batch["id"]),
+    )
 
     await store.record_outcome(batch["id"], 0, BatchOutcome(status="unchosen"))
 
@@ -739,11 +743,11 @@ async def test_reading_a_batch_counts_as_touching_it(client: TestClient) -> None
     was pruned as untouched."""
     batch = new_batch(client, 104)
     store = _state(client).components.get(PRINT_BATCHES)
-    with store._pool.connection() as conn:
-        conn.execute(
-            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
-            (BATCH_TTL + timedelta(hours=1), batch["id"]),
-        )
+    _sql(
+        store,
+        "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
+        (BATCH_TTL + timedelta(hours=1), batch["id"]),
+    )
 
     assert client.get(f"{BATCHES}/{batch['id']}").status_code == 200
 

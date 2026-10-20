@@ -210,3 +210,41 @@ def test_a_single_vir_slot_255_is_the_one_holder() -> None:
     report = _lan({"vir_slot": [{"id": "255", "tray_type": "PLA"}]})
     status = status_from_report(row(), report, now=report.received_at)
     assert [tray.id for tray in status.vt_tray] == [254]
+
+
+def test_a_holder_id_other_than_254_or_255_is_dropped() -> None:
+    """A holder is tray ``id - 254``, so any other id would be a bad tray id (#4377)."""
+    reports: list[dict[str, object]] = [
+        {"vir_slot": [{"id": "254", "tray_type": "PLA"}, {"id": "7", "tray_type": "PLA"}]},
+        {"vt_tray": {"id": "256", "tray_type": "PLA"}},
+    ]
+    for print_ in reports:
+        report = _lan(print_)
+        status = status_from_report(row(), report, now=report.received_at)
+        assert [tray.id for tray in status.vt_tray] == ([254] if "vir_slot" in print_ else [])
+
+
+def test_a_presence_bit_an_ams_4_shares_with_an_ams_ht_vetoes_neither() -> None:
+    """AMS 4 tray 0 and HT-A are both bit 16 (#4377): with both reported, the bit says
+    nothing about either, while the unshared bits still apply."""
+    report = _lan(
+        {
+            "ams": {
+                "tray_exist_bits": "0",
+                "power_on_flag": True,
+                "ams": [
+                    {
+                        "id": "4",
+                        "tray": [
+                            {"id": "0", "tray_type": "PLA", "state": 11},
+                            {"id": "2", "tray_type": "PLA", "state": 11},
+                        ],
+                    },
+                    {"id": "128", "tray": [{"id": "0", "tray_type": "PETG", "state": 11}]},
+                ],
+            }
+        }
+    )
+    status = status_from_report(row(), report, now=report.received_at)
+    exists = {(unit.id, tray.id): tray.exists for unit in status.ams for tray in unit.tray}
+    assert exists == {(4, 0): None, (4, 2): False, (128, 0): None}

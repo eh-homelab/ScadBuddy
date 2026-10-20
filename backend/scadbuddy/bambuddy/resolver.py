@@ -19,11 +19,12 @@ print run states each side's flow in the 3MF, as Bambu Studio does (#484,
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
+from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -39,6 +40,8 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
     Tier,
 )
+
+logger = logging.getLogger(__name__)
 
 #: The nozzle types moved to ``models`` so the settings store can remember them; they
 #: are re-exported here, where every caller already imports them from.
@@ -172,7 +175,7 @@ def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) ->
     )
 
 
-def _record_preset(catalogue: _Catalogue, option: SpoolOption, printer: str) -> PresetRef | None:
+def _record_preset(catalogue: Catalogue, option: SpoolOption, printer: str) -> PresetRef | None:
     """An untagged tray's preset from the spool providers' records of its spool (#3818
     D1), in their priority order: Bambuddy's ``slicer_filament`` is a ``filament_id``
     (``GFA00``) or a cloud ``setting_id`` (``GFSL99_20``), as
@@ -227,7 +230,7 @@ class _ChoiceResult(BaseModel):
     errors: list[FilamentWarning] = Field(default_factory=list)
 
 
-def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceResult:
+def _resolve_choices(choices: PrintChoices, catalogue: Catalogue) -> _ChoiceResult:
     """Everything the choices decide on their own, without any plate's slots: the
     nozzle sizes, the printer preset and the process preset."""
     warnings: list[FilamentWarning] = []
@@ -283,13 +286,13 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
     )
 
 
-def process_preset_for(choices: PrintChoices, catalogue: _Catalogue) -> PresetRef | None:
+def process_preset_for(choices: PrintChoices, catalogue: Catalogue) -> PresetRef | None:
     """The process preset the choices resolve to, or ``None`` (which :func:`resolve`
     reports as an error)."""
     return _resolve_choices(choices, catalogue).process_preset
 
 
-def choice_errors(choices: PrintChoices, catalogue: _Catalogue) -> list[FilamentWarning]:
+def choice_errors(choices: PrintChoices, catalogue: Catalogue) -> list[FilamentWarning]:
     """The errors :func:`resolve` would report from the choices alone, before any plate
     is read — so a caller can refuse before uploading anything. Slot errors (no spool,
     no filament preset, an unusable Advanced override) need the plate's slots, which
@@ -301,7 +304,7 @@ def resolve(
     options: FilamentOptions,
     plan: FilamentPlan,
     choices: PrintChoices,
-    catalogue: _Catalogue,
+    catalogue: Catalogue,
     spool_presets: dict[int, list[SpoolFilamentPreset]],
 ) -> Resolved:
     chosen = _resolve_choices(choices, catalogue)
@@ -376,6 +379,24 @@ def resolve(
                 for row in spool_presets.get(option.spool_id, [])
                 if row.printer_model == PRINTER_MODEL and row.nozzle_diameter == size
             ]
+            if catalogue.is_native:
+                # A spool's preset is a Bambu Cloud setting_id, a BBL filament_id (as a
+                # tray's tray_info_idx is) or a Bambuddy local id, which the image lacks;
+                # native refs are preset names (#4349).
+                mapped = {
+                    preset_id: catalogue.native_ref(
+                        PresetRef(source="cloud", id=preset_id), "filament"
+                    )
+                    or _by_filament_id(catalogue.filament, preset_id, printer)
+                    for preset_id in own
+                }
+                if None in mapped.values():
+                    # Said, so a slot that falls back to a name is not a mystery.
+                    logger.debug(
+                        "a spool's own preset is not in the native catalogue",
+                        extra={"spool_id": option.spool_id},
+                    )
+                own = [native.id for native in mapped.values() if native is not None]
             ref = next(
                 (
                     choice.ref

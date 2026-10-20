@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from scadbuddy.bambuddy.catalogue import _Catalogue
+from scadbuddy.bambuddy.catalogue import Catalogue
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
@@ -695,7 +695,7 @@ async def resolve_plates(
     per_plate: list[FilamentOptions],
     plan: FilamentPlan,
     choices: PrintChoices,
-    catalogue: _Catalogue,
+    catalogue: Catalogue,
 ) -> tuple[list[Resolved], list[str]]:
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
     own words: what :func:`plan_run` refuses with, and what :func:`check_print` reports
@@ -1321,7 +1321,7 @@ class PreparedRun:
     printer_id: int
     #: Read once, before the 202, and reused by the run rather than read again; ``None``
     #: for a sliced file, which takes no presets (#2671).
-    catalogue: _Catalogue | None
+    catalogue: Catalogue | None
     #: The printer's live status, read once for the run's hardware warnings; ``None``
     #: when it was unreadable.
     printer_status: PrinterStatus | None
