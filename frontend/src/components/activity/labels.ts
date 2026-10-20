@@ -55,4 +55,4 @@ export function sinceTime(token: string, now = Date.now()): string {
  * #3747 — how many chips a filter group shows until its "Show more": every kind there
  * is, and every subject seen in the window, buried the list under its own filters.
  */
-export const CHIPS_SHOWN = 10
+export { CHIPS_SHOWN } from '../records/filterChips'
