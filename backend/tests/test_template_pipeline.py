@@ -440,6 +440,8 @@ async def test_a_job_waiting_on_two_pieces_gets_each_its_own(released: tuple[int
     original = world.cached_piece
 
     async def held(req: PieceRequest) -> PieceResult | None:
+        if activity.info().is_local:
+            return None  # the job's own lookup (#4199): a miss, so a child renders it
         w = int(req.params["w"])
         started.add(w)
         await gates[w].wait()
@@ -738,3 +740,57 @@ async def test_a_template_pack_the_packer_refuses_fails_with_its_line_and_reason
     assert final.failure.error.startswith("pipeline/pipeline.py:3: model.scad (400 x 10 mm)")
     assert "does not fit the plate" in final.failure.error
     assert world.outputs == []
+
+
+async def _children(client: Client, workflow_id: str) -> list[str]:
+    history = await client.get_workflow_handle(workflow_id).fetch_history()
+    return [
+        event.start_child_workflow_execution_initiated_event_attributes.workflow_id
+        for event in history.events
+        if event.HasField("start_child_workflow_execution_initiated_event_attributes")
+    ]
+
+
+async def test_a_cached_piece_is_answered_by_the_job_without_a_child() -> None:
+    """#4199: a piece a closed run finished is looked up in the job's own worker, so a
+    cached render starts no `RenderPiece` (its start, workflow tasks and activity task
+    were each a handoff Temporal could lose) and schedules no activity task for it."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    job.model_version = "a" * 40
+    async with temporal_client() as client:
+        await run_job(world, job, client=client)
+        children = await _children(client, workflow_id_for(job.id))
+        scheduled = await _scheduled_activities(client, workflow_id_for(job.id))
+    assert world.final().state == "done"
+    assert children == []
+    assert scheduled == ["load_pipeline", "write_output"]
+    assert world.outputs[0].layout.own == world.pieces[0].piece_key
+
+
+class _FailingLookups(FakeWorld):
+    """`cached_piece` fails until it has been tried ``failures`` times."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    @activity.defn(name="cached_piece")
+    async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("the store went away")
+        return await super().cached_piece(req)
+
+
+async def test_a_lookup_failing_in_the_job_falls_back_to_the_pieces_child() -> None:
+    """The job's lookup is only a shortcut: past `LOOKUP_RETRY`'s attempts the piece's
+    child looks again, with its own retries, and the job still finishes."""
+    attempts = pipelines.LOOKUP_RETRY.maximum_attempts
+    world, job = _FailingLookups(failures=attempts + 1), a_job(params={"w": 12})
+    job.model_version = "a" * 40
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, job, client=client), 60)
+        children = await _children(client, workflow_id_for(job.id))
+    assert world.failures == 0
+    assert world.final().state == "done"
+    assert children == [f"piece-{world.pieces[0].piece_key}"]

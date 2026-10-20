@@ -1,104 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
+import { ChipGroup as Group, Count, DebouncedInput, SearchField } from '../records/FilterBar'
+import { CHIP, shownChips } from '../records/filterChips'
 import { DEFAULT_ACTIVITY_QUERY, isActivityFiltered, joinList, splitList, type ActivityQuery } from '../../lib/activityQuery'
 import type { ActivityFacets } from '../../api/types'
 import { statusLabel } from '../prints/status'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { SearchIcon, XIcon } from 'lucide-react'
-import { CHIPS_SHOWN, principalLabel, SINCE_OPTIONS, subjectLabel } from './labels'
+import { XIcon } from 'lucide-react'
+import { principalLabel, SINCE_OPTIONS, subjectLabel } from './labels'
 
 interface Props {
   query: ActivityQuery
   facets: ActivityFacets | undefined
   /** `typing` is a change made keystroke by keystroke: it replaces the history entry. */
   onChange: (next: ActivityQuery, options?: { typing?: boolean }) => void
-}
-
-/** The first `CHIPS_SHOWN` of `items` (the facets list them most frequent first), and
- * every selected one past them, so a choice in force is never hidden. */
-function shownChips<T>(items: T[], key: (item: T) => string, selected: string[], all: boolean): T[] {
-  if (all || items.length <= CHIPS_SHOWN) return items
-  return items.filter((item, i) => i < CHIPS_SHOWN || selected.includes(key(item)))
-}
-
-function Group({
-  label,
-  children,
-  hidden = 0,
-  all = false,
-  onAll,
-}: {
-  label: string
-  children: React.ReactNode
-  /** How many chips `shownChips` left out; a toggle shows them. */
-  hidden?: number
-  all?: boolean
-  onAll?: (all: boolean) => void
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <span aria-hidden="true" className="text-xs text-muted-foreground">
-        {label}
-      </span>
-      {children}
-      {onAll && (all || hidden > 0) && (
-        <Button
-          variant="link"
-          size="sm"
-          className="h-auto px-1 text-xs"
-          aria-expanded={all}
-          aria-label={all ? `${label}: show fewer` : `${label}: show ${hidden} more`}
-          onClick={() => onAll(!all)}
-        >
-          {all ? 'Show fewer' : `Show ${hidden} more`}
-        </Button>
-      )}
-    </div>
-  )
-}
-
-/** A chip: a toggle in a group, wrapping a long value rather than widening the page. */
-const CHIP =
-  'h-auto min-h-7 max-w-full rounded-full px-2.5 py-0.5 text-left text-xs font-normal break-all whitespace-normal data-[state=on]:border-primary/60 data-[state=on]:bg-primary/15 data-[state=on]:text-foreground'
-
-function Count({ count }: { count: number | null }) {
-  return count === null ? null : <span className="sb-num text-muted-foreground">{count}</span>
-}
-
-/** A text input that reports after a pause, and follows the URL when it changes elsewhere. */
-function DebouncedInput({
-  value,
-  onCommit,
-  ...rest
-}: { value: string; onCommit: (value: string) => void } & Omit<
-  React.InputHTMLAttributes<HTMLInputElement>,
-  'value' | 'onChange'
->) {
-  const [text, setText] = useState(value)
-  const sent = useRef(value)
-  const commit = useRef(onCommit)
-  useEffect(() => {
-    commit.current = onCommit
-  })
-  useEffect(() => {
-    if (value !== sent.current) {
-      sent.current = value
-      setText(value)
-    }
-  }, [value])
-  useEffect(() => {
-    if (text === sent.current) return
-    const timer = setTimeout(() => {
-      sent.current = text
-      commit.current(text)
-    }, 250)
-    return () => clearTimeout(timer)
-  }, [text])
-  return <Input {...rest} value={text} onChange={(e) => setText(e.target.value)} />
 }
 
 /** Radix Select takes no empty value: this stands for "no `since`". */
@@ -115,7 +33,7 @@ function valueChips(
   return [...listed, ...extra]
 }
 
-/** The filters above the table; every choice comes from the facets endpoint. */
+/** The filters above the table, on the records `FilterBar` parts (#4249); every choice comes from the facets endpoint. */
 export function ActivityFilters({ query, facets, onChange }: Props) {
   const [all, setAll] = useState<Record<string, boolean>>({})
   const showAll = (group: string) => (next: boolean) => setAll((was) => ({ ...was, [group]: next }))
@@ -165,17 +83,11 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
   return (
     <div className="flex flex-col gap-2.5" aria-label="Activity filters" role="search">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative w-full max-w-xs">
-          <SearchIcon aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <DebouncedInput
-            type="search"
-            className="pl-8"
-            placeholder="Search activity"
-            aria-label="Search activity"
-            value={query.q}
-            onCommit={(q) => onChange({ ...latest.current, q }, { typing: true })}
-          />
-        </div>
+        <SearchField
+          placeholder="Search activity"
+          value={query.q}
+          onChange={(q) => onChange({ ...latest.current, q }, { typing: true })}
+        />
         <Select
           value={sinceKnown ? query.since : ANY_TIME}
           onValueChange={(since) => onChange({ ...query, since: since === ANY_TIME ? '' : since })}
