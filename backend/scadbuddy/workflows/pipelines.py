@@ -71,6 +71,11 @@ from scadbuddy.workflows.ctx import Ctx, PieceFailedError
 RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
 )
+#: `reuse_geometry` is only a shortcut: a failure falls back to rendering the piece, so
+#: one that recurs every time costs one retry, not all of `RETRY`'s (#3449).
+REUSE_RETRY = RetryPolicy(
+    maximum_attempts=2, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
+)
 #: What signalling a workflow that is gone raises: one that never ran and one that has
 #: closed alike (measured against temporalio 1.33.0's dev server).
 EXTERNAL_NOT_FOUND = "ExternalWorkflowExecutionNotFound"
@@ -154,12 +159,12 @@ def _openscad_timeout() -> timedelta:
     return timedelta(seconds=memo)
 
 
-def _retried(start_to_close: timedelta) -> timedelta:
-    """One activity's worst case under `RETRY`: every attempt timing out, plus the
+def _retried(start_to_close: timedelta, policy: RetryPolicy = RETRY) -> timedelta:
+    """One activity's worst case under ``policy``: every attempt timing out, plus the
     backoff between them."""
-    attempts = RETRY.maximum_attempts
+    attempts = policy.maximum_attempts
     backoff = sum(
-        (RETRY.initial_interval * RETRY.backoff_coefficient**n for n in range(attempts - 1)),
+        (policy.initial_interval * policy.backoff_coefficient**n for n in range(attempts - 1)),
         timedelta(),
     )
     return attempts * start_to_close + backoff
@@ -222,7 +227,7 @@ def _waiter_recheck() -> timedelta:
     return (
         _retried(CACHED_TIMEOUT)
         + _retried(_prepare_timeout())
-        + _retried(REUSE_TIMEOUT)
+        + _retried(REUSE_TIMEOUT, REUSE_RETRY)
         + _retried(_main_timeout())
         # One piece's budget: a layout of many outlasts it, and the re-check that
         # follows is harmless (below), so the wait is not stretched for the rare one.
@@ -347,7 +352,7 @@ class RenderPiece:
                     result_type=RenderMainResult,
                     start_to_close_timeout=REUSE_TIMEOUT,
                     heartbeat_timeout=HEARTBEAT,
-                    retry_policy=RETRY,
+                    retry_policy=REUSE_RETRY,
                 )
             except ActivityError as error:
                 if is_cancelled_exception(error):
