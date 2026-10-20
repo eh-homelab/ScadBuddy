@@ -4,6 +4,7 @@ reads and writes the piece's directory in the blob store (spec §3.4)."""
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -12,13 +13,13 @@ import sys
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Concatenate
 
 import psycopg
 from temporalio import activity
@@ -244,7 +245,9 @@ async def _heartbeating[T](work: asyncio.Task[T], every: float = 5.0) -> T:
     cancel `work` and await it so the runner kills the openscad process group before
     the activity returns. Called outside an activity (a test, or a caller that runs the
     stage directly), as `_stage` allows, there is nothing to beat to."""
-    beating = activity.in_activity()
+    # A local activity has no heartbeat of its own: the workflow task it runs in is
+    # kept alive by the SDK, and its bound is its start-to-close.
+    beating = activity.in_activity() and not activity.info().is_local
     try:
         while True:
             done, _ = await asyncio.wait({work}, timeout=every)
@@ -258,6 +261,22 @@ async def _heartbeating[T](work: asyncio.Task[T], every: float = 5.0) -> T:
             await asyncio.wait({work})
             if not work.cancelled():
                 work.exception()  # retrieved, so asyncio does not log it as lost
+
+
+def heartbeated[S, **P, T](
+    fn: Callable[Concatenate[S, P], Coroutine[Any, Any, T]],
+) -> Callable[Concatenate[S, P], Coroutine[Any, Any, T]]:
+    """An activity that heartbeats from its start to its end (#4199), not only around
+    its downloads and openscad runs. Its workflow gives it a `heartbeat_timeout`, so a
+    stretch with no beat (a slow store upload or Postgres write, a template's code) as
+    long as that timeout fails a live attempt, and a lost attempt is freed at that
+    timeout rather than its start-to-close. Applied under `activity.defn`."""
+
+    @functools.wraps(fn)
+    async def beating(self: S, /, *args: P.args, **kwargs: P.kwargs) -> T:
+        return await _heartbeating(asyncio.create_task(fn(self, *args, **kwargs)))
+
+    return beating
 
 
 def _prepared(result: PrepareResult) -> Prepared:
@@ -447,6 +466,7 @@ class RenderActivities:
         return replace(config, solid_concurrency=await self.deps.stored_solid_concurrency())
 
     @activity.defn(name="cached_piece")
+    @heartbeated
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
         """The piece as a finished render left it, so it is never rendered in place again."""
         blobs = self.deps.blobs
@@ -502,6 +522,7 @@ class RenderActivities:
         await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
 
     @activity.defn(name="prepare")
+    @heartbeated
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
         await self.materialize(req.slug, req.revision)
@@ -560,6 +581,7 @@ class RenderActivities:
         return result
 
     @activity.defn(name="reuse_geometry")
+    @heartbeated
     async def reuse_geometry(
         self, req: PieceRequest, prepared: PrepareResult
     ) -> RenderMainResult | None:
@@ -642,6 +664,7 @@ class RenderActivities:
         return RenderMainResult.model_validate(row.main)
 
     @activity.defn(name="render_main")
+    @heartbeated
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
         d = self.deps
         await self.materialize(req.slug, req.revision)
@@ -682,6 +705,7 @@ class RenderActivities:
         return _main_result(output)
 
     @activity.defn(name="render_solids")
+    @heartbeated
     async def render_solids(
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> None:
@@ -722,6 +746,7 @@ class RenderActivities:
         )
 
     @activity.defn(name="finish_piece")
+    @heartbeated
     async def finish_piece(
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> PieceResult:
@@ -796,6 +821,7 @@ class RenderActivities:
         return piece
 
     @activity.defn(name="render_preview_png")
+    @heartbeated
     async def render_preview_png(self, slug: str, revision: str | None = None) -> bytes:
         """As `prepare` then the render, for the default parameters: on the bambuddy
         store the worker has no volume, so the source is the pinned revision's
