@@ -867,11 +867,20 @@ export const printTools: Tool[] = [
       'project: omit it for the default project (`last_project_id`), or pass null for "No project". ' +
       '`folder_id` (from list_print_projects\' `folders`) puts the 3MF in a library folder of no project ' +
       'instead; it cannot be sent with a `project_id`. ' +
+      '`printer` names a registry printer by its id (list_printers) in place of `printer_id`. ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
     input: withSource({
       printer_id: z.number().int().optional(),
+      printer: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "A registry printer's `id` (list_printers, get_printers_now), in place of `printer_id`: the run prints " +
+            'on the Bambuddy printer it links and records the printer by this id.',
+        ),
       copies: z.number().int().min(1).max(1000).optional(),
       plate_id: z.number().int().min(1).default(1),
       all_plates: z.boolean().default(false),
@@ -949,7 +958,7 @@ export const printTools: Tool[] = [
     ],
     title: (args) => `Print ${sourceName(args)}${args.copies && args.copies > 1 ? ` × ${args.copies}` : ''}`,
     summarize: (args) => {
-      const { printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
+      const { printer_id, printer, copies, plate_id, all_plates, nozzles, tier, process_name } = args
       const defaulted =
         nozzles === undefined ||
         (tier === undefined && process_name === undefined) ||
@@ -961,7 +970,7 @@ export const printTools: Tool[] = [
         }` +
         `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
         `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
-        `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
+        `${printer !== undefined ? ` on printer ${printer}` : printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
         `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
         `${supportsPhrase(args.supports)}` +
         `${towerPhrase(args.prime_tower)}` +
@@ -974,6 +983,22 @@ export const printTools: Tool[] = [
       const { backend } = ctx
       const source = sourceOf(args)
       let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
+      // #3823 — a registry printer prints on the Bambuddy printer it links; both go to the
+      // backend, which refuses a pair that disagrees. One only the LAN reaches cannot be
+      // printed to until LAN printing lands, so it is refused here, before any read.
+      if (args.printer !== undefined) {
+        const row = await ok(
+          backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } } }),
+          'read the printer',
+        )
+        if (row.bambuddy_printer_id == null) {
+          throw new ToolError(
+            `${row.name} is reached only over the LAN, which ScadBuddy cannot print to yet. ` +
+              'Ask the user to link it to Bambuddy in Settings > Printers.',
+          )
+        }
+        printerId ??= row.bambuddy_printer_id
+      }
       let slots = args.filament_plan?.slots
       let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
       let processName: string | null | undefined = args.process_name
@@ -1029,6 +1054,7 @@ export const printTools: Tool[] = [
       const requestId = ctx.callKey ? idempotencyKey(ctx) : randomUUID()
       const body = {
         printer_id: printerId ?? null,
+        ...(args.printer === undefined ? {} : { printer: args.printer }),
         copies: args.copies ?? null,
         plate_id: args.plate_id,
         all_plates: args.all_plates,

@@ -1066,6 +1066,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             links=links,
             library=library,
             native=native,
+            printers=printers,
+            reports=reports,
         )
     )
     return PrintWorkerDeps(

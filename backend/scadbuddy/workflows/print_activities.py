@@ -68,6 +68,8 @@ from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.slicing.start import NativeSliceStarter
 from scadbuddy.workflows.print_models import (
@@ -154,6 +156,10 @@ class PrintDeps:
     native_run: Callable[[StoredSettings, PrintRunRequest], bool] = field(
         default=lambda settings, request: False
     )
+    #: The printer registry and its LAN reports (#3823, plan 2026-10-16 Task 8): the
+    #: check names the run's row and chooses its path. ``None`` runs as before it.
+    printers: PrinterStore | None = None
+    reports: PrinterReportStore | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -292,6 +298,8 @@ class PrintActivities:
                     rack=self.d.rack,
                     project=project,
                     native=self.d.library if native else None,
+                    printers=self.d.printers,
+                    reports=self.d.reports,
                 )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
@@ -311,6 +319,8 @@ class PrintActivities:
             workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id,
             retention=timedelta(seconds=retention) if retention is not None else None,
+            # The check's row (#3823): named by the request, or made for its printer.
+            printer=input.checked.prepared.printer or None,
         )
 
     @activity.defn(name="print_plan")

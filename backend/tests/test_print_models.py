@@ -4,11 +4,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from pydantic import ValidationError
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest, run_path
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
+from scadbuddy.bambuddy.runs import run_key
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.status import STALE_AFTER
 from scadbuddy.workflows.print_models import PrintRunInput, SourceSpec
 
 
@@ -44,3 +51,68 @@ def test_an_omitted_project_stays_omitted() -> None:
 def test_an_explicit_no_project_stays_explicit() -> None:
     back = round_trip(request(project_id=None))
     assert "project_id" in back.model_fields_set and back.project_id is None
+
+
+# ── #3823 Task 8: the run names a registry printer and chooses its path ─────────────
+
+PRINTER = "00000000-0000-4000-8000-0000000000aa"
+NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+
+
+def row(**fields: object) -> PrinterRow:
+    return PrinterRow.model_validate(
+        {
+            "id": PRINTER,
+            "serial": "01P00A0000000AA",
+            "name": "Garage",
+            "created_at": NOW,
+            "updated_at": NOW,
+            **fields,
+        }
+    )
+
+
+def test_the_printer_crosses_the_history() -> None:
+    assert round_trip(request(printer=PRINTER)).printer == PRINTER
+
+
+def test_a_change_of_printer_is_a_new_run() -> None:
+    plain = run_key("o" * 32, request(printer_id=1))
+    named = run_key("o" * 32, request(printer_id=1, printer=PRINTER))
+    other = run_key("o" * 32, request(printer_id=1, printer="00000000-0000-4000-8000-0000000000bb"))
+    assert len({plain, named, other}) == 3
+    # No printer named: the key it had before the field existed.
+    assert plain == run_key("o" * 32, request(printer_id=1, printer=None))
+
+
+def test_a_printer_that_is_not_a_registry_id_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        request(printer="garage")
+
+
+@pytest.mark.parametrize(
+    ("fields", "seen", "path"),
+    [
+        ({"preferred_path": "bambuddy", "lan_host": "10.0.0.9"}, NOW, "bambuddy"),
+        ({"preferred_path": "native"}, None, "native"),
+        ({"preferred_path": "auto", "lan_host": "10.0.0.9"}, NOW - timedelta(seconds=5), "native"),
+        ({"preferred_path": "auto", "lan_host": "10.0.0.9"}, NOW - STALE_AFTER, "bambuddy"),
+        ({"preferred_path": "auto", "lan_host": "10.0.0.9"}, None, "bambuddy"),
+        ({"preferred_path": "auto"}, NOW, "bambuddy"),
+    ],
+    ids=["bambuddy", "native", "auto-fresh", "auto-stale", "auto-unheard", "auto-no-lan"],
+)
+def test_the_path_follows_the_row_and_its_report(
+    fields: dict[str, object], seen: datetime | None, path: str
+) -> None:
+    assert run_path(row(**fields), seen, now=NOW) == path
+
+
+def test_a_run_planned_before_the_registry_decodes_as_bambuddys() -> None:
+    old = {"plate_ids": [1], "printer_id": 1}
+    prepared = PreparedPlates.model_validate(old)
+    assert (prepared.printer, prepared.path) == ("", "bambuddy")
+    converter = pydantic_data_converter.payload_converter
+    [payload] = converter.to_payloads([prepared])
+    [back] = converter.from_payloads([payload], [PreparedPlates])
+    assert back == prepared

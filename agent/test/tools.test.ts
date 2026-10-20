@@ -643,6 +643,61 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(run.body).not.toHaveProperty('project_id')
   })
 
+  describe('a registry printer (#3823 Task 8)', () => {
+    const PRINTER = '00000000-0000-4000-8000-0000000000aa'
+    const row = (bambuddy_printer_id: number | null, name = 'Garage') =>
+      http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, () =>
+        HttpResponse.json({ id: PRINTER, serial: '01P00A0000000AA', name, bambuddy_printer_id, preferred_path: 'auto' }),
+      )
+    const chosen = {
+      output_id: OUT,
+      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }] },
+      nozzles: [{ size: '0.4' }],
+      tier: 'standard' as const,
+      bed_type: 'Cool Plate',
+    }
+
+    it('names it beside the Bambuddy printer it links, so the backend can check the two agree', async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      server.use(row(2), ...capturedRun(run))
+      const result = await tool('print_output').execute({ ...chosen, printer: PRINTER }, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2 })
+    })
+
+    it("reads the dialog's choices for the Bambuddy printer the registry links", async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      let asked: string | null = null
+      server.use(
+        row(2),
+        ...capturedRun(run),
+        http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, ({ request }) => {
+          asked = new URL(request.url).searchParams.get('printer_id')
+          return HttpResponse.json({ printer_id: 2, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices: {} })
+        }),
+      )
+      await tool('print_output').execute({ output_id: OUT, printer: PRINTER }, ctx())
+      expect(asked).toBe('2')
+      expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2 })
+    })
+
+    it('says a printer only the LAN reaches cannot be printed to yet, before anything is sent', async () => {
+      server.use(row(null))
+      const refused = await tool('print_output')
+        .execute({ ...chosen, printer: PRINTER }, ctx())
+        .then(
+          () => null,
+          (error: unknown) => error as Error,
+        )
+      expect(refused?.message).toMatch(/Garage is reached only over the LAN/)
+    })
+
+    it('names the registry printer in its approval line', () => {
+      const t = tool('print_output')
+      expect(t.summarize({ ...chosen, printer: PRINTER })).toContain(`on printer ${PRINTER}`)
+    })
+  })
+
   it('sends a chosen print_sequence, and omits it when none is chosen (#907)', async () => {
     const chosen: { body?: unknown } = {}
     const plain: { body?: unknown } = {}

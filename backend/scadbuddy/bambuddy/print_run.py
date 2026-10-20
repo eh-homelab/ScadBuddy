@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 
 from fastapi import status
@@ -133,6 +135,9 @@ from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, require_native_folder
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies
+from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.status import STALE_AFTER, status_from_report
 from scadbuddy.rack.rank import (
     RackCandidate,
     RackGroup,
@@ -162,6 +167,9 @@ from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
 from scadbuddy.slicing.values import values_for
 
 if TYPE_CHECKING:
+    from scadbuddy.printers.reports import PrinterReportStore
+    from scadbuddy.printers.store import PrinterStore
+
     # `slicing.start` imports the slice workflow, whose models import this module.
     from scadbuddy.slicing.start import NativeSliceStarter
 
@@ -190,6 +198,11 @@ class PrintRunRequest(BaseModel):
     #: means the configured printer. It is also the printer the per-printer option scope
     #: keys on.
     printer_id: int | None = None
+    #: The registry printer to print on (#3823, plan 2026-10-16 Task 8), by its id. Sent
+    #: with ``printer_id``, the row must link that Bambuddy printer, or the run is
+    #: refused (``prepare_run``). Omitted, the row is the one for ``printer_id`` (or the
+    #: configured printer), made from Bambuddy's listing if there is none yet.
+    printer: str | None = None
     #: One spool per plate slot. Every slot a plate uses needs one: a slot with no spool
     #: has no filament preset, which the resolver reports as an error (spec §4.3).
     filament_plan: FilamentPlan
@@ -251,6 +264,12 @@ class PrintRunRequest(BaseModel):
         if unknown:
             raise ValueError(f"no filament profile {', '.join(map(repr, unknown))}")
         return list(dict.fromkeys(ids))
+
+    @field_validator("printer")
+    @classmethod
+    def _registry_id(cls, value: str | None) -> str | None:
+        # A uuid, as the registry keys its rows; one spelling, so one run key.
+        return None if value is None else str(uuid.UUID(value))
 
     @field_validator("plate_ids")
     @classmethod
@@ -1333,6 +1352,24 @@ class PreparedRun:
     #: The project the caller resolved already, if it did; :func:`plan_run` reads it
     #: rather than Bambuddy's project list again.
     project: ResolvedProject | None = None
+    #: The registry printer the run prints on (#3823), and how it reaches it: ``""``
+    #: and ``bambuddy`` where there is no registry (a process without Postgres's
+    #: printers, or a run accepted before it).
+    printer: str = ""
+    path: RunPath = "bambuddy"
+
+
+RunPath = Literal["bambuddy", "native"]
+
+
+def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> RunPath:
+    """How a run reaches ``row`` (#3823, plan Task 8): its ``preferred_path`` as set,
+    and for ``auto`` the LAN when it has a LAN link whose last report (``seen_at``) is
+    fresher than ``STALE_AFTER``, else Bambuddy."""
+    if row.preferred_path != "auto":
+        return row.preferred_path
+    fresh = seen_at is not None and now - seen_at < STALE_AFTER
+    return "native" if row.lan_host is not None and fresh else "bambuddy"
 
 
 async def prepare_run(
@@ -1345,6 +1382,8 @@ async def prepare_run(
     refuse_manual_pick: bool = True,
     project: ResolvedProject | None = None,
     native: NativeCopies | None = None,
+    printers: PrinterStore | None = None,
+    reports: PrinterReportStore | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -1360,6 +1399,12 @@ async def prepare_run(
 
     ``native`` is ScadBuddy's own library on a native run (#3818 tier A Task 5, D6): a
     project is refused and the folder is checked there, never in Bambuddy.
+
+    ``printers`` is the printer registry (#3823, plan 2026-10-16 Task 8): the run names
+    a row (``request.printer``), else the row for its Bambuddy printer, made from
+    Bambuddy's listing when there is none, and takes the row's path (`run_path`). On the
+    native path the status is the row's LAN report (``reports``), never Bambuddy's (D4).
+    Without ``printers`` the run is Bambuddy's, as before the registry.
     """
     if native is not None:
         if request.project_id is not None:
@@ -1406,16 +1451,40 @@ async def prepare_run(
             f"The 3MF has {count} ({', '.join(map(str, laid_out))}); "
             f"there is no {plates_named(missing)}.",
         )
-    printer_id = request.printer_id or settings.printer_id
+    if printers is not None and request.printer is not None:
+        named = await asyncio.to_thread(printers.get, request.printer)
+        if named is None:
+            raise RunRefusalError(
+                f"There is no printer {request.printer} in the registry. Pick another printer."
+            )
+        if request.printer_id is not None and named.bambuddy_printer_id != request.printer_id:
+            raise RunRefusalError(
+                f"disagreeing printer: {named.name} is not Bambuddy printer "
+                f"{request.printer_id}. Send one of the two, or the pair the registry links."
+            )
+        printer_id: int | None = named.bambuddy_printer_id
+    else:
+        named = None
+        printer_id = request.printer_id or settings.printer_id
+        if printer_id is None:
+            raise not_configured(
+                "no printer is chosen and none is configured, so there is nothing to print on"
+            )
+    row, path, report_status = await _registry_path(named, printer_id, printers, reports)
     if printer_id is None:
-        raise not_configured(
-            "no printer is chosen and none is configured, so there is nothing to print on"
+        # A row the LAN alone reaches: its status carries printer id 0, which nothing
+        # may key on (#4336 review M7), and only a native run can print to it.
+        assert row is not None
+        raise RunRefusalError(
+            f"{row.name} is reached only over the LAN, which ScadBuddy cannot print to"
+            " yet. Link it to Bambuddy in Settings > Printers to print through Bambuddy."
         )
     if source.is_sliced:
         # Nothing is sliced, so no preset need resolve (#2671): any active printer the
         # file was sliced for prints it.
         printer = await _require_resolvable_printer(client, printer_id, any_model=True)
-        printer_status = await read_status(client, printer_id)
+        row = await _ensure_row(printers, row, printer)
+        printer_status = report_status or await read_status(client, printer_id)
         await record_seen(rack, printer_id, printer_status)
         return PreparedRun(
             plate_ids=plate_ids,
@@ -1427,8 +1496,11 @@ async def prepare_run(
             warnings=plate_warnings
             + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
             project=project,
+            printer="" if row is None else row.id,
+            path=path,
         )
     printer = await _require_resolvable_printer(client, printer_id)
+    row = await _ensure_row(printers, row, printer)
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
     # Read before the upload, so that what the choices alone refuse — mixed nozzle
     # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
@@ -1439,7 +1511,7 @@ async def prepare_run(
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
-    printer_status = await read_status(client, printer_id)
+    printer_status = report_status or await read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
     if refuse_manual_pick and request.rack_position is not None:
         # Only a manual pick needs the file judged, which reads its 3MF (#1752).
@@ -1456,6 +1528,74 @@ async def prepare_run(
         printer_name=printer.name,
         printer_model=printer.model,
         project=project,
+        printer="" if row is None else row.id,
+        path=path,
+    )
+
+
+#: A native run on a print worker that cannot open the access code (Review Focus 4).
+LAN_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the print worker"
+
+
+async def _registry_path(
+    row: PrinterRow | None,
+    printer_id: int | None,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+) -> tuple[PrinterRow | None, RunPath, PrinterStatus | None]:
+    """The run's row (the named one, else the row linking ``printer_id`` if there is
+    one yet), its path and, on the native path, its status from the LAN report."""
+    if printers is None:
+        return None, "bambuddy", None
+    if row is None and printer_id is not None:
+        row = await asyncio.to_thread(printers.by_bambuddy_id, printer_id)
+    if row is None:
+        # Made from Bambuddy's listing by `_ensure_row`: a new row's path is Bambuddy's.
+        return None, "bambuddy", None
+    report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
+    now = datetime.now(UTC)
+    path = run_path(row, None if report is None else report[1], now=now)
+    if path == "bambuddy":
+        if row.bambuddy_printer_id is None:
+            raise RunRefusalError(
+                f"{row.name} is not linked to Bambuddy, and its path is Bambuddy's. Link it in"
+                " Settings > Printers, or link it over the LAN."
+            )
+        return row, path, None
+    if printers.kek is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, LAN_NEEDS_KEK)
+    if row.bambuddy_printer_id is None:
+        return row, path, None
+    if report is None:
+        raise RunRefusalError(
+            f"{row.name} has not reported over the LAN yet, so its trays and nozzles are not"
+            " known. Wait for it to come online, or set its path to Bambuddy."
+        )
+    # Parsed here, never from a dumped status, so nothing it drops is relied on (#4336
+    # review M6).
+    data, seen_at = report
+    return (
+        row,
+        path,
+        status_from_report(
+            row, LanReport(serial=row.serial, received_at=seen_at, print=data), now=now
+        ),
+    )
+
+
+async def _ensure_row(
+    printers: PrinterStore | None, row: PrinterRow | None, printer: Printer
+) -> PrinterRow | None:
+    """The row for the Bambuddy ``printer``, made from its listing when the run has none
+    (`PrinterStore.ensure_bambuddy`)."""
+    if printers is None or row is not None:
+        return row
+    return await asyncio.to_thread(
+        printers.ensure_bambuddy,
+        printer.id,
+        serial=printer.serial_number,
+        name=printer.name,
+        model=printer.model,
     )
 
 
@@ -1480,6 +1620,10 @@ class PreparedPlates(BaseModel):
     #: falling through to "No project", a window of seconds accepted for one read
     #: (#4008 review).
     project: ResolvedProject | None = None
+    #: As :attr:`PreparedRun.printer` and :attr:`PreparedRun.path`; the defaults are a
+    #: run accepted before the registry (#3823), which is Bambuddy's.
+    printer: str = ""
+    path: RunPath = "bambuddy"
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1498,6 +1642,8 @@ class PreparedPlates(BaseModel):
             warnings=prepared.warnings,
             printer_model=prepared.printer_model,
             project=prepared.project,
+            printer=prepared.printer,
+            path=prepared.path,
         )
 
 
@@ -1544,6 +1690,10 @@ class PlannedRun(BaseModel):
     #: keep every recorded ``print_plan`` result reading as Bambuddy's.
     slicer: Literal["bambuddy", "native"] = "bambuddy"
     library_queue: str = "library"
+    #: The registry printer (#3823, plan Task 8) and the path the run takes to it. The
+    #: defaults keep every recorded ``print_plan`` result reading as Bambuddy's.
+    printer: str = ""
+    path: RunPath = "bambuddy"
 
 
 class QueuedPlate(BaseModel):
@@ -1923,6 +2073,8 @@ async def plan_run(
         nozzle_plan=nozzle_plan,
         slicer="native" if native_slicing else "bambuddy",
         library_queue=native.library_queue if native is not None else "library",
+        printer=prepared.printer,
+        path=prepared.path,
     )
 
 
@@ -2028,6 +2180,8 @@ async def _plan_sliced(
         + not_resliced(request.prime_tower),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
+        printer=prepared.printer,
+        path=prepared.path,
     )
 
 
