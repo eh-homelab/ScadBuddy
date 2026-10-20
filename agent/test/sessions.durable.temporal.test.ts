@@ -734,7 +734,13 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
         page_chars: 1,
         owed_reads: [
           { pending: { toolu_a: outcome('a'), toolu_b: outcome('b') } },
-          { pending: { toolu_b: outcome('b'), toolu_a: outcome('a') } },
+          // Reordered at both levels: the calls, and the keys of each result.
+          {
+            pending: {
+              toolu_b: { blocks: null, is_error: false, content: 'b' },
+              toolu_a: { is_error: false, blocks: null, content: 'a' },
+            },
+          },
           { fork_next: true },
         ],
       },
