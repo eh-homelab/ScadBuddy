@@ -13,11 +13,15 @@ import { CataloguePage } from './pages/CataloguePage'
 // change inside `startTransition` (react-router 8, unless `useTransitions={false}`), so
 // React keeps the old page up until the next one's chunk is in. `lazyRetry`, not `lazy`:
 // a chunk that failed is imported again on the next visit (#3241).
+const CustomerPage = lazyRetry(async () => ({ default: (await import('./pages/CustomerPage')).CustomerPage }))
+const CustomersPage = lazyRetry(async () => ({ default: (await import('./pages/CustomersPage')).CustomersPage }))
 const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
 const EditPage = lazyRetry(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
 const FlowPage = lazyRetry(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
 const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
 const LibraryPage = lazyRetry(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
+const OrderPage = lazyRetry(async () => ({ default: (await import('./pages/OrderPage')).OrderPage }))
+const OrdersPage = lazyRetry(async () => ({ default: (await import('./pages/OrdersPage')).OrdersPage }))
 const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
 // Two pages of one module, so one chunk.
 const loadPrints = () => import('./pages/PrintsPage')
@@ -99,6 +103,10 @@ export function App() {
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="library/*" element={<LibraryPage />} />
+        <Route path="orders" element={<OrdersPage />} />
+        <Route path="orders/:id" element={<OrderPage />} />
+        <Route path="customers" element={<CustomersPage />} />
+        <Route path="customers/:id" element={<CustomerPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
         <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
         <Route path="workflows/flows/:id" element={<FlowPage />} />

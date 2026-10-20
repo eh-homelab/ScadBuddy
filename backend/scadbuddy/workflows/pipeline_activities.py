@@ -32,7 +32,7 @@ from scadbuddy.store import BlobStore
 from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content import BlobScope
 from scadbuddy.template import ACTIVITY_RESULT_NAME
-from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating
+from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating, heartbeated
 from scadbuddy.workflows.arrange import arrange
 from scadbuddy.workflows.models import (
     Failure,
@@ -130,6 +130,7 @@ class PipelineActivities:
         return source.scad.parent
 
     @activity.defn(name="load_pipeline")
+    @heartbeated
     async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
         """The template's pipeline source at ``req.revision``, read and never run: the
         workflow runs it in its sandbox, where what raises is a nondeterministic call
@@ -204,6 +205,7 @@ class PipelineActivities:
         return await asyncio.to_thread(pack_layout, req)
 
     @activity.defn(name="write_output")
+    @heartbeated
     async def write_output(self, req: OutputRequest) -> PipelineOutput:
         """Meshes, thumbnails and a many-plate 3MF can outlast a short timeout, so it
         heartbeats, as the openscad stages do. Its budget in the workflow is
@@ -215,6 +217,7 @@ class PipelineActivities:
         )
 
     @activity.defn(name="migrate_inputs")
+    @heartbeated
     async def migrate_inputs(self, req: MigrateRequest) -> MigrateResult:
         """The template's `migrate`, in the template process (§8.2): it runs template code,
         so it runs here on the worker, never in the API (§9)."""
@@ -265,6 +268,7 @@ class PipelineActivities:
         return value
 
     @activity.defn(name="run_template_activity")
+    @heartbeated
     async def run_template_activity(self, call: TemplateCall) -> Any:
         """One function of the template's `pipeline/activities.py`, in its own process
         group (`template_process`). The template's exception is non-retryable; a crash

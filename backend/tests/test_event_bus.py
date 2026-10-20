@@ -18,6 +18,8 @@ from scadbuddy.core.events import (
     InProcessEventBus,
     JobEvent,
     ModelEvent,
+    OrderChanged,
+    OrderItemChanged,
     SessionBusEvent,
     SettingsChanged,
     Subscription,
@@ -177,6 +179,24 @@ def test_events_round_trip_through_their_wire_form() -> None:
     assert set(event.model_dump()) == {"id", "at", "kind", "job_id", "slug"}
 
 
+def test_order_events_round_trip() -> None:
+    # #4249: ids and the new status only, as spec 2026-10-18 §7.1 has them.
+    order = OrderChanged(order_id="o1", status="accepted")
+    assert decode_event(encode_event(order)) == order
+    assert set(order.model_dump()) == {"id", "at", "kind", "order_id", "status"}
+    item = OrderItemChanged(order_id="o1", item_id="i1", status="fulfilled", attempt=2)
+    assert decode_event(encode_event(item)) == item
+    assert set(item.model_dump()) == {
+        "id",
+        "at",
+        "kind",
+        "order_id",
+        "item_id",
+        "status",
+        "attempt",
+    }
+
+
 def test_decodes_the_agents_session_events() -> None:
     # What agent/src/sessions/busEvents.ts NOTIFYs (#300): decoded, not logged
     # as undecodable, whether or not it carries a status.
@@ -225,6 +245,9 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "activity.changed",
         "printer.report",
         "printer.changed",
+        # Orders (#4249, spec 2026-10-18 §7.1).
+        "order.changed",
+        "order_item.changed",
         # The agent service's own (#300, agent/src/sessions/busEvents.ts).
         "session.started",
         "session.owner",

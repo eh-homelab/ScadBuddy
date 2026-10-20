@@ -8,6 +8,7 @@ export const SECTIONS = [
   { id: 'printing', title: 'Printing defaults' },
   { id: 'printers', title: 'Printers' },
   { id: 'inventory', title: 'Spool inventory' },
+  { id: 'orders', title: 'Orders' },
   { id: 'projects', title: 'Projects & files' },
   { id: 'uploads', title: 'Uploads' },
   { id: 'rendering', title: 'Rendering' },
@@ -59,6 +60,13 @@ export type FieldSpec = {
  * the unit) are not listed here; they are laid out by hand.
  */
 export const RUNTIME_FIELDS: readonly FieldSpec[] = [
+  {
+    name: 'orders_currency',
+    section: 'orders',
+    label: 'Orders currency',
+    kind: 'text',
+    help: 'The ISO 4217 code, such as USD or EUR, an order copies when it is made. A change applies to the next order; an existing order keeps its own.',
+  },
   {
     name: 'temporal_ui_url',
     section: 'administration',

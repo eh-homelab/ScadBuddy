@@ -561,6 +561,8 @@ class SettingsPatch(BaseModel):
     store_backend: StoreBackend | None = None
     library_backend: LibraryBackend | None = None
     slicer_backend: Slicer | None = None
+    #: The ISO 4217 code the next order copies (#4249); an existing order keeps its own.
+    orders_currency: str | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None

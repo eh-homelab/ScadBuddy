@@ -603,6 +603,11 @@ def test_library_backend_applies_on_restart() -> None:
     assert APPLIES["library_backend"] == "restart"
 
 
+def test_orders_currency_applies_at_the_next_order() -> None:
+    """#4249: an order copies the code when it is made and never changes it."""
+    assert APPLIES["orders_currency"] == "next order"
+
+
 def test_slicer_backend_applies_at_once() -> None:
     """Task 14/15 review M5: the Settings row shows no restart badge because of this;
     `plan_run` and `preview_run` read the setting per run and per start."""

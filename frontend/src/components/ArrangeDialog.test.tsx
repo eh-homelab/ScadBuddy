@@ -896,8 +896,7 @@ describe('ArrangeDialog', () => {
       expect(found.length).toBeGreaterThan(0)
       expect(found.every((o) => /keychain/i.test(o))).toBe(true)
       await choose(user, select, nameOf('name-keychain'))
-      // The date is relative to now ("2 days ago", then "last month" once the fixture is 30 days
-      // old), so any phrase between the separators: a fixed "ago" stopped matching on 2026-10-20.
+      // The date is relative to now, so not always "… ago": a month old it is "last month".
       expect(await screen.findByRole('checkbox', { name: /^Nova · [^·]+ · .*mm · needs a re-render$/ })).toBeInTheDocument()
     })
 

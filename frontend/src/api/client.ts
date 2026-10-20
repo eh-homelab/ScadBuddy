@@ -172,6 +172,27 @@ import type {
   UrlImport,
   VersionDiff,
   NeedsBackfillProblem,
+  Customer,
+  CustomerCreate,
+  CustomerPatch,
+  Fulfilment,
+  FulfilmentInput,
+  ManualQuoteInput,
+  Order,
+  OrderCreate,
+  OrderDetail,
+  OrderEvent,
+  OrderItem,
+  OrderItemCreate,
+  OrderItemPatch,
+  OrderPage,
+  OrderPatch,
+  Payment,
+  PaymentCreate,
+  Quote,
+  Shipment,
+  ShipmentEdit,
+  ShipmentInput,
 } from './types'
 import type {
   McpAuthSetting,
@@ -188,6 +209,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -1945,6 +1967,69 @@ export const api = {
     request<ActivityFacets>(`/activity/facets${since ? `?since=${encodeURIComponent(since)}` : ''}`),
   getActivity: (id: string, advanced: boolean) =>
     request<ActivityDetail>(`/activity/${seg(id)}${advanced ? '?advanced=1' : ''}`),
+
+  // -- orders (#4249, spec 2026-10-18 §4) -------------------------------------------------
+  /** Customers by name, at most `limit`; `q` matches the name, the company and any contact. */
+  customers: (query: { q?: string; includeArchived?: boolean; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    if (query.q) search.set('q', query.q)
+    if (query.includeArchived) search.set('include_archived', 'true')
+    if (query.limit !== undefined) search.set('limit', String(query.limit))
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<Customer[]>(`/customers${suffix}`)
+  },
+  customer: (id: string) => request<Customer>(`/customers/${seg(id)}`),
+  createCustomer: (body: CustomerCreate) =>
+    request<Customer>('/customers', { method: 'POST', body: JSON.stringify(body) }),
+  updateCustomer: (id: string, body: CustomerPatch) =>
+    request<Customer>(`/customers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  archiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/archive`, { method: 'POST' }),
+  /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
+  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams(ordersApiParams(query))
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<OrderPage>(`/orders${suffix}`)
+  },
+  order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
+  orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
+  createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
+  updateOrder: (id: string, body: OrderPatch) =>
+    request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  acceptOrder: (id: string) => request<Order>(`/orders/${seg(id)}/accept`, { method: 'POST' }),
+  cancelOrder: (id: string, reason?: string) =>
+    request<Order>(`/orders/${seg(id)}/cancel`, { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) }),
+  holdOrder: (id: string) => request<Order>(`/orders/${seg(id)}/hold`, { method: 'POST' }),
+  releaseOrder: (id: string) => request<Order>(`/orders/${seg(id)}/release`, { method: 'POST' }),
+  closeOrder: (id: string) => request<Order>(`/orders/${seg(id)}/close`, { method: 'POST' }),
+  addPayment: (id: string, body: PaymentCreate) =>
+    request<Payment>(`/orders/${seg(id)}/payments`, { method: 'POST', body: JSON.stringify(body) }),
+  addOrderItem: (orderId: string, body: OrderItemCreate) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items`, { method: 'POST', body: JSON.stringify(body) }),
+  updateOrderItem: (orderId: string, itemId: string, body: OrderItemPatch) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteOrderItem: (orderId: string, itemId: string) =>
+    request<void>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'DELETE' }),
+  cancelOrderItem: (orderId: string, itemId: string) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
+  quoteOrderItem: (orderId: string, itemId: string, body: ManualQuoteInput) =>
+    request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
+  acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
+  recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>
+    request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments`, { method: 'POST', body: JSON.stringify(body) }),
+  updateFulfilment: (orderId: string, itemId: string, fulfilmentId: string, body: FulfilmentInput) =>
+    request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
+    request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+  addShipment: (orderId: string, body: ShipmentInput) =>
+    request<Shipment>(`/orders/${seg(orderId)}/shipments`, { method: 'POST', body: JSON.stringify(body) }),
+  updateShipment: (orderId: string, shipmentId: string, body: ShipmentEdit) =>
+    request<Shipment>(`/orders/${seg(orderId)}/shipments/${seg(shipmentId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */

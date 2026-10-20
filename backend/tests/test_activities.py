@@ -67,6 +67,7 @@ from scadbuddy.workflows.activities import (
     _scope,
     _stage,
     _write_piece,
+    heartbeated,
     require_whole_3mf,
 )
 from scadbuddy.workflows.client import make_current, render_worker
@@ -1160,3 +1161,33 @@ async def test_a_stage_fails_its_span_only_when_its_attempt_is_not_retried(
     assert stage.status.status_code is status
     assert (stage.attributes or {})["scadbuddy.attempt"] == attempt
     assert (stage.attributes or {})["scadbuddy.failure_class"] == type(error).__name__
+
+
+class _Quiet:
+    """An activity with a stretch that beats nothing of its own: a store upload or a
+    Postgres write that takes longer than usual."""
+
+    @heartbeated
+    async def run(self, seconds: float) -> str:
+        await asyncio.sleep(seconds)
+        return "done"
+
+
+@pytest.mark.parametrize(("local", "beats"), [(False, True), (True, False)])
+async def test_a_heartbeated_activity_beats_through_its_quiet_stretches(
+    monkeypatch: pytest.MonkeyPatch, local: bool, beats: bool
+) -> None:
+    """#4199: its workflow gives it a heartbeat timeout, so it beats from its start to
+    its end. A local activity has no heartbeat of its own: it beats nothing."""
+    original = activities._heartbeating
+
+    async def often[T](work: asyncio.Task[T], every: float = 5.0) -> T:
+        return await original(work, every=0.02)
+
+    monkeypatch.setattr(activities, "_heartbeating", often)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, is_local=local)
+    beaten: list[object] = []
+    env.on_heartbeat = lambda *details: beaten.append(details)
+    assert await env.run(_Quiet().run, 0.2) == "done"
+    assert bool(beaten) is beats
