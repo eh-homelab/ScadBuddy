@@ -55,7 +55,7 @@ from scadbuddy.api.outputs import (
 )
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
-from scadbuddy.bambuddy.catalogue import catalogue_name_key
+from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
@@ -1438,7 +1438,8 @@ async def post_library_check(
     printers: PrintersDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
-    its slots read from the file itself, as ``/choices`` reads them (#2550)."""
+    its slots read from the file itself, as ``/choices`` reads them (#2550), and its
+    presets from the dialog's kept catalogue (#4196)."""
     settings = store.load()
     native = await library.serving_native()
     async with client_for(settings) as client:
@@ -1461,4 +1462,5 @@ async def post_library_check(
             files=files,
             printers=printers.store,
             reports=printers.reports,
+            catalogue=kept_catalogue(client, paths.cache, store.kek),
         )

@@ -59,7 +59,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
-from scadbuddy.bambuddy.catalogue import catalogue_name_key
+from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
@@ -1003,7 +1003,8 @@ async def post_check(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
-    catalogue: CatalogueDep,
+    library_catalogue: CatalogueDep,
+    paths: PathsDep,
     printers: PrintersDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
@@ -1012,12 +1013,13 @@ async def post_check(
     advisories it would carry back.
 
     Nothing is uploaded, sliced or queued; the used slots are read from the local 3MF.
+    The presets are the dialog's kept catalogue, as ``/choices`` reads them (#4196).
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
     try:
         # The template's defaults, by-object printing among them (#2976).
-        print_settings = await asyncio.to_thread(catalogue.print_settings, meta.slug)
+        print_settings = await asyncio.to_thread(library_catalogue.print_settings, meta.slug)
     except InvalidModelMetaError:
         print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:
@@ -1032,6 +1034,7 @@ async def post_check(
             print_settings=print_settings,
             printers=printers.store,
             reports=printers.reports,
+            catalogue=kept_catalogue(client, paths.cache, store.kek),
         )
 
 
