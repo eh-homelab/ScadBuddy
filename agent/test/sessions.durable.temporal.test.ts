@@ -40,7 +40,7 @@ const IMAGE: UserImage = {
 }
 const PNG_NAME = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
 
-type Recorded = { start: Record<string, unknown>; messages: Record<string, unknown>[]; calls: string[] }
+type Recorded = { start: Record<string, unknown>; messages: Record<string, unknown>[]; calls: string[]; firstReads: number }
 
 const mode = (value: string | undefined) => ({
   get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? value : undefined) as T),
@@ -726,6 +726,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     })
     const child = await m.fork(changed.id, browser)
     expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2', fork_next: true, recent_call_ids: ['toolu_9'] } })
+    // First page, re-read (changed), then both again: four, or the states went to other reads.
+    expect((await recorded(changed.id)).firstReads).toBe(4)
     // The same map in another key order is no change: no second read (which would answer the third state).
     const reordered = await twoTurns(m, {
       owed: {
@@ -742,6 +744,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(same.id)).start).toMatchObject({
       agent: { fork_next: false, pending: { toolu_a: outcome('a'), toolu_b: outcome('b') } },
     })
+    expect((await recorded(reordered.id)).firstReads).toBe(2)
   }, 60_000)
 
   it('says the log lacks the call when a paused parent with its result held has no reply before it', async () => {
