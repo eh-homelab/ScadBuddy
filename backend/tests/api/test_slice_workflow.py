@@ -257,6 +257,8 @@ def test_a_slice_completes_and_holds_its_blob(slice_client: TestClient, slicer: 
     machine, process, *filaments = (json.loads(doc) for doc in downloaded[1:])
     assert machine["name"] == "Test Printer 0.4 nozzle" and process["name"] == "leaf"
     assert process["curr_bed_type"] == "Textured PEI Plate" and len(filaments) == 2
+    # The slots' colours reach the CLI, which keeps the prime tower by them (#3962).
+    assert slicer.inputs[-1].filament_colours == ["#FF0000", "#00FF00"]
     presets = {f"slice-{hashlib.sha256(doc).hexdigest()}" for doc in downloaded[1:]}
     assert _holds(slice_client, row) == {
         row.sliced_blob_key,
@@ -362,6 +364,21 @@ def test_the_same_bytes_and_presets_reuse_the_slice(
     assert second.warnings == first.warnings
     assert slicer.calls == calls
     assert first.sliced_blob_key in _holds(slice_client, second)
+
+
+def test_a_recolour_slices_again(slice_client: TestClient, slicer: FakeSlicer) -> None:
+    """#3962: the colours reach the CLI and change the sliced file, so the same copy and
+    presets in other colours are a slice of their own, sliced with those colours."""
+    first = _slice(slice_client)
+    assert first.status == "completed", first.failure
+    swapped = PLAN.model_copy(update={"filament_colours": ["#00FF00", "#FF0000"]})
+
+    second = _slice(slice_client, plan=swapped)
+
+    assert second.status == "completed", second.failure
+    assert second.id != first.id and second.workflow_id != first.workflow_id
+    assert slicer.calls == 2
+    assert slicer.inputs[-1].filament_colours == ["#00FF00", "#FF0000"]
 
 
 def test_a_started_slice_starts_once(slice_client: TestClient, slicer: FakeSlicer) -> None:

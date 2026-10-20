@@ -470,6 +470,14 @@ export class DurableTurns {
           }
           texts.push(...next.entries)
         }
+        // What the agent owes is on the first page only, and can change with no new entry
+        // (a turn that starts and stops): read over several pages, it must still be what it
+        // was, or the entries and it may not be one state. One page is one Query.
+        if (!moved && texts.length > first.entries.length) {
+          const again = await page(0)
+          const owedOf = (p: ForkPointPage) => JSON.stringify([p.pending ?? {}, p.fork_next ?? false, p.recent_call_ids ?? []])
+          moved = again.total !== first.total || again.checkpoint !== first.checkpoint || again.busy !== first.busy || owedOf(again) !== owedOf(first)
+        }
         if (moved) continue
         return {
           claudeSessionId: first.session_id,

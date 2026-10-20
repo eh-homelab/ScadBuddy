@@ -90,10 +90,11 @@ def attach_backfills(
     further output: the boot's pass runs in a thread the shutdown cannot cancel (#2128)."""
     pending = outputs.pending_backfills()
     # A job no output waits on any more (its outputs deleted, or failed another way) is
-    # never read again, so nothing else would drop it. Two races only cost a log line,
-    # and are left (#3574): a backfill.json caught mid-write is skipped by this listing,
-    # so its job is forgotten once and its trace logged again next pass; and a job
-    # attach_job_backfills adds between the listing and this line is dropped, the same.
+    # never read again, so nothing else would drop it. No backfill.json is seen half
+    # written (`outputs._replace` renames a whole file in), so a job still waited on is
+    # never dropped (#3792). One race only costs a log line, and is left (#3574): a job
+    # attach_job_backfills adds between the listing and this line is dropped, so its
+    # trace is logged again next pass. attach_job_backfills itself prunes nothing.
     _unreadable_jobs.intersection_update(state.job_id for _, state in pending)
     return _attach_all(outputs, refs, read_job, pending, events, stop)
 

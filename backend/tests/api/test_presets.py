@@ -24,9 +24,9 @@ from scadbuddy.library.presets import (
     MAX_PRESET_TAG,
     MAX_PRESET_TAGS,
     MAX_PRESETS,
-    PRESET_LOCK_PREFIX,
     ParamPresetCreate,
     PresetStore,
+    preset_lock_key,
 )
 from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
@@ -653,7 +653,7 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
             mine, other = (
                 conn.execute(
                     "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
-                    (f"{PRESET_LOCK_PREFIX}{model_id}",),
+                    (preset_lock_key(model_id),),
                 ).fetchone()
                 for model_id in ("m", "n")
             )
@@ -678,7 +678,7 @@ def test_keep_only_reads_the_kept_names_and_trims_every_preset_under_the_lock(
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             row = conn.execute(
                 "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
-                (f"{PRESET_LOCK_PREFIX}m",),
+                (preset_lock_key("m"),),
             ).fetchone()
             assert row is not None
             held.append(row[0])
@@ -692,29 +692,56 @@ def test_keep_only_reads_the_kept_names_and_trims_every_preset_under_the_lock(
     assert after["Wide"].params == {"width": 5} and after["Wide"].updated_at == wide.updated_at
 
 
-def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(store: PresetStore) -> None:
+def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(
+    store: PresetStore, pg_conninfo: str
+) -> None:
     """#2979 review: the lost update keep_only's lock prevents. A save that comes in
     while the trim reads what the scene keeps waits for the trim's write, then lands
-    on top of it, rather than being overwritten by a list read before it."""
+    on top of it, rather than being overwritten by a list read before it. The wait is
+    seen in ``pg_locks`` (#3301), not inferred from a slow save."""
     store.create("m", ParamPresetCreate(name="Tall", params={"height": 3, "width": 2}))
     saving: list[threading.Thread] = []
-    waited: list[bool] = []
+    saved = threading.Event()
+    waited: list[tuple[bool, bool]] = []
 
     def save() -> None:
         store.create("m", ParamPresetCreate(name="New", params={"width": 7}))
+        saved.set()
+
+    def waiting_for_a_lock() -> bool:
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            for _ in range(200):
+                # The template's own lock: a bigint key is classid's high half, objid's low.
+                # A negative key comes back too, since int8's << wraps into the sign bit
+                # (checked on postgres:17 with keys of both signs).
+                row = conn.execute(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                    " AND database = (SELECT oid FROM pg_database"
+                    " WHERE datname = current_database())"
+                    " AND ((classid::bigint << 32) | objid::bigint)"
+                    " = hashtextextended(%s, 0)",
+                    (preset_lock_key("m"),),
+                ).fetchone()
+                if row is not None and row[0]:
+                    return True
+                if saved.wait(0.05):
+                    return False  # saved without waiting
+        return False
 
     def kept() -> list[str]:
         saver = threading.Thread(target=save)
         saver.start()
         saving.append(saver)
-        saver.join(0.5)
-        waited.append(saver.is_alive())
+        waited.append((waiting_for_a_lock(), saved.is_set()))
         return ["width"]
 
     store.keep_only("m", kept)
     saving[0].join(10)
 
-    assert waited == [True], "the save waited for the trim's lock"
+    # (seen waiting in pg_locks, saved before the trim let go): (False, True) is a save
+    # that never waited; (False, False) one that neither waited nor finished in 10 s.
+    assert waited == [(True, False)], f"the save waited for the trim's lock: {waited}"
+    assert saved.is_set()
     after = {p.name: p.params for p in store.saved_presets("m")}
     assert after == {"Tall": {"width": 2}, "New": {"width": 7}}
 

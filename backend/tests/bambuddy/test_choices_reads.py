@@ -118,7 +118,7 @@ def _count_shields(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Awaitable
     shields = 0
     real = asyncio.shield
 
-    def counting(arg: Awaitable[catalogue._Catalogue]) -> asyncio.Future[catalogue._Catalogue]:
+    def counting(arg: Awaitable[catalogue.Catalogue]) -> asyncio.Future[catalogue.Catalogue]:
         nonlocal shields
         shields += 1
         return real(arg)

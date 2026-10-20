@@ -406,9 +406,8 @@ async def remove_library(
         ops,
         response,
         kind=ops.kinds["library_remove"],
-        # Shares `library:` with Bambuddy files: an all-digit name reads as a file's id
-        # in titles and chips (operations/activity.py `_subject_text`, labels.ts).
-        subject=f"library:{name}",
+        # A prefix of its own (#4001): `library:<id>` is a Bambuddy file's.
+        subject=f"scad-library:{name}",
         request={"name": name, "commit": commit},
         idempotency_key=idempotency_key,
     )

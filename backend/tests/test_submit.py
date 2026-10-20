@@ -76,6 +76,7 @@ from scadbuddy.workflows.commands import (
     TemporalBusyError,
     TemporalRefusedError,
     TemporalUnavailableError,
+    execution_gone,
     temporal_failure,
 )
 from scadbuddy.workflows.models import (
@@ -119,14 +120,29 @@ SUBMIT_HANG_BOUND = 120
 class ProjectingActivities(FakeActivities):
     """The fakes, but the row's writes are the real activities': `render_accept`,
     `render_claims` and `project`. ``hold_running`` keeps a job pending (its `running`
-    projection waits for it)."""
+    projection waits for it). That write is a local activity (#4199), so it also holds
+    every Update to the run, a joining request's included, until the SDK heartbeats
+    the workflow task; ``hold_load`` keeps a job open without that (its
+    `load_pipeline` waits)."""
 
     def __init__(
-        self, deps: WorkerDeps, *, hold_running: asyncio.Event | None = None, **kwargs: Any
+        self,
+        deps: WorkerDeps,
+        *,
+        hold_running: asyncio.Event | None = None,
+        hold_load: asyncio.Event | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._real = RenderActivities(deps)
         self.hold_running = hold_running
+        self.hold_load = hold_load
+
+    @activity.defn(name="load_pipeline")
+    async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
+        if self.hold_load is not None:
+            await self.hold_load.wait()
+        return await super().load_pipeline(req)
 
     @activity.defn(name=ACCEPT_ACTIVITY)
     async def render_accept(self, accept: AcceptRender) -> Job:
@@ -1350,13 +1366,21 @@ async def test_a_release_after_the_render_finished_cancels_nothing(
             )
             await asyncio.sleep(1)
             held.set()
-            answer = await asyncio.wait_for(last, timeout=30)
+            try:
+                answer: ReleaseAnswer | None = await asyncio.wait_for(last, timeout=30)
+            except RPCError as error:
+                # `done` is a local activity (#4199): the run can complete in the
+                # workflow task that holds it, before the Update is delivered, and
+                # Temporal then aborts the Update as NOT_FOUND, which `_release` reads
+                # as nothing to release.
+                assert execution_gone(error), error
+                answer = None
             await asyncio.wait_for(handle.result(), timeout=30)
             described = await handle.describe()
         await service.aclose()
 
     assert done.state == "done"
-    assert answer.cancelled is None
+    assert answer is None or answer.cancelled is None
     # Visibility says what the row says (review #1066 (9) 2).
     assert described.typed_search_attributes.get(STATUS) == "settled"
     assert (await asyncio.to_thread(projection.read, job.id)).state == "done"
@@ -1749,7 +1773,7 @@ async def test_concurrent_claims_project_the_workflows_count(
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
         held = asyncio.Event()
-        acts = _SlowFirstClaim(deps, hold_running=held)
+        acts = _SlowFirstClaim(deps, hold_load=held)
         async with _worker(client, queue, acts):
             job = await service.submit(SLUG, params)
             await asyncio.gather(service.submit(SLUG, params), service.submit(SLUG, params))
@@ -1765,12 +1789,24 @@ async def test_concurrent_claims_project_the_workflows_count(
     assert claimed.claims == 3
 
 
+class _HeldFailed(ProjectingActivities):
+    """The `failed` projection never finishes (until cancelled)."""
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> bool:
+        if projection.state == "failed":
+            await asyncio.Event().wait()
+        return await super().project(projection)
+
+
 async def test_a_release_while_an_input_problems_failure_waits_to_be_written_cancels_it(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
     """The last release landing while the `failed` projection of an input problem is
-    scheduled (no worker takes it) still leaves the row terminal (review #1066 2.2)."""
-    acts = ProjectingActivities(deps)
+    still being written still leaves the row terminal (review #1066 2.2). The write is
+    a local activity (#4199) that never finishes here: the release reaches the run at
+    the SDK's heartbeat of the workflow task holding it, and cancels it."""
+    acts = _HeldFailed(deps)
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
@@ -2103,8 +2139,8 @@ async def test_a_coalesced_submit_links_to_the_render_it_joined(
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
         hold = asyncio.Event()
-        async with _worker(client, queue, ProjectingActivities(deps, hold_running=hold)):
-            # Held pending, so the second joins the first's execution.
+        async with _worker(client, queue, ProjectingActivities(deps, hold_load=hold)):
+            # Held open, so the second joins the first's execution.
             first = await service.submit(SLUG, {"width": width})
             second = await service.submit(SLUG, {"width": width})
             hold.set()

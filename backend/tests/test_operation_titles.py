@@ -18,9 +18,12 @@ from scadbuddy.operations.activity import row_of
         ("library_file_delete", "library:12", "Library file delete #12"),
         ("library_file_move", "library-files", "Library file move (several files)"),
         ("library_folder_update", "library-folder:3", "Library folder update #3"),
-        ("library_install", "library:BOSL2", "Library install BOSL2"),
-        # All digits reads as a Bambuddy file's id, whichever it is (labels.ts says so).
-        ("library_install", "library:123", "Library install #123"),
+        ("library_remove", "scad-library:BOSL2", "Library remove BOSL2"),
+        # #4001: an all-digit OpenSCAD library is no Bambuddy file.
+        ("library_remove", "scad-library:123", "Library remove 123"),
+        # A removal recorded before #4001 shared `library:`; all digits read as a file.
+        ("library_remove", "library:BOSL2", "Library remove BOSL2"),
+        ("library_remove", "library:123", "Library remove #123"),
         ("print", "output:abc", "Print output:abc"),
     ],
 )

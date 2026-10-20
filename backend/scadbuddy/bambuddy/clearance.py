@@ -4,9 +4,12 @@ Printing by object finishes each object before starting the next, so the toolhea
 travels past the ones already printed. Bambu Studio refuses to slice such a plate when
 two objects sit closer than the printer's ``extruder_clearance_radius``, when more than
 one is taller than ``extruder_clearance_height_to_rod`` (only the last may pass under
-the gantry), or when one is taller than ``extruder_clearance_height_to_lid``. This says
-so before the print, as warnings, and never refuses: Bambuddy's slicer still has the
-last word (``docs/superpowers/specs/2026-10-13-declared-objects-design.md`` §4).
+the gantry), or when one printed before the last is taller than
+``extruder_clearance_height_to_lid`` (``sequential_print_clearance_valid`` in Bambu
+Studio's ``Print.cpp``, read at
+https://github.com/bambulab/BambuStudio/blob/79df7ae309be398ed30c9f397c13c9911c2edc57/src/libslic3r/Print.cpp#L894-L925).
+This says so before the print, as warnings, and never refuses: Bambuddy's slicer still
+has the last word (``docs/superpowers/specs/2026-10-13-declared-objects-design.md`` §4).
 
 An object's footprint here is its bounding box on the bed, which holds Bambu's convex
 hull: the check may warn where Bambu Studio would not, never the other way round.
@@ -73,7 +76,12 @@ class PlacedObject:
 
     @property
     def height(self) -> float:
-        return self.high[2] - self.low[2]
+        """How high its top sits above the bed, which is what Bambu Studio holds to the
+        gantry and lid heights (``print_object->max_z()``, in the source the module
+        docstring cites; #3223). An item lifted off the bed reads taller than its own
+        extent; one sunk below it reads shorter, as the part under the bed is cut off and
+        never printed."""
+        return max(0.0, self.high[2])
 
 
 def _transform(text: str | None) -> np.ndarray:
@@ -300,7 +308,10 @@ def clearance_warnings(
     objects: Sequence[PlacedObject], clearance: Clearance, *, plate: int | None = None
 ) -> list[FilamentWarning]:
     """What a by-object print of ``objects`` would hit, as warnings (never refusals).
-    One object, or none, clears everything."""
+    One object, or none, clears everything: Bambu Studio holds the last object printed
+    only to ``printable_height``, not to the lid (the module docstring's source, #3223),
+    and one object is always the last. Of several, any may be printed last, so each is
+    held to the lid: the check may warn where the slicer would not."""
     if len(objects) < 2:
         return []
     where = f"Plate {plate}: " if plate is not None else ""

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -48,6 +48,10 @@ class TransferUrl(BaseModel):
         yield "expires_at", self.expires_at
 
 
+#: A slot colour the CLI takes in `--filament-colour` (#3962).
+COLOUR = r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+
+
 class SlicePlateInput(BaseModel):
     model_config = ConfigDict(hide_input_in_errors=True)
 
@@ -63,6 +67,12 @@ class SlicePlateInput(BaseModel):
     arrange: Literal["no", "yes", "auto"] = "no"
     allow_newer_file: bool = True
     debug: int = Field(default=1, ge=0, le=5)
+    #: Each slot's colour (``#RRGGBB``), in slot order, passed as ``--filament-colour``.
+    #: Without it the CLI turns the prime tower off whenever every slot loads a preset
+    #: of one name (``BambuStudio.cpp`` ``disable_wipe_tower_after_mapping`` at
+    #: v02.08.02.61), however many colours the plate prints (#3962). A colour is
+    #: ``#`` and 6 or 8 hex digits, never a ``;``, which would split it into another slot.
+    filament_colours: list[Annotated[str, Field(pattern=COLOUR)]] = Field(default_factory=list)
 
 
 class SliceProgress(BaseModel):

@@ -42,9 +42,11 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _catalogue
+from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.slicing.profiles import (
@@ -56,13 +58,16 @@ from scadbuddy.slicing.profiles import (
     flatten,
 )
 
+if TYPE_CHECKING:
+    from scadbuddy.library.settings_store import SettingsStore
+
 logger = logging.getLogger(__name__)
 
 #: The catalogue's field for each of the tree's kinds.
 _FIELDS: dict[Kind, str] = {"machine": "printer", "process": "process", "filament": "filament"}
 
 #: Built catalogues, by the tree's root and version.
-_built: dict[tuple[Path, str], _Catalogue] = {}
+_built: dict[tuple[Path, str], Catalogue] = {}
 #: A build that failed, by the same key: when, and the error, answered again until
 #: :data:`FAILED_RETRY` has passed, so a broken tree is not rebuilt on every open.
 _failed: dict[tuple[Path, str], tuple[float, ProfileImageError]] = {}
@@ -75,8 +80,8 @@ FAILED_RETRY = 60.0
 _now = time.monotonic
 
 
-def native_catalogue(profiles: Profiles) -> _Catalogue:
-    """Every preset of the image's tree a native slice can read, as :class:`_Catalogue`
+def native_catalogue(profiles: Profiles) -> Catalogue:
+    """Every preset of the image's tree a native slice can read, as :class:`Catalogue`
     rows (the module's docstring). File I/O and seconds of work on its first call per tree
     and version: an async caller runs it in a thread (:func:`catalogue_for`), and the app
     and the print worker start it at start (:func:`warm_catalogue`). A tree that cannot be
@@ -98,18 +103,39 @@ def native_catalogue(profiles: Profiles) -> _Catalogue:
     return built
 
 
-def warm_catalogue(profiles: Profiles | None) -> asyncio.Task[None] | None:
+def slices_native(store: SettingsStore) -> Callable[[], bool]:
+    """Whether ``slicer_backend`` is ``native`` now, read from ``store`` (blocking): what
+    the API and the print worker give :func:`warm_catalogue`, so both read it alike."""
+    return lambda: store.load().slicer_backend == "native"
+
+
+def warm_catalogue(
+    profiles: Profiles | None, native: Callable[[], bool]
+) -> asyncio.Task[None] | None:
     """Build the image's catalogue in the background, so the first native dialog does
-    not wait the seconds it takes; ``None`` without a tree. Never raises: a failure is
-    logged once, by type, and the first open that needs the catalogue raises it again.
-    The caller keeps the task and cancels it at shutdown, which stops waiting on the
-    build, not the build's thread (it finishes on its own)."""
+    not wait the seconds it takes; ``None`` without a tree. Only when ``native`` (a
+    blocking read of ``slicer_backend``, run in a thread) says the slices are native:
+    otherwise nothing reads it, and the build would hold the GIL for seconds while the
+    first requests are served (#4348). Never raises: a failure is logged once, by type,
+    and the first open that needs the catalogue raises it again. The caller keeps the
+    task and cancels it at shutdown, which stops waiting on the build, not the build's
+    thread (it finishes on its own)."""
     if profiles is None:
         return None
-    return asyncio.create_task(_warm(profiles), name="native-catalogue-warm")
+    return asyncio.create_task(_warm(profiles, native), name="native-catalogue-warm")
 
 
-async def _warm(profiles: Profiles) -> None:
+async def _warm(profiles: Profiles, native: Callable[[], bool]) -> None:
+    try:
+        wanted = await asyncio.to_thread(native)
+    except Exception as error:
+        logger.warning(
+            "could not read slicer_backend to warm the native preset catalogue",
+            extra={"error": type(error).__name__},
+        )
+        return
+    if not wanted:
+        return
     try:
         await asyncio.to_thread(native_catalogue, profiles)
     except Exception as error:
@@ -119,7 +145,7 @@ async def _warm(profiles: Profiles) -> None:
         )
 
 
-def _build(profiles: Profiles) -> _Catalogue:
+def _build(profiles: Profiles) -> Catalogue:
     rows: dict[Kind, list[PresetChoice]] = {}
     setting_ids: dict[str, dict[str, str]] = {}
     for kind, field in _FIELDS.items():
@@ -144,7 +170,7 @@ def _build(profiles: Profiles) -> _Catalogue:
                 "presets the native slicer cannot read are not offered",
                 extra={"kind": kind, "count": refused},
             )
-    return _Catalogue(
+    return Catalogue(
         printer=rows["machine"],
         process=rows["process"],
         filament=rows["filament"],
@@ -171,13 +197,13 @@ def _row(name: str, flat: Flat) -> PresetChoice:
 
 
 def native_ref(profiles: Profiles, ref: PresetRef) -> PresetRef | None:
-    """:meth:`_Catalogue.native_ref` on the image's catalogue. It builds the catalogue on
+    """:meth:`Catalogue.native_ref` on the image's catalogue. It builds the catalogue on
     a first call (seconds of file I/O), so never call it on the event loop: an async
     caller holds the catalogue from :func:`catalogue_for` and asks it."""
     return native_catalogue(profiles).native_ref(ref)
 
 
-async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | None) -> _Catalogue:
+async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | None) -> Catalogue:
     """The catalogue a run resolves against: the image's BBL profiles when ``native`` is
     given (no Bambuddy call, #3818 tier A), else Bambuddy's, read fresh as
     :func:`~scadbuddy.bambuddy.catalogue.read_catalogue` reads it."""

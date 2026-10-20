@@ -44,6 +44,8 @@ pub struct RunRequest<'a> {
     pub arrange: Arrange,
     pub allow_newer_file: bool,
     pub debug: u8,
+    /// Each slot's colour, in slot order; none leaves `--filament-colour` out.
+    pub filament_colours: &'a [String],
     /// [`KEEPALIVE`] outside tests.
     pub keepalive: Duration,
 }
@@ -98,6 +100,14 @@ pub fn command_line(req: &RunRequest<'_>, fifo: &Path) -> Vec<OsString> {
     argv.push("--load-filaments".into());
     // `BambuStudio.cpp` splits both lists on ';'.
     argv.push(joined(req.filaments.iter().map(PathBuf::as_path)));
+    if !req.filament_colours.is_empty() {
+        // Without it, slots that all load a preset of one name lose the prime tower
+        // (`disable_wipe_tower_after_mapping`, #3962); with two or more distinct colours
+        // the CLI keeps it, while one is passed but changes nothing there. The same
+        // `;`-separated list (Python's `COLOUR` pattern keeps `;` out of a colour).
+        argv.push("--filament-colour".into());
+        argv.push(req.filament_colours.join(";").into());
+    }
     if req.allow_newer_file {
         argv.push("--allow-newer-file".into());
     }

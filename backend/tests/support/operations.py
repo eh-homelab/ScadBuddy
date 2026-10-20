@@ -42,9 +42,5 @@ def subjects(client: TestClient, kind: str) -> list[str]:
     from scadbuddy.api.deps import STATE_ATTR
     from scadbuddy.operations.component import OPERATIONS
 
-    pool = getattr(client.app.state, STATE_ATTR).components.get(OPERATIONS).store.pool  # type: ignore[attr-defined]
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT subject FROM operations WHERE kind = %s ORDER BY created_at", (kind,)
-        ).fetchall()
-    return [row["subject"] for row in rows]
+    store = getattr(client.app.state, STATE_ATTR).components.get(OPERATIONS).store  # type: ignore[attr-defined]
+    return store.subjects_of(kind)  # type: ignore[no-any-return]

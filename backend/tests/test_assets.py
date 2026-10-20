@@ -223,10 +223,13 @@ def test_an_undecodable_png_is_refused_without_pillows_text(
     assert str(refused.value) == "the file is not a readable PNG; re-export it as PNG and try again"
     logged = [r for r in caplog.records if r.getMessage() == "a PNG upload could not be decoded"]
     assert len(logged) == 1
-    # Pillow's own words for these bytes, exactly: what the user is spared goes to the log.
-    with pytest.raises(OSError) as pillow, Image.open(io.BytesIO(data)) as image:
-        image.load()
-    assert getattr(logged[0], "error", None) == str(pillow.value)
+    # Pillow's own words go to the log. Not compared with a second decode's: an error
+    # naming its BytesIO by address would differ between the two (#3195).
+    error = getattr(logged[0], "error", None)
+    assert isinstance(error, str) and error
+
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
@@ -239,14 +242,14 @@ def _with_chunk(kind: bytes, data: bytes) -> bytes:
     out = io.BytesIO()
     Image.new("RGB", (4, 4)).save(out, format="PNG")
     png = out.getvalue()
-    end_of_ihdr = 8 + 8 + 13 + 4  # signature, IHDR length and type, its data, its CRC
+    end_of_ihdr = len(PNG_SIGNATURE) + len(_chunk(b"IHDR", b"\x00" * 13))
     return png[:end_of_ihdr] + _chunk(kind, data) + png[end_of_ihdr:]
 
 
 def _png_header(width: int, height: int) -> bytes:
     """A PNG that declares ``width`` x ``height`` (1-bit grey) and holds no pixels."""
     ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IEND", b"")
+    return PNG_SIGNATURE + _chunk(b"IHDR", ihdr) + _chunk(b"IEND", b"")
 
 
 def test_a_png_with_a_text_chunk_too_large_to_read_is_refused(store: AssetStore) -> None:
@@ -297,7 +300,10 @@ def test_a_png_pillow_refuses_as_a_bomb_is_refused_as_too_large(store: AssetStor
     # Over twice Pillow's MAX_IMAGE_PIXELS: refused at open, before the pixel check.
     with pytest.raises(AssetRejectedError) as refused:
         store.put(_png_header(20_000, 20_000), "bomb.png")
-    assert str(refused.value) == f"the PNG is too large; at most {MAX_PNG_PIXELS} pixels are read"
+    assert str(refused.value) == (
+        f"the PNG declares more than {MAX_PNG_PIXELS} pixels; at most {MAX_PNG_PIXELS}"
+        " pixels are read"
+    )
 
 
 def test_an_oversized_upload_is_refused(store: AssetStore) -> None:

@@ -310,7 +310,10 @@ class Profiles:
         """Every ``kind`` preset ``BBL.json`` lists, by name, as its own file holds it
         (``inherits`` not applied), for a caller that flattens the whole tree
         (:func:`~scadbuddy.slicing.catalogue.native_catalogue`). Before the kind is
-        indexed, the one read of each file builds the index as well."""
+        indexed, the one read of each file builds the index as well. Once it is (a
+        ``find`` came first), each file is read again (#4348): keeping the index's reads
+        would hold the whole tree in memory for the process's life, to spare a second
+        read in a build that runs once per tree (``native_catalogue`` keeps its result)."""
         if kind not in self._indexes:
             index, docs = self._scan(kind)
             self._indexes.setdefault(kind, index)

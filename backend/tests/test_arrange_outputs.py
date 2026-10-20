@@ -590,14 +590,14 @@ async def _objects_of_output(
     tmp_path: Path, read: list[Any], copies: int, key: str
 ) -> list[set[str]]:
     """Each object of the written plate, as the subtypes of its parts."""
-    return [subtypes for subtypes, _, _ in await _written_objects(tmp_path, read, copies, key)]
+    return [subtypes for subtypes, _, _, _ in await _written_objects(tmp_path, read, copies, key)]
 
 
 async def _written_objects(
     tmp_path: Path, read: list[Any], copies: int, key: str
-) -> list[tuple[set[str], int, str | None]]:
+) -> list[tuple[set[str], int, str | None, str]]:
     """Each object of the written plate: its parts' subtypes, how many parts it holds,
-    and its build item's transform."""
+    its build item's transform and its name."""
     deps, paths = _deps(tmp_path)
     entry, library = _library_piece(read, key, 92, copies)
     await publish_library_pieces(deps.blobs, [entry], read)
@@ -628,6 +628,12 @@ async def _written_objects(
         config = ET.fromstring(archive.read("Metadata/model_settings.config"))
         root = ET.fromstring(archive.read("3D/3dmodel.model"))
     parts = {obj.get("id"): obj.findall("part") for obj in config.iter("object")}
+    names = {
+        obj.get("id"): entry.get("value") or ""
+        for obj in config.iter("object")
+        for entry in obj.findall("metadata")
+        if entry.get("key") == "name"
+    }
     moved = {
         item.get("objectid"): item.get("transform") for item in root.iter(f"{{{CORE_NS}}}item")
     }
@@ -636,6 +642,7 @@ async def _written_objects(
             {part.get("subtype") or "" for part in parts[assembly]},
             len(parts[assembly]),
             moved[assembly],
+            names[assembly],
         )
         for assembly in plate.assembly_ids
     ]
@@ -679,9 +686,33 @@ async def test_a_pieces_declared_objects_stay_apart_in_the_output(
     objects = await _written_objects(tmp_path, read, 1, "ce")
 
     # Split per object, not per colour: one part each, moved together by the one copy.
-    assert [count for _, count, _ in objects] == [1, 1]
-    transforms = {transform for _, _, transform in objects}
+    assert [count for _, count, _, _ in objects] == [1, 1]
+    transforms = {transform for _, _, transform, _ in objects}
     assert len(transforms) == 1 and None not in transforms
+    # Each named after its piece, by the number the template declared it with (#3212).
+    assert [name for *_, name in objects] == ["demo (object 1)", "demo (object 2)"]
+
+
+async def test_an_objects_negative_parts_are_written_apart(tmp_path: Path) -> None:
+    """#4061: two negative parts joined into one failed Bambu Studio's toolpath stage
+    (exit 156); the arranged object carries each as a negative part of its own."""
+    from tests.test_objects3mf import _two_cuts_project
+
+    [(subtypes, count, _, _)] = await _written_objects(
+        tmp_path, read_objects(_two_cuts_project()), 1, "ch"
+    )
+
+    assert subtypes == {"normal_part", "negative_part"} and count == 3
+
+
+async def test_packed_copies_are_named_after_their_piece(tmp_path: Path) -> None:
+    """#3212: every copy on a packed plate was named "<model> (object N)", whatever
+    piece it was; each is named after its piece now, numbered when there are several."""
+    from tests.test_objects3mf import _cut_project
+
+    objects = await _written_objects(tmp_path, read_objects(_cut_project()), 3, "cg")
+
+    assert [name for *_, name in objects] == ["demo 1", "demo 2", "demo 3"]
 
 
 async def test_a_layout_plate_with_nothing_to_print_is_refused(tmp_path: Path) -> None:

@@ -36,11 +36,11 @@ def native_values(profiles: Profiles) -> ReadPresetValues:
         if native.id not in read:
             try:
                 flat = await asyncio.to_thread(profiles.process, native.id)
-            except ProfileImageError:
-                # The image's defect, not the plan's (Task 12 review N-b): never said
-                # to be a preset Bambu Studio lacks.
-                raise
-            except ProfileError:
+            except ProfileError as error:
+                if isinstance(error, ProfileImageError):
+                    # The image's defect, not the plan's (Task 12 review N-b): never said
+                    # to be a preset Bambu Studio lacks.
+                    raise
                 return PresetValues(resolved=False, reason=NOT_IN_PROFILES)
             read[native.id] = PresetValues(resolved=True, values=flat)
         return read[native.id]
