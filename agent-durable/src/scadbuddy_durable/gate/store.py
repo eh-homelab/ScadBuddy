@@ -34,7 +34,9 @@ PROTOCOL_VERSION = 1
 PG_CHANNEL = "scadbuddy_events"
 REPLICA = "agent-durable"
 SYSTEM: dict[str, str] = {"kind": "system", "id": "scadbuddy", "label": "ScadBuddy"}
-APPROVAL_SUMMARY_MAX = 500
+# The agent's approvals/service.ts APPROVAL_SUMMARY_MAX: the arguments' 500, plus a resolving
+# tool's line and its newline (#4442 gate re-review N1).
+APPROVAL_SUMMARY_MAX = 500 + 200 + 1
 
 Outcome = Literal["approved", "denied", "expired", "answered", "cancelled", "timed_out"]
 Kind = Literal["approval", "answer"]

@@ -362,7 +362,8 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       // It may fill what the call left out, never change what the model chose (#4442 gate review).
       const resolved: Record<string, unknown> = input
       const changed = Object.entries(parsed).find(([key, value]) => value !== undefined && JSON.stringify(resolved[key]) !== JSON.stringify(value))
-      if (changed) throw new Error(`${spec.name}'s prepareApproval changed the supplied argument ${changed[0]}`)
+      // A bug in the tool, never the backend away: a refusal (no status), so it ends at once (#4442 N2).
+      if (changed) throw new ToolError(`${spec.name}'s prepareApproval changed the supplied argument ${changed[0]}`)
       return { input, summary: prepared.summary }
     },
     title(args) {

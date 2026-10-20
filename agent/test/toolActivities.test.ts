@@ -13,7 +13,7 @@ import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -627,6 +627,35 @@ describe("a call whose tool resolves what it names (#4442)", () => {
   }
   const sessions = { ownerOf: async (id: string) => (id === SESSION ? BROWSER : undefined) }
 
+  // #4442 gate re-review N2: a hook that changes what the model supplied is a bug in the tool,
+  // never the backend away: refused at once, audited, and never retried.
+  it('refuses and audits a call whose hook changed a supplied argument, at describe and at run', async () => {
+    const bent = defineTool({
+      name: 'bent',
+      description: 'rewrites printer_id',
+      input: z.object({ printer: z.string().optional(), printer_id: z.number().int().optional() }),
+      risk: 'outward',
+      routes: [],
+      prepareApproval: async (args) => ({ input: { ...args, printer_id: 9 }, summary: 'Aim' }),
+      handler: async (args) => json({ ran: args }),
+    })
+    const audits: AuditEntry[] = []
+    const recording = { ...audit, record: async (entry: AuditEntry) => void audits.push(entry) }
+    const describeCall = gateActivities({ audit: recording, sessions, tools: [bent], services: services() })[DESCRIBE_CALL_ACTIVITY]!
+    const refused = await failure(env().run(describeCall, { tool: 'bent', input: { printer: PRINTER, printer_id: 2 } }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('ToolError')
+    expect(refused.message).toContain('changed the supplied argument printer_id')
+    const h = harness({ audit: recording, approvals: { approved: async () => true } }, [bent])
+    const ran = await failure(env(undefined, 'tool-toolu_16').run(h.activities.bent!, { printer: PRINTER, printer_id: 2 }))
+    expect(ran.nonRetryable).toBe(true)
+    expect(ran.type).toBe('ToolError')
+    expect(audits.map((a) => [a.action, a.outcome])).toEqual([
+      ['bent', 'refused'],
+      ['bent', 'refused'],
+    ])
+  })
+
   it("describes the call by the printer that prints, and hashes the pair it approves", async () => {
     const backend = registry({ id: 2 })
     const describeCall = gateActivities({ audit, sessions, tools: [aim], services: services({ backend }) })[DESCRIBE_CALL_ACTIVITY]!
@@ -686,7 +715,8 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     tier: 'standard',
     bed_type: 'Cool Plate',
   }
-  type Registry = { linked: number; status?: number; detail?: string; reads: number; posted: Record<string, unknown>[] }
+  /** `status` answers the row's read instead, for the first `failures` reads (every read when unset). */
+  type Registry = { linked: number; status?: number; failures?: number; detail?: string; reads: number; posted: Record<string, unknown>[] }
   /** Bambuddy's printer `linked` behind registry row PRINTER, and the print routes; `status` answers the row's read instead. */
   function backendOf(state: Registry) {
     return createBackendClient(BACKEND, async (request) => {
@@ -694,7 +724,7 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
       const url = new URL(req.url)
       if (url.pathname === `/api/v1/printers/${PRINTER}`) {
         state.reads++
-        if (state.status !== undefined) return Response.json({ detail: state.detail ?? 'unavailable' }, { status: state.status })
+        if (state.status !== undefined && (state.failures === undefined || state.reads <= state.failures)) return Response.json({ detail: state.detail ?? 'unavailable' }, { status: state.status })
         return Response.json({ id: PRINTER, serial: '01P00A0000000AA', name: 'Garage', bambuddy_printer_id: state.linked, preferred_path: 'auto' })
       }
       if (url.pathname === `/api/v1/print/outputs/${OUT}/run` && req.method === 'POST') {
@@ -746,19 +776,54 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     expect(state.posted).toHaveLength(1)
   })
 
-  it('leaves a 503 or 429 on the printer read to the retry policy, at describe and at run (I3)', async () => {
+  it('leaves a 503 or 429 at describe to the retry policy, never refused (I3)', async () => {
     for (const status of [503, 429]) {
       const state: Registry = { ...registry(), status }
       const audits: AuditEntry[] = []
       const described = await failure(env().run(describeWith(state, audits), { tool: 'print_output', input: { ...chosen, printer: PRINTER } }))
       expect(described.nonRetryable).toBe(false)
-      const approvals = { approved: async () => true }
-      const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }) }, [printOutput])
-      const ran = await failure(env(undefined, 'tool-toolu_13').run(h.activities.print_output!, { ...chosen, printer: PRINTER }))
-      expect(ran.nonRetryable).toBe(false)
-      expect(audits.filter((a) => a.outcome === 'refused')).toEqual([])
-      expect(state.posted).toEqual([])
+      expect(described.type).toBe(BACKEND_UNAVAILABLE)
+      expect(audits).toEqual([])
     }
+  })
+
+  // #4442 gate re-review: a gated call runs once (its activity is never retried), so a 503 as it
+  // runs is retried in the activity, before the approval is checked and before anything is sent.
+  it('retries a 503 or 429 as an approved call runs, within the one approval, and checks its hash', async () => {
+    for (const status of [503, 429]) {
+      const state: Registry = { ...registry(), status, failures: 2 }
+      const audits: AuditEntry[] = []
+      const raw: unknown = await env().run(describeWith(registry()), { tool: 'print_output', input: { ...chosen, printer: PRINTER } })
+      const described = raw as { input_hash: string }
+      const checked: (string | undefined)[] = []
+      const approvals = {
+        approved: async (_id: string, call?: { inputHash: string }) => {
+          checked.push(call?.inputHash)
+          return call?.inputHash === described.input_hash
+        },
+      }
+      const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [0, 0] }, [printOutput])
+      await env(undefined, 'tool-toolu_14').run(h.activities.print_output!, { ...chosen, printer: PRINTER })
+      expect(checked).toEqual([described.input_hash])
+      expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
+      expect(audits.filter((a) => a.outcome !== 'ok')).toEqual([])
+    }
+  })
+
+  it('audits a backend still away after those tries, and tells the model its approval was spent', async () => {
+    const state: Registry = { ...registry(), status: 503 }
+    const audits: AuditEntry[] = []
+    let asked = 0
+    const approvals = { approved: async () => (asked++, true) }
+    const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [0, 0] }, [printOutput])
+    const ran = await failure(env(undefined, 'tool-toolu_15').run(h.activities.print_output!, { ...chosen, printer: PRINTER }))
+    expect(ran.nonRetryable).toBe(true)
+    expect(ran.type).toBe(BACKEND_UNAVAILABLE)
+    expect(ran.message).toMatch(/approval .*spent.*call it again/)
+    expect(state.reads).toBe(3)
+    expect(asked).toBe(0)
+    expect(state.posted).toEqual([])
+    expect(audits).toEqual([expect.objectContaining({ action: 'print_output', outcome: 'error', toolUseId: 'toolu_15' })])
   })
 
   it('audits a refusal at describe time, its backend detail in the untrusted envelope (M3, M5)', async () => {

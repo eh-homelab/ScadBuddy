@@ -201,6 +201,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(approval.inputHash).toBe(m.approvals.hash('mcp__scadbuddy__print_output', input))
   })
 
+  // #4442 gate re-review N1: the card reads approval.required's capped summary; a resolving
+  // tool's line must not take the room its arguments had.
+  it("keeps the arguments' full room in approval.required beside a resolving tool's line", async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
+    const input = { printer: 'p', note: 'x'.repeat(1000) }
+    await m.approvals.create({
+      sessionId: session.id,
+      turnId: null,
+      toolUseId: 'toolu_10',
+      tool: 'mcp__scadbuddy__print_output',
+      input,
+      summary: `Print on printer "${'G'.repeat(400)}"`,
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
+    const required = events.find((e) => e.type === 'approval.required') as { summary: string }
+    const [line, args] = required.summary.split('\n')
+    expect(line!.length).toBe('mcp__scadbuddy__print_output '.length + 200)
+    // As much as without a line: the cap is 500 for the tool's name and its arguments.
+    expect(args!.length).toBe(500 - 'mcp__scadbuddy__print_output '.length)
+    expect(args!.endsWith('…')).toBe(true)
+  })
+
   // #2382: while one row throws, no other due approval must stay unexpired.
   it('expires every other due approval when one of them fails, and reports the failure', async () => {
     const first = await orphan()

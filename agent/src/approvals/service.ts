@@ -122,8 +122,13 @@ export const DEFAULT_APPROVAL_EXPIRY_SECONDS = 600
 export const MIN_APPROVAL_EXPIRY_SECONDS = 10
 export const MAX_APPROVAL_EXPIRY_SECONDS = 86_400
 export const DEFAULT_APPROVAL_POLL_MS = 1000
-/** The longest `approval.required` summary. */
-export const APPROVAL_SUMMARY_MAX = 500
+/**
+ * The longest `approval.required` summary, which the panel's card shows: 500 for the call's
+ * arguments, plus a resolving tool's line and its newline (APPROVAL_LINE_MAX, #4442 gate
+ * re-review N1), so the line never takes the arguments' room. agent-durable gate/store.py and
+ * gate/store.ts keep the same cap.
+ */
+export const APPROVAL_SUMMARY_MAX = 500 + 200 + 1
 /** The advisory-lock key MCP prepares serialise on (`createPrepared`). */
 const PREPARE_LOCK = 'scadbuddy:ai_approvals:mcp_prepare'
 

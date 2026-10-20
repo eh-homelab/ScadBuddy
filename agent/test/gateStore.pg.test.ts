@@ -98,6 +98,17 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await t.drop()
     })
 
+    it("keeps the arguments' full room in approval.required beside a resolving tool's line (#4442 N1)", async () => {
+      const sid = await newSession(sql)
+      const line = 'L'.repeat(200)
+      await openInput(sql, { ...open(sid), summary: `${line}\n${'a'.repeat(1000)}` } as OpenInput)
+      const [required] = await events(sql, sid)
+      const summary = (required as { summary: string }).summary
+      expect(summary.startsWith(`print_output ${line}\n`)).toBe(true)
+      expect(summary.split('\n')[1]!.length).toBe(500 - 'print_output '.length)
+      expect(summary.endsWith('…')).toBe(true)
+    })
+
     it('open writes the row and its events once', async () => {
       const sid = await newSession(sql)
       const args = open(sid)

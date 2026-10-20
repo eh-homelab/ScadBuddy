@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from collections.abc import Callable
@@ -93,6 +94,19 @@ async def _count(conn: Conn, sql: str, *params: Any) -> int:
     row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def test_a_resolving_tools_line_leaves_the_arguments_their_room(agent_db: Conn) -> None:
+    """#4442 gate re-review N1: the card reads approval.required's capped summary; a
+    resolving tool's line must not take the room its arguments had."""
+    sid = await _session(agent_db)
+    line = "L" * 200
+    args = dataclasses.replace(_open(sid), summary=f"{line}\n{'a' * 1000}")
+    assert await open_input(agent_db, args) is True
+    summary = (await _events(agent_db, sid))[0]["summary"]
+    assert summary.startswith(f"print_output {line}\n")
+    assert len(summary.split("\n")[1]) == 500 - len("print_output ")
+    assert summary.endswith("…")
 
 
 async def test_open_writes_the_row_and_its_events_once(agent_db: Conn) -> None:

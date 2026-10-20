@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
@@ -169,6 +170,11 @@ export type ToolActivityDeps = {
   flowBlobs?: FlowBlobStore | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
+  /**
+   * The waits between a resolving tool's tries to read what it names as an approved call runs
+   * (#4442 gate re-review), one more try than waits; RESOLVE_BACKOFF_MS when undefined.
+   */
+  resolveBackoffMs?: readonly number[]
 }
 
 export type ToolActivity = (input: unknown) => Promise<unknown>
@@ -180,6 +186,11 @@ export const TOOL_ERROR = 'ToolError'
  * (#4442 gate review): retried, and never taken for the tool's refusal.
  */
 export const BACKEND_UNAVAILABLE = 'BackendUnavailable'
+/**
+ * The waits between an approved call's tries to resolve what it names while the backend is
+ * away (#4442 gate re-review): a gated call's activity runs once, so these are its only retries.
+ */
+export const RESOLVE_BACKOFF_MS: readonly number[] = [500, 2000]
 /** The failure type of a call from a workflow that is no known session. */
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
@@ -465,7 +476,7 @@ async function runGated(
   // approval and is refused NotApproved; one disabled after its approval is refused as
   // disabled; and no second read can disagree with the one that was checked.
   const effective = await effectiveTool(tool, deps.services)
-  const refuse = async (detail: string, message: string, type: string): Promise<never> => {
+  const refuse = async (detail: string, message: string, type: string, outcome: 'refused' | 'error' = 'refused'): Promise<never> => {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -479,7 +490,7 @@ async function runGated(
       tier: effective.risk,
       inputHash: deps.audit.hash(tool.name, parsed),
       inputSummary: deps.audit.summarise(tool.name, parsed),
-      outcome: 'refused',
+      outcome,
       detail,
       startedAt: now,
       finishedAt: now,
@@ -496,14 +507,35 @@ async function runGated(
   // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
   // approval is of the script's raw arguments (the backend hashes those), so a flow's call
   // runs them as sent, resolved only to refuse a pair its registry row no longer links.
+  //
+  // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
+  // is tried again here, within the one approval: safe, since nothing is checked or sent before
+  // the read succeeds, and the approval is then checked against what that read resolved. Still
+  // away after the last try, the call fails closed and is audited, and the model is told the
+  // approval was spent, so it asks again and a person approves again.
   let runInput = input
   if (effective.gated && tool.resolvesApproval) {
-    try {
-      const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
-      const resolved = (await tool.prepareApproval(input, ctx)).input
-      if (flow === undefined) runInput = resolved
-    } catch (err) {
-      await refuseOrRetry(err, refuse, tool.name)
+    const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
+    const waits = deps.resolveBackoffMs ?? RESOLVE_BACKOFF_MS
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const resolved = (await tool.prepareApproval(input, ctx)).input
+        if (flow === undefined) runInput = resolved
+        break
+      } catch (err) {
+        if (isRefusal(err)) await refuseOrRetry(err, refuse, tool.name)
+        const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
+        const wait = waits[attempt]
+        if (wait === undefined || call.signal.aborted) {
+          await refuse(
+            `the backend was unavailable after ${attempt + 1} tries: ${why}`,
+            `${tool.name} was not run: what it names could not be checked (${why}), so this call's approval is spent; call it again to ask for a new one`,
+            BACKEND_UNAVAILABLE,
+            'error',
+          )
+        }
+        await sleep(wait, undefined, { signal: call.signal }).catch(() => {})
+      }
     }
   }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
