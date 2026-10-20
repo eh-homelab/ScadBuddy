@@ -123,6 +123,8 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OperationEvent,
+    OrderChanged,
+    OrderItemChanged,
     OutputEvent,
     PresetsChanged,
     PrinterEvent,
@@ -179,6 +181,8 @@ COLLECTION_TOPICS = frozenset(
         "workflow-runs",
         "activity",
         "printers",
+        # Orders (#4249, spec 2026-10-18 §4): the list re-reads on any order's change.
+        "orders",
     }
 )
 #: A flow run's id (#1057): a UUID, as ``api/flows.py`` makes them.
@@ -201,6 +205,8 @@ _TOPIC = re.compile(
             f"workflow-run:{FLOW_RUN_ID_PATTERN}",
             # A registry printer (#3823): its id is a UUID, as `printers/store.py` makes.
             f"printer:{FLOW_RUN_ID_PATTERN}",
+            # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
+            f"order:{FLOW_RUN_ID_PATTERN}",
             # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
             r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
             *sorted(COLLECTION_TOPICS),
@@ -245,6 +251,8 @@ def topics_of(event: Event) -> list[str]:
             return ["analyzers"]
         case ActivityEvent():
             return ["activity", f"activity:{event.activity_id}"]
+        case OrderChanged() | OrderItemChanged():
+            return ["orders", f"order:{event.order_id}"]
         case AgentOperationEvent():
             return []
         case OperationEvent():

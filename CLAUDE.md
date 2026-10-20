@@ -517,6 +517,38 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
+- `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
+  `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
+  customers, orders and line items as ScadBuddy's own records. `component.py` `ORDERS`
+  (`OrdersComponent`: `store` over a pool of its own opened on first use, `lifecycle` over the
+  core's bus; `OrdersDep`), `models.py` (the wire and row shapes; money is integer minor
+  units, `*_minor`), `store.py` (`OrderStore`, plain CRUD per table; `transaction()` and
+  `lock_order`; a customer's contacts and addresses replaced whole but kept by id, so an open
+  order's address pointer survives an edit), `numbers.py` (`ORD-<yyyy>-<n>` from the
+  `order_numbers` counter row under `FOR UPDATE` in the insert's transaction: gapless, never a
+  sequence), `reference.py` (`resolve_reference`: the slug exists, the commit is expanded to
+  its full id and must have touched the slug's directory, the inputs normalise against that
+  commit's schema; an output's commit, libraries and colours when made from one; a deleted
+  template is `TemplateDeletedError`), `lifecycle.py` (`Lifecycle`: every transition opens a
+  transaction, takes the order's row lock, checks, writes, derives the status past `accepted`
+  with the pure `derive` (`in_production` from an attempt, `ready`, `shipped` once shipments
+  cover every fulfilled item), writes the audit row (`order_events`, one per status change)
+  and publishes after commit; a refusal is `LifecycleError(slug, items, shipments)`, which
+  `api/orders.py` maps to a 409 problem `https://scadbuddy.dev/problems/orders/<slug>`; on
+  hold every transition that advances the order is `order_on_hold`, never release, a cancel,
+  a payment or a plain edit), `actor.py` (`created_by` and an audit row's `by` from the
+  author header, never a body). The bus events are `OrderChanged` (`order.changed`) and
+  `OrderItemChanged` (`order_item.changed`), ids and the new status only, on the realtime
+  topics `orders` and `order:<id>`. Every item's `inputs` join `referenced_asset_ids`, and
+  `main.sweep_assets` skips the pass when they cannot be read. Routes `api/customers.py`,
+  `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
+  `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,
+  `outward` what commits it to the customer: accept, a quote's acceptance, fulfil, ship,
+  close, cancel). Frontend: `pages/OrdersPage.tsx`, `OrderPage.tsx`, `CustomersPage.tsx`,
+  `CustomerPage.tsx` over `components/records/` (`DataTable`, `FilterBar`, `RecordDrawer`,
+  extracted from the Activity components, which wrap them) and `components/orders/`; the
+  Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
+  `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

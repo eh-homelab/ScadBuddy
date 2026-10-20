@@ -111,6 +111,13 @@ PROJECT_TIMEOUT = timedelta(seconds=10)
 LOCAL_ROW_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
+PIECE_LOOKUP_PATCH = "piece-lookup-4199"
+#: The parent's own lookup of a finished piece (`TemplatePipeline._cached`), a local
+#: activity: two attempts, then the child's lookup with `RETRY`. Bounded, as
+#: `LOCAL_ROW_RETRY` is, so a failing store never holds the worker's shutdown.
+LOOKUP_RETRY = RetryPolicy(
+    maximum_attempts=2, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
+)
 #: The packer's refusal (`pipeline_activities.pack_layout`): the job's outcome, with
 #: its message. `pack` runs as a local activity, whose failure reaches the workflow as
 #: this ApplicationError itself, not an ActivityError around it (temporalio 1.34,
@@ -1007,10 +1014,47 @@ class TemplatePipeline:
             self._parts[req.piece_key] = Part.of(req, outcome.result)
         return outcome
 
+    async def _cached(self, req: PieceRequest) -> PieceResult | None:
+        """The finished piece, looked up in this job's own worker (#4199): a cache hit
+        then starts no `RenderPiece` child, whose start, workflow tasks and activity
+        task were each a handoff prod's slow Temporal database could lose. Only a
+        shortcut: on a miss, or a lookup that fails, the child looks again, with its
+        own retries. The lookup is a read, so it is safe to repeat. On the bambuddy and
+        s3 stores it also downloads the piece into this worker's cache, which
+        `write_output` (on any worker) does not reuse: keep it, as it is what shows the
+        piece is really there, never only an index row.
+
+        Behind `patched`: the in-process worker is unversioned, so a run it started
+        before this lookup replays a child start where the lookup's marker would be."""
+        if req.revision is None:
+            return None  # `cached_piece` answers None without one: no marker for it
+        if not workflow.patched(PIECE_LOOKUP_PATCH):
+            return None
+        try:
+            cached: PieceResult | None = await workflow.execute_local_activity(
+                "cached_piece",
+                req,
+                result_type=PieceResult,
+                start_to_close_timeout=CACHED_TIMEOUT,
+                retry_policy=LOOKUP_RETRY,
+            )
+        except FailureError as error:
+            if is_cancelled_exception(error):
+                raise
+            workflow.logger.warning("looking up the finished piece failed; rendering it: %s", error)
+            cached = None
+        # A release that landed with the lookup's answer: as for a child start.
+        self._raise_if_released()
+        return cached
+
     async def _piece(self, req: PieceRequest) -> PieceOutcome:
         """Run the piece as this job's child, or wait on the one another job started.
-        Neither a cancelled job nor its closing touches the piece (ABANDON twice)."""
+        Neither a cancelled job nor its closing touches the piece (ABANDON twice). A
+        piece a closed run already finished is answered here, with no child."""
         key = req.piece_key
+        cached = await self._cached(req)
+        if cached is not None:
+            return PieceOutcome(result=cached, piece_key=key)
         piece_id = f"piece-{key}"
         while True:
             if self._outcomes.get(key) is not None:

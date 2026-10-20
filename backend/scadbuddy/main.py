@@ -98,6 +98,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.orders.component import ORDERS
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.printers.component import PRINTERS
@@ -270,9 +271,10 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the projection, then every
-    saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
-    them raises before anything is removed. What is referenced after that is kept by
-    its last use, which the sweep re-checks under the store's lock per asset.
+    saved preset, order item (#4249), output and template (`referenced_asset_ids`) -- and
+    any failure to read them raises, or skips the pass, before anything is removed. What
+    is referenced after that is kept by its last use, which the sweep re-checks under the
+    store's lock per asset.
     ``stop``, once set, ends it before its next asset (#2140), and before and after
     reading the references, which no per-asset check can interrupt (#2554).
     """
@@ -280,7 +282,15 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
         return []
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
-    referenced = referenced_asset_ids(state.paths, params)
+    try:
+        # Every order item's inputs (#4249, orders spec §3.3). Fails closed: without
+        # them the sweep would take an ordered upload, so a store that cannot answer
+        # (or no orders component at all) skips this pass, as `stopped` does.
+        item_inputs = list(state.components.get(ORDERS).store.item_inputs())
+    except Exception:
+        logger.exception("skipping the asset sweep: the orders' inputs could not be read")
+        return []
+    referenced = referenced_asset_ids(state.paths, params, item_inputs)
     if stopped(stop):
         return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)

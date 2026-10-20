@@ -113,6 +113,8 @@ class SettingsView(BaseModel):
     store_backend: StoreBackend = "local"
     library_backend: LibraryBackend = "bambuddy"
     slicer_backend: Slicer = "bambuddy"
+    #: The ISO 4217 code the next order copies (#4249, orders spec §3.2).
+    orders_currency: str
     store_s3_endpoint: str | None = None
     store_s3_region: str = "us-east-1"
     store_s3_bucket: str | None = None

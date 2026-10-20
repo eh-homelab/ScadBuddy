@@ -965,6 +965,7 @@ export const settingsDefaults = {
   store_s3_path_style: true,
   library_backend: 'bambuddy',
   slicer_backend: 'bambuddy',
+  orders_currency: 'USD',
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
@@ -985,6 +986,8 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   ...Object.fromEntries(Object.keys(settingsDefaults).map((name) => [name, 'live' as const])),
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
+  // #4249 — copied by each order at create; neither live nor a restart.
+  orders_currency: 'next order',
   render_concurrency: 'restart',
   check_concurrency: 'restart',
   lsp_sessions: 'restart',
