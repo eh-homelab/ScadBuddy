@@ -52,6 +52,7 @@ DEFAULTS: dict[str, object] = {
     "render_key_fallback": False,
     "store_backend": "local",
     "library_backend": "bambuddy",
+    "orders_currency": "USD",
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
@@ -488,6 +489,27 @@ def test_the_temporal_ui_url_round_trips(client: TestClient, settings: Settings)
 
     cleared = client.put("/api/v1/settings", json={"temporal_ui_url": None}).json()
     assert cleared["temporal_ui_url"] is None
+
+
+def test_orders_currency_defaults_to_usd_and_is_three_letters(
+    client: TestClient, settings: Settings
+) -> None:
+    """#4249: the ISO 4217 code an order copies when it is made; a change applies to the
+    next order, so it is neither live nor a restart."""
+    body = client.get("/api/v1/settings").json()
+    assert body["orders_currency"] == "USD"
+    assert body["applies"]["orders_currency"] == "next order"
+
+    refused = client.put("/api/v1/settings", json={"orders_currency": "usd"})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", "orders_currency"]
+    assert client.put("/api/v1/settings", json={"orders_currency": "EURO"}).status_code == 422
+
+    saved = client.put("/api/v1/settings", json={"orders_currency": "EUR"}).json()
+    assert saved["orders_currency"] == "EUR"
+    assert saved["sources"]["orders_currency"] == "stored"
+    assert "orders_currency" not in saved["restart_required"]
+    assert read_stored(settings.database_url)["orders_currency"] == "EUR"
 
 
 def test_the_temporal_ui_url_follows_its_variable(settings: Settings) -> None:

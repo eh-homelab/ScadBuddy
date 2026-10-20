@@ -45,6 +45,10 @@ multi-colour rules, connecting Bambuddy and each feature.
   spools chosen, filed in the project's folder; an author's plates and placement are
   kept. Advanced also lists STLs, which print as one plate, and sliced
   `.gcode.3mf` files, which print from Bambuddy directly.
+- **Orders**: customers with their contact points and addresses, and orders of line
+  items, each pinning one template commit with its inputs, priced by hand, fulfilled,
+  shipped and closed, with an audit line per order; the pages under Orders, and the
+  assistant's `order_*` tools (phase 1 of #4248).
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,

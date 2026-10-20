@@ -1186,6 +1186,12 @@ function SettingsSections() {
           </Section>
 
           {saved(
+            'orders',
+            runtimeRows('orders'),
+            'What a new order records (#4249). Nothing here changes an order already made.',
+          )}
+
+          {saved(
             'projects',
             <>
               <FieldRow
