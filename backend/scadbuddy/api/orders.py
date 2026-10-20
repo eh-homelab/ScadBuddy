@@ -41,6 +41,7 @@ from scadbuddy.orders.lifecycle import (
     LifecycleError,
     ManualQuoteInput,
     OrderEdit,
+    ShipmentEdit,
     ShipmentInput,
 )
 from scadbuddy.orders.models import (
@@ -647,7 +648,7 @@ async def add_shipment(order_id: str, body: ShipmentInput, orders: OrdersDep) ->
     "/{order_id}/shipments/{shipment_id}", response_model=Shipment, summary="Edit a shipment"
 )
 async def update_shipment(
-    order_id: str, shipment_id: str, body: ShipmentInput, orders: OrdersDep
+    order_id: str, shipment_id: str, body: ShipmentEdit, orders: OrdersDep
 ) -> Shipment:
     _path(order_id, shipment_id)
     by = current_actor()

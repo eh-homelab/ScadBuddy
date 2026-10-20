@@ -440,13 +440,15 @@ export const orderTools: Tool[] = [
       shipped_at: datetime.optional(),
       address: address.omit({ default_shipping: true, default_billing: true }).optional(),
       cost_minor: money.optional(),
-      notes: z.string().default(''),
-      items: z.array(shipmentItem).default([]),
+      notes: z.string().optional(),
+      items: z.array(shipmentItem).optional(),
     }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/shipments', 'PATCH /api/v1/orders/{order_id}/shipments/{shipment_id}'],
     summarize: ({ order_id, shipment_id, items }) =>
-      `${shipment_id ? 'Edit a shipment' : 'Ship'} ${items.length} item line(s) of order ${order_id}${shipment_id ? ` (${shipment_id})` : ''}`,
+      shipment_id
+        ? `Edit shipment ${shipment_id} of order ${order_id}${items ? ` (${items.length} item line(s))` : ''}`
+        : `Ship ${items?.length ?? 0} item line(s) of order ${order_id}`,
     handler: async ({ order_id, shipment_id, ...body }, { backend }) =>
       json(
         shipment_id === undefined

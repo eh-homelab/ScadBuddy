@@ -17,6 +17,7 @@ from scadbuddy.orders.lifecycle import (
     LifecycleError,
     ManualQuoteInput,
     OrderEdit,
+    ShipmentEdit,
     ShipmentInput,
     derive,
 )
@@ -243,7 +244,7 @@ def test_shipped_needs_every_fulfilled_item_covered(shop: Shop) -> None:
     shop.lifecycle.update_shipment(
         order.id,
         partial.id,
-        ShipmentInput(
+        ShipmentEdit(
             items=[
                 ShipmentItem(order_item_id=first.id, quantity=2),
                 ShipmentItem(order_item_id=second.id, quantity=1),
@@ -256,6 +257,58 @@ def test_shipped_needs_every_fulfilled_item_covered(shop: Shop) -> None:
     with pytest.raises(LifecycleError) as refused:
         shop.lifecycle.add_shipment(order.id, ShipmentInput(items=[]), BY)
     assert refused.value.slug == "order_closed"
+
+
+def test_a_shipment_edit_keeps_what_it_does_not_send(shop: Shop) -> None:
+    """A PATCH that adds a tracking number is not a replacement: the carrier, the
+    notes and every line stay, and the order stays `shipped`."""
+    order, item = shop.accepted(quantity=2)
+    shop.fulfilled(order, item)
+    shipment = shop.shipped(order, shop.get_item(item))
+    assert shop.get(order).status == "shipped"
+    edited = shop.lifecycle.update_shipment(order.id, shipment.id, ShipmentEdit(tracking="T2"), BY)
+    assert edited.tracking == "T2"
+    assert edited.carrier == "Post"
+    assert [(line.order_item_id, line.quantity) for line in edited.items] == [(item.id, 2)]
+    assert shop.get(order).status == "shipped"
+    # Sent lines replace the lines; a sent null clears a nullable field.
+    edited = shop.lifecycle.update_shipment(
+        order.id, shipment.id, ShipmentEdit(items=[], tracking=None), BY
+    )
+    assert edited.items == [] and edited.tracking is None and edited.carrier == "Post"
+    assert shop.get(order).status == "ready"
+
+
+def test_shipments_never_cover_more_than_the_item_quantity(shop: Shop) -> None:
+    order, item = shop.accepted(quantity=2)
+    shop.fulfilled(order, item)
+    first = shop.lifecycle.add_shipment(
+        order.id, ShipmentInput(items=[ShipmentItem(order_item_id=item.id, quantity=1)]), BY
+    )
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.add_shipment(
+            order.id, ShipmentInput(items=[ShipmentItem(order_item_id=item.id, quantity=2)]), BY
+        )
+    assert refused.value.slug == "shipment_over_quantity" and refused.value.items == [item.id]
+    # An edit's lines replace that shipment's own, so they are not counted twice.
+    both = ShipmentEdit(items=[ShipmentItem(order_item_id=item.id, quantity=2)])
+    edited = shop.lifecycle.update_shipment(order.id, first.id, both, BY)
+    assert edited.items[0].quantity == 2 and shop.get(order).status == "shipped"
+
+
+def test_a_shipment_lists_each_item_once() -> None:
+    line = ShipmentItem(order_item_id="i", quantity=1)
+    with pytest.raises(ValueError, match="listed twice"):
+        ShipmentInput(items=[line, line])
+    with pytest.raises(ValueError, match="listed twice"):
+        ShipmentEdit(items=[line, line])
+
+
+def test_a_plain_edit_is_on_the_audit_line(shop: Shop) -> None:
+    order = shop.order()
+    shop.lifecycle.edit_order(order.id, BY, OrderEdit(notes="rush"))
+    events = shop.rows.events(order.id)
+    assert events[-1].kind == "order.edited" and events[-1].detail == {"fields": ["notes"]}
 
 
 # -- Review Focus 3: a customer edit after accept ----------------------------------------

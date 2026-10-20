@@ -338,6 +338,8 @@ export type OrderItemPatch = Partial<Schemas['ItemPatch']>
 export type ManualQuoteInput = Defaulted<Schemas['ManualQuoteInput'], 'label'>
 export type FulfilmentInput = Defaulted<Schemas['FulfilmentInput'], 'notes' | 'failure_reason' | 'started_at' | 'finished_at'>
 export type ShipmentInput = Partial<Schemas['ShipmentInput']>
+/** `PATCH …/shipments/{shipment}`: only what is sent changes. */
+export type ShipmentEdit = Schemas['ShipmentEdit']
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */

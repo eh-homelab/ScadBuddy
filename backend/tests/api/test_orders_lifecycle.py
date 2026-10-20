@@ -114,16 +114,22 @@ def test_the_happy_path_through_the_api(client: TestClient) -> None:
     )
     assert shipment.status_code == 201, shipment.text
     assert shipment.json()["address"]["recipient"] == "Ada Lovelace"
+    assert client.get(f"/api/v1/orders/{order['id']}").json()["order"]["status"] == "shipped"
+    # A PATCH carrying only the tracking number keeps the carrier and the lines, so
+    # the order stays shipped.
     updated = client.patch(
         f"/api/v1/orders/{order['id']}/shipments/{shipment.json()['id']}",
-        json={
-            "carrier": "Post",
-            "tracking": "T2",
-            "items": [{"order_item_id": item["id"], "quantity": 2}],
-        },
+        json={"tracking": "T2"},
     )
-    assert updated.status_code == 200 and updated.json()["tracking"] == "T2"
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["tracking"] == "T2" and updated.json()["carrier"] == "Post"
+    assert updated.json()["items"] == [{"order_item_id": item["id"], "quantity": 2}]
     assert client.get(f"/api/v1/orders/{order['id']}").json()["order"]["status"] == "shipped"
+    twice = client.post(
+        f"/api/v1/orders/{order['id']}/shipments",
+        json={"items": [{"order_item_id": item["id"], "quantity": 1}] * 2},
+    )
+    assert twice.status_code == 422, twice.text
 
     closed = client.post(f"/api/v1/orders/{order['id']}/close")
     assert closed.status_code == 200, closed.text

@@ -229,7 +229,7 @@ describe('order tools (#4249)', () => {
       'RECORD {"quantity":2,"outcome":"succeeded","notes":""}',
       'EDIT {"quantity":1,"outcome":"partial","notes":""}',
       'ACCEPT',
-      `SHIP {"carrier":"Post","notes":"","items":[{"order_item_id":"${ITEM}","quantity":2}]}`,
+      `SHIP {"carrier":"Post","items":[{"order_item_id":"${ITEM}","quantity":2}]}`,
     ])
   })
 

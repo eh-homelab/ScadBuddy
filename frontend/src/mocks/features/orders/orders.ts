@@ -14,6 +14,7 @@ import type {
   PaymentCreate,
   Quote,
   Shipment,
+  ShipmentEdit,
   ShipmentInput,
 } from '../../../api/types'
 import { mockModels, mockOutput } from '../../handlers'
@@ -654,7 +655,7 @@ export const handlers = [
     }
   }),
   http.patch('/api/v1/orders/:id/shipments/:s', async ({ request, params }) => {
-    const body = (await request.json()) as ShipmentInput
+    const body = (await request.json()) as ShipmentEdit
     return transition(request, () => {
       const order = lock(String(params.id))
       notEnded(order)
@@ -662,10 +663,15 @@ export const handlers = [
       const shipment = state.shipments.find((s) => s.id === params.s && s.order_id === order.id)
       if (!shipment) throw new Refused('shipment_not_found', `no shipment ${String(params.s)} of order ${order.number}`, [], true)
       const items = itemsOf(order.id)
-      const lines = body.items ?? []
-      const unmade = lines.filter((l) => items.find((i) => i.id === l.order_item_id)?.status !== 'fulfilled').map((l) => l.order_item_id)
-      if (unmade.length > 0) throw new Refused('items_not_fulfilled', 'a shipment carries fulfilled items only', unmade)
-      Object.assign(shipment, { carrier: body.carrier ?? null, service: body.service ?? null, tracking: body.tracking ?? null, shipped_at: body.shipped_at ?? null, address: body.address ?? shipment.address, cost_minor: body.cost_minor ?? null, notes: body.notes ?? '', items: lines })
+      if (body.items) {
+        const unmade = body.items.filter((l) => items.find((i) => i.id === l.order_item_id)?.status !== 'fulfilled').map((l) => l.order_item_id)
+        if (unmade.length > 0) throw new Refused('items_not_fulfilled', 'a shipment carries fulfilled items only', unmade)
+      }
+      // Only what the body carries changes; a field left out keeps the shipment's value.
+      for (const key of ['carrier', 'service', 'tracking', 'shipped_at', 'cost_minor', 'notes', 'items'] as const) {
+        if (body[key] !== undefined) Object.assign(shipment, { [key]: body[key] })
+      }
+      if (body.address) shipment.address = body.address
       event(order, 'shipment.updated', { shipment_id: shipment.id })
       rederive(order)
       return shipment

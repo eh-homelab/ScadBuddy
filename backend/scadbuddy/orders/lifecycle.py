@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
@@ -108,6 +108,17 @@ class FulfilmentInput(BaseModel):
     notes: str = ""
 
 
+def _distinct_lines(items: list[ShipmentItem]) -> list[ShipmentItem]:
+    """One line per item: a second line for the same item would hit the shipment
+    items' primary key, a 500 where the sender deserves a 422."""
+    seen: set[str] = set()
+    for line in items:
+        if line.order_item_id in seen:
+            raise ValueError(f"item {line.order_item_id} is listed twice")
+        seen.add(line.order_item_id)
+    return items
+
+
 class ShipmentInput(BaseModel):
     """A shipment (§6.3): what went, how, and to which address (the order's snapshot
     when none is given)."""
@@ -122,6 +133,30 @@ class ShipmentInput(BaseModel):
     cost_minor: Money | None = None
     notes: str = ""
     items: list[ShipmentItem] = Field(default_factory=list)
+
+    _lines = field_validator("items")(_distinct_lines)
+
+
+class ShipmentEdit(BaseModel):
+    """`PATCH …/shipments/{shipment}`: only what is sent changes. A field left out
+    keeps the shipment's value (``model_fields_set`` tells), so an edit that adds a
+    tracking number never clears the carrier or the lines; ``items`` replaces the
+    lines whole when sent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    carrier: str | None = None
+    service: str | None = None
+    tracking: str | None = None
+    shipped_at: datetime | None = None
+    address: AddressSnapshot | None = None
+    cost_minor: Money | None = None
+    notes: str | None = None
+    items: list[ShipmentItem] | None = None
+
+    _lines = field_validator("items")(
+        lambda items: None if items is None else _distinct_lines(items)
+    )
 
 
 class OrderEdit(BaseModel):
@@ -264,15 +299,20 @@ class Lifecycle:
         notes: str = "",
         due_at: datetime | None = None,
     ) -> Order:
-        """A draft order, pointing at the customer's default addresses (Ruling 11)."""
-        customer = self.store.customer(customer_id)
-        if customer is None:
-            raise LifecycleError("customer_not_found", f"no customer {customer_id}", not_found=True)
-        if customer.archived_at is not None:
-            raise LifecycleError("customer_archived", f"customer {customer_id} is archived")
-        shipping = next((a.id for a in customer.addresses if a.default_shipping), None)
-        billing = next((a.id for a in customer.addresses if a.default_billing), None)
+        """A draft order, pointing at the customer's default addresses (Ruling 11).
+        The customer is read under a share lock inside the insert's transaction, so an
+        archive running at the same moment either comes first and refuses this order,
+        or waits for it."""
         with self.store.transaction() as conn:
+            customer = self.store.customer(customer_id, conn=conn, share=True)
+            if customer is None:
+                raise LifecycleError(
+                    "customer_not_found", f"no customer {customer_id}", not_found=True
+                )
+            if customer.archived_at is not None:
+                raise LifecycleError("customer_archived", f"customer {customer_id} is archived")
+            shipping = next((a.id for a in customer.addresses if a.default_shipping), None)
+            billing = next((a.id for a in customer.addresses if a.default_billing), None)
             order = self.store.insert_order(
                 conn,
                 customer_id=customer_id,
@@ -321,6 +361,18 @@ class Lifecycle:
                 shipping_address_id=edit.shipping_address_id,
                 billing_address_id=edit.billing_address_id,
             )
+            edited = [
+                name
+                for name, value in (
+                    ("notes", edit.notes),
+                    ("due_at", edit.due_at),
+                    ("shipping_address_id", edit.shipping_address_id),
+                    ("billing_address_id", edit.billing_address_id),
+                )
+                if value is not None and not isinstance(value, UnsetType)
+            ]
+            if edited:
+                self._event(conn, order, by, "order.edited", fields=edited)
             if edit.charges is not None:
                 self.store.replace_charges(conn, order.id, edit.charges)
                 self._event(conn, order, by, "charges.replaced", count=len(edit.charges))
@@ -811,7 +863,17 @@ class Lifecycle:
 
     # -- shipments (§6.3) -----------------------------------------------------------------
 
-    def _shippable(self, conn: Conn, order: Order, lines: Sequence[ShipmentItem]) -> None:
+    def _shippable(
+        self,
+        conn: Conn,
+        order: Order,
+        lines: Sequence[ShipmentItem],
+        *,
+        replacing: str | None = None,
+    ) -> None:
+        """The lines name the order's own fulfilled items, and with the order's other
+        shipments (``replacing`` names the one these lines replace) cover no item past
+        its quantity."""
         items = {item.id: item for item in self.store.items(order.id, conn=conn)}
         wrong = [line.order_item_id for line in lines if line.order_item_id not in items]
         if wrong:
@@ -824,6 +886,24 @@ class Lifecycle:
         if unmade:
             raise LifecycleError(
                 "items_not_fulfilled", "a shipment carries fulfilled items only", items=unmade
+            )
+        shipped: dict[str, int] = {}
+        for shipment in self.store.shipments(order.id, conn=conn):
+            if shipment.id == replacing:
+                continue
+            for line in shipment.items:
+                shipped[line.order_item_id] = shipped.get(line.order_item_id, 0) + line.quantity
+        over = [
+            line.order_item_id
+            for line in lines
+            if shipped.get(line.order_item_id, 0) + line.quantity
+            > items[line.order_item_id].quantity
+        ]
+        if over:
+            raise LifecycleError(
+                "shipment_over_quantity",
+                "the shipments would cover more than the item's quantity",
+                items=over,
             )
 
     def add_shipment(self, order_id: str, body: ShipmentInput, by: Actor) -> Shipment:
@@ -854,8 +934,10 @@ class Lifecycle:
         return shipment
 
     def update_shipment(
-        self, order_id: str, shipment_id: str, body: ShipmentInput, by: Actor
+        self, order_id: str, shipment_id: str, edit: ShipmentEdit, by: Actor
     ) -> Shipment:
+        """Only what ``edit`` carries changes (its ``model_fields_set``); the rest of
+        the shipment, its lines included, stays as it is."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -868,18 +950,26 @@ class Lifecycle:
                     shipments=[shipment_id],
                     not_found=True,
                 )
-            self._shippable(conn, order, body.items)
+            sent = edit.model_fields_set
+            if edit.items is not None:
+                self._shippable(conn, order, edit.items, replacing=shipment.id)
+
+            def given(name: str) -> Any:
+                return getattr(edit, name) if name in sent else UNSET
+
             shipment = self.store.update_shipment(
                 conn,
                 shipment.id,
-                carrier=body.carrier,
-                service=body.service,
-                tracking=body.tracking,
-                shipped_at=body.shipped_at,
-                address=body.address or shipment.address,
-                cost_minor=body.cost_minor,
-                notes=body.notes,
-                items=[(line.order_item_id, line.quantity) for line in body.items],
+                carrier=given("carrier"),
+                service=given("service"),
+                tracking=given("tracking"),
+                shipped_at=given("shipped_at"),
+                address=edit.address if edit.address is not None else UNSET,
+                cost_minor=given("cost_minor"),
+                notes=UNSET if edit.notes is None else edit.notes,
+                items=UNSET
+                if edit.items is None
+                else [(line.order_item_id, line.quantity) for line in edit.items],
             )
             self._event(conn, order, by, "shipment.updated", shipment_id=shipment.id)
             order = self._rederive(conn, order, by)

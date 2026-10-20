@@ -191,6 +191,7 @@ import type {
   PaymentCreate,
   Quote,
   Shipment,
+  ShipmentEdit,
   ShipmentInput,
 } from './types'
 import type {
@@ -2027,7 +2028,7 @@ export const api = {
     request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
   addShipment: (orderId: string, body: ShipmentInput) =>
     request<Shipment>(`/orders/${seg(orderId)}/shipments`, { method: 'POST', body: JSON.stringify(body) }),
-  updateShipment: (orderId: string, shipmentId: string, body: ShipmentInput) =>
+  updateShipment: (orderId: string, shipmentId: string, body: ShipmentEdit) =>
     request<Shipment>(`/orders/${seg(orderId)}/shipments/${seg(shipmentId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
