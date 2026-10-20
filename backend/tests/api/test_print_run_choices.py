@@ -435,7 +435,7 @@ def test_the_check_reads_the_dialogs_kept_catalogue_and_the_run_reads_it_fresh(
     assert [check.status_code for check in checks] == [200, 200], checks[-1].text
     assert read_by_checks == 1
     assert ran.status_code == 200, ran.text
-    assert presets.call_count > read_by_checks
+    assert presets.call_count == read_by_checks + 2  # the run's prepare and its plan
 
 
 @respx.mock

@@ -824,9 +824,10 @@ async def check_print(
     run says why. For a plan with slots that includes the inventory read (#2722): a
     failed spool or assignment read fails the check, where the rack preview alone used
     to swallow it and preview nothing, since the run would fail on the same read.
-    ``catalogue`` is where the presets are read from, the dialog's kept copy (#4196): the
-    check slices nothing, so it judges the choices against the presets the dialog
-    offered, and only the run reads them fresh."""
+    ``catalogue`` is where the presets are read from, the dialog's kept copy of
+    Bambuddy's (#4196): the check slices nothing, so it judges the choices against what
+    the dialog's choices read, and only the run reads them fresh. A dialog served
+    natively offers the image's catalogue instead, and its check still reads Bambuddy's."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
@@ -1380,7 +1381,9 @@ async def prepare_run(
     project is refused and the folder is checked there, never in Bambuddy.
 
     ``catalogue`` reads the presets in place of a fresh read: the check's, never the run's
-    (:func:`check_print`).
+    (:func:`check_print`). The kept copy is served however old it is, so a preset removed
+    in Bambuddy since can pass the check and still be refused by the run's fresh read:
+    the check is advice, and the run's read is the one that decides.
     """
     if native is not None:
         if request.project_id is not None:
