@@ -90,6 +90,17 @@ const BUSY = 'busy'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
 export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
+/** `value` with every object's keys sorted, at every depth: two equal states serialise alike. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => [k, canonical(v)]),
+  )
+}
+
 type WireOwner = { kind: string; id: string; label: string }
 type ImageRef = { name: string; mediaType: string }
 
@@ -475,7 +486,8 @@ export class DurableTurns {
         // was, or the entries and it may not be one state. One page is one Query.
         if (!moved && texts.length > first.entries.length) {
           const again = await page(0)
-          const owedOf = (p: ForkPointPage) => JSON.stringify([p.pending ?? {}, p.fork_next ?? false, p.recent_call_ids ?? []])
+          // Keys sorted at every depth: the same state in another key order is no change.
+          const owedOf = (p: ForkPointPage) => JSON.stringify(canonical([p.pending ?? {}, p.fork_next ?? false, p.recent_call_ids ?? []]))
           moved = again.total !== first.total || again.checkpoint !== first.checkpoint || again.busy !== first.busy || owedOf(again) !== owedOf(first)
         }
         if (moved) continue
