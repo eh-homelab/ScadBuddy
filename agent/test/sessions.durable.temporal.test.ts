@@ -104,7 +104,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
   beforeAll(async () => {
     env = await localTemporal()
     // A cache that never evicts: the stand-in's `owed_reads` count lives in a Query, in no
-    // history, and would start again on a replay (support/durableSessionWorkflows.ts).
+    // history, and would start again on a replay (support/durableSessionWorkflows.ts). The
+    // number need only exceed the workflows this file opens; lowered below that, the reset
+    // comes back.
     worker = await Worker.create({ connection: env.nativeConnection, taskQueue: QUEUE, workflowsPath: WORKFLOWS, maxCachedWorkflows: 10_000 })
     running = worker.run()
   }, 120_000)
