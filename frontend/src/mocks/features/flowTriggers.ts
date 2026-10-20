@@ -26,7 +26,7 @@ function grantSpec(): FlowGrantSpec {
 }
 
 function standing(id: string, fields: Partial<FlowStandingGrant>): FlowStandingGrant {
-  const spec = grantSpec()
+  const spec = fields.spec ?? grantSpec()
   return {
     id,
     status: 'approved',
