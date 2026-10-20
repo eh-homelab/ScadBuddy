@@ -11,6 +11,7 @@ import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
 import { statusLabel } from '../components/prints/status'
 import { PrintPicker } from '../components/PrintPicker'
+import { AddToOrderDialog } from '../components/orders/AddToOrderDialog'
 import { SendDialog } from '../components/SendDialog'
 import { PageLoading } from '../components/PageState'
 import { Spinner } from '../components/ui/spinner'
@@ -84,6 +85,8 @@ export function HistoryPage() {
   const [queueing, setQueueing] = useState(false)
   /** #2288 — the output whose preview is open large. */
   const [previewFor, setPreviewFor] = useState<Output | undefined>(undefined)
+  /** #4249 — "Order this": the output becomes a line item of an order. */
+  const [orderFor, setOrderFor] = useState<Output | undefined>(undefined)
   /**
    * #2288 — each output's newest print as the Prints page has it, so a row says how its
    * print went rather than only that it was queued. Best effort: unread, rows say less.
@@ -224,6 +227,7 @@ export function HistoryPage() {
                   }
                   onSend={() => setSendFor(output)}
                   onPrint={() => setPrintFor(output)}
+                  onOrder={() => setOrderFor(output)}
                   onDelete={() => setConfirmFor(output)}
                   bambuddyUrl={bambuddyUrl}
                   pinned={modelState.data?.libraries}
@@ -291,6 +295,7 @@ export function HistoryPage() {
         onClose={() => setSendFor(undefined)}
         onSent={() => outputsState.reload()}
       />
+      {orderFor && <AddToOrderDialog open outputId={orderFor.id} outputName={orderFor.name} onClose={() => setOrderFor(undefined)} />}
       <ArrangeDialog
         open={arranging}
         sources={fromOutputs((outputsState.data ?? []).filter((o) => picked.includes(o.id)))}
@@ -500,6 +505,7 @@ function OutputRow({
   onEdit,
   onSend,
   onPrint,
+  onOrder,
   onQueue,
   onPreview,
   onRenamed,
@@ -518,6 +524,8 @@ function OutputRow({
   onEdit: () => void
   onSend: () => void
   onPrint: () => void
+  /** #4249 — the output as a line item of an order. */
+  onOrder: () => void
   /** #2288 — the print dialog, set to wait in Bambuddy's queue for a manual start. */
   onQueue: () => void
   /** #2288 — the row's preview, large. */
@@ -702,6 +710,9 @@ function OutputRow({
             <DropdownMenuContent align="end" className="w-auto min-w-40">
               <DropdownMenuItem onSelect={() => setTimeout(onQueue, 0)} aria-label={`Queue ${label}`}>
                 Queue
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setTimeout(onOrder, 0)} aria-label={`Order ${label}`}>
+                Order this
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={naming !== null}

@@ -896,7 +896,8 @@ describe('ArrangeDialog', () => {
       expect(found.length).toBeGreaterThan(0)
       expect(found.every((o) => /keychain/i.test(o))).toBe(true)
       await choose(user, select, nameOf('name-keychain'))
-      expect(await screen.findByRole('checkbox', { name: /^Nova · .* ago · .*mm · needs a re-render$/ })).toBeInTheDocument()
+      // The date is relative to now, so not always "… ago": a month old it is "last month".
+      expect(await screen.findByRole('checkbox', { name: /^Nova · [^·]+ · .*mm · needs a re-render$/ })).toBeInTheDocument()
     })
 
     it('finds a model by its slug as well as its name (#2754 review)', async () => {

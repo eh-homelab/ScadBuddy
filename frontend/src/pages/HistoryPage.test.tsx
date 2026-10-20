@@ -88,6 +88,14 @@ function noPrints() {
 }
 
 describe('HistoryPage', () => {
+  it('offers "Order this" on an output, opening the add-to-order dialog (#4249)', async () => {
+    noPrints()
+    const { user } = render()
+    const entry = await menuItem(user, await row('Reagan'), 'Order Reagan')
+    await user.click(entry)
+    expect(await screen.findByRole('dialog', { name: 'Add to order' })).toBeInTheDocument()
+  })
+
   it('shows a pipeline output\'s bill of materials and links its files', async () => {
     const first = outputs[0]!
     server.use(

@@ -41,7 +41,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import psycopg
 from lxml import etree
@@ -765,7 +765,9 @@ def stopped(stop: threading.Event | None) -> bool:
 
 
 def referenced_asset_ids(
-    paths: DataPaths, params: Iterable[Mapping[str, ParamValue]] = ()
+    paths: DataPaths,
+    params: Iterable[Mapping[str, ParamValue]] = (),
+    extra: Iterable[Mapping[str, Any]] = (),
 ) -> set[str]:
     """Every asset id something keeps (#296): the sweep removes nothing in here.
 
@@ -774,6 +776,8 @@ def referenced_asset_ids(
       provenance "Edit in ScadBuddy" falls back to is stamped;
     - ``params``: every saved preset's values (they are in Postgres) and every job's
       in the ``render_jobs`` projection, finished or not;
+    - ``extra``: other JSON records to scan whole, as ``params`` are: every order
+      item's ``inputs`` (#4249, orders spec §3.3), so an ordered upload stays;
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
@@ -798,6 +802,8 @@ def referenced_asset_ids(
             scan(template_file)
     for values in params:
         found.update(_ids_in(json.dumps(values).encode()))
+    for inputs in extra:
+        found.update(_ids_in(json.dumps(inputs).encode()))
     return found
 
 

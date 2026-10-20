@@ -23,6 +23,7 @@ import { traceAction } from '../lib/traceAction'
 import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
+import { AddToOrderDialog } from './orders/AddToOrderDialog'
 import { ColoursDialog } from './ColoursDialog'
 import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
@@ -140,10 +141,12 @@ export function ActionBar({
   const [printOpen, setPrintOpen] = useState(false)
   const [imageOpen, setImageOpen] = useState(false)
   const [coloursOpen, setColoursOpen] = useState(false)
+  /** #4249 — "Add to order…": the saved output of the values on screen becomes a line item. */
+  const [orderOpen, setOrderOpen] = useState(false)
   /** #1741 — at a phone's width the project, Download, Send and Print wait behind More. */
   const phone = useMediaQuery(PHONE_QUERY)
   const [moreOpen, setMoreOpen] = useState(false)
-  const dialogOpen = sendOpen || printOpen || imageOpen || coloursOpen
+  const dialogOpen = sendOpen || printOpen || imageOpen || coloursOpen || orderOpen
   const [error, setError] = useState<string | null>(null)
   /** A job whose first output was saved but not the rest: Generate saves only those. */
   const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
@@ -573,6 +576,7 @@ export function ActionBar({
             ? () => setColoursOpen(true)
             : undefined
         }
+        onOrder={output ? () => setOrderOpen(true) : undefined}
       />
       {blockedReason && (
         <span id={`${slug}-generate-blocked`} data-testid="generate-blocked" className="ml-2 text-xs text-destructive">
@@ -776,6 +780,8 @@ export function ActionBar({
         onClose={() => setColoursOpen(false)}
       />
 
+      {output && <AddToOrderDialog open={orderOpen} outputId={output.id} outputName={output.name} onClose={() => setOrderOpen(false)} />}
+
       <SendDialog
         open={sendOpen}
         output={output}
@@ -812,9 +818,12 @@ function GenerateMenu({
   disabled,
   onImage,
   onColours,
+  onOrder,
 }: {
   disabled: boolean
   onImage: () => void
+  /** #4249 — once an output of the values on screen exists; it becomes a line item. */
+  onOrder?: (() => void) | undefined
   /** Offered only when the render has colours to break down. */
   onColours?: (() => void) | undefined
 }) {
@@ -863,6 +872,10 @@ function GenerateMenu({
             <span className="text-xs text-muted-foreground">Where each colour goes, one view per colour</span>
           </DropdownMenuItem>
         )}
+        <DropdownMenuItem data-testid="generate-order" disabled={!onOrder} onSelect={onOrder ? after(onOrder) : undefined} className="flex-col items-start gap-0">
+          Add to order…
+          <span className="text-xs text-muted-foreground">{onOrder ? 'This output as a line item of an order' : 'Generate first'}</span>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )

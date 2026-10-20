@@ -110,6 +110,9 @@ function putSettings(body: Record<string, unknown>) {
     if (value === null && !NULLABLE.has(name)) {
       return refused(name, `Value error, ${envName(name)} cannot be cleared; reset it to follow the deployment's value`)
     }
+    if (name === 'orders_currency' && !(typeof value === 'string' && /^[A-Z]{3}$/.test(value))) {
+      return refused(name, "String should match pattern '^[A-Z]{3}$'")
+    }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)
     }
