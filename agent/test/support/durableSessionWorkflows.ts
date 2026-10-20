@@ -23,7 +23,7 @@ export const cancelInput = defineUpdate<'cancelled' | 'none', [{ reason: string 
 export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 export const holdCancel = defineSignal('hold_cancel')
 export const endTurn = defineSignal('end_turn')
-export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[]; firstReads: number }>('recorded')
+export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[]; forkPointPage0Queries: number }>('recorded')
 export const turn = defineQuery<string | null>('turn')
 type Owed = { pending?: Record<string, unknown>; fork_next?: boolean; recent_call_ids?: string[] }
 type Conversation = { session_id: string; checkpoint: string; conversation: string[] } & Owed
@@ -38,17 +38,17 @@ export async function DurableSession(start: unknown): Promise<void> {
   let busy = false
   let hold = false
   let held: Held | undefined = (start as { agent?: Conversation } | null)?.agent ?? undefined
-  let firstReads = 0
-  setHandler(recorded, () => ({ start, messages, calls, firstReads }))
+  let forkPointPage0Queries = 0
+  setHandler(recorded, () => ({ start, messages, calls, forkPointPage0Queries }))
   setHandler(setConversation, (conversation) => {
     held = conversation
-    firstReads = 0
+    forkPointPage0Queries = 0
   })
   setHandler(forkPoint, ({ start: from, limit: asked }) => {
     const texts = held?.conversation ?? []
     const limit = held?.page_chars ?? asked
     const reads = held?.owed_reads
-    const owed = from === 0 && reads?.length ? reads[Math.min(firstReads++, reads.length - 1)]! : held
+    const owed = from === 0 && reads?.length ? reads[Math.min(forkPointPage0Queries++, reads.length - 1)]! : held
     let end = from
     let used = 0
     while (end < texts.length && (end === from || used + texts[end]!.length <= limit)) used += texts[end++]!.length
