@@ -96,6 +96,8 @@ async def prepare(
     reports: PrinterReportStore,
     request: PrintRunRequest,
     settings: StoredSettings | None = None,
+    *,
+    refuse_manual_pick: bool = True,
 ) -> PreparedRun:
     async with BambuddyClient(BambuddyConfig(base_url=BASE, api_key="k")) as client:
         return await prepare_run(
@@ -105,6 +107,7 @@ async def prepare(
             request,
             printers=printers,
             reports=reports,
+            refuse_manual_pick=refuse_manual_pick,
         )
 
 
@@ -301,6 +304,14 @@ async def test_an_auto_printer_prints_through_bambuddy_without_kek(
     assert (prepared.printer, prepared.path, prepared.printer_id) == (pid, "bambuddy", 1)
     assert status.called
     assert "no key for the LAN" in caplog.text
+
+    # The dialog's checks prepare the same run on every re-check, and say nothing.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="scadbuddy.bambuddy.print_run"):
+        await prepare(
+            printers_with_kek, reports, run_request(printer=pid), refuse_manual_pick=False
+        )
+    assert "no key for the LAN" not in caplog.text
 
 
 @respx.mock

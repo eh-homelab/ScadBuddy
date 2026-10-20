@@ -1507,7 +1507,9 @@ async def prepare_run(
     # takes its own path from its first run.
     printer = await _require_resolvable_printer(client, printer_id, any_model=source.is_sliced)
     row = await _ensure_row(printers, named, printer)
-    path, report_status = await _registry_path(row, printers, reports)
+    path, report_status = await _registry_path(
+        row, printers, reports, say_fallback=refuse_manual_pick
+    )
     if source.is_sliced:
         # Nothing is sliced, so no preset need resolve (#2671): any active printer the
         # file was sliced for prints it (`any_model` above).
@@ -1614,7 +1616,11 @@ LAN_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the print worke
 
 
 async def _registry_path(
-    row: PrinterRow | None, printers: PrinterStore | None, reports: PrinterReportStore | None
+    row: PrinterRow | None,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+    *,
+    say_fallback: bool = True,
 ) -> tuple[RunPath, PrinterStatus | None]:
     """The run's path to ``row`` and, on the native path, its status from the LAN
     report, which must be as fresh as `printers_now` needs it to call the printer
@@ -1623,7 +1629,8 @@ async def _registry_path(
     A print worker without the key cannot open the access code, so an ``auto`` row it
     reaches through Bambuddy too takes that path (#4442 review): the run still queues
     through Bambuddy until LAN printing lands (plan Task 9). Only a row set to
-    ``native`` is the key's 503."""
+    ``native`` is the key's 503. ``say_fallback`` logs that fallback: on for a run, off
+    for the dialog's checks, which would repeat it on every re-check."""
     if printers is None or row is None:
         return "bambuddy", None
     report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
@@ -1634,10 +1641,11 @@ async def _registry_path(
     if printers.kek is None:
         if row.preferred_path == "auto" and row.bambuddy_printer_id is not None:
             # Said, so a worker that lost its key is not silently on Bambuddy's path.
-            logger.info(
-                "printer %s takes Bambuddy's path: the print worker has no key for the LAN",
-                row.id,
-            )
+            if say_fallback:
+                logger.info(
+                    "printer %s takes Bambuddy's path: the print worker has no key for the LAN",
+                    row.id,
+                )
             return "bambuddy", None
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, LAN_NEEDS_KEK)
     if report is None:
