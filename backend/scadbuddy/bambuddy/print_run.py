@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 
 from fastapi import status
@@ -1459,7 +1460,8 @@ async def prepare_run(
     # library. Slot errors need the plate's slots, which only a library file answers,
     # so those are still found after the upload, by `resolve` in `execute_run`. The run
     # reads it fresh, two GETs; the check reads the dialog's kept copy (#4196).
-    presets = await (catalogue() if catalogue is not None else catalogue_for(client, native=None))
+    read = catalogue or partial(catalogue_for, client, native=None)
+    presets = await read()
     refused = choice_errors(request.choices, presets)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))

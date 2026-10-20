@@ -439,6 +439,33 @@ def test_the_check_reads_the_dialogs_kept_catalogue_and_the_run_reads_it_fresh(
 
 
 @respx.mock
+def test_a_preset_gone_since_it_was_kept_passes_the_check_and_the_run_refuses_it(
+    client: TestClient, model: str
+) -> None:
+    """#4196 review: the check reads the kept catalogue however old it is, so a preset
+    Bambuddy has lost since passes it; the run's fresh read is the one that decides."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    kept = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    no_presets: dict[str, dict[str, list[Any]]] = {
+        tier: {"printer": [], "process": [], "filament": []}
+        for tier in ("cloud", "standard", "local", "orca_cloud")
+    }
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(200, json=no_presets))
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    ran = run_print(client, output_id, json=body())
+
+    assert (kept.status_code, kept.json()["errors"]) == (200, []), kept.text
+    assert (check.status_code, check.json()["errors"]) == (200, []), check.text
+    assert ran.status_code == 422, ran.text
+    assert not sliced.called
+
+
+@respx.mock
 @pytest.mark.parametrize(("first", "second"), [(404, 403), (403, 404)])
 def test_the_spools_read_together_fail_as_the_serial_reads_did(
     client: TestClient, model: str, first: int, second: int

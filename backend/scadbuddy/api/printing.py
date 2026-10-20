@@ -15,7 +15,6 @@ from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from typing import Annotated, Any
 
 import httpx
@@ -60,7 +59,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
-from scadbuddy.bambuddy.catalogue import cached_catalogue, catalogue_name_key
+from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
@@ -1032,9 +1031,7 @@ async def post_check(
             body,
             rack=rack,
             print_settings=print_settings,
-            catalogue=partial(
-                cached_catalogue, client, paths.cache, name_key=catalogue_name_key(store.kek)
-            ),
+            catalogue=kept_catalogue(client, paths.cache, store.kek),
         )
 
 

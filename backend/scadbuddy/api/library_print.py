@@ -55,7 +55,7 @@ from scadbuddy.api.outputs import (
 )
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
-from scadbuddy.bambuddy.catalogue import cached_catalogue, catalogue_name_key
+from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
@@ -1458,7 +1458,5 @@ async def post_library_check(
                 files=files,
             ),
             files=files,
-            catalogue=partial(
-                cached_catalogue, client, paths.cache, name_key=catalogue_name_key(store.kek)
-            ),
+            catalogue=kept_catalogue(client, paths.cache, store.kek),
         )

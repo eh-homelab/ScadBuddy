@@ -15,8 +15,9 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -223,6 +224,15 @@ def catalogue_name_key(kek: Kek | None) -> bytes | None:
     if kek is None:
         return None
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=NAME_KEY_INFO).derive(kek.key)
+
+
+def kept_catalogue(
+    client: BambuddyClient, cache: Path, kek: Kek | None
+) -> Callable[[], Awaitable[Catalogue]]:
+    """:func:`cached_catalogue` for ``client`` as a reader, its file named under
+    :func:`catalogue_name_key` as the dialog's choices name it: what the dialog's check
+    reads (#4196)."""
+    return partial(cached_catalogue, client, cache, name_key=catalogue_name_key(kek))
 
 
 async def cached_catalogue(
