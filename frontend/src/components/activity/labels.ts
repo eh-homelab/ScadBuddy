@@ -12,28 +12,26 @@ export function principalLabel(principal: string | null, _facets?: ActivityFacet
   }
 }
 
-/** How much of a project's name a chip shows; a title (backend `TITLE_NAME_CHARS`) as much. */
-export const SUBJECT_NAME_CHARS = 40
-
 /**
  * #3856 — how a subject chip reads: the name the server found for it, else its raw
  * reference made legible (a library file, a folder, a project by id or by name, an
- * output's short id).
+ * output's short id). `nameChars` is how much of a project's name the facets say a chip
+ * shows (`subject_name_chars`, as much as a title, #4003); the whole name until they load.
  */
-export function subjectLabel(subject: { value: string; label?: string | null }): string {
+export function subjectLabel(subject: { value: string; label?: string | null }, nameChars?: number): string {
   if (subject.label) return subject.label
   const [prefix, id] = subject.value.split(/:(.*)/s)
   if (id) {
-    // A Bambuddy file is `library:<id>`; an OpenSCAD library's checkout is `library:<name>`.
-    // An all-digit library name would read as a file; the two share the prefix with the
-    // print records, so a split would rename those too. The server's label, when it has
-    // one, says which it is.
+    // A Bambuddy file is `library:<id>`; an OpenSCAD library's checkouts are
+    // `scad-library:<name>` (#4001), and were `library:<name>` before.
     if (prefix === 'library') return /^\d+$/.test(id) ? `Library file ${id}` : `Library ${id}`
+    if (prefix === 'scad-library') return `Library ${id}`
     if (prefix === 'library-folder') return `Library folder ${id}`
     if (prefix === 'project') return `Project ${id}`
     // Up to 200 characters, typed by a person: the chip shows the start, its title all.
     if (prefix === 'project-name') {
-      return `Project “${id.length > SUBJECT_NAME_CHARS ? `${id.slice(0, SUBJECT_NAME_CHARS)}…` : id}”`
+      const clipped = nameChars !== undefined && id.length > nameChars
+      return `Project “${clipped ? `${id.slice(0, nameChars)}…` : id}”`
     }
     if (prefix === 'output') return `Output ${id.slice(0, 8)}`
   }

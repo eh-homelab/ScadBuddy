@@ -489,6 +489,45 @@ async def test_a_pass_forgets_an_unreadable_job_no_output_waits_on(
 
 
 @pytest.mark.requires_postgres
+async def test_attaching_one_job_forgets_no_other_unreadable_job(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3792: only the full pass prunes the unreadable jobs. A per-job attach, for a job
+    no output waits on, leaves a job another output still waits on in the set."""
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    monkeypatch.setattr(backfill_module, "_unreadable_jobs", {job.id, "gone-job"})
+    with store_pool(pg_conninfo) as pool:
+        assert attach_job_backfills(store, BlobRefs(pool), _jobs(), "nobody-waits") == 0
+    assert backfill_module._unreadable_jobs == {job.id, "gone-job"}
+
+
+@pytest.mark.requires_postgres
+async def test_a_pass_while_a_marker_is_rewritten_keeps_its_unreadable_job(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3792: a marker is renamed in whole, so a pass that lists it while it is being
+    written again still finds it, and keeps its job."""
+    monkeypatch.setattr(backfill_module, "_unreadable_jobs", set())
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    marker = store.directory(old.id) / "backfill.json"
+    # A rewrite's temporary file, not yet renamed over the marker: half the JSON.
+    half = marker.with_name(f".{marker.name}.0123")
+    half.write_text(marker.read_text(encoding="utf-8")[:5], encoding="utf-8")
+
+    def unreadable(job_id: str) -> Job:
+        Job.model_validate({"id": job_id})
+        raise AssertionError("unreachable")
+
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, unreadable) == 0
+        assert attach_backfills(store, refs, unreadable) == 0
+    assert backfill_module._unreadable_jobs == {job.id}
+
+
+@pytest.mark.requires_postgres
 async def test_a_marker_left_after_its_manifest_was_written_is_cleared_not_failed(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
