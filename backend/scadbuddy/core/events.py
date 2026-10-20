@@ -214,6 +214,27 @@ class ActivityEvent(BaseEvent):
     principal: str | None = None
 
 
+class OrderChanged(BaseEvent):
+    """An order's row changed (#4249, spec 2026-10-18 §7.1): a status transition, a hold
+    or release, or a plain edit; ``status`` is the one it has now. Re-read ``GET
+    /orders/{order_id}``. Published on ``orders`` and ``order:<order id>``."""
+
+    kind: Literal["order.changed"] = "order.changed"
+    order_id: str
+    status: str
+
+
+class OrderItemChanged(BaseEvent):
+    """A line item changed (#4249, §7.1): its status, or the attempt just recorded or
+    accepted (``attempt``, else ``None``). Published where :class:`OrderChanged` is."""
+
+    kind: Literal["order_item.changed"] = "order_item.changed"
+    order_id: str
+    item_id: str
+    status: str
+    attempt: int | None = None
+
+
 class AgentOperationEvent(BaseEvent):
     """The agent recorded or ended an ``ai_operations`` row; the agent publishes it
     itself (``agent/src/operations/store.ts``). The activity component ingests it; it
@@ -340,6 +361,8 @@ Event = Annotated[
     | OperationEvent
     | FlowRunEvent
     | ActivityEvent
+    | OrderChanged
+    | OrderItemChanged
     | AgentOperationEvent
     | LibraryChanged
     | LibraryRemoved
