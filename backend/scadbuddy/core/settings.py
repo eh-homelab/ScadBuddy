@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_LIBRARY_BACKEND: whose library the print routes serve (`native` needs a
     # content store: `store_backend` s3 or bambuddy).
     library_backend: LibraryBackend = "bambuddy"
+    # SCADBUDDY_ORDERS_CURRENCY: the ISO 4217 code an order copies when it is made
+    # (orders spec 2026-10-18 §3.2, #4249) and never changes; a change applies to the
+    # next order. The three-letter shape is checked, not the code list.
+    orders_currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
     # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
     slicer_backend: Slicer = "bambuddy"
@@ -626,12 +630,13 @@ SECRET_FIELDS: Final = frozenset(
     }
 )
 
-Applies = Literal["live", "restart"]
+Applies = Literal["live", "restart", "next order"]
 
 #: When a changed value takes effect in a running process (#322). ``live`` is at once,
 #: on every replica (``api/runtime.py`` applies it on ``settings.changed``); ``restart``
 #: is at the next start, and until then ``GET /settings`` lists the field in
-#: ``restart_required``. A new env-seeded field must say which it is.
+#: ``restart_required``; ``next order`` is read from the store by each order's create
+#: (#4249), so no process state carries it. A new env-seeded field must say which it is.
 APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
     {
         # Read from the store on every use.
@@ -688,6 +693,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # the store each process opens, its caps, and the key workers fetch with.
         "store_backend": "restart",
         "library_backend": "restart",
+        # Copied by each order at create (orders spec §3.2); never an existing order's.
+        "orders_currency": "next order",
         # Read from the store by every slice's start.
         "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",
