@@ -12,10 +12,10 @@ import type { FlowGrantSpec, FlowStandingGrant, FlowTrigger, FlowTriggerCreate }
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 10, 9, minutes)).toISOString()
 const CHANGED = 'https://scadbuddy.dev/problems/flow-trigger-changed'
-/** The standing grants' spec, made at each reset: its expiry is from now, never a fixed
- *  date, since the grant editor refuses one in the past and a fixed one passed on
- *  2026-10-20 (#4447); made per reset, so a long-open `pnpm dev` tab keeps one too.
- *  Three days is inside both grant caps. */
+/** The standing grants' spec, made at each reset (each test, and each page load): its
+ *  expiry is from now, never a fixed date, since the grant editor refuses one in the
+ *  past and a fixed one passed on 2026-10-20 (#4447). A test that pins the clock resets
+ *  after pinning it. Three days is inside both grant caps. */
 function grantSpec(): FlowGrantSpec {
   return {
     expires_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
