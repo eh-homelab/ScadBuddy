@@ -241,6 +241,7 @@ class SliceActivities:
                 process_preset=process,
                 filament_presets=filaments,
                 sliced_3mf=put.url,
+                filament_colours=list(input.plan.filament_colours),
             ),
             put=put,
             reused_blob_key=None,
