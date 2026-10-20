@@ -1,10 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../../agent/bridge'
 import { isUserOnly } from '../../agent/dom'
 import { useGlobalAgentTools } from '../../agent/global'
-import { changeFlowTrigger, flowTriggerRequests } from '../../mocks/features/flowTriggers'
+import {
+  changeFlowTrigger,
+  flowTriggerRequests,
+  reset as resetFlowTriggers,
+} from '../../mocks/features/flowTriggers'
 import { renderPage } from '../../test/utils'
 import { FlowTriggers } from './Triggers'
 
@@ -52,6 +56,25 @@ describe('FlowTriggers', () => {
         'In force',
       ),
     )
+  })
+
+  it('approves a requested grant whatever the date (#4447)', async () => {
+    // Years ahead: a mock grant that expires on a fixed date fails here at once, not
+    // only once that date has passed.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2031-01-01T00:00:00Z'))
+    try {
+      resetFlowTriggers()
+      const { user } = render()
+      const trigger = await row(/When a render finishes/)
+      await user.click(within(trigger).getByRole('button', { name: 'Review…' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Review the standing grant' })
+      await user.click(await within(dialog).findByRole('button', { name: 'Approve' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(flowTriggerRequests().filter((r) => r.path === '/flow-triggers/trig-render/grant/approve')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses an approval of a trigger changed since it was shown, and shows it again', async () => {

@@ -12,24 +12,29 @@ import type { FlowGrantSpec, FlowStandingGrant, FlowTrigger, FlowTriggerCreate }
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 10, 9, minutes)).toISOString()
 const CHANGED = 'https://scadbuddy.dev/problems/flow-trigger-changed'
-const SPEC: FlowGrantSpec = {
-  // From now, never a fixed date: the grant editor refuses an expiry in the past, and a
-  // fixed one passed on 2026-10-20 (#4447). Three days is inside both grant caps.
-  expires_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
-  rules: [{ fn: 'queue_print', printers: [1], max_prints: 2 }],
-  sessions: false,
-  ask_starter_session: false,
+/** The standing grants' spec, made at each reset: its expiry is from now, never a fixed
+ *  date, since the grant editor refuses one in the past and a fixed one passed on
+ *  2026-10-20 (#4447); made per reset, so a long-open `pnpm dev` tab keeps one too.
+ *  Three days is inside both grant caps. */
+function grantSpec(): FlowGrantSpec {
+  return {
+    expires_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+    rules: [{ fn: 'queue_print', printers: [1], max_prints: 2 }],
+    sessions: false,
+    ask_starter_session: false,
+  }
 }
 
 function standing(id: string, fields: Partial<FlowStandingGrant>): FlowStandingGrant {
+  const spec = grantSpec()
   return {
     id,
     status: 'approved',
-    spec: SPEC,
+    spec,
     requested_by: { kind: 'browser' },
     approved_by: 'browser',
     approved_at: at(0),
-    expires_at: SPEC.expires_at,
+    expires_at: spec.expires_at,
     created_at: at(0),
     in_force: true,
     ...fields,
