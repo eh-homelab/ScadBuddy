@@ -4,6 +4,7 @@ activities replaced by fakes that record their calls."""
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -701,14 +702,15 @@ async def test_a_piece_resumes_from_the_activity_it_was_on() -> None:
         assert second.calls == ["render_solids", "finish_piece"]
 
 
-async def _decided_after_an_activity(handle: WorkflowHandle[Any, Any]) -> bool:
-    """Whether a workflow task completed after an activity did."""
-    completed = False
+async def _decided_after_the_write(handle: WorkflowHandle[Any, Any]) -> bool:
+    """Whether the run has taken its turn on a `project` write. The write is a local
+    activity (#4199): its marker is written by the workflow task that ran it, as that
+    task completes."""
     async for event in handle.fetch_history_events():
-        if event.HasField("activity_task_completed_event_attributes"):
-            completed = True
-        elif completed and event.HasField("workflow_task_completed_event_attributes"):
-            return True
+        if event.HasField("marker_recorded_event_attributes"):
+            [meta] = event.marker_recorded_event_attributes.details["data"].payloads
+            if json.loads(meta.data).get("activity_type") == "project":
+                return True
     return False
 
 
@@ -845,7 +847,7 @@ async def test_a_request_coalesced_into_a_render_that_raises_gets_its_job() -> N
             fail.set()
             handle = client.get_workflow_handle(wid)
             # The `failed` write landed and the run has taken its turn on it.
-            while not await _decided_after_an_activity(handle):
+            while not await _decided_after_the_write(handle):
                 await asyncio.sleep(0.05)
             claims.set()
             answer = await asyncio.wait_for(second, timeout=30)
@@ -873,7 +875,7 @@ async def test_accepted_after_the_render_raised_is_rejected_as_closing() -> None
                 await asyncio.sleep(0.05)
             fail.set()
             handle = client.get_workflow_handle(wid)
-            while not await _decided_after_an_activity(handle):
+            while not await _decided_after_the_write(handle):
                 await asyncio.sleep(0.05)
             late = uuid.uuid4().hex
             with pytest.raises(WorkflowUpdateFailedError) as rejected:
@@ -1058,32 +1060,6 @@ async def test_an_older_builds_start_for_a_row_already_cancelled_renders_nothing
         assert [p.state for p in acts.projections] == ["running"]
 
 
-async def test_a_release_right_after_the_start_cancels_the_job() -> None:
-    """The release lands while the job's first projection is in flight: that write
-    completing anyway must not swallow the release."""
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        gate = asyncio.Event()
-        acts = FakeActivities(block_main=gate)
-        async with _worker(client, queue, acts):
-            job = _job(width=uuid.uuid4().int % 10**9)
-            wid = f"render-{job.id}"
-            await start_render(client, queue, start_of(job), id=wid)
-            handle = client.get_workflow_handle(wid)
-            try:
-                answer = await asyncio.wait_for(
-                    handle.execute_update(RELEASE_UPDATE, "cancelled", result_type=ReleaseAnswer),
-                    timeout=10,
-                )
-                await asyncio.wait_for(handle.result(), timeout=10)
-            finally:
-                gate.set()
-        assert answer.cancelled is not None
-        last = [p for p in acts.projections if p.state][-1]
-        assert last.state == "cancelled" and last.failure is not None
-        assert last.failure.error == CANCELLED_ERROR
-
-
 class _HeldLoad(FakeActivities):
     """`load_pipeline` past the first ``free`` calls waits for ``loaded``."""
 
@@ -1100,6 +1076,55 @@ class _HeldLoad(FakeActivities):
             self.loading.set()
             await self.loaded.wait()
         return await FakeWorld().load_pipeline(req)
+
+
+class _HeldRunning(_HeldLoad):
+    """The `running` projection waits for ``written``; `load_pipeline` is held too, so
+    no activity completes while the release's workflow task runs."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(free=0, **kwargs)
+        self.writing = asyncio.Event()
+        self.written = asyncio.Event()
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> bool:
+        if projection.state == "running":
+            self.writing.set()
+            await self.written.wait()
+        return await super().project(projection)
+
+
+async def test_a_release_right_after_the_start_cancels_the_job() -> None:
+    """The release is sent while the job's first projection is being written. That
+    write is a local activity (#4199), so Temporal holds the Update until the workflow
+    task running it completes; the release then cancels the job, not nothing."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = _HeldRunning(block_main=gate)
+        async with _worker(client, queue, acts):
+            job = _job(width=uuid.uuid4().int % 10**9)
+            wid = f"render-{job.id}"
+            await start_render(client, queue, start_of(job), id=wid)
+            handle = client.get_workflow_handle(wid)
+            try:
+                await asyncio.wait_for(acts.writing.wait(), timeout=10)
+                release = asyncio.create_task(
+                    handle.execute_update(RELEASE_UPDATE, "cancelled", result_type=ReleaseAnswer)
+                )
+                await asyncio.sleep(0.5)
+                acts.written.set()
+                answer = await asyncio.wait_for(release, timeout=10)
+                await asyncio.wait_for(handle.result(), timeout=10)
+            finally:
+                acts.written.set()
+                acts.loaded.set()
+                gate.set()
+        assert answer.cancelled is not None
+        last = [p for p in acts.projections if p.state][-1]
+        assert last.state == "cancelled" and last.failure is not None
+        assert last.failure.error == CANCELLED_ERROR
 
 
 def _workflows_only(client: Client, queue: str, acts: FakeActivities) -> Worker:

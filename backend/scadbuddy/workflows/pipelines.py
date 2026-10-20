@@ -82,16 +82,35 @@ PROJECT_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 SHORT = timedelta(seconds=60)
-#: `project` (one or two short statements; attempts took 0.03-0.4 s on prod). An
-#: attempt Temporal records as started but never delivers (a poll that gave up while
-#: history committed the start, on prod's slow Temporal database) is recovered only by
-#: this timeout, which is what a page load waited: 60 s under `SHORT` (2026-10-18). A
-#: slow attempt it cuts short is retried. A late write from it never moves the row's
-#: state back (`projection.py` settles only from pending or running), but a late
-#: `steps` write is last-writer-wins while the row is open: it can show older progress
-#: until the next progress write or the final projection replaces it. Its statements
-#: wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection.
+#: `project` (one or two short statements; attempts took 0.03-0.4 s on prod). It runs
+#: as a local activity (#4199), as `render_accept` does: in the worker that runs the
+#: workflow task, with no activity task to hand off. As a regular activity, an attempt
+#: Temporal recorded as started but never delivered (a poll that gave up while prod's
+#: slow Temporal database committed the start) waited out this whole timeout: 60 s
+#: under `SHORT` for a page load (2026-10-18). Nor does a write wait for an activity
+#: slot an openscad run holds. An Update (a coalesced request, a release) that arrives
+#: during a write is delivered once it ends.
+#:
+#: The bound stays: a hung attempt is cut short and retried. A late write from it never
+#: moves the row's state back (`projection.py` settles only from pending or running),
+#: but a late `steps` write is last-writer-wins while the row is open: it can show
+#: older progress until the next progress write or the final projection replaces it.
+#: Its statements wait at most `projection.PROJECT_POOL_TIMEOUT` for a connection.
 PROJECT_TIMEOUT = timedelta(seconds=10)
+#: A row write's attempts as a local activity, before it goes to Temporal's own retries
+#: as a regular activity (`_row_write`). A local activity's retries run inside the
+#: worker, and the worker's shutdown waits for them: on one that kept failing,
+#: `Worker.shutdown` was still waiting after 90 s (temporalio 1.34, measured against the
+#: dev server). Unbounded (`PROJECT_RETRY`), a Postgres outage would hold a deploy's
+#: drain, or the in-process worker's stop, for as long as it lasted.
+LOCAL_ROW_RETRY = RetryPolicy(
+    maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
+)
+#: The packer's refusal (`pipeline_activities.pack_layout`): the job's outcome, with
+#: its message. `pack` runs as a local activity, whose failure reaches the workflow as
+#: this ApplicationError itself, not an ActivityError around it (temporalio 1.34,
+#: measured against the dev server).
+PACK_REFUSED = "PackError"
 #: `render_accept`, the run's first step: a bounded number of attempts, so a failure no
 #: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
 #: them answers still-accepting) answers the request rather than holding its render key
@@ -463,6 +482,8 @@ class TemplatePipeline:
         return part
 
     async def activity_call(self, name: str, arg: Any, *, result_type: type[Any]) -> Any:
+        if name == "pack":
+            return await _pack(arg)
         # `write_output` loads meshes, renders every plate's thumbnails (bounded by the
         # render timeout) and writes the 3MF: it gets the openscad bound and heartbeats.
         if name == "write_output":
@@ -486,12 +507,11 @@ class TemplatePipeline:
 
     async def _project(self, **fields: Any) -> bool:
         """For ``state="running"``, whether the row is still open (#603); else True."""
-        open_row: bool = await workflow.execute_activity(
+        open_row: bool = await _row_write(
             "project",
             self._projection(fields),
             result_type=bool,
             start_to_close_timeout=PROJECT_TIMEOUT,
-            retry_policy=PROJECT_RETRY,
             # A release that cancels the job mid-projection waits for the write to
             # resolve: its outcome must be in history before the run completes, or
             # Temporal rejects that workflow task and the release with it.
@@ -513,13 +533,8 @@ class TemplatePipeline:
         async def write() -> None:
             if previous is not None:
                 await previous
-            with contextlib.suppress(ActivityError):
-                await workflow.execute_activity(
-                    "project",
-                    projection,
-                    start_to_close_timeout=PROJECT_TIMEOUT,
-                    retry_policy=PROJECT_RETRY,
-                )
+            with contextlib.suppress(FailureError):
+                await _row_write("project", projection, start_to_close_timeout=PROJECT_TIMEOUT)
 
         self._progress = asyncio.create_task(write())
 
@@ -615,11 +630,8 @@ class TemplatePipeline:
     async def _project_claims(self) -> None:
         assert self._job is not None
         async with self._claims_lock:
-            await workflow.execute_local_activity(
-                CLAIMS_ACTIVITY,
-                args=[self._job.id, self._claims],
-                start_to_close_timeout=SHORT,
-                retry_policy=PROJECT_RETRY,
+            await _row_write(
+                CLAIMS_ACTIVITY, self._job.id, self._claims, start_to_close_timeout=SHORT
             )
 
     async def _project_released(
@@ -628,7 +640,7 @@ class TemplatePipeline:
         """The cancelled job its last release leaves. Local, so it never waits behind
         openscad runs (the piece goes on) for one of the worker's activity slots:
         `release` waits for it."""
-        await workflow.execute_local_activity(
+        await _row_write(
             "project",
             Projection(
                 job_id=job.id,
@@ -639,7 +651,6 @@ class TemplatePipeline:
                 pipeline_version=version,
             ),
             start_to_close_timeout=SHORT,
-            retry_policy=PROJECT_RETRY,
         )
         self._cancelled = True
 
@@ -880,9 +891,14 @@ class TemplatePipeline:
             if loaded.version == "default":
                 return error.failure  # today's behaviour (§5.3): the one piece's own error
             return error.failure.model_copy(update={"error": str(error)})
-        except (ActivityError, ChildWorkflowError) as error:
+        except (ActivityError, ChildWorkflowError, ApplicationError) as error:
             if is_cancelled_exception(error):
                 raise
+            if isinstance(error, ApplicationError) and error.type != PACK_REFUSED:
+                # Not a local activity's refusal: the template's own raise.
+                if loaded.version == "default":
+                    return Failure(error=f"{type(error).__name__}: {error}")
+                return Failure(error=pipeline_error(error, loaded.file))
             failure = _failure_of(error)
             if loaded.version == "default":
                 return failure  # no line in a file the template does not have
@@ -907,8 +923,7 @@ class TemplatePipeline:
                 return  # settled before this run began, as in `_render` (#603)
             self._upsert(STATUS.value_set("running"))
             await self._project(steps=steps)
-            layout = await workflow.execute_activity(
-                "pack",
+            layout = await _pack(
                 # Always plates, never the piece as rendered: only the writer applies
                 # the pinned colour order (Review Focus 4).
                 PackRequest(
@@ -918,10 +933,7 @@ class TemplatePipeline:
                     filament_plan=inputs.filament_plan,
                     colours=inputs.colours,
                     allow_own=False,
-                ),
-                result_type=Layout,
-                start_to_close_timeout=SHORT,
-                retry_policy=RETRY,
+                )
             )
             steps[0].done = 1
             await self._project(steps=steps)
@@ -970,9 +982,12 @@ class TemplatePipeline:
             )
         except BaseException as error:
             failure: Failure | None = None
-            if _said_no(error) and isinstance(error, ActivityError):
-                # The packer or the writer said no (an object that does not fit the
-                # plate): the job's outcome, with the activity's message.
+            if isinstance(error, ApplicationError) and error.type == PACK_REFUSED:
+                # The packer said no (an object that does not fit the plate): the job's
+                # outcome, with its message.
+                failure = Failure(error=error.message)
+            elif _said_no(error) and isinstance(error, ActivityError):
+                # The writer said no: the job's outcome, with the activity's message.
                 cause = error.cause
                 message = cause.message if isinstance(cause, ApplicationError) else str(error)
                 failure = Failure(error=message)
@@ -1046,7 +1061,56 @@ def _said_no(error: BaseException) -> bool:
     the run fails, as any error the job's row cannot record."""
     if isinstance(error, ActivityError):
         return error.activity_type != "project"
+    if isinstance(error, ApplicationError):
+        return error.type == PACK_REFUSED  # a local activity's failure, unwrapped
     return isinstance(error, ChildWorkflowError)
+
+
+async def _row_write(
+    name: str,
+    *args: Any,
+    start_to_close_timeout: timedelta,
+    result_type: type[Any] | None = None,
+    cancellation_type: workflow.ActivityCancellationType = (
+        workflow.ActivityCancellationType.TRY_CANCEL
+    ),
+) -> Any:
+    """A write of the job's row (`project`, `render_claims`): a local activity for
+    `LOCAL_ROW_RETRY`'s attempts, then a regular one on `PROJECT_RETRY`, which never
+    gives up. A non-retryable failure is raised as it is, as `PROJECT_RETRY` would. A
+    local activity's failure is the error itself, not an ActivityError."""
+    try:
+        return await workflow.execute_local_activity(
+            name,
+            args=args,
+            result_type=result_type,
+            start_to_close_timeout=start_to_close_timeout,
+            retry_policy=LOCAL_ROW_RETRY,
+            cancellation_type=cancellation_type,
+        )
+    except FailureError as error:
+        if is_cancelled_exception(error) or (
+            isinstance(error, ApplicationError) and error.non_retryable
+        ):
+            raise
+        workflow.logger.warning("a job row write failed in this worker; retrying it: %s", error)
+    return await workflow.execute_activity(
+        name,
+        args=args,
+        result_type=result_type,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=PROJECT_RETRY,
+        cancellation_type=cancellation_type,
+    )
+
+
+async def _pack(req: PackRequest) -> Layout:
+    """Arrange's packer, as a local activity (#4199): it reads nothing but its request,
+    so it runs beside the workflow task with no activity task to hand off."""
+    layout: Layout = await workflow.execute_local_activity(
+        "pack", req, result_type=Layout, start_to_close_timeout=SHORT, retry_policy=RETRY
+    )
+    return layout
 
 
 def _settled(steps: list[StepInfo], state: StepState) -> list[StepInfo]:
