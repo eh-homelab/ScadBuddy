@@ -28,6 +28,21 @@ const render = (wrap = false) => {
 
 const row = (name: RegExp) => screen.findByRole('listitem', { name })
 
+type User = ReturnType<typeof render>['user']
+
+/** Opens the render trigger's standing grant for review, as a person does. */
+async function reviewRenderGrant(user: User) {
+  await user.click(within(await row(/When a render finishes/)).getByRole('button', { name: 'Review…' }))
+  return screen.findByRole('dialog', { name: 'Review the standing grant' })
+}
+
+/** Approves the render trigger's grant as shown, and waits for the dialog to close. */
+async function approveRenderGrant(user: User) {
+  const dialog = await reviewRenderGrant(user)
+  await user.click(await within(dialog).findByRole('button', { name: 'Approve' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+}
+
 describe('FlowTriggers', () => {
   it('lists each trigger with its next fire, its last fires and its grant', async () => {
     render()
@@ -43,11 +58,7 @@ describe('FlowTriggers', () => {
 
   it('approves a requested grant as it was shown', async () => {
     const { user } = render()
-    const trigger = await row(/When a render finishes/)
-    await user.click(within(trigger).getByRole('button', { name: 'Review…' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Review the standing grant' })
-    await user.click(await within(dialog).findByRole('button', { name: 'Approve' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await approveRenderGrant(user)
     const sent = flowTriggerRequests().filter((r) => r.path === '/flow-triggers/trig-render/grant/approve')
     expect(sent).toHaveLength(1)
     expect(sent[0]!.body?.['seen']).toBe('seen-trig-render-0')
@@ -66,11 +77,7 @@ describe('FlowTriggers', () => {
     try {
       resetFlowTriggers()
       const { user } = render()
-      const trigger = await row(/When a render finishes/)
-      await user.click(within(trigger).getByRole('button', { name: 'Review…' }))
-      const dialog = await screen.findByRole('dialog', { name: 'Review the standing grant' })
-      await user.click(await within(dialog).findByRole('button', { name: 'Approve' }))
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      await approveRenderGrant(user)
       expect(flowTriggerRequests().filter((r) => r.path === '/flow-triggers/trig-render/grant/approve')).toHaveLength(1)
     } finally {
       vi.useRealTimers()
@@ -79,9 +86,7 @@ describe('FlowTriggers', () => {
 
   it('refuses an approval of a trigger changed since it was shown, and shows it again', async () => {
     const { user } = render()
-    const trigger = await row(/When a render finishes/)
-    await user.click(within(trigger).getByRole('button', { name: 'Review…' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Review the standing grant' })
+    const dialog = await reviewRenderGrant(user)
     // An assistant widens the trigger between the person's look and their click.
     changeFlowTrigger('trig-render', { event: { kind: 'model.changed' } })
     await user.click(await within(dialog).findByRole('button', { name: 'Approve' }))
