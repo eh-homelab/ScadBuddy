@@ -104,6 +104,11 @@ class Address(AddressInput):
     position: int
 
 
+class AddressSnapshot(AddressInput):
+    """An address as copied onto an order at accept, or onto a shipment (Ruling 11):
+    the row's fields with its id, so a later edit to the customer never moves it."""
+
+
 class Customer(BaseModel):
     id: str
     display_name: str
@@ -168,8 +173,8 @@ class Order(BaseModel):
     shipping_address_id: str | None
     billing_address_id: str | None
     #: ...and the copies taken at accept, which a later customer edit never moves.
-    shipping_address: Address | None
-    billing_address: Address | None
+    shipping_address: AddressSnapshot | None
+    billing_address: AddressSnapshot | None
     notes: str
     due_at: datetime | None
     accepted_at: datetime | None
@@ -298,7 +303,7 @@ class Shipment(BaseModel):
     service: str | None
     tracking: str | None
     shipped_at: datetime | None
-    address: Address | None
+    address: AddressSnapshot | None
     cost_minor: Money | None
     notes: str
     created_at: datetime

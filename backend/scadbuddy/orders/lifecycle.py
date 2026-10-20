@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
     Actor,
-    Address,
+    AddressSnapshot,
     ChargeInput,
     Fulfilment,
     ItemStatus,
@@ -118,7 +118,7 @@ class ShipmentInput(BaseModel):
     service: str | None = None
     tracking: str | None = None
     shipped_at: datetime | None = None
-    address: Address | None = None
+    address: AddressSnapshot | None = None
     cost_minor: Money | None = None
     notes: str = ""
     items: list[ShipmentItem] = Field(default_factory=list)
@@ -393,11 +393,15 @@ class Lifecycle:
                     f"{len(unquoted)} item(s) of order {order.number} have no accepted quote",
                     items=unquoted,
                 )
-            snapshots: dict[str, Address | UnsetType | None] = {}
+            snapshots: dict[str, AddressSnapshot | None] = {}
             for name in ("shipping_address_id", "billing_address_id"):
                 address_id = getattr(order, name)
                 found = self.store.address(address_id, conn=conn) if address_id else None
-                snapshots[name.removesuffix("_id")] = found[1] if found else None
+                snapshots[name.removesuffix("_id")] = (
+                    AddressSnapshot.model_validate(found[1].model_dump(exclude={"position"}))
+                    if found
+                    else None
+                )
             self.store.update_order_fields(
                 conn,
                 order.id,

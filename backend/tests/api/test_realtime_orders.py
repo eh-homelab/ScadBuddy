@@ -57,3 +57,7 @@ def test_an_order_change_is_news_for_orders_and_its_order(app: FastAPI, client: 
         assert frame["topics"] == ["orders"]
         orders.lifecycle.hold(order.id, Actor(kind="browser"))
         assert ws.receive_json()["data"] == {"order_id": order.id, "status": "draft"}
+        # A route's plain edit publishes the same way (Task 7).
+        patched = client.patch(f"/api/v1/orders/{order.id}", json={"notes": "heard"})
+        assert patched.status_code == 200, patched.text
+        assert ws.receive_json()["data"] == {"order_id": order.id, "status": "draft"}
