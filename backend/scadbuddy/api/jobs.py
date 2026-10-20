@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -14,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -48,10 +47,9 @@ from scadbuddy.api.versions import require_history
 from scadbuddy.bambuddy.library_view import plate_glb
 from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
-from scadbuddy.library.catalogue import meta_from_raw
+from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
@@ -313,19 +311,6 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
     )
 
 
-def _declares_pipeline(directory: Path, slug: str) -> bool:
-    """Whether the template's model.json at this revision declares a pipeline (§5.1),
-    read as the catalogue reads it. A malformed declaration counts: the job then reaches
-    the worker, whose `load_pipeline` names what is wrong with it. An unreadable
-    model.json declares none, and the job renders `model.scad`'s parameters."""
-    try:
-        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
-        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
-    except (OSError, ValueError, ValidationError):
-        return False
-    return meta.pipeline is not None or meta.pipeline_raw is not None
-
-
 async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
     """Validate an explicitly requested revision. ``None`` leaves the caller to fall
     back to whatever the model is currently at."""
@@ -444,7 +429,7 @@ async def render_model(
     params, inputs = normalized.params, normalized.data
     # A pipeline passes params to the pieces it renders, each of which checks its own
     # (§5.2); only the built-in pipeline renders `model.scad` with them.
-    pipeline = await asyncio.to_thread(_declares_pipeline, source.scad.parent, slug)
+    pipeline = await asyncio.to_thread(declares_pipeline, source.scad.parent, slug)
     if not pipeline:
         require_valid_params(schema, params)
         # A family that is not installed is a 422 here, not a render in the default font.
