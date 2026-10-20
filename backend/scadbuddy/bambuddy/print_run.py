@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from scadbuddy.bambuddy.catalogue import Catalogue
+from scadbuddy.bambuddy.catalogue import Catalogue, ReadCatalogue
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
@@ -560,9 +560,6 @@ class PrintCheck(BaseModel):
 
 
 ChooseRack = Callable[[int], Awaitable[RackChoice | None]]
-#: Where the check reads the preset catalogue from: the dialog's kept copy
-#: (:func:`~scadbuddy.bambuddy.catalogue.cached_catalogue`, #4196).
-ReadCatalogue = Callable[[], Awaitable[Catalogue]]
 
 
 class RackReads(Protocol):

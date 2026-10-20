@@ -1003,7 +1003,7 @@ async def post_check(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
-    catalogue: CatalogueDep,
+    library_catalogue: CatalogueDep,
     paths: PathsDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
@@ -1018,7 +1018,7 @@ async def post_check(
     settings = store.load()
     try:
         # The template's defaults, by-object printing among them (#2976).
-        print_settings = await asyncio.to_thread(catalogue.print_settings, meta.slug)
+        print_settings = await asyncio.to_thread(library_catalogue.print_settings, meta.slug)
     except InvalidModelMetaError:
         print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:

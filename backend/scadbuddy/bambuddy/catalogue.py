@@ -226,9 +226,11 @@ def catalogue_name_key(kek: Kek | None) -> bytes | None:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=NAME_KEY_INFO).derive(kek.key)
 
 
-def kept_catalogue(
-    client: BambuddyClient, cache: Path, kek: Kek | None
-) -> Callable[[], Awaitable[Catalogue]]:
+#: A catalogue read deferred: what the dialog's check is given (#4196).
+ReadCatalogue = Callable[[], Awaitable[Catalogue]]
+
+
+def kept_catalogue(client: BambuddyClient, cache: Path, kek: Kek | None) -> ReadCatalogue:
     """:func:`cached_catalogue` for ``client`` as a reader, its file named under
     :func:`catalogue_name_key` as the dialog's choices name it: what the dialog's check
     reads (#4196)."""
