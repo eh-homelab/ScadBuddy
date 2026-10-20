@@ -1005,6 +1005,7 @@ async def post_check(
     rack: RackUsageDep,
     library_catalogue: CatalogueDep,
     paths: PathsDep,
+    printers: PrintersDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -1031,6 +1032,8 @@ async def post_check(
             body,
             rack=rack,
             print_settings=print_settings,
+            printers=printers.store,
+            reports=printers.reports,
             catalogue=kept_catalogue(client, paths.cache, store.kek),
         )
 

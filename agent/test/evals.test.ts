@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { EvalBackend, OUTWARD_ROUTES } from '../evals/backend.js'
+import { EvalBackend, OUTWARD_ROUTES, routePattern } from '../evals/backend.js'
 import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { EVAL_DENIAL, EVAL_TOOL_PREFIX, formatReport, runScenario, type Scenario, score, type ScriptedTurn } from '../evals/runner.js'
 import {
@@ -142,6 +142,15 @@ describe('eval checks', () => {
     expect(others.some((r) => r.startsWith('GET '))).toBe(true)
     expect(ALL_TOOLS.some((t) => t.risk === 'write')).toBe(true)
     for (const route of others.filter((r) => !outward.includes(r))) expect(isOutward(concrete(route)), route).toBe(false)
+  })
+
+  it('never matches a parameter against a literal route of the same place (#4442)', () => {
+    const one = routePattern('GET /api/v1/printers/{printer_id}')
+    expect(one.test('GET /api/v1/printers/00000000-0000-4000-8000-0000000000aa')).toBe(true)
+    expect(one.test('GET /api/v1/printers/discover')).toBe(false)
+    expect(one.test('GET /api/v1/printers/discovered')).toBe(true)
+    expect(one.test('PUT /api/v1/printers/discover')).toBe(false)
+    expect(routePattern('PUT /api/v1/printers/{printer_id}', ['PUT /api/v1/printers/discover']).test('PUT /api/v1/printers/discover')).toBe(false)
   })
 
   it('every scenario checks the approval invariants', () => {

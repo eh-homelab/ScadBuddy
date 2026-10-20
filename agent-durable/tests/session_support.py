@@ -110,6 +110,8 @@ class StandInTools:
         self._connect = connect
         self.ran: list[tuple[str, dict[str, Any]]] = []
         self.describe_refuses = False
+        #: describe_call's ToolError, when the agent refuses the call before it parks (#4442).
+        self.describe_tool_error: str | None = None
         #: The input hash describe_call gives a tool, when not the default ``"a" * 64``.
         self.input_hashes: dict[str, str] = {}
         # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
@@ -198,6 +200,10 @@ class StandInTools:
         async def describe_call(args: dict[str, Any]) -> dict[str, str]:
             if self.describe_refuses:
                 raise ApplicationError("no such session", type="UnknownSession", non_retryable=True)
+            if self.describe_tool_error is not None:
+                raise ApplicationError(
+                    self.describe_tool_error, type="ToolError", non_retryable=True
+                )
             digest = self.input_hashes.get(args["tool"], "a" * 64)
             return {"summary": f"{args['tool']} call", "input_hash": digest}
 

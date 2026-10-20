@@ -1134,6 +1134,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # This process's own native library when it serves (#3827).
         library=await state.components.get(PRINT_LIBRARY).serving_native(),
         native=state.components.get(SLICING).starter,
+        printers=state.components.get(PRINTERS).store,
+        reports=state.components.get(PRINTERS).reports,
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)

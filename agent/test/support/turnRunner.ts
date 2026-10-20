@@ -8,7 +8,7 @@ import type { ApprovalRequest, RiskTier } from '../../src/harness/permissions.js
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
 import { forwardForRun, type PluginForwarder } from '../../src/plugins/forwarder.js'
 import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.js'
-import { TurnRunner } from '../../src/sessions/turnRunner.js'
+import { TurnRunner, type TurnRunnerDeps } from '../../src/sessions/turnRunner.js'
 import type { TurnContext } from '../../src/sessions/turnSlot.js'
 import type { SessionFiles } from '../../src/workspace/store.js'
 import { TurnTrace } from '../../src/telemetry/turn.js'
@@ -37,6 +37,8 @@ export type TurnRunnerTestOptions = {
   allowRefused?: boolean
   /** The stored Hindsight recall query cap (#2655); the default when undefined. */
   recallMaxQueryChars?: number
+  /** The preparer each assembly binds (#4442); none resolves when undefined. */
+  prepareApproval?: TurnRunnerDeps['prepareApproval']
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -96,6 +98,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     },
     tierOf: () => 'read',
     mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),
+    prepareApproval: options.prepareApproval ?? (() => async () => undefined),
     builtInTools: () =>
       Promise.resolve(
         builtInPolicy([

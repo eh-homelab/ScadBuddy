@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
@@ -5,7 +6,21 @@ import type { AuditLog } from '../audit/log.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import { effectiveTool, type FlowImages, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
+import { withApprovalLine } from '../approvals/service.js'
+import {
+  effectiveTool,
+  type FlowImages,
+  isRefusal,
+  isTransient,
+  parsedOrRaw,
+  runToolWithOutcome,
+  type Tool,
+  ToolError,
+  toolErrorText,
+  unexpectedErrorText,
+  type ToolRun,
+  type ToolServices,
+} from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
@@ -157,12 +172,27 @@ export type ToolActivityDeps = {
   flowBlobs?: FlowBlobStore | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
+  /**
+   * The waits between a resolving tool's tries to read what it names as an approved call runs
+   * (#4442 gate re-review), one more try than waits; RESOLVE_BACKOFF_MS when undefined.
+   */
+  resolveBackoffMs?: readonly number[]
 }
 
 export type ToolActivity = (input: unknown) => Promise<unknown>
 
 /** The failure type of a call that ran and did not succeed: never retried. */
 export const TOOL_ERROR = 'ToolError'
+/**
+ * The failure type of a resolving tool's read that met the backend away or rate-limiting
+ * (#4442 gate review): retried, and never taken for the tool's refusal.
+ */
+export const BACKEND_UNAVAILABLE = 'BackendUnavailable'
+/**
+ * The waits between an approved call's tries to resolve what it names while the backend is
+ * away (#4442 gate re-review): a gated call's activity runs once, so these are its only retries.
+ */
+export const RESOLVE_BACKOFF_MS: readonly number[] = [500, 2000]
 /** The failure type of a call from a workflow that is no known session. */
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
@@ -448,7 +478,7 @@ async function runGated(
   // approval and is refused NotApproved; one disabled after its approval is refused as
   // disabled; and no second read can disagree with the one that was checked.
   const effective = await effectiveTool(tool, deps.services)
-  const refuse = async (detail: string, message: string, type: string): Promise<never> => {
+  const refuse = async (detail: string, message: string, type: string, outcome: 'refused' | 'error' = 'refused'): Promise<never> => {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -462,7 +492,7 @@ async function runGated(
       tier: effective.risk,
       inputHash: deps.audit.hash(tool.name, parsed),
       inputSummary: deps.audit.summarise(tool.name, parsed),
-      outcome: 'refused',
+      outcome,
       detail,
       startedAt: now,
       finishedAt: now,
@@ -473,9 +503,50 @@ async function runGated(
     const message = `${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`
     await refuse(message, message, TOOL_ERROR)
   }
+  const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
+  const services = deps.services
+  // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
+  // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
+  // approval is of the script's raw arguments (the backend hashes those), so a flow's call
+  // runs them as sent, resolved only to refuse a pair its registry row no longer links.
+  //
+  // Its activity runs once (a gated call is never retried), so a backend away or rate-limiting
+  // is tried again here, within the one approval: safe, since nothing is checked or sent before
+  // the read succeeds, and the approval is then checked against what that read resolved. Still
+  // away after the last try, the call fails closed and is audited, and the model is told the
+  // approval was spent, so it asks again and a person approves again.
+  let runInput = input
+  if (effective.gated && tool.resolvesApproval) {
+    const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
+    const waits = deps.resolveBackoffMs ?? RESOLVE_BACKOFF_MS
+    const unavailable = (tries: number, why: string): Promise<never> =>
+      refuse(
+        `the backend was unavailable after ${tries} tries: ${why}`,
+        `${tool.name} was not run: what it names could not be checked (${why}), so this call's approval is spent; call it again to ask for a new one`,
+        BACKEND_UNAVAILABLE,
+        'error',
+      )
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // Only the input: the line naming the printer was the approval's, so its reads are skipped.
+        const resolved = (await tool.prepareApproval(input, ctx, { summary: false })).input
+        if (flow === undefined) runInput = resolved
+        break
+      } catch (err) {
+        // A refusal, or an error no retry would change (arguments that do not parse), ends it now.
+        if (isRefusal(err) || !(isTransient(err) || call.signal.aborted)) await refuseOrRetry(err, refuse, tool.name)
+        const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
+        const wait = waits[attempt]
+        if (wait === undefined || call.signal.aborted) await unavailable(attempt + 1, why)
+        await sleep(wait, undefined, { signal: call.signal }).catch(() => {})
+        // Cancelled while it waited: refused now, never one more read (#4442 review).
+        if (call.signal.aborted) await unavailable(attempt + 1, why)
+      }
+    }
+  }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
   // describe_call gave the parked call, computed again from what this call was given.
-  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
+  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (runInput ?? {}) as Record<string, unknown>) } : undefined
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
     if (await caller.approvals?.lapsed?.(requestId, binding)) {
       await refuse(
@@ -490,13 +561,11 @@ async function runGated(
       NOT_APPROVED,
     )
   }
-  const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
-  const services = deps.services
   const heartbeat = setInterval(() => call.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
   const startedAt = new Date()
   let run: ToolRun
   try {
-    run = await runToolWithOutcome(tool, input, {
+    run = await runToolWithOutcome(tool, runInput, {
       ...services,
       // The tab paired with this session (#254), as for a classic turn; a flow has none.
       ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
@@ -644,6 +713,24 @@ async function answerAsActivity(
   return answer.text
 }
 
+/**
+ * A resolving tool's failure (#4442 gate review): its own refusal refuses the call, its
+ * backend text in the untrusted-data envelope; the backend away, rate-limiting or out of
+ * reach is thrown to be retried; anything else (arguments that do not parse) is refused
+ * too, saying what went wrong, since no retry would change it.
+ */
+async function refuseOrRetry(
+  err: unknown,
+  refuse: (detail: string, message: string, type: string) => Promise<never>,
+  tool: string,
+): Promise<never> {
+  if (err instanceof CancelledFailure) throw err
+  if (isRefusal(err)) return refuse(err.summary, `${tool} was not run: ${toolErrorText(err, tool)}`, TOOL_ERROR)
+  if (isTransient(err)) throw ApplicationFailure.retryable(err instanceof ToolError ? err.summary : (err as Error).message, BACKEND_UNAVAILABLE)
+  const { text, detail } = unexpectedErrorText(err, tool)
+  return refuse(detail, `${tool} was not run: ${text}`, TOOL_ERROR)
+}
+
 /** The activity that describes a call for its gate entry (gateActivities). */
 export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
 
@@ -655,19 +742,75 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  * scrubbing rules. Served on `agent-tools` beside the tools.
  */
 export function gateActivities(
-  deps: Pick<ToolActivityDeps, 'audit' | 'sessions'> & { workspace?: SessionFiles | undefined },
+  deps: Pick<ToolActivityDeps, 'audit' | 'sessions' | 'currentTiers'> & {
+    workspace?: SessionFiles | undefined
+    /**
+     * The tools whose own `prepareApproval` decides what a call parks (#4442), and the
+     * services it reads with, as the session's owner. Without them, every call parks as sent.
+     */
+    tools?: readonly Tool[]
+    services?: ToolServices
+  },
 ): Record<string, ToolActivity> {
+  const byName = new Map((deps.tools ?? []).map((t) => [t.name, t]))
+  const lookup = (name: string): Tool | undefined => byName.get(name)
   return {
     [DESCRIBE_CALL_ACTIVITY]: async (args: unknown) => {
       // The hash is keyed by the approvals' HMAC key: only a durable session's workflow
       // gets one (security review of 5b).
-      const { session } = await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
+      const { session, owner, turnTiers: sent } = await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (!deps.audit) throw ApplicationFailure.nonRetryable('describing a call needs the audit log and its key', TOOL_ERROR)
       if (typeof tool !== 'string' || typeof input !== 'object' || input === null || Array.isArray(input)) {
         throw ApplicationFailure.nonRetryable('describe_call takes {tool: string, input: object}', TOOL_ERROR)
       }
       const fields = input as Record<string, unknown>
+      // A tool that resolves what its arguments name (#4442: print_output's registry printer)
+      // parks the resolved input, by the line that names it; the call's activity resolves it
+      // again and runs only if it hashes the same (runGated). A ToolError refuses it unparked.
+      const own = lookup(tool.startsWith(HARNESS_PREFIX) ? tool.slice(HARNESS_PREFIX.length) : tool)
+      const services = deps.services
+      const audit = deps.audit
+      // Resolved only for a call that could run: the tool enabled, and its tier one the owner holds now.
+      const effective = own && services ? await effectiveTool(own, services) : undefined
+      const tiers = await turnTiers(owner, sent, deps)
+      const principal = turnPrincipal(owner, tiers ? { tiers: [...tiers] } : undefined)
+      if (own?.resolvesApproval && services && effective && !effective.disabled && principal.tiers.includes(effective.risk)) {
+        const { request_id: requestId } = args as { request_id?: unknown }
+        const refuse = async (detail: string, message: string, type: string): Promise<never> => {
+          const parsed = parsedOrRaw(own, fields)
+          const now = new Date()
+          await audit.record({
+            kind: 'tool_call',
+            action: own.name,
+            surface: 'harness',
+            actor: owner,
+            sessionId: session,
+            ...(typeof requestId === 'string' ? { requestId } : {}),
+            tier: effective.risk,
+            inputHash: audit.hash(own.name, parsed),
+            inputSummary: audit.summarise(own.name, parsed),
+            outcome: 'refused',
+            detail,
+            startedAt: now,
+            finishedAt: now,
+          })
+          throw ApplicationFailure.nonRetryable(message, type)
+        }
+        let prepared: { input: Record<string, unknown>; summary: string }
+        try {
+          const ctx = { ...services, principal, session, progress: async () => {}, signal: Context.current().cancellationSignal, lookup, gate: 'workflow' as const }
+          prepared = await own.prepareApproval(fields, ctx)
+        } catch (err) {
+          return refuseOrRetry(err, refuse, own.name)
+        }
+        const secrets = (await services.secrets?.()) ?? []
+        const shown = await withWorkspaceSize(deps.workspace, { kind: 'session', sessionId: session }, prepared.input)
+        return {
+          summary: withApprovalLine(prepared.summary, audit.summarise(tool, shown, secrets), secrets),
+          input_hash: audit.hash(tool, prepared.input),
+        }
+      }
       // A workspace upload's size is shown (#2396), from the session's own workspace; the hash is of the call's input.
       const shown = await withWorkspaceSize(deps.workspace, { kind: 'session', sessionId: session }, fields)
       return { summary: deps.audit.summarise(tool, shown), input_hash: deps.audit.hash(tool, fields) }

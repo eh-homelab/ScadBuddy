@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { ApprovalGate, ApprovalRequest, ApprovalVerdict, RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
-import type { Kek } from '../secrets.js'
+import { type Kek, redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
   type ApprovalDecisionMessage,
@@ -122,8 +122,13 @@ export const DEFAULT_APPROVAL_EXPIRY_SECONDS = 600
 export const MIN_APPROVAL_EXPIRY_SECONDS = 10
 export const MAX_APPROVAL_EXPIRY_SECONDS = 86_400
 export const DEFAULT_APPROVAL_POLL_MS = 1000
-/** The longest `approval.required` summary. */
-export const APPROVAL_SUMMARY_MAX = 500
+/**
+ * The longest `approval.required` summary, which the panel's card shows: 500 for the call's
+ * arguments, plus a resolving tool's line and its newline (APPROVAL_LINE_MAX, #4442 gate
+ * re-review N1), so the line never takes the arguments' room. agent-durable gate/store.py and
+ * gate/store.ts keep the same cap.
+ */
+export const APPROVAL_SUMMARY_MAX = 500 + 200 + 1
 /** The advisory-lock key MCP prepares serialise on (`createPrepared`). */
 const PREPARE_LOCK = 'scadbuddy:ai_approvals:mcp_prepare'
 
@@ -376,6 +381,22 @@ export function inputHash(key: Buffer, tool: string, input: Record<string, unkno
   return createHmac('sha256', key).update(canonicalJson({ tool, input }), 'utf8').digest('hex')
 }
 
+/** The longest line a resolving tool puts above its call's arguments (#4442). */
+export const APPROVAL_LINE_MAX = 200
+
+/**
+ * A resolving tool's line (ApprovalRequest.summary, #4442) above the call's own scrubbed
+ * arguments, so a person sees what it resolved and every argument the model chose. The
+ * line is one line, redacted of the turn's secrets and capped: it can name a printer.
+ */
+export function withApprovalLine(line: string, summary: string, secrets: readonly string[]): string {
+  const one = redact(line, secrets)
+    // eslint-disable-next-line no-control-regex -- the control characters are what is stripped
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .trim()
+  return `${cap(one, APPROVAL_LINE_MAX)}\n${summary}`
+}
+
 /** The input as the event log would show it: scrubbed and size-capped by scrubForLog. */
 export function summariseInput(tool: string, input: Record<string, unknown>, secrets: readonly string[]): string {
   const scrubbed = scrubForLog(
@@ -435,6 +456,8 @@ export type CreateApproval = {
   traceparent?: string
   /** The workspace the call runs in (workspaceOf), for an upload's size; a session's own when omitted. */
   workspace?: WorkspaceRef
+  /** The tool's own line for a call it resolved (ApprovalRequest.summary, #4442); else the scrubbed input. */
+  summary?: string
 }
 
 export type DecideOptions = {
@@ -688,7 +711,8 @@ export class ApprovalService {
   private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
     const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
     const shown = await withWorkspaceSize(this.deps.workspace, ws, request.input)
-    return summariseInput(request.tool, shown, request.secrets ?? [])
+    const input = summariseInput(request.tool, shown, request.secrets ?? [])
+    return request.summary === undefined ? input : withApprovalLine(request.summary, input, request.secrets ?? [])
   }
 
   /** Records a pending approval (and, in a session, emits `approval.required`). */
@@ -1300,6 +1324,7 @@ export class ApprovalService {
           toolUseId: request.toolUseId,
           tool: request.toolName,
           input,
+          ...(request.summary !== undefined ? { summary: request.summary } : {}),
           tier: request.tier,
           requestedBy: context.requestedBy,
           ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),

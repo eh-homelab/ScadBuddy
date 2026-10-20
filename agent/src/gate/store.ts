@@ -29,7 +29,8 @@ export const INPUT_CHANNEL = 'scadbuddy_input'
 // this file does not write through EventLog.append. If the gate ever does, use the publisher's id.
 const REPLICA = 'agent-durable'
 const SYSTEM: Responder = { kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' }
-const APPROVAL_SUMMARY_MAX = 500
+// approvals/service.ts APPROVAL_SUMMARY_MAX: the arguments' 500, plus a resolving tool's line (#4442).
+const APPROVAL_SUMMARY_MAX = 500 + 200 + 1
 
 export type Responder = { kind: string; id: string; label: string }
 type Hop = { hop: string; action: string; actor: string; at: string; reason?: string }

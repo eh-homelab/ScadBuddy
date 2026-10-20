@@ -20,6 +20,9 @@ STATUSES: tuple[ActivityStatus, ...] = (
 )
 FINISHED: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 FacetType = Literal["keyword", "number", "bool", "time"]
+#: Where a facet's values are named (#4442 review): ``printers`` is the printer registry,
+#: whose rows name the uuids a ``printer`` facet holds. The facets read lists them as options.
+FacetOptions = Literal["printers"]
 
 
 class ActivityRow(BaseModel):
@@ -50,6 +53,8 @@ class Facet:
     type: FacetType
     label: str
     filterable: bool = True
+    #: The values a filter offers, each named (`FacetOptions`); a free-text filter without.
+    options: FacetOptions | None = None
 
 
 @dataclass(frozen=True)

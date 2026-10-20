@@ -177,6 +177,51 @@ describe("ActivityPage", () => {
     expect(await screen.findByLabelText("Template")).toBeInTheDocument();
   });
 
+  it("offers a facet's named values by name, and filters by the value (#4442 review)", async () => {
+    const garage = "00000000-0000-4000-8000-0000000000aa";
+    const facets = await (await fetch("/api/v1/activity/facets")).json();
+    setActivityFacets({
+      ...facets,
+      kinds: [
+        ...facets.kinds,
+        {
+          key: "print_run",
+          label: "Print",
+          facets: [
+            {
+              name: "printer",
+              type: "keyword",
+              label: "Printer",
+              filterable: true,
+              options: [{ value: garage, label: "Garage" }],
+            },
+          ],
+        },
+      ],
+    });
+    const { user } = render("/activity?kind=print_run");
+    await user.click(
+      await screen.findByRole("combobox", { name: "Printer" }, { timeout: 5000 }),
+    );
+    expect(screen.queryByRole("option", { name: garage })).toBeNull();
+    await user.click(await screen.findByRole("option", { name: "Garage" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).toContain(
+        `facet.printer=${garage}`,
+      ),
+    );
+    expect(screen.getByRole("combobox", { name: "Printer" })).toHaveTextContent(
+      "Garage",
+    );
+    await user.click(screen.getByRole("combobox", { name: "Printer" }));
+    await user.click(await screen.findByRole("option", { name: "Any" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).not.toContain(
+        "facet.printer",
+      ),
+    );
+  });
+
   it("updates live when an activity changes", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const realtime = fakeRealtime();

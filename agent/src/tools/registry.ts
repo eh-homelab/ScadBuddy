@@ -251,6 +251,18 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   /** A human-readable line for the pending action a gated call creates. */
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
   /**
+   * What a gated call parks for approval, when that needs a read (#4442): the input a
+   * person approves, which may name what the arguments resolve to (a registry printer's
+   * Bambuddy id), and the line that says it. confirm_action must send that input, so
+   * what runs is what was approved. It may refuse the call, before anything is parked.
+   * Without it, the call's parsed arguments and `summarize`.
+   */
+  prepareApproval?: (
+    args: z.infer<z.ZodObject<S>>,
+    ctx: ToolContext,
+    needs: ApprovalNeeds,
+  ) => Promise<{ input: z.infer<z.ZodObject<S>>; summary: string }>
+  /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
    * the action ("Render cable-clip"), since the panel shows whether it is
    * running or done beside it. Defaults to the name in words, with the `slug`
@@ -275,6 +287,13 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<CallToolResult>
 }
 
+/**
+ * What a prepareApproval caller needs besides the input (#4442 review): `summary: false` when
+ * only the input is wanted (a durable call's hash check as it runs), so the tool skips reads
+ * made only to word the line a person sees; it still returns a line, worded without them.
+ */
+export type ApprovalNeeds = { summary: boolean }
+
 /** A registry entry with its argument types erased, so tools of any shape share one list. */
 export type Tool = {
   readonly name: string
@@ -289,6 +308,10 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
+  /** What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`). */
+  prepareApproval(args: unknown, ctx: ToolContext, needs?: ApprovalNeeds): Promise<{ input: Record<string, unknown>; summary: string }>
+  /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
+  readonly resolvesApproval: boolean
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
   title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
@@ -337,6 +360,19 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     summarize(args) {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
+    },
+    resolvesApproval: spec.prepareApproval !== undefined,
+    async prepareApproval(args, ctx, needs = { summary: true }) {
+      const parsed = spec.input.parse(args)
+      if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }
+      const prepared = await spec.prepareApproval(parsed, ctx, needs)
+      const input = spec.input.parse(prepared.input)
+      // It may fill what the call left out, never change what the model chose (#4442 gate review).
+      const resolved: Record<string, unknown> = input
+      const changed = Object.entries(parsed).find(([key, value]) => value !== undefined && JSON.stringify(resolved[key]) !== JSON.stringify(value))
+      // A bug in the tool, never the backend away: a refusal (no status), so it ends at once (#4442 N2).
+      if (changed) throw new ToolError(`${spec.name}'s prepareApproval changed the supplied argument ${changed[0]}`)
+      return { input, summary: prepared.summary }
     },
     title(args) {
       const parsed = spec.input.safeParse(args)
@@ -390,6 +426,34 @@ export class ToolError extends Error {
   }
 }
 
+/**
+ * Whether an error is the tool's own refusal (#4442 gate review): a ToolError that is not
+ * the backend away (5xx) or rate-limiting (429). Those, and a network error, are worth
+ * trying again, so a gate leaves them to its retries rather than refusing the call.
+ */
+export function isRefusal(err: unknown): err is ToolError {
+  return err instanceof ToolError && !(err.status !== undefined && (err.status >= 500 || err.status === 429))
+}
+
+/** A socket's codes for a backend it could not reach, on undici's `fetch failed` cause. */
+const UNREACHED = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'EADDRNOTAVAIL', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'])
+
+/**
+ * Whether an error is worth another try (#4442 review): the backend away (5xx) or
+ * rate-limiting (429), or a request that never reached it (fetch's network failure, a
+ * timeout or abort). Anything else, a ToolError refusal or an error in the tool itself
+ * (its arguments not parsing), will fail the same way again.
+ */
+export function isTransient(err: unknown): boolean {
+  if (err instanceof ToolError) return !isRefusal(err)
+  if (!(err instanceof Error)) return false
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return true
+  // Node's fetch (undici) says `fetch failed`; the WHATWG wording, msw's too, `Failed to fetch`.
+  if (err instanceof TypeError && (err.message === 'fetch failed' || err.message === 'Failed to fetch')) return true
+  const code = (err.cause as { code?: unknown } | undefined)?.code ?? (err as { code?: unknown }).code
+  return typeof code === 'string' && UNREACHED.has(code)
+}
+
 /** Where a backend error's reason comes from, for the envelope around it. */
 export const ERROR_DETAIL_SOURCE =
   "the backend's error detail, which can relay Bambuddy's or another upstream's own message"
@@ -402,6 +466,21 @@ export function toolErrorText(err: ToolError, tool: string): string {
   return err.untrusted === undefined
     ? err.message
     : `${err.summary}: ${wrapUntrustedText(tool, ERROR_DETAIL_SOURCE, err.untrusted)}`
+}
+
+/**
+ * What went wrong, for an error that is neither a ToolError nor worth another try (#4442
+ * review): arguments that do not parse said as such, else the error's own message, which
+ * the model gets in the untrusted-data envelope (it can quote an upstream). `detail` is the
+ * audit row's, unwrapped.
+ */
+export function unexpectedErrorText(err: unknown, tool: string): { text: string; detail: string } {
+  if (err instanceof z.ZodError) {
+    const text = `its arguments are not valid (${z.prettifyError(err)})`
+    return { text, detail: text }
+  }
+  const reason = err instanceof Error ? err.message : String(err)
+  return { text: `it failed: ${wrapUntrustedText(tool, UNEXPECTED_ERROR_SOURCE, reason)}`, detail: `it failed: ${reason}` }
 }
 
 export function errorResult(message: string): CallToolResult {
@@ -558,11 +637,14 @@ async function runJudgedByResult(
   try {
     if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
-      const input = tool.parse(args)
+      const { input, summary } = await tool.prepareApproval(args, ctx)
+      // The approved input differs from the call's when the tool resolved what an argument
+      // names (#4442); confirm_action must then send it, so the answer carries it.
+      const resolved = JSON.stringify(input) !== JSON.stringify(tool.parse(args))
       const action = await ctx.pending.prepare(ctx.principal, {
         tool: tool.name,
         input,
-        summary: tool.summarize(args),
+        summary,
         workspace: workspaceOf(ctx),
       })
       return {
@@ -571,10 +653,12 @@ async function runJudgedByResult(
           pending_action_id: action.id,
           summary: action.summary,
           expires_at: action.expiresAt.toISOString(),
+          ...(resolved ? { arguments: input } : {}),
           next:
             'Nothing was sent. Outward actions need a human approval in the ScadBuddy UI. Once the user has ' +
-            'approved it there, call confirm_action with this pending_action_id and exactly the same arguments; ' +
-            'until then confirm_action answers pending_approval.',
+            `approved it there, call confirm_action with this pending_action_id and ${
+              resolved ? 'exactly these `arguments` (what the user approves)' : 'exactly the same arguments'
+            }; until then confirm_action answers pending_approval.`,
         }),
         outcome: 'refused',
         detail: `waiting for approval (pending action ${action.id}); nothing was sent`,

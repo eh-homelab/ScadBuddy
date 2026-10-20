@@ -23,13 +23,14 @@ that every foreign key to ``printers`` is listed), in one of two forms:
   settle. It runs on the merge's connection, inside its transaction, while both rows
   still exist; raising undoes the merge. ``tray_spool_links`` (#4180, primary key
   ``(printer_id, ams_id, tray_id)``) is registered this way with
-  ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190); Task 8's
-  activity attribution joins the same way. A bare hook is accepted too, for a reference
-  with no column to name.
+  ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190). A bare
+  hook is accepted too, for a reference with no column to name: Task 8's print-run
+  activity facet is one (`_repoint_run_activity`).
 
 A table that names a printer also carries ``REFERENCES printers (id) ON DELETE
 CASCADE`` (``tray_spool_links``: 20261019T0304Z), so a delete takes its rows with it
-and the test above sees it."""
+and the test above sees it; ``print_runs.printer`` is ``ON DELETE SET NULL`` instead
+(20261020T0327Z), since a run's history outlives its printer."""
 
 from __future__ import annotations
 
@@ -132,11 +133,32 @@ def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> No
     repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
+def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # A print run's activity row names its printer in the ``printer`` facet (#3823 Task
+    # 8), a JSON value rather than a column, so no foreign key keeps it.
+    conn.execute(
+        "UPDATE activity SET facets = jsonb_set(facets, '{printer}', to_jsonb(%s::text))"
+        " WHERE kind = 'print_run' AND facets->>'printer' = %s",
+        (into, merged),
+    )
+
+
+def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
+    conn.execute(
+        "UPDATE activity SET facets = facets - 'printer'"
+        " WHERE kind = 'print_run' AND facets->>'printer' = %s",
+        (printer_id,),
+    )
+
+
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
     PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),
+    # #3823 Task 8: the printer a run printed on, and its activity row's facet.
+    PrinterReference("print_runs", "printer"),
+    _repoint_run_activity,
 )
 
 
@@ -536,3 +558,7 @@ class PrinterStore:
             gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
             if gone.rowcount == 0:
                 raise PrinterNotFoundError(printer_id)
+            # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
+            # activity facets follow in the same transaction, so the Printer filter never
+            # offers a printer that is gone (#4442 M3).
+            _forget_run_activity(conn, str(key))

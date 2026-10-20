@@ -67,7 +67,7 @@ UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while preparing this print; s
 _COLUMNS = (
     "id, output_id, status, created_at, finished_at, result, error,"
     " (status = 'failed' AND enqueue_attempted) AS may_have_queued,"
-    " workflow_id, workflow_run_id"
+    " workflow_id, workflow_run_id, printer::text AS printer"
 )
 
 
@@ -112,6 +112,9 @@ class PrintRun(BaseModel):
     #: Only on a ``POST .../run`` answered 200: this is an earlier run with the same key,
     #: and the POST started nothing.
     repeated: bool = False
+    #: The registry printer the run prints on (#3823), whichever field named it; ``None``
+    #: for a run from before the registry, or one whose printer was deleted since.
+    printer: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -171,8 +174,11 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
 
     ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm``,
     ``filament_profiles``, ``supports`` (#1899), ``prime_tower`` (#3628), ``plate_ids``
-    (#3652) and ``folder_id`` (#3651) are part of it when sent; without them the key is
-    what it was before the fields existed.
+    (#3652), ``folder_id`` (#3651) and ``printer`` (#3823) are part of it when sent;
+    without them the key is what it was before the fields existed. ``printer`` counts
+    only without ``printer_id``, which decides when both are sent (#4442 I1, M1): the
+    dialog sent it, ignored, before the backend read it, so its keys stay as they were
+    across the deploy, and a retry that straddles it joins its run.
     """
     optional = (
         "request_id",
@@ -183,8 +189,11 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "prime_tower",
         "plate_ids",
         "folder_id",
+        "printer",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
+    if request.printer_id is not None:
+        exclude.add("printer")
     # #717: no profiles is the key from before the field existed.
     if not request.filament_profiles:
         exclude.add("filament_profiles")
@@ -262,6 +271,7 @@ class PrintRunStore:
         workflow_id: str,
         workflow_run_id: str,
         retention: timedelta | None,
+        printer: str | None = None,
     ) -> PrintRun:
         """Record an accepted run of ``subject``; the execution's row if it has one
         already (a retried activity, §4.2 step 3), announced only when inserted. Prunes
@@ -275,6 +285,7 @@ class PrintRunStore:
             workflow_id,
             workflow_run_id,
             retention,
+            printer,
         )
 
     async def start_enqueue(self, run_id: str) -> None:
@@ -410,17 +421,21 @@ class PrintRunStore:
         workflow_id: str,
         workflow_run_id: str,
         retention: timedelta | None,
+        printer: str | None = None,
     ) -> PrintRun:
         with self._pool.connection() as conn, conn.transaction():
             if retention is not None:
                 conn.execute("DELETE FROM print_runs WHERE finished_at < now() - %s", (retention,))
             row = conn.execute(
                 "INSERT INTO print_runs"
-                " (id, output_id, idempotency_key, status, workflow_id, workflow_run_id, slug)"
-                " VALUES (%s, %s, %s, 'running', %s, %s, %s)"
+                " (id, output_id, idempotency_key, status, workflow_id, workflow_run_id, slug,"
+                "  printer)"
+                " VALUES (%s, %s, %s, 'running', %s, %s, %s,"
+                # A row deleted since the check leaves the run unnamed, not refused.
+                "  (SELECT id FROM printers WHERE id = %s::uuid))"
                 " ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING"
                 f" RETURNING {_COLUMNS}",
-                (run_id, subject, key, workflow_id, workflow_run_id, slug),
+                (run_id, subject, key, workflow_id, workflow_run_id, slug, printer),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)

@@ -33,6 +33,8 @@ type PrintRunRequest struct {
 	prime_tower PrimeTowerChoiceable
 	// The print_sequence property
 	print_sequence PrintRunRequest_PrintRunRequest_print_sequenceable
+	// The printer property
+	printer PrintRunRequest_PrintRunRequest_printerable
 	// The printer_id property
 	printer_id PrintRunRequest_PrintRunRequest_printer_idable
 	// The project_id property
@@ -394,6 +396,92 @@ func (m *PrintRunRequest_PrintRunRequest_print_sequence) SetPrintRunRequestPrint
 
 // SetString sets the string property value. Composed type representation for type string
 func (m *PrintRunRequest_PrintRunRequest_print_sequence) SetString(value *string) {
+	m.string = value
+}
+
+// PrintRunRequest_PrintRunRequest_printer composed type wrapper for classes PrintRunRequest_printerMember1able, string
+type PrintRunRequest_PrintRunRequest_printer struct {
+	// Composed type representation for type PrintRunRequest_printerMember1able
+	printRunRequest_printerMember1 PrintRunRequest_printerMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewPrintRunRequest_PrintRunRequest_printer instantiates a new PrintRunRequest_PrintRunRequest_printer and sets the default values.
+func NewPrintRunRequest_PrintRunRequest_printer() *PrintRunRequest_PrintRunRequest_printer {
+	m := &PrintRunRequest_PrintRunRequest_printer{}
+	return m
+}
+
+// CreatePrintRunRequest_PrintRunRequest_printerFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreatePrintRunRequest_PrintRunRequest_printerFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewPrintRunRequest_PrintRunRequest_printer()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreatePrintRunRequest_printerMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(PrintRunRequest_printerMember1able); ok {
+				result.SetPrintRunRequestPrinterMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *PrintRunRequest_PrintRunRequest_printer) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *PrintRunRequest_PrintRunRequest_printer) GetIsComposedType() bool {
+	return true
+}
+
+// GetPrintRunRequestPrinterMember1 gets the PrintRunRequest_printerMember1 property value. Composed type representation for type PrintRunRequest_printerMember1able
+// returns a PrintRunRequest_printerMember1able when successful
+func (m *PrintRunRequest_PrintRunRequest_printer) GetPrintRunRequestPrinterMember1() PrintRunRequest_printerMember1able {
+	return m.printRunRequest_printerMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PrintRunRequest_PrintRunRequest_printer) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *PrintRunRequest_PrintRunRequest_printer) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetPrintRunRequestPrinterMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetPrintRunRequestPrinterMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetPrintRunRequestPrinterMember1 sets the PrintRunRequest_printerMember1 property value. Composed type representation for type PrintRunRequest_printerMember1able
+func (m *PrintRunRequest_PrintRunRequest_printer) SetPrintRunRequestPrinterMember1(value PrintRunRequest_printerMember1able) {
+	m.printRunRequest_printerMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *PrintRunRequest_PrintRunRequest_printer) SetString(value *string) {
 	m.string = value
 }
 
@@ -867,6 +955,14 @@ type PrintRunRequest_PrintRunRequest_printer_idable interface {
 	SetPrintRunRequestPrinterIdMember1(value PrintRunRequest_printer_idMember1able)
 }
 
+type PrintRunRequest_PrintRunRequest_printerable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetPrintRunRequestPrinterMember1() PrintRunRequest_printerMember1able
+	GetString() *string
+	SetPrintRunRequestPrinterMember1(value PrintRunRequest_printerMember1able)
+	SetString(value *string)
+}
+
 type PrintRunRequest_PrintRunRequest_project_idable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetInteger() *int32
@@ -1060,6 +1156,16 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["printer"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_printerFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrinter(val.(PrintRunRequest_PrintRunRequest_printerable))
+		}
+		return nil
+	}
 	res["printer_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_printer_idFromDiscriminatorValue)
 		if err != nil {
@@ -1165,6 +1271,12 @@ func (m *PrintRunRequest) GetPrimeTower() PrimeTowerChoiceable {
 	return m.prime_tower
 }
 
+// GetPrinter gets the printer property value. The printer property
+// returns a PrintRunRequest_PrintRunRequest_printerable when successful
+func (m *PrintRunRequest) GetPrinter() PrintRunRequest_PrintRunRequest_printerable {
+	return m.printer
+}
+
 // GetPrinterId gets the printer_id property value. The printer_id property
 // returns a PrintRunRequest_PrintRunRequest_printer_idable when successful
 func (m *PrintRunRequest) GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable {
@@ -1265,6 +1377,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("prime_tower", m.GetPrimeTower())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("printer", m.GetPrinter())
 		if err != nil {
 			return err
 		}
@@ -1375,6 +1493,11 @@ func (m *PrintRunRequest) SetPrimeTower(value PrimeTowerChoiceable) {
 	m.prime_tower = value
 }
 
+// SetPrinter sets the printer property value. The printer property
+func (m *PrintRunRequest) SetPrinter(value PrintRunRequest_PrintRunRequest_printerable) {
+	m.printer = value
+}
+
 // SetPrinterId sets the printer_id property value. The printer_id property
 func (m *PrintRunRequest) SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable) {
 	m.printer_id = value
@@ -1423,6 +1546,7 @@ type PrintRunRequestable interface {
 	GetPlateId() *int32
 	GetPlateIds() PrintRunRequest_PrintRunRequest_plate_idsable
 	GetPrimeTower() PrimeTowerChoiceable
+	GetPrinter() PrintRunRequest_PrintRunRequest_printerable
 	GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable
 	GetPrintSequence() PrintRunRequest_PrintRunRequest_print_sequenceable
 	GetProjectId() PrintRunRequest_PrintRunRequest_project_idable
@@ -1440,6 +1564,7 @@ type PrintRunRequestable interface {
 	SetPlateId(value *int32)
 	SetPlateIds(value PrintRunRequest_PrintRunRequest_plate_idsable)
 	SetPrimeTower(value PrimeTowerChoiceable)
+	SetPrinter(value PrintRunRequest_PrintRunRequest_printerable)
 	SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable)
 	SetPrintSequence(value PrintRunRequest_PrintRunRequest_print_sequenceable)
 	SetProjectId(value PrintRunRequest_PrintRunRequest_project_idable)

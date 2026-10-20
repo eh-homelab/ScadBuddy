@@ -234,6 +234,26 @@ describe('TurnRunner', () => {
     expect(context.signal?.aborted).toBe(true)
   })
 
+  // #4442 gate re-review M8: the classic preparer reads as the turn's principal, so a warm
+  // process spawned for one set of tiers is never reused for a turn sent with others.
+  it("binds the approval preparer to each assembly's tiers, and fingerprints them apart", async () => {
+    const bound: (readonly string[] | undefined)[] = []
+    const { runner, session } = await turnRunnerForTest({
+      prepareApproval: (_session, turn) => {
+        bound.push(turn?.tiers)
+        return async () => undefined
+      },
+    })
+    const outward = await runner.assemble(session, { tiers: ['read', 'write', 'outward'] })
+    const again = await runner.assemble(session, { tiers: ['read', 'write', 'outward'] })
+    const lowered = await runner.assemble(session, { tiers: ['read'] })
+    expect(again.fingerprintParts).toEqual(outward.fingerprintParts)
+    expect(lowered.fingerprintParts.tiers).not.toEqual(outward.fingerprintParts.tiers)
+    expect(bound).toEqual([['read', 'write', 'outward'], ['read', 'write', 'outward'], ['read']])
+    expect(lowered.run.prepareApproval).toBeDefined()
+    expect(lowered.run.prepareApproval).not.toBe(outward.run.prepareApproval)
+  })
+
   it('names every HarnessRun key either in the fingerprint or as per-turn', async () => {
     // `sessionId` (a first turn) and `resume` (a later one) never come together,
     // so both assemblies' keys together are every key a run can be given.

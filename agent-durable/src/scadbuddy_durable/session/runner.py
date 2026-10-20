@@ -511,16 +511,24 @@ def _user_images_tool(images: list[Image]) -> Any:
 PLUGIN_REJECTION = "A human reviewer rejected this action. Do not retry it."
 
 
-def with_refusals(injected: dict[str, Any], refusals: dict[str, str]) -> dict[str, Any]:
-    """The results to deliver, each refused one followed by why it was not run (#2392).
-    Only the plugin's own rejection is added to, and it stays an error."""
+def with_refusals(
+    injected: dict[str, Any],
+    refusals: dict[str, str],
+    replaced: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The results to deliver, each refused one followed by why it was not run (#2392),
+    and each the agent refused before it parked told only the agent's reason in place of
+    the rejection, since no person rejected it (#4442). Only the plugin's own rejection is
+    changed, and it stays an error."""
     out = dict(injected)
-    for call_id, why in refusals.items():
+    texts = {call_id: f"{PLUGIN_REJECTION}\n\n{why}" for call_id, why in refusals.items()}
+    texts.update(replaced or {})
+    for call_id, text in texts.items():
         result = out.get(call_id)
         if isinstance(result, ToolOutcome) and result.content == PLUGIN_REJECTION:
-            out[call_id] = replace(result, content=f"{PLUGIN_REJECTION}\n\n{why}")
+            out[call_id] = replace(result, content=text)
         elif isinstance(result, dict) and result.get("content") == PLUGIN_REJECTION:
-            out[call_id] = {**result, "content": f"{PLUGIN_REJECTION}\n\n{why}"}
+            out[call_id] = {**result, "content": text}
     return out
 
 
@@ -1043,10 +1051,13 @@ class ScadBuddyRunner:
             "preset": "claude_code",
             **({"append": context.system_append} if context.system_append else {}),
         }
-        if context.refusals:
+        if context.refusals or context.replaced:
             # A call refused at the gate: the model is told why after the plugin's fixed
-            # rejection, as a classic turn tells it (#2392). The decision stays the plugin's.
-            inp = replace(inp, injected=with_refusals(inp.injected, context.refusals))
+            # rejection, as a classic turn tells it (#2392), or, refused by the agent before
+            # it parked, only why (#4442). The decision stays the plugin's.
+            inp = replace(
+                inp, injected=with_refusals(inp.injected, context.refusals, context.replaced)
+            )
         if context.disabled_tools:
             # Settings → Plugins turned them off (#2088): Claude is not offered them.
             off = set(context.disabled_tools)

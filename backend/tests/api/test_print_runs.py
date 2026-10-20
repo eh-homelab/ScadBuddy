@@ -937,6 +937,7 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
                 "prime_tower",
                 "plate_ids",
                 "folder_id",
+                "printer",
             },
         ),
         sort_keys=True,

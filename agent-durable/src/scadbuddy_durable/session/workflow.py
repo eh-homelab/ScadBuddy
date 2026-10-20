@@ -208,6 +208,21 @@ def _refused(code: str, message: str) -> ApplicationError:
     return ApplicationError(message, type=refused_failure_type(code), non_retryable=True)
 
 
+def _tool_refusal(err: FailureError, tool: str) -> str | None:
+    """What the model is told of a call the agent would not describe: its own refusal (a
+    ``ToolError`` from ``gate.describe_call``) as it said it, or, after the backend stayed
+    away through every retry (``BackendUnavailable``), that it may try again; ``None`` for
+    any other failure."""
+    cause = err.cause if isinstance(err, ActivityError) else err
+    if isinstance(cause, ApplicationError) and cause.type == "ToolError":
+        return cause.message
+    if isinstance(cause, ApplicationError) and cause.type == "BackendUnavailable":
+        return (
+            f"{tool} was not run: what it names could not be checked just now; try the call again."
+        )
+    return None
+
+
 def refusal(tool: str, request_id: str, outcome: str, reason: str | None) -> str:
     """What the model is told when its call was not approved, in the words a classic turn
     uses (agent/src/approvals/service.ts ``refusal``)."""
@@ -559,9 +574,15 @@ class DurableSession:
             await self._park(call)
         except asyncio.CancelledError:
             raise
-        except FailureError:
+        except FailureError as err:
             if any(p.call_id == str(call["id"]) for p in self._parked.values()):
                 return  # parked: its entry is ended by the gate (cancel, interrupt, turn end)
+            why = _tool_refusal(err, str(call["name"]))
+            if why is not None and self._turn is not None:
+                # The agent refused the call as it described it (#4442: a print_output
+                # whose printer no longer links its printer_id): the model is told why,
+                # in place of the plugin's rejection, since no person rejected it.
+                self._turn.replaced[str(call["id"])] = why
             with contextlib.suppress(ValueError):
                 self._agent.decide(str(call["id"]), False, approver="scadbuddy")
 
@@ -582,7 +603,7 @@ class DurableSession:
         if kind == "approval":
             described = await workflow.execute_activity(
                 DESCRIBE_CALL,
-                {"tool": name, "input": call["input"]},
+                {"tool": name, "input": call["input"], "request_id": rid},
                 task_queue=TOOLS_QUEUE,
                 start_to_close_timeout=SHORT,
                 retry_policy=RetryPolicy(
@@ -1050,6 +1071,7 @@ class DurableSession:
             disabled_tools=list(self._settings.disabled_tools),
             packages=list(self._packages),
             refusals=dict(self._turn.refusals) if self._turn else {},
+            replaced=dict(self._turn.replaced) if self._turn else {},
         )
 
     @workflow.query(name=TURN_QUERY)

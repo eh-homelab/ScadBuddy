@@ -45,6 +45,7 @@ from temporalio.claude_agent_sdk import (
 from temporalio.claude_agent_sdk._events import _EMIT, emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
@@ -74,7 +75,7 @@ from scadbuddy_durable.session.runner import (
     view_tool_images_tool,
     with_refusals,
 )
-from scadbuddy_durable.session.workflow import refusal
+from scadbuddy_durable.session.workflow import _tool_refusal, refusal
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -1285,6 +1286,34 @@ def test_only_the_plugins_rejection_is_added_to_and_it_stays_an_error() -> None:
     assert out["t2"] == {"content": f"{PLUGIN_REJECTION}\n\nwhy 2", "is_error": True}
     assert out["t3"] == injected["t3"]
     assert set(out) == {"t1", "t2", "t3"}
+
+
+def test_an_agent_refusal_replaces_the_rejection_the_model_reads() -> None:
+    """#4442 gate review: a call the agent refused before it parked is not one a person
+    rejected; the model reads only the agent's reason, still as an error."""
+    why = "print_output was not run: Garage is Bambuddy printer 2, not printer_id 3."
+    injected: dict[str, Any] = {
+        "t1": ToolOutcome(content=PLUGIN_REJECTION, is_error=True),
+        "t2": {"content": PLUGIN_REJECTION, "is_error": True},
+        "t3": ToolOutcome(content=PLUGIN_REJECTION, is_error=True),
+    }
+    out = with_refusals(injected, {"t3": "denied"}, {"t1": why, "t2": why})
+    assert out["t1"] == ToolOutcome(content=why, is_error=True)
+    assert out["t2"] == {"content": why, "is_error": True}
+    assert "human reviewer" not in str(out["t1"]) + str(out["t2"])
+    assert out["t3"] == ToolOutcome(content=f"{PLUGIN_REJECTION}\n\ndenied", is_error=True)
+
+
+def test_a_describe_that_stayed_unavailable_says_try_again_and_no_one_rejected_it() -> None:
+    """#4442 gate review: the backend away through describe_call's retries is no refusal
+    of the call; the model is told it may try again. The agent's own refusal is its text."""
+    away = ApplicationError("read the printer failed (HTTP 503)", type="BackendUnavailable")
+    assert _tool_refusal(away, "mcp__scadbuddy__print_output") == (
+        "mcp__scadbuddy__print_output was not run: what it names could not be checked just now;"
+        " try the call again."
+    )
+    assert _tool_refusal(ApplicationError("no", type="ToolError"), "t") == "no"
+    assert _tool_refusal(ApplicationError("gone", type="UnknownSession"), "t") is None
 
 
 class Delivered(ScriptedClaude):

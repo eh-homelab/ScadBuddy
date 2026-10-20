@@ -1,7 +1,7 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
-import type { TierResolver } from '../harness/permissions.js'
+import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
@@ -9,7 +9,7 @@ import type { TitleResolver } from '../sessions/sdkEvents.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ALL_TOOLS } from './index.js'
 import { createHarnessServer, SERVER_NAME } from './projections.js'
-import type { Tool, ToolServices, WaitForTab } from './registry.js'
+import { effectiveTool, isRefusal, isTransient, type Tool, ToolError, toolErrorText, type ToolServices, unexpectedErrorText, type WaitForTab } from './registry.js'
 
 // The registry's harness side, as the session manager takes it
 // (sessions/manager.ts SessionManagerDeps `tierOf` and `mcpServers`), so that
@@ -39,6 +39,11 @@ export type HarnessTools = {
     turn?: TurnPrincipal,
     extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
+  /**
+   * What an outward call of a tool with its own `prepareApproval` parks (#4442): the input
+   * it resolves, as the turn's principal reads it, and its line. `undefined` for any other name.
+   */
+  prepareApproval: (session: { id?: string; owner: Owner }, turn?: TurnPrincipal) => ApprovalPreparer
 }
 
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
@@ -46,6 +51,37 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
   return {
     tierOf: (name) => byName.get(name)?.risk,
     titleOf: (name, input) => byName.get(name)?.title(input),
+    prepareApproval: (session, turn) => {
+      const principal = turnPrincipal(session.owner, turn)
+      const lookup = (name: string) => tools.find((t) => t.name === name)
+      return async (name, input, signal) => {
+        const tool = byName.get(name)
+        if (!tool?.resolvesApproval) return undefined
+        // Resolved only for a call that could run: the tool enabled, its tier one the turn holds.
+        const effective = await effectiveTool(tool, services)
+        if (effective.disabled || !hasTier(principal, effective.risk)) return undefined
+        try {
+          return await tool.prepareApproval(input, {
+            ...services,
+            principal,
+            ...(session.id !== undefined ? { session: session.id } : {}),
+            progress: async () => {},
+            signal,
+            lookup,
+            gate: 'harness',
+          })
+        } catch (err) {
+          // An interrupted turn is not the backend away: the abort goes on as it is (#4442 review).
+          if (signal.aborted) throw err
+          // The tool's refusal, its backend text in the envelope; the backend away is worth another try.
+          if (isRefusal(err)) throw new Error(toolErrorText(err, tool.name), { cause: err })
+          // An error no retry would change (arguments that do not parse) says what went wrong (#4442 review).
+          if (!isTransient(err)) throw new Error(unexpectedErrorText(err, tool.name).text, { cause: err })
+          const why = err instanceof ToolError ? err.summary : err instanceof Error ? err.message : String(err)
+          throw new Error(`what it names could not be checked just now (${why}); try the call again`, { cause: err })
+        }
+      }
+    },
     mcpServers: (session, turn, extras) => {
       const principal = turnPrincipal(session.owner, turn)
       // Settings → Plugins (#1953): a disabled tool is not offered, and one raised

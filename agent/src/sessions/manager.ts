@@ -18,7 +18,7 @@ import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
-import type { TierResolver } from '../harness/permissions.js'
+import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
 import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
@@ -709,6 +709,11 @@ export type SessionManagerDeps = {
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
     extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
+  /**
+   * What an outward call parks, for a registry tool that resolves its arguments (#4442,
+   * tools/harness.ts `prepareApproval`): bound to the turn's principal, as `mcpServers` is.
+   */
+  prepareApproval?: (session: SessionRecord, turn: TurnPrincipal) => ApprovalPreparer
   /**
    * Settings → Plugins' overrides of the built-in tools (#1953,
    * plugins/builtInTools.ts `BuiltInTools.policy`): read once per turn, as the

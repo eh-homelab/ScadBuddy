@@ -101,6 +101,61 @@ describe('with an approval gate (#258)', () => {
     expect(asked).toEqual(['mcp__scadbuddy__send_to_printer:t1:outward'])
   })
 
+  // #4442: a tool that resolves what its arguments name parks the resolved input, with
+  // the line that says it, and runs exactly that once approved.
+  it('canUseTool parks the input a tool resolves, with its line, and runs that input', async () => {
+    const parked: { input?: Record<string, unknown>; summary?: string } = {}
+    const prepare = async (name: string, input: Record<string, unknown>) =>
+      name === 'mcp__scadbuddy__send_to_printer' ? { input: { ...input, printer_id: 2 }, summary: 'Print on printer "Garage"' } : undefined
+    const canUseTool = makeCanUseTool(
+      tierOf,
+      undefined,
+      (request) => {
+        parked.input = request.input
+        if (request.summary !== undefined) parked.summary = request.summary
+        return Promise.resolve({ approved: true, input: request.input })
+      },
+      undefined,
+      prepare,
+    )
+    expect(await canUseTool('mcp__scadbuddy__send_to_printer', { printer: 'p' }, opts('t5'))).toEqual({
+      behavior: 'allow',
+      updatedInput: { printer: 'p', printer_id: 2 },
+    })
+    expect(parked).toEqual({ input: { printer: 'p', printer_id: 2 }, summary: 'Print on printer "Garage"' })
+  })
+
+  it("canUseTool resolves under the call's abort signal (#4442 gate review)", async () => {
+    let given: AbortSignal | undefined
+    const canUseTool = makeCanUseTool(tierOf, undefined, (request) => Promise.resolve({ approved: true, input: request.input }), undefined, async (_name, _input, s) => {
+      given = s
+      return undefined
+    })
+    await canUseTool('mcp__scadbuddy__send_to_printer', {}, opts('t7'))
+    expect(given).toBe(signal)
+  })
+
+  it('canUseTool refuses a call its tool will not resolve, before anything parks', async () => {
+    let asked = false
+    const canUseTool = makeCanUseTool(
+      tierOf,
+      undefined,
+      () => {
+        asked = true
+        return Promise.resolve({ approved: true, input: {} })
+      },
+      undefined,
+      async () => {
+        throw new Error('Garage is Bambuddy printer 2, not printer_id 3.')
+      },
+    )
+    expect(await canUseTool('mcp__scadbuddy__send_to_printer', { printer: 'p', printer_id: 3 }, opts('t6'))).toEqual({
+      behavior: 'deny',
+      message: expect.stringContaining('Garage is Bambuddy printer 2, not printer_id 3.'),
+    })
+    expect(asked).toBe(false)
+  })
+
   it('a refusal or a failing gate is a deny', async () => {
     const refused = makeCanUseTool(tierOf, undefined, () => Promise.resolve({ approved: false, message: 'The user denied it.' }))
     expect(await refused('mcp__scadbuddy__send_to_printer', {}, opts('t3'))).toEqual({

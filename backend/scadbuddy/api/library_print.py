@@ -130,6 +130,7 @@ from scadbuddy.print_library.reads import (
     reads_for,
     served_reads,
 )
+from scadbuddy.printers.component import PrintersDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
@@ -1434,6 +1435,7 @@ async def post_library_check(
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
+    printers: PrintersDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550), and its
@@ -1458,5 +1460,7 @@ async def post_library_check(
                 files=files,
             ),
             files=files,
+            printers=printers.store,
+            reports=printers.reports,
             catalogue=kept_catalogue(client, paths.cache, store.kek),
         )

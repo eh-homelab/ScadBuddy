@@ -31,7 +31,12 @@ def row_of(
         title=f"Print {slug or run.subject}",
         source="print_runs",
         source_id=run.id,
-        facets={"subject": run.subject, "may_have_queued": run.may_have_queued},
+        facets={
+            "subject": run.subject,
+            "may_have_queued": run.may_have_queued,
+            # The registry printer, by identity (#3823): never its path or Bambuddy id.
+            **({"printer": run.printer} if run.printer else {}),
+        },
         workflow_id=workflow_id,
         run_id=workflow_run_id,
     )
@@ -43,6 +48,8 @@ PRINT_RUN = ActivityKind(
     facets=(
         Facet("subject", "keyword", "Subject"),
         Facet("may_have_queued", "bool", "May have queued", filterable=False),
+        # A registry uuid, so the filter offers the registry's printers by name (#4442 review).
+        Facet("printer", "keyword", "Printer", options="printers"),
     ),
 )
 ACTIVITY_KINDS = (PRINT_RUN,)
