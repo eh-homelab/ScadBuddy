@@ -783,6 +783,32 @@ async def test_a_recorded_slice_whose_id_holds_another_file_is_forgotten_and_one
     assert uploads.forgotten == [100]
 
 
+@respx.mock
+async def test_a_recorded_slice_read_with_no_hash_or_as_a_plain_3mf_is_kept(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#3896: a reply with no hash, or the recorded hash with a type that is not sliced
+    for now, says nothing about another file at the id: skipped, never forgotten."""
+    respx.get(f"{API}/library/files/100").mock(
+        return_value=httpx.Response(
+            200, json={"id": 100, "filename": "x.gcode.3mf", "file_type": "gcode.3mf"}
+        )
+    )
+    respx.get(f"{API}/library/files/101").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 101, "filename": "x.3mf", "file_type": "3mf", "file_hash": f"{101:064x}"},
+        )
+    )
+    respx.get(url__regex=rf"{API}/library/files/10[2-9]$").mock(
+        return_value=httpx.Response(503, json={"detail": "busy"})
+    )
+    uploads = _ManySlices()
+
+    assert await _library(uploads).recorded_slice(bambuddy, 11, "key") is None
+    assert uploads.forgotten == []
+
+
 class _ForgetFails(_ManySlices):
     async def forget_slice(self, output_id: str, sliced_id: int) -> None:
         raise RuntimeError("the database is down")

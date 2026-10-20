@@ -82,8 +82,22 @@ def test_objects_far_enough_apart_and_short_say_nothing() -> None:
 
 
 def test_one_object_clears_everything() -> None:
+    """#3223: one object is the last printed, which Bambu Studio holds only to the
+    printable height, not to the lid."""
     assert H2C is not None
     assert clearance_warnings([_box("A", 0, height=300)], H2C) == []
+
+
+def test_an_objects_height_is_its_top_above_the_bed() -> None:
+    """#3223: the gantry and lid limits are about how high an object's top sits, not
+    its extent: one lifted off the bed is as tall as its top, one sunk below it is cut."""
+    lifted = PlacedObject("lifted", (0.0, 0.0, 30.0), (20.0, 20.0, 50.0))
+    sunk = PlacedObject("sunk", (100.0, 0.0, -20.0), (120.0, 20.0, 40.0))
+    assert (lifted.height, sunk.height) == (50.0, 40.0)
+    assert H2C is not None
+    # 20 and 60 mm in extent, but only the lifted one's top is past the 47.4 mm gantry.
+    [warning] = clearance_warnings([lifted, sunk, _box("C", 200, 48)], H2C)
+    assert "lifted, C" in warning.message
 
 
 def test_only_one_object_may_pass_under_the_gantry() -> None:

@@ -21,6 +21,7 @@ A field that is not the type it should be reads as absent, never as a failed sta
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -92,7 +93,10 @@ def _presence_bit(ams_id: int, tray_id: int) -> int | None:
     ``None`` for any other unit, whose layout is unknown (Bambuddy
     ``apply_tray_exist_bits``, ``bambu_mqtt.py:216-330`` at ``0d427510``, which checked the
     HT's against OrcaSlicer ``DevFilaSystem.cpp`` and a live H2D capture). Not yet
-    measured on our H2C: the LAN fixture is synthetic (plan 2026-10-16 Task 7)."""
+    measured on our H2C: the LAN fixture is synthetic (plan 2026-10-16 Task 7).
+
+    The HT bits 16-23 are also AMS units 4 and 5's bits, so :func:`_ams` vetoes by no
+    bit two reported trays share: nothing says whose it is (#4377)."""
     unit = _A2L_BITS if ams_id == _A2L_PHYSICAL else ams_id
     if 128 <= unit <= 135:
         return 16 + (unit - 128)
@@ -110,16 +114,23 @@ def _ams(report: dict[str, Any]) -> list[AmsUnit]:
         if not isinstance(entry, dict):
             continue
         unit = _valid(AmsUnit, {**entry, "tray": _trays(entry.get("tray"))})
-        if unit is None:
-            continue
-        if bits is not None:
-            # Bambuddy annotates the same ``exists`` (``annotate_exists=True``), which
-            # `trays._filled` reads as a veto.
-            for index, tray in enumerate(unit.tray):
-                bit = _presence_bit(unit.id, tray.id)
-                if bit is not None:
-                    unit.tray[index] = tray.model_copy(update={"exists": bool(bits >> bit & 1)})
-        found.append(unit)
+        if unit is not None:
+            found.append(unit)
+    if bits is None:
+        return found
+    claims = Counter(
+        bit
+        for unit in found
+        for tray in unit.tray
+        if (bit := _presence_bit(unit.id, tray.id)) is not None
+    )
+    for unit in found:
+        # Bambuddy annotates the same ``exists`` (``annotate_exists=True``), which
+        # `trays._filled` reads as a veto; a shared bit leaves both trays unknown.
+        for index, tray in enumerate(unit.tray):
+            bit = _presence_bit(unit.id, tray.id)
+            if bit is not None and claims[bit] == 1:
+                unit.tray[index] = tray.model_copy(update={"exists": bool(bits >> bit & 1)})
     return found
 
 
@@ -128,15 +139,17 @@ def _vt_tray(report: dict[str, Any]) -> list[AmsTray]:
     ``vt_tray`` as the one active spool, so ``vir_slot`` wins (Bambuddy
     ``bambu_mqtt.py:2323-2349`` at ``0d427510``; ha-bambulab ``pybambu/models.py:3696`` at
     ``0e027ff1``). A single ``vir_slot`` holder that says 255 is a single-nozzle
-    printer's one holder, 254, as Bambuddy reads it."""
+    printer's one holder, 254, as Bambuddy reads it. Any other id is dropped: a holder
+    is tray ``id - 254`` (``trays._trays``), so no other id names one (#4377)."""
     slots = report.get("vir_slot")
     if isinstance(slots, list) and slots:
         trays = _trays(slots)
         if len(trays) == 1 and trays[0].id == 255:
             trays = [trays[0].model_copy(update={"id": 254})]
-        return trays
-    value = report.get("vt_tray")
-    return _trays([value] if isinstance(value, dict) else value)
+    else:
+        value = report.get("vt_tray")
+        trays = _trays([value] if isinstance(value, dict) else value)
+    return [tray for tray in trays if tray.id in (254, 255)]
 
 
 def hms_errors(value: Any) -> list[HmsError]:

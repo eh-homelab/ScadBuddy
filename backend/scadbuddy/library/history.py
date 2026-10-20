@@ -301,6 +301,8 @@ class ModelHistory(GitRepo):
         walked again then and only then.
         """
         with span("model_history.last_commits") as current:
+            # Read outside the lock: a commit landing before the walk files a newer walk
+            # under this older HEAD, which costs only one more walk next call (#3058).
             head = self.head()
             with self._last_commits_lock:
                 kept = self._last_commits

@@ -67,7 +67,7 @@ from scadbuddy.main import sweep_library_checkouts
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.conftest import PgPool, make_library_upstream, open_pg_pool
-from tests.support.operations import press
+from tests.support.operations import press, subjects
 from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
@@ -1180,6 +1180,8 @@ def test_every_checkout_goes_once_nothing_pins_the_library(
     assert not (paths.libraries / "BOSL2").exists()
     assert again.status_code == 404
     assert lib_client.get("/api/v1/libraries/installed").json() == []
+    # #4001: a prefix of its own; `library:<id>` is a Bambuddy file's.
+    assert subjects(lib_client, "library_remove") == ["scad-library:BOSL2"]
 
 
 def test_a_name_only_declaration_counts_as_a_pin_of_every_commit(

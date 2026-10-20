@@ -147,6 +147,7 @@ async fn slice(
         arrange: input.arrange,
         allow_newer_file: input.allow_newer_file,
         debug: input.debug,
+        filament_colours: &input.filament_colours,
         keepalive: acts.keepalive,
     };
 

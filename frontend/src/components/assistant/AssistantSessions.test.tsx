@@ -353,6 +353,38 @@ describe('archive (#1885)', () => {
     expect(within(header).getByRole('button', { name: 'Archive' })).toBeInTheDocument()
   })
 
+  it("says why the archived note's Unarchive was refused, and a second press asks again (#3943)", async () => {
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    await user.click(within(screen.getByTestId('active-session-header')).getByRole('button', { name: 'Archive' }))
+    await waitFor(() => expect(composerBox()).toBeDisabled())
+    let refused = 0
+    server.use(
+      http.patch(
+        '/api/v1/ai/sessions/:id',
+        () => {
+          refused += 1
+          return HttpResponse.json({ detail: 'a turn is running' }, { status: 409 })
+        },
+        { once: true },
+      ),
+    )
+    const writes = sessionWrites().length
+
+    await user.click(screen.getByRole('button', { name: 'Unarchive' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('a turn is running')
+    expect(refused).toBe(1)
+    expect(composerBox()).toBeDisabled()
+    expect(screen.getByText(/This chat is archived/)).toBeInTheDocument()
+
+    // The refusal let go of the press: the next one is sent, lands, and focuses the composer.
+    await user.click(screen.getByRole('button', { name: 'Unarchive' }))
+    await waitFor(() => expect(composerBox()).toBeEnabled())
+    expect(composerBox()).toHaveFocus()
+    expect(sessionWrites().slice(writes)).toMatchObject([{ method: 'PATCH', body: { archived: false } }])
+  })
+
   it("marks the open chat done from its header, beside Archive, where the user's own chat offers it", async () => {
     const { user } = await openParent()
     const header = () => screen.getByTestId('active-session-header')

@@ -33,6 +33,9 @@ pub struct SlicePlateInput {
     pub allow_newer_file: bool,
     #[serde(default = "default_debug")]
     pub debug: u8,
+    /// Each slot's colour, in slot order: `--filament-colour` (#3962).
+    #[serde(default)]
+    pub filament_colours: Vec<String>,
 }
 
 fn default_allow_newer_file() -> bool {
@@ -100,6 +103,7 @@ mod tests {
         assert_eq!(input.arrange, Arrange::No);
         assert!(input.allow_newer_file);
         assert_eq!(input.debug, 1);
+        assert!(input.filament_colours.is_empty());
 
         let progress: SliceProgress = serde_json::from_value(json!({
             "plate_index": 0, "plate_count": 1, "plate_percent": 0, "total_percent": 0,

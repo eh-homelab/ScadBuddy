@@ -34,7 +34,6 @@ from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.bambu3mf import ArchiveTooLargeError, TooManyTrianglesError
 from scadbuddy.render.geometry_cache import (
     mesh_geometry,
-    painted,
     recolour_piece,
     reusable,
 )
@@ -583,8 +582,32 @@ class RenderActivities:
         if not found or not (source / PIECE_NAME).is_file():
             await asyncio.to_thread(d.geometry.forget, key, row.piece_key)
             return None
-        layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
-        if not reusable(layout, row.colours):
+        try:
+            layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
+            usable = reusable(layout, row.colours)
+        except (FileNotFoundError, ValueError, KeyError, TypeError) as error:
+            # As unreusable: every retry would read the same file (#3449). Its
+            # `piece.json` was found just above, so the volume is there and only the
+            # layout is missing, unreadable or not a layout (an older or partial publish).
+            logger.warning(
+                "the geometry's source layout is missing or unreadable; forgetting the"
+                " geometry and rendering the piece",
+                extra={"piece_key": req.piece_key, "error": type(error).__name__},
+            )
+            usable = False
+        except OSError as error:
+            # Perhaps the volume's blip: a miss for this render only, the row kept.
+            logger.warning(
+                "could not read the geometry's source layout this time; keeping the"
+                " geometry and rendering the piece",
+                extra={"piece_key": req.piece_key, "error": type(error).__name__},
+            )
+            return None
+        if not usable:
+            # Forgotten, or every later recolour of this geometry fetches it again only
+            # to refuse it again (#3449). `finish_piece` records no such row now; one an
+            # older build recorded is dropped here.
+            await asyncio.to_thread(d.geometry.forget, key, row.piece_key)
             return None
         baseline = await _heartbeating(asyncio.create_task(d.blobs.checkout_fresh(req.piece_key)))
         work = d.blobs.dir_for(req.piece_key)
@@ -749,13 +772,14 @@ class RenderActivities:
         if d.geometry is not None and prepared.geometry_key is not None:
             # A cache's hint, after the piece is published: losing it costs a later
             # recolour its shortcut, never this render. A recoloured piece comes with
-            # no key: its copied raw render keeps its source's colours. A painted piece
-            # is never a source (`reusable` refuses it), so no recolour fetches it.
+            # no key: its copied raw render keeps its source's colours. A piece
+            # `reusable` refuses (a painted one) is never a source, so no recolour
+            # fetches it (#3449); nor is one whose layout cannot be read (#3748).
             try:
                 layout = json.loads(
                     await asyncio.to_thread((work / LAYOUT_NAME).read_text, "utf-8")
                 )
-                if painted(layout):
+                if not reusable(layout, prepared.colours):
                     return piece
                 await asyncio.to_thread(
                     d.geometry.put,
@@ -764,9 +788,10 @@ class RenderActivities:
                     prepared.colours,
                     main.model_dump(mode="json"),
                 )
-            except psycopg.Error:
+            except (psycopg.Error, OSError, ValueError, KeyError, TypeError) as error:
                 logger.warning(
-                    "could not record the piece's geometry", extra={"piece_key": req.piece_key}
+                    "could not record the piece's geometry",
+                    extra={"piece_key": req.piece_key, "error": type(error).__name__},
                 )
         return piece
 

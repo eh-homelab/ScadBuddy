@@ -299,8 +299,13 @@ The worker's whole configuration is its environment: `SCADBUDDY_TEMPORAL_ADDRESS
 needs no database role.
 
 The activity downloads its inputs into a per-attempt temp dir, writes a fifo, starts the CLI with `--pipe <fifo>
---load-settings <machine>;<process> --load-filaments <f1;…> --slice <plate>
---export-3mf <out> [--arrange …] [--allow-newer-file] [--debug N] <input>`, reads the
+--load-settings <machine>;<process> --load-filaments <f1;…> [--filament-colour <c1;…>]
+--slice <plate> --export-3mf <out> [--arrange …] [--allow-newer-file] [--debug N]
+<input>` (`--filament-colour` carries the slots' colours: unless it names two or more
+distinct ones, the CLI turns the prime tower off whenever every filament file has one
+preset name, `BambuStudio.cpp:2625` and `:3770-3784` at v02.08.02.61, #3962; a single
+colour is passed but changes nothing there, and the colours are in the native slice's
+key), reads the
 fifo's JSON lines and turns each `total_percent` into a heartbeat carrying
 `{plate_index, plate_count, plate_percent, total_percent, message}`; each `warning`
 line is collected. Exit 0 PUTs the output to its URL and returns; any other exit fails the

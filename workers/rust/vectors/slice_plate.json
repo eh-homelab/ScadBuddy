@@ -4,6 +4,7 @@
       "allow_newer_file": true,
       "arrange": "no",
       "debug": 1,
+      "filament_colours": [],
       "filament_presets": [
         {
           "expires_at": "2026-10-16T12:00:00Z",
@@ -53,6 +54,9 @@
       "allow_newer_file": false,
       "arrange": "auto",
       "debug": 3,
+      "filament_colours": [
+        "#FF0000"
+      ],
       "filament_presets": [
         {
           "expires_at": "2026-10-16T12:00:00Z",

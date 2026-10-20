@@ -319,12 +319,12 @@ async def test_a_boot_while_a_run_is_open_does_not_run_the_sweeps_again(
                     client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
                 )
             release.set()
-            await asyncio.sleep(1)
-            described = await client.get_schedule_handle(schedule_id).describe()
+            # Polled for a second action, not slept on (#3057).
+            actions = await _actions(client, schedule_id, 2)
     finally:
         await client.get_schedule_handle(schedule_id).delete()
         await terminate_open_workflows(client, queue)
-    assert described.info.num_actions == 1
+    assert actions == 1
     assert ran == [PRUNE_SWEEPS[0]]
 
 
@@ -352,6 +352,39 @@ async def test_a_boot_runs_the_sweeps_only_once_the_last_run_is_old_enough(
         await handle.delete()
         await terminate_open_workflows(client, queue)
     assert (within, after) == (1, 2)
+
+
+async def test_a_boot_that_changes_the_sweeps_runs_them_within_the_window(
+    client: Client,
+) -> None:
+    """#3057: the run within the window did the old sweeps, so a rollout that adds or
+    changes one would wait for the next tick, up to a day. A boot that changes them
+    runs them; one that changes nothing still converges on the recent run."""
+    schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    handle = client.get_schedule_handle(schedule_id)
+
+    async def end_the_last_run() -> None:
+        started = (await handle.describe()).info.recent_actions[-1].action
+        assert isinstance(started, ScheduleActionExecutionStartWorkflow)
+        await client.get_workflow_handle(
+            started.workflow_id, run_id=started.first_execution_run_id
+        ).terminate("ended by the test")
+
+    try:
+        await ensure_schedule(client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS)
+        assert await _actions(client, schedule_id, 1) == 1
+        await end_the_last_run()
+        await ensure_schedule(client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS)
+        unchanged = await _actions(client, schedule_id, 2)
+        await ensure_schedule(
+            client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS[:1]
+        )
+        changed = await _actions(client, schedule_id, 2)
+    finally:
+        await handle.delete()
+        await terminate_open_workflows(client, queue)
+    assert (unchanged, changed) == (1, 2)
 
 
 async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:

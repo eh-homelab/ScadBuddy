@@ -8,7 +8,10 @@ import { page, PAGED, pageInput } from './pagination.js'
 // how ScadBuddy reaches it over the LAN. Routes: backend/scadbuddy/api/printers.py.
 //
 // The serial stays out of every result (it is an identifier the printer's cloud account
-// is bound to): a tool returns the row's `id`, which every tool here takes. No tool takes
+// is bound to): a tool returns the row's `id`, which every tool here takes. Settings >
+// Printers, where these tools send the model, shows it as plain text, which the browser
+// bridge's page read (`frontend/src/agent/snapshot.ts`: controls, alerts and status only)
+// leaves out; `Printers.test.tsx` holds it to that (#4375). No tool takes
 // the LAN access code (#4340 review I1): it is a device credential, typed only in
 // Settings > Printers (`PUT /printers/{id}/lan` is a coverage.ts NOT_A_TOOL), so it never
 // enters a model's context, a transcript or a flow script. Unlinking the LAN deletes that

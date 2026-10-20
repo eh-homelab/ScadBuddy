@@ -240,11 +240,13 @@ async def test_the_written_file_has_a_slot_for_the_new_colour(tmp_path: Path) ->
     ]
 
 
-async def test_a_painted_copy_is_painted_in_its_new_colour(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mirrored", [False, True])
+async def test_a_painted_copy_is_painted_in_its_new_colour(tmp_path: Path, mirrored: bool) -> None:
+    """A mirrored painting stays mirrored through the swap (#4015, #4075)."""
     deps, paths = _deps(tmp_path)
     body = trimesh.creation.box(extents=(20, 10, 5))
     payload = bambu_project(
-        items=[at(50, 50)],
+        items=["-1 0 0 0 1 0 0 0 1 50 50 0" if mirrored else at(50, 50)],
         parts={1: (body, "normal_part", 1)},
         triangle_extra=' paint_color="8"',
     )
@@ -278,6 +280,7 @@ async def test_a_painted_copy_is_painted_in_its_new_colour(tmp_path: Path) -> No
     [painted] = again.parts
     assert painted.colour == "#FF0000"
     assert painted.paint is not None and painted.paint.used() == [MAGENTA]
+    assert painted.paint.reversed is mirrored
 
 
 def test_a_swap_the_sources_disagree_on_states_no_material() -> None:

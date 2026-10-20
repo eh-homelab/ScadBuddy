@@ -28,6 +28,12 @@ _KEEP_COPY = ", ".join(
 )
 #: Attempts at an index write that Postgres picks as a deadlock's victim (`_retrying`).
 _DEADLOCK_ATTEMPTS = 3
+#: `BlobIndex.copied_refs`: read in order from `store_blobs_backend_migrated_touched`
+#: (#4117), not sorted.
+COPIED_REFS_SQL = (
+    f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s AND migrated_backend = %s"
+    " ORDER BY touched_at DESC LIMIT %s"
+)
 
 
 def _kept_copy(ref: BlobRef) -> tuple[str, ...]:
@@ -371,14 +377,10 @@ class BlobIndex:
         """Up to ``limit`` rows on ``source`` already copied to ``target``, most recently
         touched first: objects the source served this migration, to ask it about again.
         A copy takes the least recently touched rows first, so these are the latest
-        copies, and the ones in use, the least likely to have been deleted since. The
-        sort runs only for a batch of misses alone (#4114)."""
+        copies, and the ones in use, the least likely to have been deleted since. Run
+        only for a batch of misses alone (#4114), and read off an index (#4117)."""
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s AND migrated_backend = %s"
-                " ORDER BY touched_at DESC LIMIT %s",
-                (source, target, limit),
-            ).fetchall()
+            rows = conn.execute(COPIED_REFS_SQL, (source, target, limit)).fetchall()
         return [_stat(row).ref for row in rows]
 
     def forget_missing(self, key: str, ref: BlobRef) -> bool:

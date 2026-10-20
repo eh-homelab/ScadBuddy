@@ -69,6 +69,13 @@ TEMPLATE_ID_PREFIX = "template-"
 #: Prefixed to a template's id for its advisory lock's key, so no other lock hashed
 #: from a slug is ever the same one.
 PRESET_LOCK_PREFIX = "scadbuddy-presets:"
+
+
+def preset_lock_key(model_id: str) -> str:
+    """The text whose ``hashtextextended(…, 0)`` is ``model_id``'s preset lock."""
+    return f"{PRESET_LOCK_PREFIX}{model_id}"
+
+
 #: The key in ``model.json`` that holds a template's own presets.
 PRESETS_KEY = "presets"
 
@@ -513,7 +520,7 @@ class PresetStore:
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"{PRESET_LOCK_PREFIX}{model_id}",),
+                (preset_lock_key(model_id),),
             )
             yield conn
 

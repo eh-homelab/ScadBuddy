@@ -23,7 +23,8 @@ ENCRYPTED = 0x1
 RAW_COPY_CHECKED = (3, 12)
 """The CPython minor whose `zipfile` internals :func:`copy_raw` was checked against
 (#2910). On any other, callers read and write each entry again instead, and
-``test_the_raw_copy_is_checked_on_this_python`` fails until it is checked again."""
+``tests/test_zipcopy.py::test_the_raw_copy_is_checked_on_this_python`` fails until it
+is checked again."""
 
 
 def raw_copy_checked() -> bool:

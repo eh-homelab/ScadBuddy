@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
+import { takeSnapshot } from '../../agent/snapshot'
 import { PROBE_FAILED, UNREACHABLE, printersState } from '../../mocks/features/printers'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
@@ -155,5 +156,15 @@ describe('PrintersPanel (#3823)', () => {
     await user.click(within(h2c).getByRole('button', { name: 'Forget 3DP-31B-598' }))
 
     expect(await within(h2c).findByRole('alert')).toHaveTextContent('unlink it first')
+  })
+
+  it("leaves the serial out of the agent's page read, as the printer tools do (#4375)", async () => {
+    renderPage(<PrintersPanel />)
+    const h2c = await screen.findByRole('listitem', { name: H2C })
+    expect(h2c).toHaveTextContent('01P00A000000001')
+
+    const read = JSON.stringify(takeSnapshot({ route: '/settings#printers', page: {}, tools: [] }))
+    expect(read).toContain('How 3DP-31B-598 prints')
+    expect(read).not.toContain('01P00A000000001')
   })
 })
