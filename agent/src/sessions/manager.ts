@@ -2273,7 +2273,10 @@ export class SessionManager {
           'no_transcript',
           source.busy
             ? `session ${id} has no finished reply to fork yet; wait for its turn to answer`
-            : `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`,
+            : !pausedHistory && answered(source.checkpoint, source.owed.pending)
+              ? // The result is held, but the log has no record of the call to end the child's history at.
+                `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; send it a turn first`
+              : `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`,
         )
       }
     }

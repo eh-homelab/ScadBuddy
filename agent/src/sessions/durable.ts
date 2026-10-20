@@ -475,7 +475,13 @@ export class DurableTurns {
         // was, or the entries and it may not be one state. One page is one Query.
         if (!moved && texts.length > first.entries.length) {
           const again = await page(0)
-          const owedOf = (p: ForkPointPage) => JSON.stringify([p.pending ?? {}, p.fork_next ?? false, p.recent_call_ids ?? []])
+          // By call id, sorted: the same map in another key order is the same state.
+          const owedOf = (p: ForkPointPage) =>
+            JSON.stringify([
+              Object.entries(p.pending ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+              p.fork_next ?? false,
+              p.recent_call_ids ?? [],
+            ])
           moved = again.total !== first.total || again.checkpoint !== first.checkpoint || again.busy !== first.busy || owedOf(again) !== owedOf(first)
         }
         if (moved) continue

@@ -712,6 +712,47 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2', pending: {}, fork_next: true, recent_call_ids: ['toolu_0'] } })
   }, 60_000)
 
+  it('reads a parent over several pages again when what it owes changed between them, and not for a key order', async () => {
+    const m = await durableManager()
+    const outcome = (content: string) => ({ content, is_error: false, blocks: null })
+    // One entry a page. The owed state changes after the first read (a turn stopped meanwhile):
+    // the read starts again and the child gets the later state, read the same at both ends.
+    const changed = await twoTurns(m, {
+      owed: { page_chars: 1, owed_reads: [{ fork_next: false }, { fork_next: true, recent_call_ids: ['toolu_9'] }] },
+    })
+    const child = await m.fork(changed.id, browser)
+    expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2', fork_next: true, recent_call_ids: ['toolu_9'] } })
+    // The same map in another key order is no change: no second read (which would answer the third state).
+    const reordered = await twoTurns(m, {
+      owed: {
+        page_chars: 1,
+        owed_reads: [
+          { pending: { toolu_a: outcome('a'), toolu_b: outcome('b') } },
+          { pending: { toolu_b: outcome('b'), toolu_a: outcome('a') } },
+          { fork_next: true },
+        ],
+      },
+    })
+    const same = await m.fork(reordered.id, browser)
+    expect((await recorded(same.id)).start).toMatchObject({ agent: { fork_next: false } })
+  }, 60_000)
+
+  it('says the log lacks the call when a paused parent with its result held has no reply before it', async () => {
+    const m = await durableManager()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'list them' })
+    await finishTurn(session.id, [{ type: 'session.status', status: 'idle' }])
+    await turn!.done
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).signal('set_conversation', {
+      session_id: 'claude-2',
+      checkpoint: 'a1',
+      conversation: [entry('u1', 'user', 'list them'), entry('a1', 'assistant', [{ type: 'tool_use', id: 'toolu_q', name: 'x', input: {} }])].map((e) =>
+        JSON.stringify(e),
+      ),
+      pending: { toolu_q: { content: [], is_error: false, blocks: null } },
+    })
+    await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'no_transcript', message: expect.stringContaining('no record of that call') })
+  }, 60_000)
+
   it('forks a parent paused at a call whose result its worker did not send before that call, with its history through the reply (#4173)', async () => {
     const m = await durableManager()
     const parent = await twoTurns(m)
