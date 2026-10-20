@@ -87,6 +87,8 @@ const ACTIVITY_TASK_QUEUE = 2
 
 /** What the workflow's validator refuses a second turn with (models.py, workflow.py). */
 const BUSY = 'busy'
+const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
+export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
 /** `value` with every object's keys sorted, at every depth: two equal states serialise alike. */
 function canonical(value: unknown): unknown {
@@ -98,8 +100,6 @@ function canonical(value: unknown): unknown {
       .map(([k, v]) => [k, canonical(v)]),
   )
 }
-const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
-export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
 type WireOwner = { kind: string; id: string; label: string }
 type ImageRef = { name: string; mediaType: string }
