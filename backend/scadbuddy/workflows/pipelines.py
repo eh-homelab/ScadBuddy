@@ -111,6 +111,7 @@ PROJECT_TIMEOUT = timedelta(seconds=10)
 LOCAL_ROW_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
+PIECE_LOOKUP_PATCH = "piece-lookup-4199"
 #: The parent's own lookup of a finished piece (`TemplatePipeline._cached`), a local
 #: activity: two attempts, then the child's lookup with `RETRY`. Bounded, as
 #: `LOCAL_ROW_RETRY` is, so a failing store never holds the worker's shutdown.
@@ -1018,10 +1019,17 @@ class TemplatePipeline:
         then starts no `RenderPiece` child, whose start, workflow tasks and activity
         task were each a handoff prod's slow Temporal database could lose. Only a
         shortcut: on a miss, or a lookup that fails, the child looks again, with its
-        own retries. The lookup is a read (and the piece's download into this worker's
-        cache), so it is safe to repeat."""
+        own retries. The lookup is a read, so it is safe to repeat. On the bambuddy and
+        s3 stores it also downloads the piece into this worker's cache, which
+        `write_output` (on any worker) does not reuse: keep it, as it is what shows the
+        piece is really there, never only an index row.
+
+        Behind `patched`: the in-process worker is unversioned, so a run it started
+        before this lookup replays a child start where the lookup's marker would be."""
         if req.revision is None:
             return None  # `cached_piece` answers None without one: no marker for it
+        if not workflow.patched(PIECE_LOOKUP_PATCH):
+            return None
         try:
             cached: PieceResult | None = await workflow.execute_local_activity(
                 "cached_piece",

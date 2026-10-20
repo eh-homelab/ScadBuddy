@@ -270,7 +270,10 @@ def heartbeated[S, **P, T](
     its downloads and openscad runs. Its workflow gives it a `heartbeat_timeout`, so a
     stretch with no beat (a slow store upload or Postgres write, a template's code) as
     long as that timeout fails a live attempt, and a lost attempt is freed at that
-    timeout rather than its start-to-close. Applied under `activity.defn`."""
+    timeout rather than its start-to-close. Applied under `activity.defn`. The
+    `_heartbeating` calls inside the body stay, nested in this one: each beats only
+    while its own work runs (the SDK throttles the beats), and a cancel reaches the
+    inner work through the outer, which cancels and awaits it."""
 
     @functools.wraps(fn)
     async def beating(self: S, /, *args: P.args, **kwargs: P.kwargs) -> T:
