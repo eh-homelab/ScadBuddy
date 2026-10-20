@@ -734,7 +734,10 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       },
     })
     const same = await m.fork(reordered.id, browser)
-    expect((await recorded(same.id)).start).toMatchObject({ agent: { fork_next: false } })
+    // The first read's state: both results, and not the third read's fork_next.
+    expect((await recorded(same.id)).start).toMatchObject({
+      agent: { fork_next: false, pending: { toolu_a: outcome('a'), toolu_b: outcome('b') } },
+    })
   }, 60_000)
 
   it('says the log lacks the call when a paused parent with its result held has no reply before it', async () => {

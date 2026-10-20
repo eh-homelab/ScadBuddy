@@ -475,7 +475,9 @@ export class DurableTurns {
         // was, or the entries and it may not be one state. One page is one Query.
         if (!moved && texts.length > first.entries.length) {
           const again = await page(0)
-          // By call id, sorted: the same map in another key order is the same state.
+          // By call id, sorted: the same map in another key order is the same state. Only that
+          // top level is normalised; each result is compared as it was serialised, which one
+          // worker does the same way every time.
           const owedOf = (p: ForkPointPage) =>
             JSON.stringify([
               Object.entries(p.pending ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
