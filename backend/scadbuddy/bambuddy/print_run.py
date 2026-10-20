@@ -1457,7 +1457,7 @@ async def prepare_run(
     # library. Slot errors need the plate's slots, which only a library file answers,
     # so those are still found after the upload, by `resolve` in `execute_run`. The run
     # reads it fresh, two GETs; the check reads the dialog's kept copy (#4196).
-    read = catalogue or partial(catalogue_for, client, native=None)
+    read = partial(catalogue_for, client, native=None) if catalogue is None else catalogue
     presets = await read()
     refused = choice_errors(request.choices, presets)
     if refused:
