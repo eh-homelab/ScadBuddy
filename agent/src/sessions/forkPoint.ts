@@ -82,16 +82,20 @@ export async function forkHistory(events: Pick<EventLog, 'read'>, id: string, up
  * The history through the last event of the calls `ids` (#4173): a child that resumes
  * at its parent's paused calls, with their results, has the conversation up to them. What
  * the parent streamed after them never committed, so the child's agent never had it.
+ * All of it with no call named; undefined when the log has no event of one of them, as
+ * then nothing in it says where the committed conversation ends.
  */
-export function historyThroughCalls(history: readonly ServerEvent[], ids: readonly string[]): ServerEvent[] {
-  const calls = new Set(ids)
-  let end = history.length - 1
-  for (let i = history.length - 1; i >= 0; i--) {
-    const e = history[i]!
-    if ((e.type === 'tool.call' || e.type === 'tool.result') && calls.has(e.id)) break
-    end = i - 1
-  }
-  return end < 0 ? [...history] : history.slice(0, end + 1)
+export function historyThroughCalls(history: readonly ServerEvent[], ids: readonly string[]): ServerEvent[] | undefined {
+  const missing = new Set(ids)
+  let end = -1
+  history.forEach((e, i) => {
+    if ((e.type === 'tool.call' || e.type === 'tool.result') && ids.includes(e.id)) {
+      missing.delete(e.id)
+      end = i
+    }
+  })
+  if (ids.length === 0) return [...history]
+  return missing.size > 0 ? undefined : history.slice(0, end + 1)
 }
 
 /**

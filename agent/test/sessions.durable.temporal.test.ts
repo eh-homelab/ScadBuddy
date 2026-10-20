@@ -681,6 +681,37 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(log.filter((e) => e.type === 'assistant.text.delta').map((e) => (e as { delta: string }).delta)).toEqual(['a box', 'a taller box'])
   }, 60_000)
 
+  it('forks a paused parent before its call when the log has no event of the call, though the result is held', async () => {
+    const m = await durableManager()
+    const parent = await twoTurns(m)
+    const third = await m.send(parent.id, browser, 'paint it')
+    // The turn's reply reached the log, its call did not: nothing says where the committed part ends.
+    await finishTurn(parent.id, [...reply('durable-13', 'painting it now'), { type: 'session.status', status: 'idle' }])
+    await third.done
+    await env.client.workflow.getHandle(sessionWorkflowId(parent.id)).signal('set_conversation', {
+      session_id: 'claude-1',
+      checkpoint: 'a3',
+      conversation: [
+        ...conversation,
+        entry('u3', 'user', 'paint it'),
+        entry('a3', 'assistant', [{ type: 'tool_use', id: 'toolu_p', name: 'mcp__scadbuddy__list_models', input: {} }]),
+      ].map((e) => JSON.stringify(e)),
+      pending: { toolu_p: { content: [], is_error: false, blocks: null } },
+      fork_next: true,
+    })
+    const child = await m.fork(parent.id, browser)
+    expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2', pending: {}, fork_next: false } })
+    const log = (await m.events.read(child.id)).map((e) => e.event)
+    expect(log.filter((e) => e.type === 'assistant.text.delta').map((e) => (e as { delta: string }).delta)).toEqual(['a box', 'a taller box'])
+  }, 60_000)
+
+  it("carries the parent's state to a fork up to the reply its checkpoint is (a stopped turn's fork_next)", async () => {
+    const m = await durableManager()
+    const parent = await twoTurns(m, { owed: { fork_next: true, recent_call_ids: ['toolu_0'] } })
+    const child = await m.fork(parent.id, browser, { upTo: 'durable-7' })
+    expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a2', pending: {}, fork_next: true, recent_call_ids: ['toolu_0'] } })
+  }, 60_000)
+
   it('forks a parent paused at a call whose result its worker did not send before that call, with its history through the reply (#4173)', async () => {
     const m = await durableManager()
     const parent = await twoTurns(m)

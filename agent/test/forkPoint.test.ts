@@ -154,10 +154,11 @@ describe('historyThroughCalls (#4173)', () => {
     { type: 'assistant.text.done', sessionId: s, messageId: 'durable-3' },
   ] as ServerEvent[]
   it("ends at the calls' last event, dropping what was streamed after them", () => {
-    expect(historyThroughCalls(history, ['toolu_p']).map((e) => e.type)).toEqual(['user.turn', 'tool.call', 'tool.result'])
+    expect(historyThroughCalls(history, ['toolu_p'])!.map((e) => e.type)).toEqual(['user.turn', 'tool.call', 'tool.result'])
   })
-  it('keeps everything when no call is named, or the log has none of them', () => {
+  it('keeps everything when no call is named, and says nothing when the log lacks one of them', () => {
     expect(historyThroughCalls(history, [])).toEqual(history)
-    expect(historyThroughCalls(history, ['toolu_x'])).toEqual(history)
+    expect(historyThroughCalls(history, ['toolu_x'])).toBeUndefined()
+    expect(historyThroughCalls(history, ['toolu_p', 'toolu_x'])).toBeUndefined()
   })
 })
