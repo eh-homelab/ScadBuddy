@@ -179,6 +179,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(String(raw?.row)).not.toContain('hunter2-long-secret')
   })
 
+  // #4442: a tool that resolved its input parks its own line, redacted; the hash is of the resolved input.
+  it("stores a resolving tool's own line, redacted, and the hash of what it resolved", async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
+    const input = { printer: 'p', printer_id: 2 }
+    const approval = await m.approvals.create({
+      sessionId: session.id,
+      turnId: null,
+      toolUseId: 'toolu_9',
+      tool: 'mcp__scadbuddy__print_output',
+      input,
+      summary: 'Print box on printer "Garage" with hunter2-long-secret',
+      secrets: ['hunter2-long-secret'],
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    expect(approval.inputSummary).toBe('Print box on printer "Garage" with [redacted]')
+    expect(approval.inputHash).toBe(m.approvals.hash('mcp__scadbuddy__print_output', input))
+  })
+
   // #2382: while one row throws, no other due approval must stay unexpired.
   it('expires every other due approval when one of them fails, and reports the failure', async () => {
     const first = await orphan()

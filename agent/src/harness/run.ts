@@ -18,6 +18,7 @@ import type { Resolver } from '../http/egress.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
   type ApprovalGate,
+  type ApprovalPreparer,
   type DecisionListener,
   makeCanUseTool,
   makePreToolUseHook,
@@ -198,6 +199,8 @@ export type HarnessRun = {
    * one, outward calls are denied as needing approval.
    */
   approvalGate?: ApprovalGate
+  /** What an outward call of a tool that resolves its arguments parks (#4442, permissions.ts ApprovalPreparer). */
+  prepareApproval?: ApprovalPreparer
   /**
    * Parks AskUserQuestion calls until the user answers (#940, questions.ts).
    * Only with one is the run given the tool.
@@ -404,7 +407,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   }
   const browser = run.browser
   const guard = browser ? (name: string, input: unknown) => browser.check(name, input) : undefined
-  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
+  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard, run.prepareApproval)
   const abort = new AbortController()
   const options: Options = {
     ...base,

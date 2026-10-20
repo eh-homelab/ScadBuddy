@@ -5,7 +5,7 @@ import type { AuditLog } from '../audit/log.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import { effectiveTool, type FlowImages, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
+import { effectiveTool, type FlowImages, parsedOrRaw, runToolWithOutcome, type Tool, ToolError, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
@@ -473,9 +473,23 @@ async function runGated(
     const message = `${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`
     await refuse(message, message, TOOL_ERROR)
   }
+  const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
+  const services = deps.services
+  // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
+  // must be what the approval was given: a printer re-linked since hashes otherwise.
+  let runInput = input
+  if (effective.gated && tool.resolvesApproval) {
+    try {
+      const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
+      runInput = (await tool.prepareApproval(input, ctx)).input
+    } catch (err) {
+      if (!(err instanceof ToolError)) throw err
+      await refuse(err.message, `${tool.name} was not run: ${err.message}`, TOOL_ERROR)
+    }
+  }
   // The approval binds to this call's tool and input (ApprovalRecords): the hash
   // describe_call gave the parked call, computed again from what this call was given.
-  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
+  const binding = deps.audit ? { inputHash: deps.audit.hash(call.describedAs ?? tool.name, (runInput ?? {}) as Record<string, unknown>) } : undefined
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
     if (await caller.approvals?.lapsed?.(requestId, binding)) {
       await refuse(
@@ -490,13 +504,11 @@ async function runGated(
       NOT_APPROVED,
     )
   }
-  const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
-  const services = deps.services
   const heartbeat = setInterval(() => call.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
   const startedAt = new Date()
   let run: ToolRun
   try {
-    run = await runToolWithOutcome(tool, input, {
+    run = await runToolWithOutcome(tool, runInput, {
       ...services,
       // The tab paired with this session (#254), as for a classic turn; a flow has none.
       ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
@@ -655,19 +667,43 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  * scrubbing rules. Served on `agent-tools` beside the tools.
  */
 export function gateActivities(
-  deps: Pick<ToolActivityDeps, 'audit' | 'sessions'> & { workspace?: SessionFiles | undefined },
+  deps: Pick<ToolActivityDeps, 'audit' | 'sessions'> & {
+    workspace?: SessionFiles | undefined
+    /**
+     * The tools whose own `prepareApproval` decides what a call parks (#4442), and the
+     * services it reads with, as the session's owner. Without them, every call parks as sent.
+     */
+    tools?: readonly Tool[]
+    services?: ToolServices
+  },
 ): Record<string, ToolActivity> {
+  const byName = new Map((deps.tools ?? []).map((t) => [t.name, t]))
+  const lookup = (name: string): Tool | undefined => byName.get(name)
   return {
     [DESCRIBE_CALL_ACTIVITY]: async (args: unknown) => {
       // The hash is keyed by the approvals' HMAC key: only a durable session's workflow
       // gets one (security review of 5b).
-      const { session } = await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
+      const { session, owner, turnTiers: sent } = await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (!deps.audit) throw ApplicationFailure.nonRetryable('describing a call needs the audit log and its key', TOOL_ERROR)
       if (typeof tool !== 'string' || typeof input !== 'object' || input === null || Array.isArray(input)) {
         throw ApplicationFailure.nonRetryable('describe_call takes {tool: string, input: object}', TOOL_ERROR)
       }
       const fields = input as Record<string, unknown>
+      // A tool that resolves what its arguments name (#4442: print_output's registry printer)
+      // parks the resolved input, by the line that names it; the call's activity resolves it
+      // again and runs only if it hashes the same (runGated). A ToolError refuses it unparked.
+      const own = lookup(tool.startsWith(HARNESS_PREFIX) ? tool.slice(HARNESS_PREFIX.length) : tool)
+      if (own?.resolvesApproval && deps.services) {
+        const principal = turnPrincipal(owner, sent ? { tiers: [...sent] } : undefined)
+        const prepared = await own
+          .prepareApproval(fields, { ...deps.services, principal, session, progress: async () => {}, signal: Context.current().cancellationSignal, lookup, gate: 'workflow' })
+          .catch((err: unknown) => {
+            // The tool's own refusal; anything else (the backend away) is the retry policy's.
+            throw err instanceof ToolError ? ApplicationFailure.nonRetryable(err.message, TOOL_ERROR) : err
+          })
+        return { summary: prepared.summary, input_hash: deps.audit.hash(tool, prepared.input) }
+      }
       // A workspace upload's size is shown (#2396), from the session's own workspace; the hash is of the call's input.
       const shown = await withWorkspaceSize(deps.workspace, { kind: 'session', sessionId: session }, fields)
       return { summary: deps.audit.summarise(tool, shown), input_hash: deps.audit.hash(tool, fields) }

@@ -1,7 +1,7 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
-import type { TierResolver } from '../harness/permissions.js'
+import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
@@ -39,6 +39,11 @@ export type HarnessTools = {
     turn?: TurnPrincipal,
     extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
+  /**
+   * What an outward call of a tool with its own `prepareApproval` parks (#4442): the input
+   * it resolves, as the turn's principal reads it, and its line. `undefined` for any other name.
+   */
+  prepareApproval: (session: { id?: string; owner: Owner }, turn?: TurnPrincipal) => ApprovalPreparer
 }
 
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
@@ -46,6 +51,23 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
   return {
     tierOf: (name) => byName.get(name)?.risk,
     titleOf: (name, input) => byName.get(name)?.title(input),
+    prepareApproval: (session, turn) => {
+      const principal = turnPrincipal(session.owner, turn)
+      const lookup = (name: string) => tools.find((t) => t.name === name)
+      return async (name, input) => {
+        const tool = byName.get(name)
+        if (!tool?.resolvesApproval) return undefined
+        return tool.prepareApproval(input, {
+          ...services,
+          principal,
+          ...(session.id !== undefined ? { session: session.id } : {}),
+          progress: async () => {},
+          signal: new AbortController().signal,
+          lookup,
+          gate: 'harness',
+        })
+      }
+    },
     mcpServers: (session, turn, extras) => {
       const principal = turnPrincipal(session.owner, turn)
       // Settings → Plugins (#1953): a disabled tool is not offered, and one raised

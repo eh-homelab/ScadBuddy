@@ -208,6 +208,15 @@ def _refused(code: str, message: str) -> ApplicationError:
     return ApplicationError(message, type=refused_failure_type(code), non_retryable=True)
 
 
+def _tool_refusal(err: FailureError) -> str | None:
+    """The agent's own refusal of a call it was asked to describe (a ``ToolError`` from
+    ``gate.describe_call``), as it said it; ``None`` for any other failure."""
+    cause = err.cause if isinstance(err, ActivityError) else err
+    if isinstance(cause, ApplicationError) and cause.type == "ToolError":
+        return cause.message
+    return None
+
+
 def refusal(tool: str, request_id: str, outcome: str, reason: str | None) -> str:
     """What the model is told when its call was not approved, in the words a classic turn
     uses (agent/src/approvals/service.ts ``refusal``)."""
@@ -559,9 +568,15 @@ class DurableSession:
             await self._park(call)
         except asyncio.CancelledError:
             raise
-        except FailureError:
+        except FailureError as err:
             if any(p.call_id == str(call["id"]) for p in self._parked.values()):
                 return  # parked: its entry is ended by the gate (cancel, interrupt, turn end)
+            why = _tool_refusal(err)
+            if why is not None and self._turn is not None:
+                # The agent refused the call as it described it (#4442: a print_output
+                # whose printer no longer links its printer_id): the model is told why,
+                # never that a person rejected it.
+                self._turn.refusals[str(call["id"])] = f"{call['name']} was not run: {why}"
             with contextlib.suppress(ValueError):
                 self._agent.decide(str(call["id"]), False, approver="scadbuddy")
 

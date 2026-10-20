@@ -592,6 +592,84 @@ describe('the gate in tool activities', () => {
   })
 })
 
+// #4442 security review: a durable session's approval of print_output names the printer that
+// prints and binds to the pair the registry links; the call runs only with that pair.
+describe("a call whose tool resolves what it names (#4442)", () => {
+  const PRINTER = '00000000-0000-4000-8000-0000000000aa'
+  /** print_output's printer resolution, alone: a registry `printer` and the Bambuddy id it links. */
+  const aim = defineTool({
+    name: 'aim',
+    description: 'prints on a registry printer',
+    input: z.object({ printer: z.string().optional(), printer_id: z.number().int().optional() }),
+    risk: 'outward',
+    routes: [],
+    prepareApproval: async (args, ctx) => {
+      const { data } = await ctx.backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer ?? '' } } })
+      const linked = (data as { bambuddy_printer_id: number; name: string }).bambuddy_printer_id
+      if (args.printer_id !== undefined && args.printer_id !== linked) throw new ToolError(`Garage is Bambuddy printer ${linked}, not printer_id ${args.printer_id}.`)
+      return { input: { ...args, printer_id: linked }, summary: `Aim at "${(data as { name: string }).name}"` }
+    },
+    handler: async (args) => json({ ran: args }),
+  })
+  /** The registry, as the fake backend answers it: which Bambuddy printer the row links now. */
+  function registry(linked: { id: number }) {
+    return createBackendClient(BACKEND, async (request) => {
+      const url = new URL((request as Request).url)
+      if (url.pathname === `/api/v1/printers/${PRINTER}`) return Response.json({ id: PRINTER, name: 'Garage', bambuddy_printer_id: linked.id })
+      return Response.json({})
+    })
+  }
+  const audit = {
+    record: async () => {},
+    hash: (tool: string, input: Record<string, unknown>) => `${tool}:${JSON.stringify(input)}`,
+    summarise: (tool: string) => `summary:${tool}`,
+  }
+  const sessions = { ownerOf: async (id: string) => (id === SESSION ? BROWSER : undefined) }
+
+  it("describes the call by the printer that prints, and hashes the pair it approves", async () => {
+    const backend = registry({ id: 2 })
+    const describeCall = gateActivities({ audit, sessions, tools: [aim], services: services({ backend }) })[DESCRIBE_CALL_ACTIVITY]!
+    expect(await env().run(describeCall, { tool: 'aim', input: { printer: PRINTER } })).toEqual({
+      summary: 'Aim at "Garage"',
+      input_hash: `aim:${JSON.stringify({ printer: PRINTER, printer_id: 2 })}`,
+    })
+    // The harness's name for it, as a released classic turn's call is described.
+    expect(await env().run(describeCall, { tool: 'mcp__scadbuddy__aim', input: { printer: PRINTER } })).toMatchObject({ summary: 'Aim at "Garage"' })
+  })
+
+  it('refuses a pair the registry does not link before anything parks', async () => {
+    const describeCall = gateActivities({ audit, sessions, tools: [aim], services: services({ backend: registry({ id: 2 }) }) })[DESCRIBE_CALL_ACTIVITY]!
+    const refused = await failure(env().run(describeCall, { tool: 'aim', input: { printer: PRINTER, printer_id: 3 } }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('ToolError')
+    expect(refused.message).toContain('Garage is Bambuddy printer 2, not printer_id 3.')
+  })
+
+  it('runs the approved pair, checked against the parked hash, and refuses one the registry moved since', async () => {
+    const linked = { id: 2 }
+    const backend = registry(linked)
+    const describeCall = gateActivities({ audit, sessions, tools: [aim], services: services({ backend }) })[DESCRIBE_CALL_ACTIVITY]!
+    const described: unknown = await env().run(describeCall, { tool: 'aim', input: { printer: PRINTER } })
+    const parked = (described as { input_hash: string }).input_hash
+    // The person approved the parked hash: only a call that hashes to it runs.
+    const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === parked }
+    const h = harness({ approvals, audit, services: services({ backend }) }, [aim])
+    const content = await env(undefined, 'tool-toolu_09').run(h.activities.aim!, { printer: PRINTER })
+    expect(text(content)).toContain(`"printer_id": 2`)
+    // Re-linked after the approval: the pair it would print on now is not the one approved.
+    linked.id = 5
+    const moved = await failure(env(undefined, 'tool-toolu_09').run(h.activities.aim!, { printer: PRINTER }))
+    expect(moved.type).toBe('NotApproved')
+  })
+
+  it('refuses a mismatched pair when it runs, and runs nothing', async () => {
+    const h = harness({ audit, services: services({ backend: registry({ id: 2 }) }) }, [aim])
+    const refused = await failure(env(undefined, 'tool-toolu_approved').run(h.activities.aim!, { printer: PRINTER, printer_id: 3 }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.message).toContain('not printer_id 3')
+  })
+})
+
 describe('answerResult', () => {
   it('turns a recorded outcome into the tool result the model reads', () => {
     expect(answerResult({ outcome: 'answered', response: { answers: ['Print it'] }, reason: null }, 'wait_for_user', {})).toEqual({

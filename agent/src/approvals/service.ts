@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { ApprovalGate, ApprovalRequest, ApprovalVerdict, RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
-import type { Kek } from '../secrets.js'
+import { type Kek, redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
   type ApprovalDecisionMessage,
@@ -435,6 +435,8 @@ export type CreateApproval = {
   traceparent?: string
   /** The workspace the call runs in (workspaceOf), for an upload's size; a session's own when omitted. */
   workspace?: WorkspaceRef
+  /** The tool's own line for a call it resolved (ApprovalRequest.summary, #4442); else the scrubbed input. */
+  summary?: string
 }
 
 export type DecideOptions = {
@@ -686,6 +688,7 @@ export class ApprovalService {
 
   /** The row's and the card's summary of the call: its input with a workspace upload's size (never hashed). */
   private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
+    if (request.summary !== undefined) return redact(request.summary, request.secrets ?? [])
     const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
     const shown = await withWorkspaceSize(this.deps.workspace, ws, request.input)
     return summariseInput(request.tool, shown, request.secrets ?? [])
@@ -1300,6 +1303,7 @@ export class ApprovalService {
           toolUseId: request.toolUseId,
           tool: request.toolName,
           input,
+          ...(request.summary !== undefined ? { summary: request.summary } : {}),
           tier: request.tier,
           requestedBy: context.requestedBy,
           ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),

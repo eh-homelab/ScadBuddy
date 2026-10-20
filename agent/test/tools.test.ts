@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { RENDER_LIMITS, RenderLimiter } from '../src/tools/renderLimits.js'
@@ -713,6 +714,20 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(result.isError).toBe(true)
       expect(firstText(result)).toMatch(/Garage is Bambuddy printer 2, not printer_id 3/)
       expect(await pending.list(context.principal)).toEqual([])
+    })
+
+    it("parks a session's call as the pair it resolves, named, and leaves other tools as sent (#4442)", async () => {
+      server.use(row(2))
+      const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
+      expect(await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER })).toEqual({
+        input: expect.objectContaining({ printer: PRINTER, printer_id: 2 }),
+        summary: expect.stringContaining('on printer "Garage"'),
+      })
+      await expect(prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER, printer_id: 3 })).rejects.toThrow(
+        /Garage is Bambuddy printer 2, not printer_id 3/,
+      )
+      expect(await prepare('mcp__scadbuddy__send_to_bambuddy', { output_id: OUT })).toBeUndefined()
+      expect(await prepare('mcp__other__thing', {})).toBeUndefined()
     })
 
     it('refuses that pair when it runs too, rather than printing on the printer_id', async () => {

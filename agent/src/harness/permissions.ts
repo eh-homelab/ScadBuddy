@@ -168,6 +168,8 @@ export type ApprovalRequest = {
   input: Record<string, unknown>
   /** The tool_use block's id: the panel's `tool.call` id. */
   toolUseId: string
+  /** The approval's line, when the tool resolved its input (ApprovalPreparer, #4442); else made from the input. */
+  summary?: string
   /** Set for a subagent's call, which the panel is never shown (sessions/sdkEvents.ts). */
   agentId?: string
   tier: RiskTier
@@ -198,6 +200,17 @@ export type ApprovalVerdict =
  */
 export type ApprovalGate = (request: ApprovalRequest) => Promise<ApprovalVerdict>
 
+/**
+ * What an outward call parks, for a tool that resolves what its arguments name (#4442,
+ * registry.ts `ToolSpec.prepareApproval`): the input the approval binds to, which then
+ * runs, and the line that says it. `undefined` for any other tool, which parks as sent.
+ * It may refuse the call (throw), before anything parks.
+ */
+export type ApprovalPreparer = (
+  toolName: string,
+  input: Record<string, unknown>,
+) => Promise<{ input: Record<string, unknown>; summary: string } | undefined>
+
 /** Observes each decision (session events, audit log, tests). Must not throw. */
 export type DecisionListener = (toolName: string, decision: ToolDecision) => void
 
@@ -210,6 +223,7 @@ export function makeCanUseTool(
   onDecision?: DecisionListener,
   gate?: ApprovalGate,
   guard?: InputGuard,
+  prepare?: ApprovalPreparer,
 ): CanUseTool {
   return async (toolName, input, options): Promise<PermissionResult> => {
     const decision = decide(toolName, tierOf, input, await judgeInput(guard, toolName, input))
@@ -219,10 +233,18 @@ export function makeCanUseTool(
     if (decision.decision === 'allow') return { behavior: 'allow', updatedInput: decision.input ?? input }
     if (decision.decision === 'deny') return { behavior: 'deny', message: decision.reason }
     if (!gate) return { behavior: 'deny', message: noGateMessage(decision.reason) }
+    let prepared: Awaited<ReturnType<ApprovalPreparer>>
+    try {
+      prepared = await prepare?.(toolName, input)
+    } catch (err) {
+      // Refused as it was described (#4442): nothing parks, and the model is told why.
+      return { behavior: 'deny', message: `${toolName} was not run: ${describeError(err)}` }
+    }
     try {
       const verdict = await gate({
         toolName,
-        input,
+        input: prepared?.input ?? input,
+        ...(prepared ? { summary: prepared.summary } : {}),
         toolUseId: options.toolUseID,
         ...(options.agentID !== undefined ? { agentId: options.agentID } : {}),
         tier: decision.tier,

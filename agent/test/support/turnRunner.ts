@@ -96,6 +96,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     },
     tierOf: () => 'read',
     mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),
+    prepareApproval: () => async () => undefined,
     builtInTools: () =>
       Promise.resolve(
         builtInPolicy([

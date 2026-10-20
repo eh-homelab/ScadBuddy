@@ -302,6 +302,8 @@ export type Tool = {
   summarize(args: unknown): string
   /** What a gated call parks (ToolSpec.prepareApproval, else its parsed arguments and `summarize`). */
   prepareApproval(args: unknown, ctx: ToolContext): Promise<{ input: Record<string, unknown>; summary: string }>
+  /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
+  readonly resolvesApproval: boolean
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
   title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
@@ -351,6 +353,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
+    resolvesApproval: spec.prepareApproval !== undefined,
     async prepareApproval(args, ctx) {
       const parsed = spec.input.parse(args)
       if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args) }

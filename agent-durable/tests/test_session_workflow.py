@@ -678,6 +678,36 @@ async def test_a_call_that_cannot_be_described_is_refused_not_left_waiting(
     assert texts and texts[-1].startswith("print_output: error")
 
 
+def _refused_then_asks(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
+    """Calls print_output, then asks a question, which holds the turn open to be read."""
+    if not history:
+        return ToolCall("print_output", {"output_id": "o1"})
+    if len(history) == 1:
+        return ToolCall("ask_user", QUESTION)
+    return Final("done")
+
+
+async def test_a_call_the_agent_refuses_to_describe_tells_the_model_why(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#4442: a print_output naming a printer that no longer links its printer_id is
+    refused before it parks, and the segment runner is given why (`with_refusals`), so
+    the model is told the agent's reason, never that a person rejected it."""
+    why = "Garage is Bambuddy printer 2, not printer_id 3."
+    harness.stand_in.describe_tool_error = why
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(_refused_then_asks)
+    async with harness.restart_agent():
+        _, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        [entry] = await _parked(handle)
+        assert entry["kind"] == "answer"
+        context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+        assert list(context.refusals.values()) == [f"print_output was not run: {why}"]
+        assert harness.stand_in.ran == []
+        await _replays(harness, handle)
+
+
 async def test_a_respond_and_an_interrupt_together_end_the_turn_and_the_next_is_taken(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:

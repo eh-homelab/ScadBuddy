@@ -721,7 +721,14 @@ const temporalWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: {
           ...toolActivities(DURABLE_TOOLS, durableToolDeps),
-          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
+          ...gateActivities({
+            audit,
+            sessions: new PgSessionOwners(temporal.sql),
+            workspace,
+            // A tool that resolves what it names parks that, by name (#4442).
+            tools: DURABLE_TOOLS,
+            services: durableToolDeps.services,
+          }),
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           ...sessionGateActivities(temporal.sql),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),

@@ -54,6 +54,7 @@ export type TurnRunnerDeps = Pick<
   | 'settings'
   | 'tierOf'
   | 'mcpServers'
+  | 'prepareApproval'
   | 'builtInTools'
   | 'pluginPaths'
   | 'ownPlugin'
@@ -180,6 +181,7 @@ export class TurnRunner {
     'browser',
     'builtInPolicy',
     'approvalGate',
+    'prepareApproval',
     'questionGate',
     'systemPromptAppend',
     'resume',
@@ -216,6 +218,7 @@ export class TurnRunner {
     tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers`
     builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
     approvalGate: 'slot',
+    prepareApproval: 'tiers', // bound to the principal, as `mcpServers` is (#4442)
     questionGate: 'slot', // present only for a browser-owned session, which `owner` fingerprints
     systemPromptAppend: 'systemAppend',
     resume: 'spawn', // resume or new id: the transcript tail rule
@@ -462,6 +465,8 @@ export class TurnRunner {
           const turn = slot.current
           return turn ? turn.approvalGate(request) : Promise.resolve({ approved: false, message: NO_TURN })
         },
+        // A registry tool that resolves what its arguments name parks that, by name (#4442).
+        ...(this.deps.prepareApproval ? { prepareApproval: this.deps.prepareApproval(session, principal) } : {}),
         // AskUserQuestion (#940): only the user in the panel answers, so only a
         // session the browser user owns is given the tool. Any other owner's turn
         // would wait on someone who is not asked.
