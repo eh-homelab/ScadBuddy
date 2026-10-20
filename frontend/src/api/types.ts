@@ -305,6 +305,41 @@ export type LanLink = Schemas['LanLink']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
+/** Orders (#4249, spec 2026-10-18 §3): customers, orders and their line items. Money is
+ * integer minor units (`*_minor`) in the order's `currency`. */
+/** A body whose fields `K` the backend defaults, so a caller may leave them out (the
+ * generated type lists a defaulted field as required, as `FlowScriptProblem` notes). */
+type Defaulted<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>
+export type Customer = Schemas['Customer']
+export type CustomerContact = Schemas['Contact']
+export type CustomerAddress = Schemas['Address']
+export type CustomerCreate = Defaulted<Schemas['CustomerCreate'], 'company' | 'notes' | 'tags' | 'contacts' | 'addresses'>
+export type CustomerPatch = Partial<Schemas['CustomerPatch']>
+export type Order = Schemas['Order']
+export type OrderStatus = Order['status']
+export type OrderDetail = Schemas['OrderDetail']
+export type OrderItem = Schemas['OrderItem']
+export type OrderItemStatus = OrderItem['status']
+/** An item with its quotes and fulfilment attempts, as `GET /orders/{id}` lists them. */
+export type OrderItemDetail = Schemas['ItemDetail']
+export type OrderTotals = Schemas['OrderTotals']
+export type OrderPage = Schemas['OrderPage']
+export type Quote = Schemas['Quote']
+export type Fulfilment = Schemas['Fulfilment']
+export type Shipment = Schemas['Shipment']
+export type Payment = Schemas['Payment']
+export type OrderCharge = Schemas['Charge']
+export type OrderEvent = Schemas['OrderEvent']
+export type AddressSnapshot = Schemas['AddressSnapshot']
+export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
+export type OrderPatch = Partial<Schemas['OrderPatch']>
+export type OrderItemCreate = Defaulted<Schemas['ItemCreate'], 'notes' | 'title' | 'slug' | 'commit' | 'inputs' | 'output_id'>
+export type OrderItemPatch = Partial<Schemas['ItemPatch']>
+export type ManualQuoteInput = Defaulted<Schemas['ManualQuoteInput'], 'label'>
+export type FulfilmentInput = Defaulted<Schemas['FulfilmentInput'], 'notes' | 'failure_reason' | 'started_at' | 'finished_at'>
+export type ShipmentInput = Partial<Schemas['ShipmentInput']>
+export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
+
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
 export type Activity = Schemas['ActivityItem']
 export type ActivityPage = Schemas['ActivityPage']
