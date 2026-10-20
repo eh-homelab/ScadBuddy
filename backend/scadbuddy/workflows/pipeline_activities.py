@@ -199,7 +199,9 @@ class PipelineActivities:
 
     @activity.defn(name="pack")
     async def pack(self, req: PackRequest) -> Layout:
-        return pack_layout(req)
+        # Off the event loop, which starts every workflow task this worker runs (#3788):
+        # the packer is pure Python and numpy (`plate.fit_problem` per plate), CPU only.
+        return await asyncio.to_thread(pack_layout, req)
 
     @activity.defn(name="write_output")
     async def write_output(self, req: OutputRequest) -> PipelineOutput:

@@ -58,7 +58,11 @@ _VENDOR = "BAMBU LAB"
 #: maziggy/bambuddy@943f3587 ``backend/app/utils/printer_models.py``:
 #: ``PRINTER_MODEL_MAP`` (Bambu Studio's ``printer_model`` names) and
 #: ``PRINTER_MODEL_ID_MAP`` (the codes a printer announces over SSDP, which Bambuddy
-#: may keep as ``Printer.model``).
+#: may keep as ``Printer.model``), lines 8-64 of
+#: https://github.com/maziggy/bambuddy/blob/943f35871289938781bad9129dba73dd6997ec2f/backend/app/utils/printer_models.py#L8-L64
+#: Copied by hand (#3897): when Bambuddy adds a model, add its Studio name and its SSDP
+#: code here, and check ``GCODE_COMPAT_FAMILIES`` (line 446 there) against
+#: :data:`_X1_FAMILY`.
 _MODEL_ALIASES = {
     "X1CARBON": "X1C",
     "A1M": "A1MINI",

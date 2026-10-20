@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _choice
+from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice, _choice
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
 from scadbuddy.bambuddy.models import PresetCatalogue, PresetRef, SlotChoice, SpoolFilamentPreset
 from scadbuddy.bambuddy.resolver import (
@@ -34,10 +34,10 @@ def row(source: str, id_: str, name: str, *sizes: str, kind: str | None = None) 
     )
 
 
-def recorded() -> _Catalogue:
+def recorded() -> Catalogue:
     catalogue = PresetCatalogue.model_validate(recording("slicer-presets-h2c.json"))
     tiers = (catalogue.cloud, catalogue.standard)
-    return _Catalogue(
+    return Catalogue(
         printer=[_choice(p) for tier in tiers for p in tier.printer],
         process=[_choice(p) for tier in tiers for p in tier.process],
         filament=[_choice(p) for tier in tiers for p in tier.filament],
@@ -48,9 +48,9 @@ def _not_cloud(rows: list[PresetChoice]) -> list[PresetChoice]:
     return [row for row in rows if row.ref.source != "cloud"]
 
 
-def without_cloud() -> _Catalogue:
+def without_cloud() -> Catalogue:
     whole = recorded()
-    return _Catalogue(
+    return Catalogue(
         _not_cloud(whole.printer), _not_cloud(whole.process), _not_cloud(whole.filament)
     )
 

@@ -17,8 +17,8 @@ _STATUS: dict[str, ActivityStatus] = {
 }
 
 
-#: How much of a project's name a title shows; the chip (frontend `labels.ts`
-#: `SUBJECT_NAME_CHARS`) shows as much.
+#: How much of a project's name a title shows; `/activity/facets` hands the chips the
+#: same (`subject_name_chars`, #4003).
 TITLE_NAME_CHARS = 40
 #: A Bambuddy subject's prefix; the kind before it in a title already names the thing.
 _ID_PREFIXES = ("library:", "library-folder:", "project:")
@@ -33,10 +33,12 @@ def _subject_text(subject: str) -> str:
         return f"“{name[:TITLE_NAME_CHARS]}…”" if clipped else f"“{name}”"
     if subject == "library-files":
         return "(several files)"
+    if subject.startswith("scad-library:"):  # an OpenSCAD library's checkouts, by name
+        return subject.removeprefix("scad-library:")
     for prefix in _ID_PREFIXES:
         if subject.startswith(prefix):
             rest = subject.removeprefix(prefix)
-            # An OpenSCAD library by name, unless all digits: that reads as a file's id.
+            # Before #4001 an OpenSCAD library's removal was `library:<name>` too.
             return f"#{rest}" if rest.isdigit() else rest
     return subject
 

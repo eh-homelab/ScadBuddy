@@ -241,8 +241,18 @@ async def test_a_local_process_needs_bambuddy(profiles: Profiles, plan: SlicePla
 def test_native_preset_key_is_distinct_from_bambuddys(plan: SlicePlan) -> None:
     assert (
         native_preset_key(plan, 1, "02.08.02.61")
-        == "native@02.08.02.61/" + slice_request(plan, 1).preset_key
+        == "native@02.08.02.61/" + slice_request(plan, 1).preset_key + "/colours=#FF0000,#00FF00"
     )
+
+
+def test_a_recolour_is_another_native_slice(plan: SlicePlan) -> None:
+    """#3962: the colours reach the CLI and change the sliced file, so two plans that
+    differ only in them never share a slice; the case of a colour does not matter."""
+    swapped = plan.model_copy(update={"filament_colours": ["#00FF00", "#FF0000"]})
+    lower = plan.model_copy(update={"filament_colours": ["#ff0000", "#00ff00"]})
+    key = native_preset_key(plan, 1, "02.08.02.61")
+    assert native_preset_key(swapped, 1, "02.08.02.61") != key
+    assert native_preset_key(lower, 1, "02.08.02.61") == key
 
 
 @pytest.mark.requires_slicer_profiles

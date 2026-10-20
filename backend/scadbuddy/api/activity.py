@@ -30,12 +30,14 @@ from scadbuddy.activity.index import (
 )
 from scadbuddy.activity.kinds import KindRegistry
 from scadbuddy.activity.models import STATUSES, ActivityRow, ActivityStatus, Facet, FacetType
+from scadbuddy.activity.subject_labels import SubjectLabels
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import CatalogueDep, OutputsDep
 from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
+from scadbuddy.operations.activity import TITLE_NAME_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,9 @@ class ActivityFacets(BaseModel):
     principals: list[CountOut]
     tools: list[CountOut]
     subjects: list[CountOut]
+    #: How much of a project's name (``project-name:<name>``) a subject's chip shows,
+    #: as much as an operation's title does (#4003).
+    subject_name_chars: int
 
 
 class LinkOut(BaseModel):
@@ -272,13 +277,27 @@ LABELLED_SUBJECTS = 100
 
 
 def _subject_labels(
-    subjects: list[Count], catalogue: Catalogue, outputs: OutputStore
+    subjects: list[Count], catalogue: Catalogue, outputs: OutputStore, kept: SubjectLabels
 ) -> dict[str, str]:
     """The names ScadBuddy holds for the subjects: a model's, and an output's (its own
-    name, else its model's). A library file or project is Bambuddy's, so it has none."""
+    name, else its model's). A library file or project is Bambuddy's, so it has none.
+    Each is looked up once per `LABELS_TTL` (#4002)."""
     # The most frequent first: past them a chip shows its reference, and the facets
     # stay one catalogue read and a bounded number of output reads.
-    values = {c.value for c in subjects[:LABELLED_SUBJECTS]}
+    labels, missing = kept.known(c.value for c in subjects[:LABELLED_SUBJECTS])
+    if missing:
+        found, settled = _look_up(missing, catalogue, outputs)
+        kept.keep(settled, found)
+        labels |= found
+    return labels
+
+
+def _look_up(
+    values: set[str], catalogue: Catalogue, outputs: OutputStore
+) -> tuple[dict[str, str], set[str]]:
+    """`_subject_labels`'s names for ``values``, and the values settled: all but those a
+    failed read left unknown, which the next facets read asks about again."""
+    settled = set(values)
     metas: dict[str, tuple[str | None, str]] = {}
     for value in values:
         if not value.startswith("output:"):
@@ -288,22 +307,27 @@ def _subject_labels(
             continue  # not an id at all: never let it near the store's paths
         try:
             metas[value] = outputs.name_and_slug(output_id)
-        except (OutputNotFoundError, OSError, ValueError):
-            continue  # deleted (even mid-read), or its meta unreadable: the chip keeps its id
+        except OutputNotFoundError:
+            continue  # deleted (even mid-read): the chip keeps its id
+        except (OSError, ValueError):
+            settled.discard(value)  # its meta unreadable for now: the chip keeps its id
     wanted = values | {slug for _, slug in metas.values()}
     names: dict[str, str] = {}
     # A model's id is a bare slug or a built-in's `builtin:<slug>`; every other subject
     # holds a ':' of its own. With no model among them there is nothing to ask the
     # catalogue, and the page refetches facets often.
-    if any(":" not in value or is_builtin(value) for value in wanted):
+    models = {value for value in wanted if ":" not in value or is_builtin(value)}
+    if models:
         try:
             slugs = [slug for slug in catalogue.slugs() if slug in wanted]
             names = {record.slug: record.name for record in catalogue.list_models(slugs)}
         except Exception:  # the facets are the activity index's; a name is only a nicety
             logger.warning("activity facets: no model names from the catalogue", exc_info=True)
+            # Every model, and every output named by its model's name, is asked again.
+            settled -= models | {v for v, (own, _) in metas.items() if own is None}
     # An output's model is looked up only to name the output; it is no chip of its own.
     labels = {value: name for value, name in names.items() if value in values}
-    return labels | _output_labels(metas, names)
+    return labels | _output_labels(metas, names), settled
 
 
 def _output_labels(
@@ -349,8 +373,11 @@ async def activity_facets(
         tools=_counts(counts.tools),
         subjects=_counts(
             counts.subjects,
-            await asyncio.to_thread(_subject_labels, counts.subjects, catalogue, outputs),
+            await asyncio.to_thread(
+                _subject_labels, counts.subjects, catalogue, outputs, activity.subject_labels
+            ),
         ),
+        subject_name_chars=TITLE_NAME_CHARS,
     )
 
 

@@ -53,6 +53,7 @@ fn request<'a>(cli: &'a Path, p: &'a Paths) -> RunRequest<'a> {
         arrange: Arrange::No,
         allow_newer_file: true,
         debug: 1,
+        filament_colours: &[],
         keepalive: KEEPALIVE,
     }
 }
@@ -231,6 +232,24 @@ fn command_line_is_the_argv_the_spec_fixes() {
     assert!(!argv.contains(&"--export-slicedata".to_owned()));
     let i = argv.iter().position(|a| a == "--arrange").unwrap();
     assert_eq!(argv[i + 1], "auto");
+    assert!(!argv.contains(&"--filament-colour".to_owned()));
+}
+
+#[test]
+fn the_slots_colours_follow_the_filaments() {
+    // #3962: without them, slots that all load one preset name lose the prime tower.
+    let cli = fake("");
+    let p = paths();
+    let colours = ["#FF0000".to_owned(), "#00FF00".to_owned()];
+    let mut req = request(&cli, &p);
+    req.filament_colours = &colours;
+    let argv: Vec<String> = command_line(&req, Path::new("/tmp/x/progress.fifo"))
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect();
+    let i = argv.iter().position(|a| a == "--load-filaments").unwrap();
+    assert_eq!(argv[i + 2], "--filament-colour");
+    assert_eq!(argv[i + 3], "#FF0000;#00FF00");
 }
 
 #[tokio::test]

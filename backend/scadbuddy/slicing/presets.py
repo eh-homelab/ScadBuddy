@@ -223,8 +223,16 @@ def native_preset_key(
     slicer slices again (Ruling C7). ``bambuddy_process`` is
     :attr:`PresetFiles.bambuddy_process`: a process file Bambuddy's values built is
     keyed by what it held, since the image's version does not say which profiles
-    Bambuddy's slicer flattened it from."""
+    Bambuddy's slicer flattened it from.
+
+    The slots' colours are in it too (#3962): the CLI takes them as ``--filament-colour``,
+    which sets each slot's colour in the sliced file and decides whether slots of one
+    preset keep the prime tower, so a recolour slices again rather than reuse a file
+    that names the old colours. Keys of slices from before then never match, and those
+    slices, without the tower, are not reused."""
     key = f"native@{version}/" + slice_request(plan, plate_id).preset_key
     if bambuddy_process is not None:
         key += f"/bambuddy-process={bambuddy_process}"
+    if plan.filament_colours:
+        key += "/colours=" + ",".join(colour.upper() for colour in plan.filament_colours)
     return key

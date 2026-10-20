@@ -11,7 +11,7 @@ from typing import cast
 
 import pytest
 from temporalio import activity
-from temporalio.client import WorkflowFailureError
+from temporalio.client import Client, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.exceptions import TimeoutError as WorkflowTimeoutError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
@@ -548,8 +548,10 @@ class _SlowSnapshots:
 
 
 class _LostFirstProjection(FakeWorld):
-    """A `project` whose first attempt never answers: the worker Temporal recorded as
-    having it never got it (a poll that gave up while history recorded the start)."""
+    """A `project` whose first attempt never answers (a hung write). As a regular
+    activity this was also an attempt Temporal recorded as started on a worker that
+    never got it; as a local activity (#4199) there is no such handoff, but a hung
+    attempt is still cut short by its bound."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -564,14 +566,14 @@ class _LostFirstProjection(FakeWorld):
 
 
 async def test_a_lost_projection_attempt_is_retried_within_seconds() -> None:
-    """Only `start_to_close` recovers an attempt that was started but never delivered,
-    so `project` (one short write) gets `PROJECT_TIMEOUT`, not `SHORT`: a lost attempt
-    cost a page load 60 s on prod (2026-10-18)."""
+    """Only `start_to_close` recovers an attempt that never answers, so `project` (one
+    short write) gets `PROJECT_TIMEOUT`, not `SHORT`: a lost attempt cost a page load
+    60 s on prod (2026-10-18)."""
     world, job = _LostFirstProjection(), a_job(params={"w": 12})
     async with temporal_client() as client:
-        # The lost attempt holds one of the worker's activity slots until the worker
-        # shuts down, as an undelivered one holds nothing on prod; the rest of the job
-        # runs beside it (asserted below), so the slot starves nothing.
+        # The hung attempt holds one of the worker's local activity slots until the
+        # worker shuts down; the rest of the job runs beside it (asserted below), so
+        # the slot starves nothing.
         await asyncio.wait_for(run_job(world, job, client=client), 30)
     assert world.lost
     assert len(world.pieces) == 1 and len(world.outputs) == 1
@@ -668,3 +670,70 @@ def test_the_pipeline_activities_budget_the_snapshot_transfer(
     # `ctx.activity` adds one transfer per Blob/Part it passes, plus the snapshot's.
     part, blob = {"kind": "part", "piece_key": "k"}, {"kind": "blob", "key": "b", "path": "f"}
     assert _references([[part, blob, 3], {"x": {"y": blob}, "n": "blob"}]) == 3
+
+
+async def _scheduled_activities(client: Client, workflow_id: str) -> list[str]:
+    history = await client.get_workflow_handle(workflow_id).fetch_history()
+    return [
+        event.activity_task_scheduled_event_attributes.activity_type.name
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+    ]
+
+
+async def test_projections_and_the_pack_run_as_local_activities() -> None:
+    """#4199: each activity task is a handoff Temporal can record as started and never
+    deliver (prod's slow Temporal database), recovered only by its timeout. A render's
+    row writes and its pack are short and read no file of a worker's own, so they run
+    in the workflow task's own worker: none is scheduled as an activity task."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    async with temporal_client() as client:
+        await run_job(world, job, client=client)
+        scheduled = await _scheduled_activities(client, workflow_id_for(job.id))
+    assert world.final().state == "done"
+    assert world.projections[0].state == "running"
+    assert scheduled == ["load_pipeline", "write_output"]
+
+
+class _FailingWrites(FakeWorld):
+    """`project` fails until it has been tried ``failures`` times."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> bool:
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("the database went away")
+        return await super().project(projection)
+
+
+async def test_a_write_still_failing_in_the_worker_goes_to_temporals_retries() -> None:
+    """A local activity's retries run in the worker, which cannot stop while they do
+    (#4199): past `LOCAL_ROW_RETRY`'s attempts the write is a regular activity, retried
+    by Temporal until it lands, and the job still finishes."""
+    attempts = pipelines.LOCAL_ROW_RETRY.maximum_attempts
+    world, job = _FailingWrites(failures=attempts + 1), a_job(params={"w": 12})
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, job, client=client), 60)
+        scheduled = await _scheduled_activities(client, workflow_id_for(job.id))
+    assert world.failures == 0
+    assert world.final().state == "done"
+    assert scheduled == ["project", "load_pipeline", "write_output"]
+
+
+async def test_a_template_pack_the_packer_refuses_fails_with_its_line_and_reason() -> None:
+    world = FakeWorld(
+        "async def run(ctx, inputs):\n"
+        "    part = await ctx.render('model.scad', w=400)\n"
+        "    await ctx.output(plates=await ctx.pack([(part, 2)]))\n"
+    )
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    final = world.final()
+    assert final.state == "failed" and final.failure is not None
+    assert final.failure.error.startswith("pipeline/pipeline.py:3: model.scad (400 x 10 mm)")
+    assert "does not fit the plate" in final.failure.error
+    assert world.outputs == []

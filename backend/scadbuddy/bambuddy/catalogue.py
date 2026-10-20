@@ -88,7 +88,7 @@ def _local_choice(preset: LocalPreset) -> PresetChoice:
 
 
 @dataclass(frozen=True)
-class _Catalogue:
+class Catalogue:
     """Every preset Bambuddy offers, normalised into :class:`PresetChoice` rows.
 
     Both catalogues go in: ``/local-presets/`` (OrcaSlicer imports) is *not* the
@@ -157,7 +157,7 @@ class _Catalogue:
         }
 
 
-async def _catalogue(client: BambuddyClient) -> _Catalogue:
+async def _catalogue(client: BambuddyClient) -> Catalogue:
     presets, local_presets = await asyncio.gather(
         client.presets(), client.local_presets(), return_exceptions=True
     )
@@ -165,7 +165,7 @@ async def _catalogue(client: BambuddyClient) -> _Catalogue:
     return await asyncio.to_thread(_build, settled(presets), settled(local_presets))
 
 
-def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> _Catalogue:
+def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> Catalogue:
     printers: list[PresetChoice] = []
     processes: list[PresetChoice] = []
     filaments: list[PresetChoice] = []
@@ -176,7 +176,7 @@ def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> _Catalogu
     printers.extend(_local_choice(row) for row in local.printer)
     processes.extend(_local_choice(row) for row in local.process)
     filaments.extend(_local_choice(row) for row in local.filament)
-    return _Catalogue(printer=printers, process=processes, filament=filaments)
+    return Catalogue(printer=printers, process=processes, filament=filaments)
 
 
 #: How old a kept catalogue may be before the dialog reads a fresh one behind it
@@ -187,7 +187,7 @@ CATALOGUE_TTL = 120.0
 #: Under the data volume's ``cache/``, which every replica shares (#2978): a catalogue
 #: kept in one process missed almost every open, the API running several.
 CATALOGUE_DIRNAME = "catalogues"
-#: Bumped when :class:`_Catalogue`'s shape changes, so an older file is never read.
+#: Bumped when :class:`Catalogue`'s shape changes, so an older file is never read.
 CATALOGUE_VERSION = 1
 #: How long a file in the directory may go unwritten before a keep removes it (#3423):
 #: one named for an old Bambuddy URL or key, or an older version, is never read again.
@@ -197,11 +197,7 @@ CATALOGUE_ORPHAN_AGE = 7 * 24 * 3600.0
 #: The HKDF label of :func:`catalogue_name_key`.
 NAME_KEY_INFO = b"scadbuddy:bambuddy:catalogue_name:v1"
 
-_ADAPTER = TypeAdapter(_Catalogue)
-
-
-#: The public name for the catalogue a public caller holds (#3585 review).
-Catalogue = _Catalogue
+_ADAPTER = TypeAdapter(Catalogue)
 
 
 async def read_catalogue(client: BambuddyClient) -> Catalogue:
@@ -212,12 +208,12 @@ async def read_catalogue(client: BambuddyClient) -> Catalogue:
 
 #: The catalogue this process last parsed, by its file and that file's mtime: one
 #: entry, so a changed Bambuddy URL or key does not keep the old one alive (#3447).
-_parsed: dict[Path, tuple[int, _Catalogue]] = {}
+_parsed: dict[Path, tuple[int, Catalogue]] = {}
 #: The background reads running in this process, one per file.
 _refreshing: dict[Path, asyncio.Task[None]] = {}
 #: The first reads running in this process, one per file with nothing kept yet, which
 #: every open of that file waits on (#2906).
-_reading: dict[Path, asyncio.Task[_Catalogue]] = {}
+_reading: dict[Path, asyncio.Task[Catalogue]] = {}
 
 
 def catalogue_name_key(kek: Kek | None) -> bytes | None:
@@ -231,7 +227,7 @@ def catalogue_name_key(kek: Kek | None) -> bytes | None:
 
 async def cached_catalogue(
     client: BambuddyClient, cache: Path, *, name_key: bytes | None = None
-) -> _Catalogue:
+) -> Catalogue:
     """:func:`_catalogue`, kept in a file under ``cache`` per Bambuddy (#2361, #2978).
 
     A kept catalogue answers at once, however old; one older than
@@ -274,7 +270,7 @@ def _path(cache: Path, config: BambuddyConfig, name_key: bytes | None = None) ->
     return cache / CATALOGUE_DIRNAME / f"v{CATALOGUE_VERSION}-{digest[:32]}.json"
 
 
-def _load(path: Path) -> tuple[float, _Catalogue] | None:
+def _load(path: Path) -> tuple[float, Catalogue] | None:
     """The kept catalogue and its age in seconds; ``None`` when there is none to read."""
     try:
         stat = path.stat()
@@ -288,7 +284,7 @@ def _load(path: Path) -> tuple[float, _Catalogue] | None:
     return time.time() - stat.st_mtime, held[1]
 
 
-def _keep(path: Path, catalogue: _Catalogue) -> None:
+def _keep(path: Path, catalogue: Catalogue) -> None:
     """Write ``path`` aside and rename it in, so another replica never reads half."""
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
@@ -324,7 +320,7 @@ def _sweep(kept: Path) -> None:
             continue
 
 
-async def _first_read(config: BambuddyConfig, path: Path) -> _Catalogue:
+async def _first_read(config: BambuddyConfig, path: Path) -> Catalogue:
     """The read every open with nothing kept waits on, with a client of its own: the
     open that started it may answer, or be given up on, before it ends.
 
@@ -343,7 +339,7 @@ async def _first_read(config: BambuddyConfig, path: Path) -> _Catalogue:
     return catalogue
 
 
-def _settle_first_read(path: Path, done: asyncio.Task[_Catalogue]) -> None:
+def _settle_first_read(path: Path, done: asyncio.Task[Catalogue]) -> None:
     """Let the next open start a read of its own, and take the failure, so a read whose
     every open was given up on is not logged as never retrieved."""
     if _reading.get(path) is done:

@@ -229,13 +229,13 @@ function libraryPin(action: ResourceAction | ((result: unknown) => ResourceActio
  */
 const pinned = libraryPin((result) => (field(result, 'pinned_before') === false ? 'created' : 'modified'))
 
-/** A stored setting, by what it is for. */
 /** A registry printer's setting id (`printer:<uuid>`), or null without one. */
 function registryPrinter(id: unknown): string | null {
   const printer = str(id)
   return printer ? `printer:${printer}` : null
 }
 
+/** A stored setting, by what it is for. */
 function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
   return id ? [{ type: 'setting', id, action: 'modified', ...extra }] : []
 }

@@ -11,8 +11,10 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex, Count
+from scadbuddy.activity.subject_labels import SubjectLabels
 from scadbuddy.api.activity import _subject_labels
 from scadbuddy.library.outputs import OutputNotFoundError
+from scadbuddy.operations.activity import TITLE_NAME_CHARS
 from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
 from tests.api.test_send import make_output
 from tests.support.operations import press
@@ -166,7 +168,8 @@ def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> Non
     subjects = [
         Count(value, 1) for value in ("output:*/../x", "output:" + "d" * 32, "output:" + "e" * 32)
     ]
-    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
+    outputs = SimpleNamespace(name_and_slug=get)
+    labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
     assert labels == {}
     assert sorted(asked) == ["d" * 32, "e" * 32]
 
@@ -183,7 +186,8 @@ def test_subjects_with_no_slug_never_read_the_catalogue() -> None:
 
     catalogue = SimpleNamespace(slugs=unused, list_models=unused)
     subjects = [Count(v, 1) for v in ("library:12", "project:5", "output:" + "a" * 32)]
-    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=gone))  # type: ignore[arg-type]
+    outputs = SimpleNamespace(name_and_slug=gone)
+    labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
     assert labels == {}
 
 
@@ -193,7 +197,7 @@ def test_a_built_in_model_alone_is_still_named() -> None:
     catalogue = SimpleNamespace(slugs=lambda: ["builtin:box"], list_models=lambda slugs: [record])
     outputs = SimpleNamespace(name_and_slug=lambda output_id: (None, "builtin:box"))
     subjects = [Count("builtin:box", 2), Count("output:" + "a" * 32, 1)]
-    labels = _subject_labels(subjects, catalogue, outputs)  # type: ignore[arg-type]
+    labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
     assert labels == {"builtin:box": "Box", "output:" + "a" * 32: "Box"}
 
 
@@ -207,8 +211,92 @@ def test_a_failing_catalogue_leaves_the_facets_their_output_names() -> None:
     catalogue = SimpleNamespace(slugs=broken, list_models=lambda slugs: [])
     outputs = SimpleNamespace(name_and_slug=lambda output_id: ("Mine", "demo"))
     subjects = [Count("demo", 2), Count("output:" + "a" * 32, 1)]
-    labels = _subject_labels(subjects, catalogue, outputs)  # type: ignore[arg-type]
+    labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
     assert labels == {"output:" + "a" * 32: "Mine"}
+
+
+def test_a_subject_is_named_once_a_while_not_on_every_facets_read() -> None:
+    """#4002: the Activity page re-reads the facets every few seconds; a subject's name,
+    or that it has none, is looked up again only once it has been kept its while."""
+    reads: list[str] = []
+    record = SimpleNamespace(slug="demo", name="Demo")
+
+    def slugs() -> list[str]:
+        reads.append("catalogue")
+        return ["demo"]
+
+    def name_and_slug(output_id: str) -> tuple[str | None, str]:
+        reads.append(output_id)
+        return None, "demo"
+
+    catalogue = SimpleNamespace(slugs=slugs, list_models=lambda slugs: [record])
+    outputs = SimpleNamespace(name_and_slug=name_and_slug)
+    now = [0.0]
+    kept = SubjectLabels(ttl=30, clock=lambda: now[0])
+    subjects = [Count("demo", 2), Count("output:" + "a" * 32, 1), Count("library:12", 1)]
+    expected = {"demo": "Demo", "output:" + "a" * 32: "Demo"}
+
+    assert _subject_labels(subjects, catalogue, outputs, kept) == expected  # type: ignore[arg-type]
+    assert reads == ["a" * 32, "catalogue"]
+    now[0] = 29
+    assert _subject_labels(subjects, catalogue, outputs, kept) == expected  # type: ignore[arg-type]
+    assert reads == ["a" * 32, "catalogue"]
+    now[0] = 31
+    assert _subject_labels(subjects, catalogue, outputs, kept) == expected  # type: ignore[arg-type]
+    assert reads == ["a" * 32, "catalogue"] * 2
+
+
+def test_a_name_a_failed_read_left_unknown_is_asked_again() -> None:
+    """#4002: a failing catalogue is not kept as "no name"; the next read asks again."""
+    broken = [True]
+    record = SimpleNamespace(slug="demo", name="Demo")
+
+    def slugs() -> list[str]:
+        if broken[0]:
+            raise OSError("catalogue unreadable")
+        return ["demo"]
+
+    catalogue = SimpleNamespace(slugs=slugs, list_models=lambda slugs: [record])
+    outputs = SimpleNamespace(name_and_slug=lambda output_id: (None, "demo"))
+    kept = SubjectLabels()
+    subjects = [Count("demo", 2), Count("output:" + "a" * 32, 1)]
+    assert _subject_labels(subjects, catalogue, outputs, kept) == {}  # type: ignore[arg-type]
+    broken[0] = False
+    assert _subject_labels(subjects, catalogue, outputs, kept) == {  # type: ignore[arg-type]
+        "demo": "Demo",
+        "output:" + "a" * 32: "Demo",
+    }
+
+
+def test_an_output_whose_meta_could_not_be_read_is_asked_again() -> None:
+    """#4002: an output whose meta.json could not be read is not kept as "no name"; a
+    deleted one is, and is not read again."""
+    reads: list[str] = []
+    unreadable = [True]
+
+    def name_and_slug(output_id: str) -> tuple[str | None, str]:
+        reads.append(output_id)
+        if output_id == "b" * 32:
+            raise OutputNotFoundError(output_id)
+        if unreadable[0]:
+            raise OSError("meta.json unreadable")
+        return "Mine", "demo"
+
+    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    outputs = SimpleNamespace(name_and_slug=name_and_slug)
+    kept = SubjectLabels()
+    subjects = [Count("output:" + "a" * 32, 2), Count("output:" + "b" * 32, 1)]
+    assert _subject_labels(subjects, catalogue, outputs, kept) == {}  # type: ignore[arg-type]
+    unreadable[0] = False
+    labels = _subject_labels(subjects, catalogue, outputs, kept)  # type: ignore[arg-type]
+    assert labels == {"output:" + "a" * 32: "Mine"}
+    assert sorted(reads) == ["a" * 32, "a" * 32, "b" * 32]
+
+
+def test_the_facets_say_how_much_of_a_name_a_chip_shows(client: TestClient) -> None:
+    """#4003: the chips clip a project's name as the titles do, by the server's count."""
+    body = client.get("/api/v1/activity/facets").json()
+    assert body["subject_name_chars"] == TITLE_NAME_CHARS
 
 
 def test_facets_without_agent_tables(client: TestClient) -> None:
