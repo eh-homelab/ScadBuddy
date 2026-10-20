@@ -15,8 +15,9 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -201,7 +202,7 @@ _ADAPTER = TypeAdapter(Catalogue)
 
 
 async def read_catalogue(client: BambuddyClient) -> Catalogue:
-    """The preset catalogue, read fresh from Bambuddy, as the check and the run read it;
+    """The preset catalogue, read fresh from Bambuddy, as the run reads it;
     :func:`cached_catalogue` is the print dialog's kept copy."""
     return await _catalogue(client)
 
@@ -225,6 +226,17 @@ def catalogue_name_key(kek: Kek | None) -> bytes | None:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=NAME_KEY_INFO).derive(kek.key)
 
 
+#: A catalogue read deferred: what the dialog's check is given (#4196).
+ReadCatalogue = Callable[[], Awaitable[Catalogue]]
+
+
+def kept_catalogue(client: BambuddyClient, cache: Path, kek: Kek | None) -> ReadCatalogue:
+    """:func:`cached_catalogue` for ``client`` as a reader, its file named under
+    :func:`catalogue_name_key` as the dialog's choices name it: what the dialog's check
+    reads (#4196)."""
+    return partial(cached_catalogue, client, cache, name_key=catalogue_name_key(kek))
+
+
 async def cached_catalogue(
     client: BambuddyClient, cache: Path, *, name_key: bytes | None = None
 ) -> Catalogue:
@@ -233,8 +245,9 @@ async def cached_catalogue(
     A kept catalogue answers at once, however old; one older than
     :data:`CATALOGUE_TTL` is read again in the background for the next open. So a
     profile imported in Bambuddy shows from the open after the one that started that
-    read. Only the print dialog's choices read it: the check and the run, which slice
-    with what they resolve, still read the catalogue fresh. A failed read is not kept.
+    read. Only the print dialog reads it, its choices and its check (#4196): the run,
+    which slices with what it resolves, still reads the catalogue fresh. A failed read
+    is not kept.
     ``name_key`` is :func:`catalogue_name_key`'s.
 
     With nothing kept, the opens of that file wait on one read and fail with it

@@ -290,11 +290,17 @@ as an unreadable record.
 
 | ScadBuddy answer | errno |
 |---|---|
-| 404 | `ENOENT` |
+| 404 | `ENOENT` (a read may see `EIO`: see below) |
 | 409 | `EBUSY` |
 | 413, or a size cap | `EFBIG` |
 | 401/403 (a Bambuddy scope the key lacks) | `EACCES` |
 | 5xx, timeout, unreachable | `EIO` |
+
+A file gone from the library since it was listed is found by its first read, which
+answers `ENOENT` and drops the entry. The file is open with `FOPEN_KEEP_CACHE`, so the
+kernel reads it through the page cache, and some kernels hand that failure to the reader
+as `EIO` (GitHub's ubuntu-24.04 image 20261018.339.1 did; its 20261012.334.1 and WSL2's
+6.6 did not, #4450). Either way the next `stat` answers `ENOENT`.
 
 Those are the answers of every operation but an upload. An upload is queued instead,
 and its `close()` succeeds, on everything but 400, 413, 415 and 422, which are refusals

@@ -272,10 +272,19 @@ func TestA404OnReadDropsTheEntry(t *testing.T) {
 	}
 	lib.remove(10)
 	// The listing and the kernel's entry are both still fresh, so only the download
-	// finds the file gone.
-	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrNotExist) {
+	// finds the file gone. The read answers ENOENT, but the file is open with
+	// FOPEN_KEEP_CACHE, so the kernel reads it through the page cache, and some kernels
+	// hand that failure to the reader as EIO: GitHub's ubuntu-24.04 image 20261018.339.1
+	// did on every run, 20261012.334.1 and WSL2's 6.6 never (#4450). The entry is dropped
+	// either way, which the stat below checks.
+	_, err := os.ReadFile(path)
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.EIO) {
 		t.Fatalf("read: %v", err)
 	}
+	// Which one, so a runner image that changes it again shows in the log.
+	var errno syscall.Errno
+	errors.As(err, &errno)
+	t.Logf("read errno: %d (%v)", int(errno), errno)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat after: %v", err)
 	}

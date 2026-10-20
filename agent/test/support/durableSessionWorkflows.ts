@@ -8,7 +8,13 @@ import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate,
 // `turn` Query names the turn it holds, None between turns, as the real one does.
 // `fork_point` (#2688) serves the conversation `set_conversation` gave it, or the one it
 // was started with (a fork's), a page at a time as the real one does, with what the agent
-// still owes at its checkpoint on the first page (#4173).
+// still owes at its checkpoint on the first page (#4173). `page_chars` makes its pages
+// smaller than the agent asks, and `owed_reads` answers each first-page read with the next
+// owed state in turn (the last one after), as a parent whose turn stops between reads. That
+// count is kept by the `fork_point` Query, which a real Query never does, and is in no
+// history: it holds only while the worker's cache keeps the workflow, and starts again if
+// the workflow is evicted and replayed mid-test (the test's worker sets `maxCachedWorkflows`
+// so none is).
 
 type Message = { turn_id: string; text: string; author: unknown; images: { name: string; mediaType: string }[] }
 
@@ -17,12 +23,13 @@ export const cancelInput = defineUpdate<'cancelled' | 'none', [{ reason: string 
 export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 export const holdCancel = defineSignal('hold_cancel')
 export const endTurn = defineSignal('end_turn')
-export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[] }>('recorded')
+export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[]; forkPointPage0Queries: number }>('recorded')
 export const turn = defineQuery<string | null>('turn')
 type Owed = { pending?: Record<string, unknown>; fork_next?: boolean; recent_call_ids?: string[] }
 type Conversation = { session_id: string; checkpoint: string; conversation: string[] } & Owed
 type ForkPoint = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] } & Owed
-export const setConversation = defineSignal<[Conversation & { busy?: boolean }]>('set_conversation')
+type Held = Conversation & { busy?: boolean; page_chars?: number; owed_reads?: Owed[] }
+export const setConversation = defineSignal<[Held]>('set_conversation')
 export const forkPoint = defineQuery<ForkPoint, [{ start: number; limit: number }]>('fork_point')
 
 export async function DurableSession(start: unknown): Promise<void> {
@@ -30,13 +37,18 @@ export async function DurableSession(start: unknown): Promise<void> {
   const calls: string[] = []
   let busy = false
   let hold = false
-  let held: (Conversation & { busy?: boolean }) | undefined = (start as { agent?: Conversation } | null)?.agent ?? undefined
-  setHandler(recorded, () => ({ start, messages, calls }))
+  let held: Held | undefined = (start as { agent?: Conversation } | null)?.agent ?? undefined
+  let forkPointPage0Queries = 0
+  setHandler(recorded, () => ({ start, messages, calls, forkPointPage0Queries }))
   setHandler(setConversation, (conversation) => {
     held = conversation
+    forkPointPage0Queries = 0
   })
-  setHandler(forkPoint, ({ start: from, limit }) => {
+  setHandler(forkPoint, ({ start: from, limit: asked }) => {
     const texts = held?.conversation ?? []
+    const limit = held?.page_chars ?? asked
+    const reads = held?.owed_reads
+    const owed = from === 0 && reads?.length ? reads[Math.min(forkPointPage0Queries++, reads.length - 1)]! : held
     let end = from
     let used = 0
     while (end < texts.length && (end === from || used + texts[end]!.length <= limit)) used += texts[end++]!.length
@@ -46,7 +58,7 @@ export async function DurableSession(start: unknown): Promise<void> {
       busy: busy || held?.busy === true,
       total: texts.length,
       entries: texts.slice(from, end),
-      ...(from === 0 ? { pending: held?.pending ?? {}, fork_next: held?.fork_next ?? false, recent_call_ids: held?.recent_call_ids ?? [] } : {}),
+      ...(from === 0 ? { pending: owed?.pending ?? {}, fork_next: owed?.fork_next ?? false, recent_call_ids: owed?.recent_call_ids ?? [] } : {}),
     }
   })
   setHandler(turn, () => (busy ? (messages.at(-1)?.turn_id ?? null) : null))

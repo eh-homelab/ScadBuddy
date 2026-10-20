@@ -14,12 +14,13 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from scadbuddy.bambuddy.catalogue import Catalogue
+from scadbuddy.bambuddy.catalogue import Catalogue, ReadCatalogue
 from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
@@ -801,6 +802,7 @@ async def check_print(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
+    catalogue: ReadCatalogue | None = None,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -819,12 +821,24 @@ async def check_print(
     the run. With no printer chosen or configured there is nothing to judge, and the
     run says why. For a plan with slots that includes the inventory read (#2722): a
     failed spool or assignment read fails the check, where the rack preview alone used
-    to swallow it and preview nothing, since the run would fail on the same read."""
+    to swallow it and preview nothing, since the run would fail on the same read.
+    ``catalogue`` is where the presets are read from, the dialog's kept copy of
+    Bambuddy's (#4196): the check slices nothing, so it judges the choices against what
+    the dialog's choices read, and only the run reads them fresh. A dialog served
+    natively offers the image's catalogue instead, and its check still reads Bambuddy's.
+    So everything the check derives from its :class:`PreparedRun` judges a copy that may
+    be old: never hand a check's ``PreparedRun`` to a run."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
         prepared = await prepare_run(
-            client, source, settings, request, rack=rack, refuse_manual_pick=False
+            client,
+            source,
+            settings,
+            request,
+            rack=rack,
+            refuse_manual_pick=False,
+            catalogue=catalogue,
         )
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
@@ -1270,6 +1284,7 @@ async def check_for_output(
     *,
     rack: RackUsage | None = None,
     print_settings: dict[str, str] | None = None,
+    catalogue: ReadCatalogue | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered, with its template's
     ``print_settings`` as the run reads them, so a template that prints by object is
@@ -1286,6 +1301,7 @@ async def check_for_output(
         settings,
         request,
         rack=rack,
+        catalogue=catalogue,
     )
 
 
@@ -1299,6 +1315,7 @@ async def check_for_library(
     rack: RackUsage | None = None,
     filaments: FilamentReader | None = None,
     files: LibraryReads | None = None,
+    catalogue: ReadCatalogue | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
     slots read from the file itself (#2550); ``files`` reads a native one (#3827)."""
@@ -1310,6 +1327,7 @@ async def check_for_library(
         settings,
         request,
         rack=rack,
+        catalogue=catalogue,
     )
 
 
@@ -1345,6 +1363,7 @@ async def prepare_run(
     refuse_manual_pick: bool = True,
     project: ResolvedProject | None = None,
     native: NativeCopies | None = None,
+    catalogue: ReadCatalogue | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -1360,6 +1379,11 @@ async def prepare_run(
 
     ``native`` is ScadBuddy's own library on a native run (#3818 tier A Task 5, D6): a
     project is refused and the folder is checked there, never in Bambuddy.
+
+    ``catalogue`` reads the presets in place of a fresh read: the check's, never the run's
+    (:func:`check_print`). The kept copy is served however old it is, so a preset removed
+    in Bambuddy since can pass the check and still be refused by the run's fresh read:
+    the check is advice, and the run's read is the one that decides.
     """
     if native is not None:
         if request.project_id is not None:
@@ -1433,10 +1457,11 @@ async def prepare_run(
     # Read before the upload, so that what the choices alone refuse — mixed nozzle
     # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
     # library. Slot errors need the plate's slots, which only a library file answers,
-    # so those are still found after the upload, by `resolve` in `execute_run`. It is
-    # two GETs, the same the dialog's own choices read makes to open (`choices.py`).
-    catalogue = await catalogue_for(client, native=None)
-    refused = choice_errors(request.choices, catalogue)
+    # so those are still found after the upload, by `resolve` in `execute_run`. The run
+    # reads it fresh, two GETs; the check reads the dialog's kept copy (#4196).
+    read = partial(catalogue_for, client, native=None) if catalogue is None else catalogue
+    presets = await read()
+    refused = choice_errors(request.choices, presets)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
     printer_status = await read_status(client, printer_id)
@@ -1451,7 +1476,7 @@ async def prepare_run(
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
-        catalogue=catalogue,
+        catalogue=presets,
         printer_status=printer_status,
         printer_name=printer.name,
         printer_model=printer.model,
