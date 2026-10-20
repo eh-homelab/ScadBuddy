@@ -18,6 +18,7 @@ from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Add,
+    Custom,
     Exposed,
     Joint,
     Part,
@@ -82,7 +83,18 @@ def _write_model(root: Path, scene: Scene) -> None:
 
 
 def _key(root: Path, scene: Scene, **params: ParamValue) -> str:
-    return geometry_key("demo", "model.scad", root, scene, [], params)
+    """``scene``'s key with its ``model.scad`` written, as `mesh_scene` admits only a
+    scene whose source is on disk."""
+    _write_model(root, scene)
+    return _key_on_disk(root, scene, **params)
+
+
+def _key_on_disk(root: Path, scene: Scene, **params: ParamValue) -> str:
+    return geometry_key("demo", "model.scad", root, scene, _source(root), [], params)
+
+
+def _source(root: Path) -> str:
+    return (root / "model.scad").read_text(encoding="utf-8")
 
 
 # ── the key ────────────────────────────────────────────────────────────────────
@@ -150,6 +162,23 @@ def test_a_colour_that_prints_nothing_is_no_class_and_no_part_of_the_key(
     assert _key(tmp_path, first) == _key(tmp_path, scene("#ABCDEF", "#FEDCBA"))
 
 
+def test_a_custom_ops_colour_that_equals_a_class_is_still_its_own_text(
+    tmp_path: Path,
+) -> None:
+    """A custom op's own ``color("#…")`` that equals a class is classed in the source, but
+    its text is in the key's objects as written, so classing never makes two ops one
+    key. It can only cost a miss: once the parts around it are recoloured, its literal
+    is no class, and the key is another."""
+
+    def scene(named: str, body: str = "#FF0000", trim: str = "#00FF00") -> Scene:
+        return _with(_scene(body, trim), ops=[Custom(scad=f'color("{named}") children();')])
+
+    red, green = scene("#FF0000"), scene("#00FF00")
+    assert _key(tmp_path / "red", red) != _key(tmp_path / "green", green)
+    recoloured = scene("#FF0000", "#0000FF", "#ABCDEF")
+    assert _key(tmp_path / "red", red) != _key(tmp_path / "recoloured", recoloured)
+
+
 def test_an_op_without_a_colour_is_in_its_objects_default_class(tmp_path: Path) -> None:
     """An uncoloured add prints in the object's first printed part's colour, so it is
     the same geometry as one that names that colour."""
@@ -165,13 +194,39 @@ def test_a_geometry_change_is_another_geometry_key(tmp_path: Path) -> None:
     base = _key(tmp_path, _scene())
     assert base != _key(tmp_path, _scene(width=11))
     assert base != _key(tmp_path, _scene(), width=12)
-    assert base != geometry_key("other", "model.scad", tmp_path, _scene(), [], {})
+    source = _source(tmp_path)
+    assert base != geometry_key("other", "model.scad", tmp_path, _scene(), source, [], {})
     library = ModelLibrary(
         name="BOSL2", url="https://github.com/x/BOSL2", ref="v1", commit="a" * 40
     )
-    assert base != geometry_key("demo", "model.scad", tmp_path, _scene(), [library], {})
+    assert base != geometry_key("demo", "model.scad", tmp_path, _scene(), source, [library], {})
     (tmp_path / MESHES[0]).write_bytes(b"another mesh")
     assert base != _key(tmp_path, _scene())
+
+
+def test_a_compiler_change_is_another_geometry_key(tmp_path: Path) -> None:
+    """#3448: a model compiled before a deploy keeps the old compiler's ``model.scad``
+    (nothing compiles it again), and the same scene compiled after it renders the new
+    one: the two must not share meshes. The key classes the source on disk, so colours
+    alone still share it."""
+
+    def compiled_by_the_old_compiler(root: Path, body: str, trim: str) -> Scene:
+        """The scene as an older `compile_scene`, which wrapped each piece in a union,
+        left it: its ``model.scad`` and the hash it recorded."""
+        _write_model(root, _scene(body, trim))
+        old = compile_scene(_scene(body, trim)).replace("{", "{ union() {")
+        (root / "model.scad").write_text(old, encoding="utf-8")
+        scene = _scene(body, trim).model_copy(update={"generated_sha256": text_sha256(old)})
+        (root / SCENE_NAME).write_text(dump_scene(scene), encoding="utf-8")
+        assert mesh_scene(root, "model.scad") == scene
+        return scene
+
+    before, after, recoloured = tmp_path / "before", tmp_path / "after", tmp_path / "recoloured"
+    old = compiled_by_the_old_compiler(before, "#FF0000", "#00FF00")
+    _write_model(after, _scene())
+    assert _key_on_disk(before, old) != _key(after, _scene())
+    again = compiled_by_the_old_compiler(recoloured, "#0000FF", "#ABCDEF")
+    assert _key_on_disk(before, old) == _key_on_disk(recoloured, again)
 
 
 def test_only_a_mesh_models_compiled_scene_has_a_scene(tmp_path: Path) -> None:
@@ -220,6 +275,21 @@ def test_a_layout_is_recoloured_in_one_pass() -> None:
     assert swapped["colours"] == ["#00FF00", "#FF0000"]
     assert [p["colour"] for p in swapped["plates"][0]["parts"]] == ["#00FF00", "#FF0000"]
     assert swapped["warnings"] == ["#00FF00: no closed solid; used the split mesh"]
+
+
+def test_a_warnings_hex_value_that_is_no_class_is_left_alone() -> None:
+    """#3448: only a class's colour is swapped in a warning's text; any other hex value
+    stays as it was written."""
+    layout = _layout("#FF0000")
+    layout["warnings"] = [
+        "#FF0000 is drawn only with every plate at once; it is on no plate",
+        "#123456 is drawn only with every plate at once; it is on no plate",
+    ]
+    swapped = recolour_layout(layout, {"#FF0000": "#0000FF"})
+    assert swapped["warnings"] == [
+        "#0000FF is drawn only with every plate at once; it is on no plate",
+        "#123456 is drawn only with every plate at once; it is on no plate",
+    ]
 
 
 def test_only_a_layout_every_colour_of_which_is_a_class_is_reusable() -> None:
@@ -424,22 +494,33 @@ async def test_a_scene_in_other_colours_is_recoloured_without_rendering(
 
 
 @pytest.mark.requires_postgres
-async def test_a_painted_piece_is_rendered_again_not_recoloured(
-    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+@pytest.mark.parametrize("source", ["painted", "missing", "corrupt", "shapeless"])
+async def test_an_unreusable_source_is_rendered_again_and_forgotten(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex], source: str
 ) -> None:
-    acts, _, _ = geometry_acts
+    """#3449: the row is forgotten, so a later recolour of the geometry does not fetch the
+    piece only to refuse it again; an unreadable layout is refused at once, not retried."""
+    acts, _, index = geometry_acts
     env = ActivityEnvironment()
     first = _piece(acts, 1, _scene(), width=12)
-    await _render(acts, first)
-    # As `paint_layout` leaves a piece whose painting it carried.
+    rendered, _, _ = await _render(acts, first)
     path = acts.deps.blobs.dir_for(first.piece_key) / LAYOUT_NAME
-    layout = json.loads(path.read_text())
-    layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
-    path.write_text(json.dumps(layout))
+    if source == "painted":
+        # As an older build left a piece whose painting `paint_layout` carried.
+        layout = json.loads(path.read_text())
+        layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
+        path.write_text(json.dumps(layout))
+    elif source == "missing":
+        path.unlink()
+    elif source == "corrupt":
+        path.write_text("{not json")
+    else:
+        path.write_text("{}")  # JSON, but no layout
 
     second = _piece(acts, 2, _scene("#0000FF"), width=12)
     prepared = await env.run(acts.prepare, second)
     assert await env.run(acts.reuse_geometry, second, prepared) is None
+    assert rendered.geometry_key is not None and index.get(rendered.geometry_key) is None
 
 
 @pytest.mark.requires_postgres
@@ -463,6 +544,34 @@ async def test_a_painted_piece_is_never_recorded_as_a_geometry_source(
     prepared, _, _ = await _render(acts, _piece(acts, 1, _scene(), width=12))
     assert prepared.geometry_key is not None
     assert index.get(prepared.geometry_key) is None
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize("layout", ["missing", "corrupt"])
+async def test_an_unreadable_layout_costs_the_hint_never_the_render(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+) -> None:
+    """#3748: the piece is published before the hint is read, so `finish_piece` still
+    answers it, and records no geometry it cannot tell is reusable."""
+    acts, _, index = geometry_acts
+
+    async def unreadable(*args: Any, **kwargs: Any) -> Any:
+        result = await finish_piece_stage(*args, **kwargs)
+        path = args[2] / LAYOUT_NAME
+        if layout == "missing":
+            path.unlink()
+        else:
+            path.write_bytes(b"\xff{")
+        return result
+
+    monkeypatch.setattr(activities_module, "finish_piece_stage", unreadable)
+    req = _piece(acts, 1, _scene(), width=12)
+    prepared, _, piece = await _render(acts, req)
+    assert piece.result.colors == ["#FF0000", "#00FF00"]
+    assert (acts.deps.blobs.dir_for(req.piece_key) / PIECE_NAME).is_file()
+    assert prepared.geometry_key is not None and index.get(prepared.geometry_key) is None
 
 
 @pytest.mark.requires_postgres
@@ -541,3 +650,32 @@ def test_a_recolour_swaps_a_painted_parts_painting_too(
     )
     drawn = {part.colour for part in read_glb(work / "preview.glb")}
     assert drawn == {"#0000FF", "#00FF00"}
+
+
+def test_a_recolour_keeps_a_mirrored_painting_mirrored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4075: the swapped painting keeps `Paint.reversed`, or a mirrored painting's codes
+    would be drawn out of order (#4015)."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ("4",) + ("",) * (len(box.faces) - 1)
+    painted = ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",), reversed=True))
+    monkeypatch.setattr(geometry_cache, "split_by_material", lambda path: [painted])
+    drawn: list[ColourPart] = []
+    monkeypatch.setattr(geometry_cache, "write_glb", lambda parts, path: drawn.extend(parts))
+    source, work = tmp_path / "source", tmp_path / "work"
+    source.mkdir()
+    work.mkdir()
+    recolour_piece(
+        source,
+        work,
+        {"colours": [], "warnings": [], "plates": []},
+        "raw.3mf",
+        classes=["#FFFFFF", "#FF0000"],
+        colours=["#0000FF", "#00FF00"],
+        skip=frozenset(),
+        layout_name="layout.json",
+        preview_name="preview.glb",
+    )
+    [part] = drawn
+    assert part.paint == Paint(codes, ("#00FF00",), reversed=True)

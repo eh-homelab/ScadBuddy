@@ -2,8 +2,9 @@
 # Render models/mesh-joint-demo with the defaults and with the leaves moved, and check
 # each 3MF has the two colours, one orange piece (the body) and two green ones (the neck
 # stub with its peg, and the leaves). A peg that came loose is an extra piece. Then check
-# leaves_x moved the leaves: one green piece further along X by leaves-far's leaves_x less the default, the other where it was
-# (#2633), so an exposure that compiles but moves nothing fails.
+# leaves_x moved the leaves: one green piece further along X by leaves-far's leaves_x less
+# the default, the other where it was (#2633), so an exposure that compiles but moves
+# nothing fails.
 # With SCADBUDDY_PIPELINE_IMAGE set, also check model.scad is what scene.json compiles to.
 #
 # The XML checking runs on the host: openscad/openscad:dev has no Python.
@@ -124,7 +125,7 @@ kept = [p for p in before if any(near(p, q) for q in after)]
 moved = [p for p in before if any(near([p[0] + MOVED, p[1] + MOVED], q) for q in after)]
 ok = len(before) == len(after) == 2 and len(kept) == 1 and len(moved) == 1
 print(("  PASS  " if ok else "  FAIL  ")
-      + "one green piece %d mm further along X, the other kept (before %s, after %s)" % (MOVED, before, after))
+      + "one green piece %g mm further along X, the other kept (before %s, after %s)" % (MOVED, before, after))
 sys.exit(0 if ok else 1)
 PY
 

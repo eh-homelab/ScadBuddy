@@ -128,3 +128,50 @@ def test_overlapping_boxes_name_the_object_whose_mesh_holds_the_point(
     assert object_at(scene, load, (4.9, 0, 0)) == big_id
     # Inside the small one's mesh (x 5.1..14.1), within the big one's box (x -5.5..5.5).
     assert object_at(scene, load, (5.2, 0, 0)) == small_id
+
+
+def _wedge() -> trimesh.Trimesh:
+    """A prism whose cross-section is a thin triangle, (0, -5), (0, 5), (20, 0), 10 high:
+    its tip's two faces turn nearly opposite ways."""
+    section = [(0.0, -5.0), (0.0, 5.0), (20.0, 0.0)]
+    vertices = [(x, y, z) for z in (0.0, 10.0) for x, y in section]
+    faces = [(0, 1, 2), (3, 5, 4), (0, 3, 4), (0, 4, 1), (1, 4, 5), (1, 5, 2), (2, 5, 3), (2, 3, 0)]
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    assert mesh.is_watertight and mesh.volume > 0
+    return mesh
+
+
+@pytest.mark.parametrize("mirrored", [False, True], ids=["placed", "mirrored"])
+@pytest.mark.parametrize("side", [1.0, -1.0], ids=["left", "right"])
+def test_a_point_just_past_a_thin_edge_is_outside_it(
+    tmp_path: Path, side: float, mirrored: bool
+) -> None:
+    """#3749: the point's nearest feature is the wedge's tip, an edge between two faces
+    that turn nearly opposite ways, and the side of either face alone can say inside.
+    The block around it holds the point; the wedge, whose box is smaller, does not.
+    Mirrored in y, the wedge is the same shape wound the other way."""
+    written(
+        tmp_path,
+        [
+            ReadObject("Wedge", 1, [ColourPart(0, "Body", ORANGE, _wedge())]),
+            ReadObject(
+                "Block", 1, [ColourPart(0, "Body", ORANGE, trimesh.creation.box((40,) * 3))]
+            ),
+        ],
+    )
+    scene = load_scene((tmp_path / SCENE_NAME).read_text())
+    wedge, block = (
+        o.model_copy(update={"transform": Transform(scale=scale)})
+        for o, scale in zip(
+            scene.objects, [(1.0, -1.0 if mirrored else 1.0, 1.0), (1.0, 1.0, 1.0)], strict=True
+        )
+    )
+    scene = scene.model_copy(update={"objects": [wedge, block]})
+    # Recentred, the tip is at x 10, y 0. The point is off it, mostly along the normal of
+    # the face on its own side, so the other face's plane has it behind.
+    normal = np.array([5.0, -20.0 * side]) / np.hypot(5.0, 20.0)
+    other = np.array([5.0, 20.0 * side]) / np.hypot(5.0, 20.0)
+    x, y = np.array([10.0, 0.0]) + 0.4 * normal + 0.05 * other
+    assert object_at(scene, mesh_loader(tmp_path), (x, y, 5.0)) == "o2"
+    # Inside the wedge, near its tip, it is the wedge's.
+    assert object_at(scene, mesh_loader(tmp_path), (9.0, 0.0, 5.0)) == "o1"

@@ -8,9 +8,11 @@ anything the program computes, and only rendering it tells, so it keeps only the
 piece cache.
 
 `geometry_key` hashes the scene's objects with each colour replaced by its *class*,
-the place it first appears in the scene (`scene_classes`), with the meshes' and paint
-codes' contents, the template file, the libraries and the parameters. Recolouring a
-part is a scene edit, a new revision and a new piece key, but the same geometry key
+the place it first appears in the scene (`scene_classes`), and the ``model.scad`` that
+is rendered, classed the same way (so the same scene compiled by another
+`compile_scene` is another key), with the meshes' and paint codes' contents, the
+template file, the libraries and the parameters. Recolouring a part is a scene edit, a
+new revision and a new piece key, but the same geometry key
 while the colours that are equal stay equal: the piece is then the first one's meshes
 with each class's colour swapped (`recolour_piece`), followed by the ordinary finish
 stage (the covers and the 3MF) in its own colours. Only the files a piece's colours are
@@ -57,14 +59,25 @@ from scadbuddy.render.split import ColourPart, Paint, split_by_material
 
 #: Part of every key: bump it when what a geometry key promises changes, or when what a
 #: row holds does (`RenderMainResult`, a piece's files), so no older row is read under
-#: the new meaning.
-GEOMETRY_VERSION = 4
+#: the new meaning. A change to what `compile_scene` writes needs no bump: the source
+#: rendered is in the key (#3448).
+GEOMETRY_VERSION = 5
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
+#: A colour as `compile_scene` writes it, around each piece. A custom op's own
+#: ``color("#…")`` that equals a class is classed too: harmless, since the op's text is
+#: in the key's objects as it is.
+_COLOUR_CALL = re.compile(r'color\("(#[0-9A-Fa-f]{6})"\)')
 
 
 def mesh_scene(root: Path, file: str) -> Scene | None:
     """The scene ``root``'s ``file`` is compiled from, or None when it is not a mesh
     model's ``model.scad`` exactly as its scene last compiled it."""
+    found = _mesh_source(root, file)
+    return found[0] if found is not None else None
+
+
+def _mesh_source(root: Path, file: str) -> tuple[Scene, str] | None:
+    """`mesh_scene`'s scene and the ``model.scad`` text it checked against it."""
     scene_path = root / SCENE_NAME
     if file != SOURCE_NAME or not scene_path.is_file():
         return None
@@ -73,7 +86,7 @@ def mesh_scene(root: Path, file: str) -> Scene | None:
     except ValidationError:
         return None  # Rendered from model.scad as it is; only its geometry is unshared.
     source = (root / SOURCE_NAME).read_text(encoding="utf-8")
-    return scene if text_sha256(source) == scene.generated_sha256 else None
+    return (scene, source) if text_sha256(source) == scene.generated_sha256 else None
 
 
 def _default_colour(obj: SceneObject) -> str:
@@ -118,6 +131,23 @@ def _classed(scene: Scene, classes: Sequence[str]) -> list[dict[str, Any]]:
     return objects
 
 
+def _classed_source(source: str, classes: Sequence[str]) -> str:
+    """``source``, the ``model.scad`` that is rendered, with each class's ``color("#…")``
+    its class's index. The file on disk, not what `compile_scene` would write now: it was
+    written by whichever compiler last compiled the scene, and nothing compiles it again
+    on a deploy (#3448)."""
+
+    index: dict[str, int] = {}
+    for number, colour in enumerate(classes):
+        index.setdefault(colour.upper(), number)
+
+    def classed(match: re.Match[str]) -> str:
+        number = index.get(match.group(1).upper())
+        return match.group(0) if number is None else f"color({number})"
+
+    return _COLOUR_CALL.sub(classed, source)
+
+
 def _file_digests(root: Path, scene: Scene) -> dict[str, str]:
     return {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
@@ -130,18 +160,22 @@ def geometry_key(
     file: str,
     root: Path,
     scene: Scene,
+    source: str,
     libraries: Sequence[ModelLibrary],
     params: Mapping[str, ParamValue],
 ) -> str:
     """The key of the mesh model's geometry: the same for two scenes that differ only
-    in which colours their colour classes are."""
-    objects = _classed(scene, scene_classes(scene))
+    in which colours their colour classes are. ``source`` is the ``model.scad`` text
+    `mesh_scene` checked against the scene, so the key hashes the bytes it checked."""
+    classes = scene_classes(scene)
+    objects = _classed(scene, classes)
     raw = json.dumps(
         [
             GEOMETRY_VERSION,
             slug,
             file,
             objects,
+            _classed_source(source, classes),
             _file_digests(root, scene),
             [library.model_dump(mode="json") for library in libraries],
             dict(params),
@@ -161,10 +195,12 @@ def mesh_geometry(
 ) -> tuple[str, list[str]] | None:
     """The piece's geometry key and its colour classes' colours, or None when its
     geometry is never shared (`mesh_scene`). Reads files: run it off the loop."""
-    scene = mesh_scene(root, file)
-    if scene is None:
+    found = _mesh_source(root, file)
+    if found is None:
         return None
-    return geometry_key(slug, file, root, scene, libraries, params), scene_classes(scene)
+    scene, source = found
+    key = geometry_key(slug, file, root, scene, source, libraries, params)
+    return key, scene_classes(scene)
 
 
 def _layout_colours(layout: Mapping[str, Any]) -> set[str]:
@@ -196,6 +232,10 @@ def _swap(colour: str, mapping: Mapping[str, str]) -> str:
 
 
 def _swap_text(text: str, mapping: Mapping[str, str]) -> str:
+    """``text`` with each class's colour swapped, a hex value that is no class left as it
+    is. Every hex in a mesh model's warnings is a colour the render names (a solid's
+    fallback, a colour on no plate): it has no colour, font or text parameter, the only
+    other warnings that quote a value (#3448)."""
     return _HEX.sub(lambda match: _swap(match.group(0), mapping), text)
 
 

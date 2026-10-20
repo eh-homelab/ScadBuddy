@@ -7,7 +7,6 @@ kept beside its mesh, and the render carries them (`paint.py`, spec §7)."""
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import json
 import zipfile
@@ -115,8 +114,12 @@ def scene_from_objects(
                     " yet; Arrange can carry it to a printer"
                 )
             if colour_part.paint is not None:
+                # `reversed` is false here (refused above), and the readers default it.
                 files[f"{stem}-p{number}.paint.json"] = json.dumps(
-                    dataclasses.asdict(colour_part.paint)
+                    {
+                        "codes": list(colour_part.paint.codes),
+                        "colours": list(colour_part.paint.colours),
+                    }
                 ).encode()
             parts.append(
                 Part(
