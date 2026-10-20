@@ -1633,6 +1633,11 @@ async def _registry_path(
         return path, None
     if printers.kek is None:
         if row.preferred_path == "auto" and row.bambuddy_printer_id is not None:
+            # Said, so a worker that lost its key is not silently on Bambuddy's path.
+            logger.info(
+                "printer %s takes Bambuddy's path: the print worker has no key for the LAN",
+                row.id,
+            )
             return "bambuddy", None
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, LAN_NEEDS_KEK)
     if report is None:

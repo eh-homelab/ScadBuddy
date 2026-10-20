@@ -6,6 +6,7 @@ status from its LAN report, never from Bambuddy (hot-path plan D4)."""
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -286,7 +287,7 @@ async def test_native_run_refused_without_kek(
 
 @respx.mock
 async def test_an_auto_printer_prints_through_bambuddy_without_kek(
-    printers_with_kek: PrinterStore, reports: PrinterReportStore
+    printers_with_kek: PrinterStore, reports: PrinterReportStore, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Task 8 queues a linked row through Bambuddy and never opens the access code, so a
     worker without the key takes Bambuddy's path for an ``auto`` row, not the 503."""
@@ -294,10 +295,12 @@ async def test_an_auto_printer_prints_through_bambuddy_without_kek(
     pid = lan_linked(printers_with_kek, reports)
     printers_with_kek.kek = None
 
-    prepared = await prepare(printers_with_kek, reports, run_request(printer=pid))
+    with caplog.at_level(logging.INFO, logger="scadbuddy.bambuddy.print_run"):
+        prepared = await prepare(printers_with_kek, reports, run_request(printer=pid))
 
     assert (prepared.printer, prepared.path, prepared.printer_id) == (pid, "bambuddy", 1)
     assert status.called
+    assert "no key for the LAN" in caplog.text
 
 
 @respx.mock
