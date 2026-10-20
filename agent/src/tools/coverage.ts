@@ -12,6 +12,12 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/orders/{order_id}/events',
+    reason:
+      "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +
+      'Activity.',
+  },
+  {
     operation: 'GET /api/v1/activity/facets',
     reason: "The UI's filter bar; activity_list's own filters say the same.",
   },
