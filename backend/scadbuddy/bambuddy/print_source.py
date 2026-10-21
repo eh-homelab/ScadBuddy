@@ -430,7 +430,7 @@ class PrintPipeline:
                 # this one was made. A row that never reads conclusively costs a GET a
                 # reprint until newer slices push it past the cap, an accepted cost: at
                 # worst an older slice goes unchecked and the plate is sliced again.
-                logger.info(
+                logger.debug(
                     "a recorded slice cannot be checked now; it is not reused",
                     extra={"library_file_id": sliced.id},
                 )

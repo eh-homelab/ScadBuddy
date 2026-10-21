@@ -380,13 +380,14 @@ def resolve(
                 if row.printer_model == PRINTER_MODEL and row.nozzle_diameter == size
             ]
             if catalogue.is_native:
-                # A spool's preset is a Bambu Cloud setting_id, a BBL filament_id (as a
-                # tray's tray_info_idx is) or a Bambuddy local id, which the image lacks;
-                # native refs are preset names (#4349).
+                # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
+                # filament_id (as a tray's tray_info_idx is) or a Bambuddy local id,
+                # which the image lacks; native refs are preset names (#4349).
                 mapped = {
                     preset_id: catalogue.native_ref(
-                        PresetRef(source="cloud", id=preset_id), "filament"
+                        PresetRef(source="standard", id=preset_id), "filament"
                     )
+                    or catalogue.native_ref(PresetRef(source="cloud", id=preset_id), "filament")
                     or _by_filament_id(catalogue.filament, preset_id, printer)
                     for preset_id in own
                 }
