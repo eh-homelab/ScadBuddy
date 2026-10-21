@@ -247,6 +247,7 @@ fn the_slots_colours_follow_the_filaments() {
         .into_iter()
         .map(|a| a.into_string().unwrap())
         .collect();
+    // Right after the filament files, deliberately: spec §5.2's argv order.
     let i = argv.iter().position(|a| a == "--load-filaments").unwrap();
     assert_eq!(argv[i + 2], "--filament-colour");
     assert_eq!(argv[i + 3], "#FF0000;#00FF00");
