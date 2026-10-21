@@ -723,13 +723,24 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
     """#4196: the check read the printer, then the 3MF, then the spools, one after
     another. Here the printer list answers only once the download and the spools have
     been asked for, and it lists no printer 1, so the check refuses and drops the
-    download it started."""
+    download and the assignments read it started."""
     source = _CheckSource()
     spools_asked = asyncio.Event()
     respx.get(f"{API}/inventory/spools").mock(
         side_effect=_marks(spools_asked, "inventory-spools.json")
     )
-    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+    assignments_dropped = False
+
+    async def assignments_never(request: httpx.Request) -> httpx.Response:
+        nonlocal assignments_dropped
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assignments_dropped = True
+            raise
+        raise AssertionError("never answered")
+
+    respx.get(f"{API}/inventory/assignments").mock(side_effect=assignments_never)
 
     async def no_printers(request: httpx.Request) -> httpx.Response:
         await source.downloading.wait()
@@ -750,3 +761,42 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
 
     assert check.errors == ["Bambuddy has no printer 1. Pick another printer."]
     assert source.cancelled
+    assert assignments_dropped
+
+
+class _CheckDone(_ReadSource):
+    async def states_nozzles(self, client: BambuddyClient) -> bool:
+        return False
+
+
+class _DownloadFails(_ReadSource):
+    async def states_nozzles(self, client: BambuddyClient) -> bool:
+        raise ValueError("the download failed")
+
+
+@respx.mock
+@pytest.mark.parametrize("download_fails", [True, False])
+async def test_the_checks_early_reads_fail_in_the_order_they_were_read_in(
+    bambuddy: BambuddyClient, download_fails: bool
+) -> None:
+    """#4196: read beside `prepare_run`, the download and the spools still fail the
+    check as they did when read after it, the download's failure first."""
+    respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
+    respx.get(f"{API}/printers/1/status").mock(return_value=_ok("printer-status-rack.json"))
+    _preset_routes()
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+    source = _DownloadFails() if download_fails else _CheckDone()
+    request = PrintRunRequest.model_validate(
+        {
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+            "printer_id": 1,
+        }
+    )
+
+    expected, said = (
+        (ValueError, "the download failed") if download_fails else (ApiError, "filament spools")
+    )
+    with pytest.raises(expected, match=said):
+        await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
