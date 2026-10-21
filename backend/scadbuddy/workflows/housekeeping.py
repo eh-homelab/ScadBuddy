@@ -408,7 +408,10 @@ async def ensure_workflow_schedule(
         changed or not await _ran_lately(handle, min(window, interval))
     ):
         # A run that opens between the look and this would SKIP this one; it queues
-        # behind that run instead.
+        # behind that run instead. In a rolling deploy the old build's replicas and the
+        # new one's boot in turn, and each sees the other's action as changed and
+        # triggers; BUFFER_ONE keeps at most one run queued behind the open one, so
+        # that costs one extra run of the sweeps, which converge whichever action won.
         await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
     return schedule.state.paused
 

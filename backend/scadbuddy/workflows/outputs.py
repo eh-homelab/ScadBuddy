@@ -9,6 +9,7 @@ import math
 import re
 import shutil
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -273,6 +274,24 @@ def _piece_name(req: OutputRequest, part: Part, model_name: str) -> str:
     return model_name if part.file == SOURCE_NAME or not stem else stem
 
 
+def _copy_names(pieces: Sequence[str]) -> list[str]:
+    """Each copy's name, in placement order, from its piece's (:func:`_piece_name`):
+    the piece's own when it is placed once, else numbered. A number skips a name some
+    piece already has (two copies of ``demo`` beside a piece ``demo 1`` are ``demo 2``
+    and ``demo 3``), so no two objects share one (#4465)."""
+    copies = Counter(pieces)
+    taken = set(copies)
+    named: Counter[str] = Counter()
+    names: list[str] = []
+    for piece in pieces:
+        name = piece
+        while copies[piece] > 1 and name in taken:
+            named[piece] += 1
+            name = f"{piece} {named[piece]}"
+        names.append(name)
+    return names
+
+
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
     blobs = deps.blobs
     parts = {p.piece_key: p for p in req.parts}
@@ -289,13 +308,16 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
     }
     # Each copy is named after its piece (#3212), numbered when the output has several.
     model_name = req.slug.removeprefix(BUILTIN_PREFIX)
-    copies = Counter(
-        _piece_name(req, parts[item.piece_key], model_name)
-        for plate in req.layout.plates
-        for item in plate.items
-        if item.piece_key in parts
+    copy_names = iter(
+        _copy_names(
+            [
+                _piece_name(req, parts[item.piece_key], model_name)
+                for plate in req.layout.plates
+                for item in plate.items
+                if item.piece_key in parts
+            ]
+        )
     )
-    named: Counter[str] = Counter()
     for index, plate in enumerate(req.layout.plates):
         # #956: each placed copy is an object of its own (and each object a copy's
         # template declared), so a by-object print can finish one before the next. Within
@@ -308,9 +330,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         for placed in plate.items:
             if placed.piece_key not in parts:
                 raise _unknown_piece(placed.piece_key)
-            piece = _piece_name(req, parts[placed.piece_key], model_name)
-            named[piece] += 1
-            copy = piece if copies[piece] == 1 else f"{piece} {named[piece]}"
+            copy = next(copy_names)
             if placed.piece_key not in layouts:
                 if not await _fetch(deps, placed.piece_key):
                     raise _refuse(f"piece {placed.piece_key} is not in the store")

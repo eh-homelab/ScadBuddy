@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 import trimesh
@@ -177,6 +177,42 @@ def test_a_custom_ops_colour_that_equals_a_class_is_still_its_own_text(
     assert _key(tmp_path / "red", red) != _key(tmp_path / "green", green)
     recoloured = scene("#FF0000", "#0000FF", "#ABCDEF")
     assert _key(tmp_path / "red", red) != _key(tmp_path / "recoloured", recoloured)
+
+
+def test_the_colour_pattern_reads_every_colour_compile_scene_writes(tmp_path: Path) -> None:
+    """#4430: the key classes the colours by matching ``compile_scene``'s spelling of
+    them. Were the compiler to spell one otherwise, nothing would fail, but every
+    recolour would miss the cache, so each ``color(`` it writes, for parts, a cut, an add
+    and both joint roles, must be one the pattern reads, and a recolour keeps the key."""
+    _write_model(tmp_path, _scene())
+    (tmp_path / "meshes" / "o1-p3.3mf").write_bytes(b"cutter")
+
+    def scene(body: str, trim: str, added: str) -> Scene:
+        def joint(role: Literal["peg", "socket"]) -> Joint:
+            return Joint(
+                at=(0, 0, 0),
+                axis=(0, 0, 1),
+                diameter=4,
+                depth=3,
+                clearance=0.2,
+                role=role,
+                colour=trim,
+            )
+
+        return _with(
+            _scene(body, trim),
+            Part(id="p3", mesh="meshes/o1-p3.3mf", colour=body, negative=True),
+            ops=[
+                Add(primitive="cube", size=(1, 1, 1), colour=added),
+                joint("peg"),
+                joint("socket"),
+            ],
+        )
+
+    first = scene("#FF0000", "#00FF00", "#0000FF")
+    source = compile_scene(first)
+    assert source.count("color(") == len(geometry_cache._COLOUR_CALL.findall(source)) > 3
+    assert _key(tmp_path, first) == _key(tmp_path, scene("#ABCDEF", "#123456", "#FEDCBA"))
 
 
 def test_an_op_without_a_colour_is_in_its_objects_default_class(tmp_path: Path) -> None:
