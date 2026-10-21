@@ -149,14 +149,15 @@ async def resolve_reference(
                 "output_id", f"output {output_id!r} is a render of {facts.slug!r}, not {slug!r}"
             )
         slug = facts.slug
+        if facts.commit is None:
+            # A commit given beside it would pin colours no revision of it backs.
+            raise ReferenceError(
+                "commit",
+                f"output {output_id!r} names no revision of {slug!r}; the model was rendered"
+                " without a history to pin",
+            )
         if commit is None:
             commit = facts.commit
-            if commit is None:
-                raise ReferenceError(
-                    "commit",
-                    f"output {output_id!r} names no revision of {slug!r}; the model was rendered"
-                    " without a history to pin",
-                )
         if inputs is None:
             inputs = facts.inputs
     if slug is None:
@@ -189,7 +190,11 @@ async def resolve_reference(
         try:
             rendered = await asyncio.to_thread(history.resolve, facts.commit)
         except RevisionNotFoundError:
-            rendered = facts.commit
+            raise ReferenceError(
+                "commit",
+                f"output {output_id!r} names revision {facts.commit}, which the models"
+                " repository no longer has",
+            ) from None
         if rendered != full:
             raise ReferenceError(
                 "commit", f"output {output_id!r} is a render of commit {rendered}, not {full}"

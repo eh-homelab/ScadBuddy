@@ -166,11 +166,26 @@ async def test_a_commit_or_inputs_beside_an_output_must_be_the_outputs(
 
 
 async def test_an_output_without_a_revision_cannot_be_ordered(library: Library) -> None:
-    library.create("demo")
+    commit = library.create("demo")
     library.write_output("demo", "out2", None)
     with pytest.raises(ReferenceError) as refused:
         await library.resolve(slug=None, commit=None, inputs=None, output_id="out2")
     assert refused.value.field == "commit"
+    # Nor pinned by a commit given beside it: no revision backs the output's colours.
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=commit, inputs=None, output_id="out2")
+    assert refused.value.field == "commit"
+    assert "no revision" in refused.value.problem
+
+
+async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> None:
+    commit = library.create("demo")
+    library.write_output("demo", "out3", "0" * 40)
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=commit, inputs=None, output_id="out3")
+    assert refused.value.field == "commit"
+    assert "0" * 40 in refused.value.problem
+    assert "no longer has" in refused.value.problem
 
 
 async def test_a_commit_of_another_model_is_refused(library: Library) -> None:
