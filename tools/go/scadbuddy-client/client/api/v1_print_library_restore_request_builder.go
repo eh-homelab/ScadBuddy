@@ -37,7 +37,7 @@ func NewV1PrintLibraryRestoreRequestBuilder(rawUrl string, requestAdapter i2ae41
 	return NewV1PrintLibraryRestoreRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post a delete's Undo (#2167): each file back from Bambuddy's trash, under its own id. Afile not in the trash (external, or emptied from it) is listed in “skipped“.
+// Post a delete's Undo (#2167): each file back from Bambuddy's trash, under its own id. A file not in the trash (external, or emptied from it) is listed in “skipped“.
 // returns a LibraryRestoreResultable when successful
 // returns a V1PrintLibraryLibraryRestoreResult428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryLibraryRestoreResult4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryRestoreRequestBuilder) Post(ctx context.Context, body i8d
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryRestoreResultable), nil
 }
 
-// ToPostRequestInformation a delete's Undo (#2167): each file back from Bambuddy's trash, under its own id. Afile not in the trash (external, or emptied from it) is listed in “skipped“.
+// ToPostRequestInformation a delete's Undo (#2167): each file back from Bambuddy's trash, under its own id. A file not in the trash (external, or emptied from it) is listed in “skipped“.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryRestoreRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFilesRequestable, requestConfiguration *V1PrintLibraryRestoreRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

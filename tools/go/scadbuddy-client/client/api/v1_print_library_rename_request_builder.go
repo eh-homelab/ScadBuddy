@@ -37,7 +37,7 @@ func NewV1PrintLibraryRenameRequestBuilder(rawUrl string, requestAdapter i2ae418
 	return NewV1PrintLibraryRenameRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post renames the file under its own id (#2670). The new name keeps the file'sextension (“.3mf“, “.gcode.3mf“), or the rename is a 422; Bambuddy refuses a name aprinter's SD card would not take.
+// Post renames the file under its own id (#2670). The new name keeps the file's extension (“.3mf“, “.gcode.3mf“), or the rename is a 422; Bambuddy refuses a name a printer's SD card would not take.
 // returns a LibraryRenameResultable when successful
 // returns a V1PrintLibraryLibraryRenameResult428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryLibraryRenameResult4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryRenameRequestBuilder) Post(ctx context.Context, body i8d9
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryRenameResultable), nil
 }
 
-// ToPostRequestInformation renames the file under its own id (#2670). The new name keeps the file'sextension (“.3mf“, “.gcode.3mf“), or the rename is a 422; Bambuddy refuses a name aprinter's SD card would not take.
+// ToPostRequestInformation renames the file under its own id (#2670). The new name keeps the file's extension (“.3mf“, “.gcode.3mf“), or the rename is a 422; Bambuddy refuses a name a printer's SD card would not take.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryRenameRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryRenameRequestable, requestConfiguration *V1PrintLibraryRenameRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

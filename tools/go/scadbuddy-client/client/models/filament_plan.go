@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// FilamentPlan what the dialog submits: one spool per slot, and how hard to insist on it.“force_colour_match“ becomes “force_color_match“ on every override, which isthe flag Bambuddy's scheduler reads to require an exact type+colour match ratherthan merely preferring one. It is off by default because it only bites on amodel-targeted queue item, where insisting can leave the job unschedulable.
+// FilamentPlan what the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
 type FilamentPlan struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

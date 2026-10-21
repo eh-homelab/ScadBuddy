@@ -14,7 +14,7 @@ type V1PrintLibraryItemObjectsRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemObjectsRequestBuilderGetQueryParameters each object the file's 3MF places, with its count (#1863): what the Arrangedialog lists for a file ScadBuddy did not make. One that cannot be arranged is thearrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spendsthe read budgets in effect, each overridable for this request (#2087).
+// V1PrintLibraryItemObjectsRequestBuilderGetQueryParameters each object the file's 3MF places, with its count (#1863): what the Arrange dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends the read budgets in effect, each overridable for this request (#2087).
 type V1PrintLibraryItemObjectsRequestBuilderGetQueryParameters struct {
 	Max_objects      *int32 "uriparametername:\"max_objects\""
 	Max_paint_digits *int32 "uriparametername:\"max_paint_digits\""
@@ -47,7 +47,7 @@ func NewV1PrintLibraryItemObjectsRequestBuilder(rawUrl string, requestAdapter i2
 	return NewV1PrintLibraryItemObjectsRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get each object the file's 3MF places, with its count (#1863): what the Arrangedialog lists for a file ScadBuddy did not make. One that cannot be arranged is thearrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spendsthe read budgets in effect, each overridable for this request (#2087).
+// Get each object the file's 3MF places, with its count (#1863): what the Arrange dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends the read budgets in effect, each overridable for this request (#2087).
 // returns a LibraryFileObjectsable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemObjectsRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemObjectsRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFileObjectsable, error) {
@@ -68,7 +68,7 @@ func (m *V1PrintLibraryItemObjectsRequestBuilder) Get(ctx context.Context, reque
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFileObjectsable), nil
 }
 
-// ToGetRequestInformation each object the file's 3MF places, with its count (#1863): what the Arrangedialog lists for a file ScadBuddy did not make. One that cannot be arranged is thearrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spendsthe read budgets in effect, each overridable for this request (#2087).
+// ToGetRequestInformation each object the file's 3MF places, with its count (#1863): what the Arrange dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends the read budgets in effect, each overridable for this request (#2087).
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemObjectsRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemObjectsRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

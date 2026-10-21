@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// NozzleChoice one extruder's nozzle in the spool-first print dialog (spec 2026-09-27 §4).Here rather than in “resolver“ so the settings store can remember it per modelwithout importing the resolver (which reaches the client, which imports the store).
+// NozzleChoice one extruder's nozzle in the spool-first print dialog (spec 2026-09-27 §4). Here rather than in “resolver“ so the settings store can remember it per model without importing the resolver (which reaches the client, which imports the store).
 type NozzleChoice struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

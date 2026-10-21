@@ -14,7 +14,7 @@ type V1PrintLibraryItemPreviewGlbRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemPreviewGlbRequestBuilderGetQueryParameters plate “plate“ of the file, read from the 3MF a print of it slices (#1753), as anoutput's “preview.glb“ is read from its own: its parts in their colours, where thefile places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404.
+// V1PrintLibraryItemPreviewGlbRequestBuilderGetQueryParameters plate “plate“ of the file, read from the 3MF a print of it slices (#1753), as an output's “preview.glb“ is read from its own: its parts in their colours, where the file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL, damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404.
 type V1PrintLibraryItemPreviewGlbRequestBuilderGetQueryParameters struct {
 	Max_objects      *int32 "uriparametername:\"max_objects\""
 	Max_paint_digits *int32 "uriparametername:\"max_paint_digits\""
@@ -48,7 +48,7 @@ func NewV1PrintLibraryItemPreviewGlbRequestBuilder(rawUrl string, requestAdapter
 	return NewV1PrintLibraryItemPreviewGlbRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get plate “plate“ of the file, read from the 3MF a print of it slices (#1753), as anoutput's “preview.glb“ is read from its own: its parts in their colours, where thefile places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404.
+// Get plate “plate“ of the file, read from the 3MF a print of it slices (#1753), as an output's “preview.glb“ is read from its own: its parts in their colours, where the file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL, damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404.
 // returns a []byte when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemPreviewGlbRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemPreviewGlbRequestBuilderGetRequestConfiguration) ([]byte, error) {
@@ -69,7 +69,7 @@ func (m *V1PrintLibraryItemPreviewGlbRequestBuilder) Get(ctx context.Context, re
 	return res.([]byte), nil
 }
 
-// ToGetRequestInformation plate “plate“ of the file, read from the 3MF a print of it slices (#1753), as anoutput's “preview.glb“ is read from its own: its parts in their colours, where thefile places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404.
+// ToGetRequestInformation plate “plate“ of the file, read from the 3MF a print of it slices (#1753), as an output's “preview.glb“ is read from its own: its parts in their colours, where the file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL, damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemPreviewGlbRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemPreviewGlbRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

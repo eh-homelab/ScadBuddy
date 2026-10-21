@@ -37,7 +37,7 @@ func NewV1PrintLibraryItemProjectRequestBuilder(rawUrl string, requestAdapter i2
 	return NewV1PrintLibraryItemProjectRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post as “/print/outputs/{id}/project“ (#1751): the queue entries named, else thoseof the file's newest run, and whatever archives they have produced, filed under theproject.
+// Post as “/print/outputs/{id}/project“ (#1751): the queue entries named, else those of the file's newest run, and whatever archives they have produced, filed under the project.
 // returns a AttachResultable when successful
 // returns a V1PrintLibraryItemProjectAttachResult428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryItemProjectAttachResult4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryItemProjectRequestBuilder) Post(ctx context.Context, body
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.AttachResultable), nil
 }
 
-// ToPostRequestInformation as “/print/outputs/{id}/project“ (#1751): the queue entries named, else thoseof the file's newest run, and whatever archives they have produced, filed under theproject.
+// ToPostRequestInformation as “/print/outputs/{id}/project“ (#1751): the queue entries named, else those of the file's newest run, and whatever archives they have produced, filed under the project.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemProjectRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.ProjectAttachable, requestConfiguration *V1PrintLibraryItemProjectRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// SlicedProfile what a sliced file was sliced for (#2671), read from the file itself: none of itcan change without slicing again, so the print dialog shows it read-only, and therun warns of a printer it does not fit rather than refusing it.
+// SlicedProfile what a sliced file was sliced for (#2671), read from the file itself: none of it can change without slicing again, so the print dialog shows it read-only, and the run warns of a printer it does not fit rather than refusing it.
 type SlicedProfile struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

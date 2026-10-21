@@ -22,7 +22,7 @@ type PrintRun struct {
 	id *string
 	// The may_have_queued property
 	may_have_queued *bool
-	// The subject as clients read it before #1750: an output's id, or“library:<file id>“. Kept so they work unchanged; read “subject“.
+	// The subject as clients read it before #1750: an output's id, or “library:<file id>“. Kept so they work unchanged; read “subject“.
 	output_id *string
 	// The printer property
 	printer PrintRun_PrintRun_printerable
@@ -394,7 +394,7 @@ func (m *PrintRun) GetMayHaveQueued() *bool {
 	return m.may_have_queued
 }
 
-// GetOutputId gets the output_id property value. The subject as clients read it before #1750: an output's id, or“library:<file id>“. Kept so they work unchanged; read “subject“.
+// GetOutputId gets the output_id property value. The subject as clients read it before #1750: an output's id, or “library:<file id>“. Kept so they work unchanged; read “subject“.
 // returns a *string when successful
 func (m *PrintRun) GetOutputId() *string {
 	return m.output_id
@@ -532,7 +532,7 @@ func (m *PrintRun) SetMayHaveQueued(value *bool) {
 	m.may_have_queued = value
 }
 
-// SetOutputId sets the output_id property value. The subject as clients read it before #1750: an output's id, or“library:<file id>“. Kept so they work unchanged; read “subject“.
+// SetOutputId sets the output_id property value. The subject as clients read it before #1750: an output's id, or “library:<file id>“. Kept so they work unchanged; read “subject“.
 func (m *PrintRun) SetOutputId(value *string) {
 	m.output_id = value
 }

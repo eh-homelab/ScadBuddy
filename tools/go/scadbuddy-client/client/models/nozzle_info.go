@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// NozzleInfo “nozzle_diameter“ is a **string** here ("0.4"), unlike the float the queueroute reports back on a print.
+// NozzleInfo “nozzle_diameter“ is a **string** here ("0.4"), unlike the float the queue route reports back on a print.
 type NozzleInfo struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

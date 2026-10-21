@@ -63,7 +63,7 @@ func NewV1PrintLibraryItemPlatesRequestBuilder(rawUrl string, requestAdapter i2a
 	return NewV1PrintLibraryItemPlatesRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get what the dialog offers as “plate_id“; empty when Bambuddy reads none (an STL,or a 3MF with no plate metadata), which prints as plate 1. On “native“ they are theplates read at upload.
+// Get what the dialog offers as “plate_id“; empty when Bambuddy reads none (an STL, or a 3MF with no plate metadata), which prints as plate 1. On “native“ they are the plates read at upload.
 // returns a []OutputPlateable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemPlatesRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemPlatesRequestBuilderGetRequestConfiguration) ([]i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.OutputPlateable, error) {
@@ -87,7 +87,7 @@ func (m *V1PrintLibraryItemPlatesRequestBuilder) Get(ctx context.Context, reques
 	return val, nil
 }
 
-// ToGetRequestInformation what the dialog offers as “plate_id“; empty when Bambuddy reads none (an STL,or a 3MF with no plate metadata), which prints as plate 1. On “native“ they are theplates read at upload.
+// ToGetRequestInformation what the dialog offers as “plate_id“; empty when Bambuddy reads none (an STL, or a 3MF with no plate metadata), which prints as plate 1. On “native“ they are the plates read at upload.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemPlatesRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemPlatesRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

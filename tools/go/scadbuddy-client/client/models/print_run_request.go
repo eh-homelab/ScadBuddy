@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// PrintRunRequest the print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality andplate. Every slicer preset is derived from them by the resolver; there is nopipeline to name, and the run always slices then queues.
+// PrintRunRequest the print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality and plate. Every slicer preset is derived from them by the resolver; there is no pipeline to name, and the run always slices then queues.
 type PrintRunRequest struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
@@ -17,13 +17,13 @@ type PrintRunRequest struct {
 	choices PrintChoicesable
 	// The copies property
 	copies PrintRunRequest_PrintRunRequest_copiesable
-	// What the dialog submits: one spool per slot, and how hard to insist on it.“force_colour_match“ becomes “force_color_match“ on every override, which isthe flag Bambuddy's scheduler reads to require an exact type+colour match ratherthan merely preferring one. It is off by default because it only bites on amodel-targeted queue item, where insisting can leave the job unschedulable.
+	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
 	filament_plan FilamentPlanable
 	// The filament_profiles property
 	filament_profiles []string
 	// The folder_id property
 	folder_id PrintRunRequest_PrintRunRequest_folder_idable
-	// A sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
+	// A sparse overlay on “PrintQueueItemCreate“'s option fields. “extra="forbid"“ on purpose: a misspelled option must 422 rather than be remembered under a name nothing will ever read.
 	options PrintOptionsable
 	// The plate_id property
 	plate_id *int32
@@ -1229,7 +1229,7 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 	return res
 }
 
-// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it.“force_colour_match“ becomes “force_color_match“ on every override, which isthe flag Bambuddy's scheduler reads to require an exact type+colour match ratherthan merely preferring one. It is off by default because it only bites on amodel-targeted queue item, where insisting can leave the job unschedulable.
+// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
 // returns a FilamentPlanable when successful
 func (m *PrintRunRequest) GetFilamentPlan() FilamentPlanable {
 	return m.filament_plan
@@ -1247,7 +1247,7 @@ func (m *PrintRunRequest) GetFolderId() PrintRunRequest_PrintRunRequest_folder_i
 	return m.folder_id
 }
 
-// GetOptions gets the options property value. A sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
+// GetOptions gets the options property value. A sparse overlay on “PrintQueueItemCreate“'s option fields. “extra="forbid"“ on purpose: a misspelled option must 422 rather than be remembered under a name nothing will ever read.
 // returns a PrintOptionsable when successful
 func (m *PrintRunRequest) GetOptions() PrintOptionsable {
 	return m.options
@@ -1458,7 +1458,7 @@ func (m *PrintRunRequest) SetCopies(value PrintRunRequest_PrintRunRequest_copies
 	m.copies = value
 }
 
-// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it.“force_colour_match“ becomes “force_color_match“ on every override, which isthe flag Bambuddy's scheduler reads to require an exact type+colour match ratherthan merely preferring one. It is off by default because it only bites on amodel-targeted queue item, where insisting can leave the job unschedulable.
+// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
 func (m *PrintRunRequest) SetFilamentPlan(value FilamentPlanable) {
 	m.filament_plan = value
 }
@@ -1473,7 +1473,7 @@ func (m *PrintRunRequest) SetFolderId(value PrintRunRequest_PrintRunRequest_fold
 	m.folder_id = value
 }
 
-// SetOptions sets the options property value. A sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
+// SetOptions sets the options property value. A sparse overlay on “PrintQueueItemCreate“'s option fields. “extra="forbid"“ on purpose: a misspelled option must 422 rather than be remembered under a name nothing will ever read.
 func (m *PrintRunRequest) SetOptions(value PrintOptionsable) {
 	m.options = value
 }

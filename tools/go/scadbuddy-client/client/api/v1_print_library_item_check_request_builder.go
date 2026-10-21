@@ -14,7 +14,7 @@ type V1PrintLibraryItemCheckRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemCheckRequestBuilderPostQueryParameters as “/print/outputs/{id}/check“, on the file as it stands in Bambuddy (#755, #760);its slots read from the file itself, as “/choices“ reads them (#2550), and itspresets from the dialog's kept catalogue (#4196).
+// V1PrintLibraryItemCheckRequestBuilderPostQueryParameters as “/print/outputs/{id}/check“, on the file as it stands in Bambuddy (#755, #760); its slots read from the file itself, as “/choices“ reads them (#2550), and its presets from the dialog's kept catalogue (#4196).
 type V1PrintLibraryItemCheckRequestBuilderPostQueryParameters struct {
 	Max_objects      *int32 "uriparametername:\"max_objects\""
 	Max_paint_digits *int32 "uriparametername:\"max_paint_digits\""
@@ -47,7 +47,7 @@ func NewV1PrintLibraryItemCheckRequestBuilder(rawUrl string, requestAdapter i2ae
 	return NewV1PrintLibraryItemCheckRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post as “/print/outputs/{id}/check“, on the file as it stands in Bambuddy (#755, #760);its slots read from the file itself, as “/choices“ reads them (#2550), and itspresets from the dialog's kept catalogue (#4196).
+// Post as “/print/outputs/{id}/check“, on the file as it stands in Bambuddy (#755, #760); its slots read from the file itself, as “/choices“ reads them (#2550), and its presets from the dialog's kept catalogue (#4196).
 // returns a PrintCheckable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemCheckRequestBuilder) Post(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintRunRequestable, requestConfiguration *V1PrintLibraryItemCheckRequestBuilderPostRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintCheckable, error) {
@@ -68,7 +68,7 @@ func (m *V1PrintLibraryItemCheckRequestBuilder) Post(ctx context.Context, body i
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintCheckable), nil
 }
 
-// ToPostRequestInformation as “/print/outputs/{id}/check“, on the file as it stands in Bambuddy (#755, #760);its slots read from the file itself, as “/choices“ reads them (#2550), and itspresets from the dialog's kept catalogue (#4196).
+// ToPostRequestInformation as “/print/outputs/{id}/check“, on the file as it stands in Bambuddy (#755, #760); its slots read from the file itself, as “/choices“ reads them (#2550), and its presets from the dialog's kept catalogue (#4196).
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemCheckRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintRunRequestable, requestConfiguration *V1PrintLibraryItemCheckRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

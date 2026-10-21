@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// ModelPrintChoices what the print dialog last chose for one model (#78). “printer_id“ is theprinter it printed on. “filament_plan“ is only a plan the user moved off theauto-match: a spool no longer in the inventory is dropped by the picker, which thenfalls back to the auto-match for that slot.“nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices(spec 2026-09-27 §7). All default to "nothing remembered", so a settings filewritten before them still loads; an empty “nozzles“ means the dialog's default.
+// ModelPrintChoices what the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 type ModelPrintChoices struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

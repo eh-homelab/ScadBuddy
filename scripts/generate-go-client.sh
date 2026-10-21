@@ -35,8 +35,12 @@ fi
 #  - A default on an anyOf/oneOf property (PrintChoices.tier: Tier | None = "standard")
 #    makes Kiota's Go emit `m.SetTier(&"standard")` on a union wrapper, which does not
 #    compile; the default is only a hint to a client that never reads it.
+# And one for the doc comments: Kiota joins a description's lines with no space
+# ("Bambuddy (#755, #760);its slots", #4464), so each run of whitespace holding a
+# newline becomes one space first. Only string-valued description/summary keys change.
 jq 'walk(if type == "object" and has("$ref") and (has("description") or has("summary")) then del(.description, .summary) else . end)
-    | walk(if type == "object" and (has("anyOf") or has("oneOf")) then del(.default) else . end)' \
+    | walk(if type == "object" and (has("anyOf") or has("oneOf")) then del(.default) else . end)
+    | walk(if type == "object" then with_entries(if (.key == "description" or .key == "summary") and (.value | type) == "string" then .value |= gsub("[ \t]*\n\\s*"; " ") else . end) else . end)' \
   "$SPEC_DIR/raw.json" > "$SPEC_DIR/openapi.json"
 
 # Delete first: a file the generator no longer emits must show up as a deletion.

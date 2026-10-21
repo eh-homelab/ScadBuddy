@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// RackOption one eligible rack position, as the dialog lists it (spec 2026-10-01 §5). Builtfield by field from a :class:`RackCandidate`, which carries no serial (§7).
+// RackOption one eligible rack position, as the dialog lists it (spec 2026-10-01 §5). Built field by field from a :class:`RackCandidate`, which carries no serial (§7).
 type RackOption struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

@@ -37,7 +37,7 @@ func NewV1PrintLibraryCopyRequestBuilder(rawUrl string, requestAdapter i2ae4187f
 	return NewV1PrintLibraryCopyRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post copies each file into “folder_id“ or “folder_path“ (the top level with neither)as a new library file (#2670). Bambuddy has no copy, so each is downloaded anduploaded, its notes copied after; a copy of an output's copy is recorded as one morecopy of that output, unless it is in the inbox. A file too large to copy, gone by then,or that Bambuddy failed on is in “skipped“, with any after a failure; the copies madebefore it are still answered.
+// Post copies each file into “folder_id“ or “folder_path“ (the top level with neither) as a new library file (#2670). Bambuddy has no copy, so each is downloaded and uploaded, its notes copied after; a copy of an output's copy is recorded as one more copy of that output, unless it is in the inbox. A file too large to copy, gone by then, or that Bambuddy failed on is in “skipped“, with any after a failure; the copies made before it are still answered.
 // returns a LibraryCopyResultable when successful
 // returns a V1PrintLibraryLibraryCopyResult428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryLibraryCopyResult4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryCopyRequestBuilder) Post(ctx context.Context, body i8d9ad
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryCopyResultable), nil
 }
 
-// ToPostRequestInformation copies each file into “folder_id“ or “folder_path“ (the top level with neither)as a new library file (#2670). Bambuddy has no copy, so each is downloaded anduploaded, its notes copied after; a copy of an output's copy is recorded as one morecopy of that output, unless it is in the inbox. A file too large to copy, gone by then,or that Bambuddy failed on is in “skipped“, with any after a failure; the copies madebefore it are still answered.
+// ToPostRequestInformation copies each file into “folder_id“ or “folder_path“ (the top level with neither) as a new library file (#2670). Bambuddy has no copy, so each is downloaded and uploaded, its notes copied after; a copy of an output's copy is recorded as one more copy of that output, unless it is in the inbox. A file too large to copy, gone by then, or that Bambuddy failed on is in “skipped“, with any after a failure; the copies made before it are still answered.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryCopyRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryTransferRequestable, requestConfiguration *V1PrintLibraryCopyRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// RackPickView the check's preview of the rack side's pick (spec 2026-10-01 §5), never with thehotend's serial (§7). It ranks the side as one group; the real pick is made persliced group and can differ when the slicer splits it.
+// RackPickView the check's preview of the rack side's pick (spec 2026-10-01 §5), never with the hotend's serial (§7). It ranks the side as one group; the real pick is made per sliced group and can differ when the slicer splits it.
 type RackPickView struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
