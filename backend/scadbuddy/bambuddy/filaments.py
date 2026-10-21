@@ -291,6 +291,8 @@ def normalise_colour(raw: str | None) -> str | None:
 
     The alpha byte is dropped rather than kept: nothing compares it, and leaving it on
     would make the same colour unequal to itself across two of Bambuddy's own routes.
+    The output is always ``#RRGGBB``, the only form ``slicing/models.py`` ``COLOUR``
+    lets reach the native slicer.
     """
     if not raw:
         return None

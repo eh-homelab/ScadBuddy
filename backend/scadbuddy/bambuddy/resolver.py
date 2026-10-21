@@ -20,6 +20,7 @@ print run states each side's flow in the 3MF, as Bambu Studio does (#484,
 from __future__ import annotations
 
 import logging
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -160,6 +161,11 @@ def _fits(rows: list[PresetChoice], prefix: str, printer: str) -> PresetRef | No
             and printer in row.compatible_printers
         ]
     )
+
+
+def _is_local_id(preset_id: str) -> bool:
+    """A Bambuddy local preset id: ASCII digits only, never a name in the image."""
+    return re.fullmatch(r"[0-9]+", preset_id) is not None
 
 
 def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) -> PresetRef | None:
@@ -392,7 +398,7 @@ def resolve(
                     for preset_id in own
                 }
                 if any(
-                    native is None and not (preset_id.isascii() and preset_id.isdigit())
+                    native is None and not _is_local_id(preset_id)
                     for preset_id, native in mapped.items()
                 ):
                     # Said, so a slot that falls back to a name is not a mystery; a
