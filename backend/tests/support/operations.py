@@ -17,14 +17,17 @@ def press() -> dict[str, str]:
     return {"Idempotency-Key": uuid.uuid4().hex}
 
 
-def accepted(send: Callable[[dict[str, str]], Response]) -> Response:
-    """``send``'s answer once accepted: sent again with the same key while it is still
-    being accepted (#3926, #4364), since on a loaded runner a short deadline passes first
-    and the 503 means "send it again", as the browser's ``command()`` does."""
+def accepted(
+    send: Callable[[dict[str, str]], Response], key: dict[str, str] | None = None
+) -> Response:
+    """``send``'s answer once accepted: sent again with the same key (``key``, or a fresh
+    press) while it is still being accepted (#3926, #4364, #4424), since on a loaded
+    runner a short deadline passes first and the 503 means "send it again", as the
+    browser's ``command()`` does."""
     from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
     from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
-    key = press()
+    key = key or press()
     resend_until = time.monotonic() + 60
     # Only a problem-JSON 503 is read as JSON, so any other answer (a proxy's HTML page
     # included) fails on its own text.

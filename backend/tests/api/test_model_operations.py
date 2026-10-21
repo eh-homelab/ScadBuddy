@@ -147,8 +147,12 @@ def test_a_slow_create_answers_202_and_its_operation_ends_with_the_model(
         return await create(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_create", slowly)
-    started = client.post(
-        "/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=press()
+    # Past its 1 s a loaded shard may not have written the record yet: the 503 says send
+    # it again, and the re-send with its key finds the record running (#4424, as #4364).
+    started = accepted(
+        lambda key: client.post(
+            "/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=key
+        )
     )
     assert started.status_code == 202, started.text
     op = follow_operation(client, started.json())

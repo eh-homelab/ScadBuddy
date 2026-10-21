@@ -45,6 +45,9 @@ from tests.support.pipelines import (
     OldRenderPiece,
     a_job,
     activity_named,
+    child_starts,
+    local_activities,
+    patch_ids,
     run_job,
 )
 from tests.support.temporal import temporal_client
@@ -810,12 +813,7 @@ async def test_a_failure_the_template_raises_as_openscads_is_taken_with_its_line
 
 
 async def _children(client: Client, workflow_id: str) -> list[str]:
-    history = await client.get_workflow_handle(workflow_id).fetch_history()
-    return [
-        event.start_child_workflow_execution_initiated_event_attributes.workflow_id
-        for event in history.events
-        if event.HasField("start_child_workflow_execution_initiated_event_attributes")
-    ]
+    return child_starts(await client.get_workflow_handle(workflow_id).fetch_history())
 
 
 async def test_a_cached_piece_is_answered_by_the_job_without_a_child() -> None:
@@ -861,3 +859,19 @@ async def test_a_lookup_failing_in_the_job_falls_back_to_the_pieces_child() -> N
     assert world.failures == 0
     assert world.final().state == "done"
     assert children == [f"piece-{world.pieces[0].piece_key}"]
+
+
+async def test_a_job_with_no_revision_starts_its_child_and_records_no_lookup() -> None:
+    """A job with no revision returns from `_cached` before `workflow.patched`
+    (`cached_piece` answers None without one), so it records neither the
+    `piece-lookup-4199` marker nor a `cached_piece` local activity, and a child renders
+    its piece."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    assert job.model_version is None
+    async with temporal_client() as client:
+        await run_job(world, job, client=client)
+        history = await client.get_workflow_handle(workflow_id_for(job.id)).fetch_history()
+    assert world.final().state == "done"
+    assert child_starts(history) == [f"piece-{world.pieces[0].piece_key}"]
+    assert pipelines.PIECE_LOOKUP_PATCH not in patch_ids(history)
+    assert "cached_piece" not in local_activities(history)

@@ -67,7 +67,7 @@ from scadbuddy.main import sweep_library_checkouts
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.conftest import PgPool, make_library_upstream, open_pg_pool
-from tests.support.operations import press, subjects
+from tests.support.operations import accepted, press, subjects
 from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
@@ -1934,7 +1934,10 @@ def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
         return await resolve(*args, **kwargs)
 
     monkeypatch.setattr(library_operations, "resolve_pin", slowly)
-    started = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press())
+    # Past its 1 s a loaded shard may not have written the record yet (#4424).
+    started = accepted(
+        lambda key: lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=key)
+    )
     assert started.status_code == 202, started.text
     op = follow_operation(lib_client, started.json())
     assert op["status"] == "succeeded", op

@@ -26,7 +26,7 @@ from tests.api.conftest import follow_operation
 from tests.api.test_assets import _svg
 from tests.api.test_model_operations import _state, _workflow_ids
 from tests.conftest import MODEL_SLUG
-from tests.support.operations import press
+from tests.support.operations import accepted, press
 
 pytestmark = [pytest.mark.requires_postgres]
 
@@ -75,7 +75,8 @@ def test_the_quota_refusal_keeps_usage_after_a_202(
         return put(*args, **kwargs)
 
     monkeypatch.setattr(store, "put", slowly)
-    started = _upload(capped_client, _svg(2))
+    # Past its 1 s a loaded shard may not have written the record yet (#4424).
+    started = accepted(lambda key: _upload(capped_client, _svg(2), key["Idempotency-Key"]))
     assert started.status_code == 202, started.text
     op = started.json()
     op = follow_operation(capped_client, op)
