@@ -132,5 +132,12 @@
       "plate_percent": 50,
       "total_percent": 25
     }
+  ],
+  "refused_colours": [
+    "#FF0000;#00FF00",
+    "red",
+    "#FFF",
+    "",
+    "#FF0000FF"
   ]
 }

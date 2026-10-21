@@ -25,3 +25,19 @@ fn every_vector_round_trips() {
         round_trip::<SlicePlateOutput>(raw);
     }
 }
+
+/// #3962: every colour Python refuses, the worker refuses too.
+#[test]
+fn every_refused_colour_is_refused() {
+    let doc: Value = serde_json::from_str(VECTORS).unwrap();
+    let refused = doc["refused_colours"].as_array().unwrap();
+    assert!(!refused.is_empty());
+    for colour in refused {
+        let mut input = doc["input"][0].clone();
+        input["filament_colours"] = Value::Array(vec![colour.clone()]);
+        assert!(
+            serde_json::from_value::<SlicePlateInput>(input).is_err(),
+            "{colour} was taken"
+        );
+    }
+}

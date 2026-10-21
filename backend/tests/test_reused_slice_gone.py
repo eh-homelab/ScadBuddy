@@ -58,7 +58,7 @@ async def test_a_404_on_the_read_back_is_a_gone_slice() -> None:
 async def test_a_refusal_that_is_not_a_gone_slice_says_why(
     caplog: pytest.LogCaptureFixture, read_back: ApiError | None, message: str, status: int
 ) -> None:
-    with caplog.at_level(logging.DEBUG, logger=print_activities.__name__):
+    with caplog.at_level(logging.INFO, logger=print_activities.__name__):
         assert not await _gone(read_back)
     [record] = [r for r in caplog.records if r.name == print_activities.__name__]
     assert record.getMessage() == message

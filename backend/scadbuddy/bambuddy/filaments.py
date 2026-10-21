@@ -291,15 +291,15 @@ def normalise_colour(raw: str | None) -> str | None:
 
     The alpha byte is dropped rather than kept: nothing compares it, and leaving it on
     would make the same colour unequal to itself across two of Bambuddy's own routes.
+    The output is always ``#RRGGBB``, the only form ``slicing/models.py`` ``COLOUR``
+    lets reach the native slicer.
     """
     if not raw:
         return None
     text = raw.strip().lstrip("#")
-    if len(text) not in (6, 8):
-        return None
-    try:
-        int(text[:6], 16)
-    except ValueError:
+    # Hex digits only: int(..., 16) also takes "-12345" and "12_456", which the native
+    # slicer's colour pattern then refuses mid-slice (#3962).
+    if re.fullmatch(r"[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?", text) is None:
         return None
     return f"#{text[:6].upper()}"
 

@@ -20,6 +20,7 @@ print run states each side's flow in the 3MF, as Bambu Studio does (#484,
 from __future__ import annotations
 
 import logging
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -160,6 +161,11 @@ def _fits(rows: list[PresetChoice], prefix: str, printer: str) -> PresetRef | No
             and printer in row.compatible_printers
         ]
     )
+
+
+def _is_local_id(preset_id: str) -> bool:
+    """A Bambuddy local preset id: ASCII digits only, never a name in the image."""
+    return re.fullmatch(r"[0-9]+", preset_id) is not None
 
 
 def _by_filament_id(rows: list[PresetChoice], filament_id: str, printer: str) -> PresetRef | None:
@@ -380,18 +386,23 @@ def resolve(
                 if row.printer_model == PRINTER_MODEL and row.nozzle_diameter == size
             ]
             if catalogue.is_native:
-                # A spool's preset is a Bambu Cloud setting_id, a BBL filament_id (as a
-                # tray's tray_info_idx is) or a Bambuddy local id, which the image lacks;
-                # native refs are preset names (#4349).
+                # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
+                # filament_id (as a tray's tray_info_idx is) or a Bambuddy local id,
+                # which the image lacks; native refs are preset names (#4349).
                 mapped = {
                     preset_id: catalogue.native_ref(
-                        PresetRef(source="cloud", id=preset_id), "filament"
+                        PresetRef(source="standard", id=preset_id), "filament"
                     )
+                    or catalogue.native_ref(PresetRef(source="cloud", id=preset_id), "filament")
                     or _by_filament_id(catalogue.filament, preset_id, printer)
                     for preset_id in own
                 }
-                if None in mapped.values():
-                    # Said, so a slot that falls back to a name is not a mystery.
+                if any(
+                    native is None and not _is_local_id(preset_id)
+                    for preset_id, native in mapped.items()
+                ):
+                    # Said, so a slot that falls back to a name is not a mystery; a
+                    # Bambuddy local id (all digits) is never in the image, so not said.
                     logger.debug(
                         "a spool's own preset is not in the native catalogue",
                         extra={"spool_id": option.spool_id},

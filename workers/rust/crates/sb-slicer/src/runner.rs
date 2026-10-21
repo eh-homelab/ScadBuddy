@@ -104,7 +104,7 @@ pub fn command_line(req: &RunRequest<'_>, fifo: &Path) -> Vec<OsString> {
         // Without it, slots that all load a preset of one name lose the prime tower
         // (`disable_wipe_tower_after_mapping`, #3962); with two or more distinct colours
         // the CLI keeps it, while one is passed but changes nothing there. The same
-        // `;`-separated list (Python's `COLOUR` pattern keeps `;` out of a colour).
+        // `;`-separated list (`models.rs` takes only `#RRGGBB`).
         argv.push("--filament-colour".into());
         argv.push(req.filament_colours.join(";").into());
     }

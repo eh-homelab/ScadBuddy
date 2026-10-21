@@ -2,6 +2,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -90,7 +91,11 @@ def test_vectors_round_trip() -> None:
             ),
         ],
     }
-    dumped = {k: [m.model_dump(mode="json") for m in v] for k, v in cases.items()}
+    dumped: dict[str, list[Any]] = {
+        k: [m.model_dump(mode="json") for m in v] for k, v in cases.items()
+    }
+    # Colours each side must refuse (#3962): `sb-slicer`'s vectors test refuses them too.
+    dumped["refused_colours"] = list(REFUSED_COLOURS)
     if os.environ.get("UPDATE_SLICE_VECTORS"):
         VECTORS.write_text(json.dumps(dumped, indent=2, sort_keys=True) + "\n")
     assert json.loads(VECTORS.read_text()) == dumped
@@ -103,7 +108,10 @@ def test_vectors_round_trip() -> None:
             assert cls.model_validate(raw).model_dump(mode="json") == raw
 
 
-@pytest.mark.parametrize("colour", ["#FF0000;#00FF00", "red", "#FFF", ""])
+REFUSED_COLOURS = ("#FF0000;#00FF00", "red", "#FFF", "", "#FF0000FF")
+
+
+@pytest.mark.parametrize("colour", REFUSED_COLOURS)
 def test_a_colour_the_cli_would_misread_is_refused(colour: str) -> None:
     """#3962: the worker joins the colours with ``;``, so one must never hold one."""
     with pytest.raises(ValidationError):

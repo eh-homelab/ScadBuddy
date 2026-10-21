@@ -427,9 +427,10 @@ class PrintPipeline:
                 # No hash to compare, or the same file read as another type for now:
                 # nothing says the id holds another file, so the row stays (#3896). It
                 # still counts toward MAX_RECORDED_SLICES: the cap bounds the GETs, and
-                # this one was made. At worst an older slice goes unchecked and the plate
-                # is sliced again, which is what a miss always costs.
-                logger.info(
+                # this one was made. A row that never reads conclusively costs a GET a
+                # reprint until newer slices push it past the cap, an accepted cost: at
+                # worst an older slice goes unchecked and the plate is sliced again.
+                logger.debug(
                     "a recorded slice cannot be checked now; it is not reused",
                     extra={"library_file_id": sliced.id},
                 )

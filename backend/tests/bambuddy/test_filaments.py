@@ -117,6 +117,10 @@ def options(**extra: object) -> FilamentOptions:
         (None, None),
         ("nope", None),
         ("ZZZZZZ", None),
+        # int(..., 16) takes these; a colour does not (#3962).
+        ("-12345", None),
+        ("12_456", None),
+        ("0x1234", None),
     ],
 )
 def test_colours_normalise_to_six_hex_digits(raw: str | None, expected: str | None) -> None:
