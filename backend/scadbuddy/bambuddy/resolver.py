@@ -392,7 +392,7 @@ def resolve(
                     for preset_id in own
                 }
                 if any(
-                    native is None and not preset_id.isdigit()
+                    native is None and not (preset_id.isascii() and preset_id.isdigit())
                     for preset_id, native in mapped.items()
                 ):
                     # Said, so a slot that falls back to a name is not a mystery; a
