@@ -109,8 +109,9 @@ class OrderPatch(BaseModel):
 
 
 class ReferenceBody(BaseModel):
-    """`{slug, commit, inputs}`; each stands in for the output's when ``output_id`` is
-    given beside it."""
+    """`{slug, commit, inputs}`. Beside ``output_id`` each may be left out (the output's
+    stands in) or given, and then must agree with the output's: ``inputs`` as the whole
+    object, ``v`` included, since a missing ``v`` reads as 0 (#4458)."""
 
     model_config = ConfigDict(extra="forbid")
 

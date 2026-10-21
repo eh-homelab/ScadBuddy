@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_send import make_output
-from tests.api.test_versions import SLUG, upload
+from tests.api.test_versions import SECOND, SLUG, put_source, upload
 from tests.support.operations import press
 
 # A committed template: an upload is a revision of the models repository, where the
@@ -212,6 +212,43 @@ def test_a_bad_reference_is_422_naming_the_field(client: TestClient) -> None:
         ).status_code
         == 422
     )
+
+
+def test_a_commit_or_inputs_beside_an_output_must_be_its_own(client: TestClient) -> None:
+    """#4458: on an add and on a repin, a commit or inputs that describe another render
+    than the output named beside them are 422 on that field."""
+    upload(client)
+    customer = create_customer(client)
+    order = create_order(client, customer["id"])
+    output_id = make_output(client, SLUG)
+    rendered = client.get(f"/api/v1/models/{SLUG}").json()["version"]
+    assert put_source(client, SECOND).status_code == 200
+    later = client.get(f"/api/v1/models/{SLUG}").json()["version"]
+    assert later != rendered
+    item = add_item(client, order["id"], output_id=output_id, quantity=1)
+    inputs = item["reference"]["inputs"]
+    # The output's own, given back whole, agree.
+    agreed = add_item(
+        client, order["id"], output_id=output_id, commit=rendered, inputs=inputs, quantity=1
+    )
+    assert agreed["reference"]["commit"] == rendered
+    cases = [
+        ({"commit": later}, "commit"),
+        ({"inputs": {**inputs, "params": {"width": 20}}}, "inputs"),
+    ]
+    for reference, field in cases:
+        added = client.post(
+            f"/api/v1/orders/{order['id']}/items",
+            json={**reference, "output_id": output_id, "quantity": 1},
+        )
+        assert added.status_code == 422, (reference, added.text)
+        assert added.json()["errors"][0]["loc"][-1] == field, reference
+        repinned = client.patch(
+            f"/api/v1/orders/{order['id']}/items/{item['id']}",
+            json={"reference": reference, "output_id": output_id},
+        )
+        assert repinned.status_code == 422, (reference, repinned.text)
+        assert repinned.json()["errors"][0]["loc"][-1] == field, reference
 
 
 def test_a_deleted_template_is_409(client: TestClient) -> None:

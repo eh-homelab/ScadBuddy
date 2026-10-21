@@ -199,8 +199,9 @@ export const orderTools: Tool[] = [
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
       'charges, replaced whole, while draft or quoted. `hold` puts it on hold or releases it (true/false): on hold, ' +
-      'every step that advances the order is refused until released. `payment` records money the shop already ' +
-      'received, in any state but cancelled.',
+      'every step that advances the order is refused until released. Releasing is a write, as holding is: it ' +
+      'commits nothing to the customer, and every step that does (accepting, fulfilling, shipping, closing) stays ' +
+      'outward. `payment` records money the shop already received, in any state but cancelled.',
     input: z.object({
       order_id: orderId,
       notes: z.string().optional(),
@@ -258,7 +259,8 @@ export const orderTools: Tool[] = [
     name: 'order_item_add',
     description:
       'Add a line item: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
-      '`commit`, `inputs`). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
+      '`commit`, `inputs`). Beside `output_id`, leave the others out: one given must be the output\'s own (`inputs` ' +
+      'whole, `v` included). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
       'that is not a revision of the template, or an input the template does not take, is refused naming the field.',
     input: z.object({
       order_id: orderId,
