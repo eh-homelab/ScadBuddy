@@ -35,12 +35,18 @@ fi
 #  - A default on an anyOf/oneOf property (PrintChoices.tier: Tier | None = "standard")
 #    makes Kiota's Go emit `m.SetTier(&"standard")` on a union wrapper, which does not
 #    compile; the default is only a hint to a client that never reads it.
-# And one for the doc comments: Kiota joins a description's lines with no space
-# ("Bambuddy (#755, #760);its slots", #4464), so each run of whitespace holding a
-# newline becomes one space first. Only string-valued description/summary keys change.
+# And one for the doc comments: Kiota joins a description's lines, and its paragraphs,
+# with no space ("Bambuddy (#755, #760);its slots", "there.#2788", #4464) and writes
+# each as one comment line, so each run of whitespace holding a newline becomes one
+# space first. Only string description/summary keys change, and none inside a
+# default, example or examples value, which is payload rather than documentation (a
+# response named `default` and a property named so are documentation still).
 jq 'walk(if type == "object" and has("$ref") and (has("description") or has("summary")) then del(.description, .summary) else . end)
     | walk(if type == "object" and (has("anyOf") or has("oneOf")) then del(.default) else . end)
-    | walk(if type == "object" then with_entries(if (.key == "description" or .key == "summary") and (.value | type) == "string" then .value |= gsub("[ \t]*\n\\s*"; " ") else . end) else . end)' \
+    | reduce (paths(strings) | select(.[-1] == "description" or .[-1] == "summary")
+              | select(. as $q | any(range(1; length); ($q[.] | IN("default", "example", "examples"))
+                  and ($q[. - 1] | IN("responses", "properties") | not)) | not)) as $p
+        (.; setpath($p; getpath($p) | gsub("[ \t]*\n\\s*"; " ")))' \
   "$SPEC_DIR/raw.json" > "$SPEC_DIR/openapi.json"
 
 # Delete first: a file the generator no longer emits must show up as a deletion.
