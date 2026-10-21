@@ -794,3 +794,23 @@ async def test_a_lookup_failing_in_the_job_falls_back_to_the_pieces_child() -> N
     assert world.failures == 0
     assert world.final().state == "done"
     assert children == [f"piece-{world.pieces[0].piece_key}"]
+
+
+async def test_a_job_without_a_revision_looks_nothing_up_and_starts_its_child() -> None:
+    """`cached_piece` answers None without a revision, so the job asks it nothing: no
+    `piece-lookup-4199` marker, no lookup of its own, and the piece's child starts."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    assert job.model_version is None
+    async with temporal_client() as client:
+        await run_job(world, job, client=client)
+        children = await _children(client, workflow_id_for(job.id))
+        history = await client.get_workflow_handle(workflow_id_for(job.id)).fetch_history()
+    markers = [
+        event.marker_recorded_event_attributes.marker_name
+        for event in history.events
+        if event.HasField("marker_recorded_event_attributes")
+    ]
+    assert world.final().state == "done"
+    assert children == [f"piece-{world.pieces[0].piece_key}"]
+    assert len(world.pieces) == 1  # the child's lookup only
+    assert "core_patch" not in markers

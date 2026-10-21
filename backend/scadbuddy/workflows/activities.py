@@ -273,7 +273,11 @@ def heartbeated[S, **P, T](
     timeout rather than its start-to-close. Applied under `activity.defn`. The
     `_heartbeating` calls inside the body stay, nested in this one: each beats only
     while its own work runs (the SDK throttles the beats), and a cancel reaches the
-    inner work through the outer, which cancels and awaits it."""
+    inner work through the outer, which cancels and awaits it.
+
+    So the heartbeat timeout now catches a lost worker or attempt only, never a body
+    that hangs (a stuck store call, a template's code): that one beats on, and only the
+    activity's start-to-close ends it. Keep each start-to-close tight (#4456)."""
 
     @functools.wraps(fn)
     async def beating(self: S, /, *args: P.args, **kwargs: P.kwargs) -> T:
