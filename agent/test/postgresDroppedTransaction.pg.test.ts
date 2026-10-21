@@ -37,9 +37,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`a transaction whose connection is dropped${
       pidOf(row!.pid)
       await held
     })
-    await db.sql`SELECT pg_terminate_backend(${await pid})`
     // The transaction fails as soon as its connection closes, before its callback ends.
-    await expect(tx).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })
+    // Its handler is attached before the terminate: the closed socket can be seen before
+    // the terminate's reply, and a rejection with no handler yet is an unhandled one.
+    const failed = expect(tx).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })
+    await db.sql`SELECT pg_terminate_backend(${await pid})`
+    await failed
     settle(release)
     // Long enough for the rollback or commit postgres.js then writes to have gone out:
     // connection.js defers each write through one setImmediate (nextWriteTimer), so the
