@@ -234,9 +234,7 @@ def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatche
     assert watches.calls == [("restart", pid), ("stop", pid)]
 
 
-GENERIC = (
-    "the printer did not answer at that address, or did not take the access code: check both"
-)
+GENERIC = "the printer did not answer at that address, or did not take the access code: check both"
 
 
 @pytest.mark.parametrize(
