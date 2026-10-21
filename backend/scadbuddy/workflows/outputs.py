@@ -9,6 +9,7 @@ import math
 import re
 import shutil
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -272,7 +273,7 @@ def _piece_name(req: OutputRequest, part: Part, model_name: str) -> str:
     return model_name if part.file == SOURCE_NAME or not stem else stem
 
 
-def _copy_names(pieces: list[str]) -> list[str]:
+def _copy_names(pieces: Sequence[str]) -> list[str]:
     """Each copy's name, in placement order, from its piece's (:func:`_piece_name`):
     the piece's own when it is placed once, else numbered. A number skips a name some
     piece already has (two copies of ``demo`` beside a piece ``demo 1`` are ``demo 2``

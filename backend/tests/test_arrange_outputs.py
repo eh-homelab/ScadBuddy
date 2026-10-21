@@ -570,12 +570,14 @@ async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
     assert first.piece_key not in alive_at_covers
 
 
-def _library_piece(read: list[Any], key: str, file_id: int, count: int) -> tuple[Any, Any]:
+def _library_piece(
+    read: list[Any], key: str, file_id: int, count: int, slug: str = "demo"
+) -> tuple[Any, Any]:
     box = bounding_box(read[0].parts)
     entry = ManifestObject(
         part=piece_key(key * 32, 0),
         file=read[0].name,
-        slug="demo",
+        slug=slug,
         revision=None,
         bbox=box,
         footprint=(box.size[0], box.size[1]),
@@ -598,9 +600,25 @@ async def _written_objects(
 ) -> list[tuple[set[str], int, str | None, str]]:
     """Each object of the written plate: its parts' subtypes, how many parts it holds,
     its build item's transform and its name."""
+    return await _written_pieces(tmp_path, read, [(key, "demo", copies)])
+
+
+async def _written_pieces(
+    tmp_path: Path, read: list[Any], pieces: list[tuple[str, str, int]]
+) -> list[tuple[set[str], int, str | None, str]]:
+    """`_written_objects` for several library pieces of ``read``'s first object, each
+    ``(key, slug, copies)``, placed in that order on one plate."""
     deps, paths = _deps(tmp_path)
-    entry, library = _library_piece(read, key, 92, copies)
-    await publish_library_pieces(deps.blobs, [entry], read)
+    made = [
+        _library_piece(read, key, 92 + n, copies, slug)
+        for n, (key, slug, copies) in enumerate(pieces)
+    ]
+    await publish_library_pieces(deps.blobs, [entry for entry, _ in made], [read[0]] * len(made))
+    placed = [
+        library.piece_key
+        for (entry, library), (*_, copies) in zip(made, pieces, strict=True)
+        for _ in range(copies)
+    ]
     req = OutputRequest(
         job_id="j9",
         index=0,
@@ -609,18 +627,18 @@ async def _written_objects(
             plates=[
                 LayoutPlate(
                     items=[
-                        Placed(piece_key=library.piece_key, x=40.0 * n, y=0, rot=0.0)
-                        for n in range(copies)
+                        Placed(piece_key=key, x=40.0 * n, y=0, rot=0.0)
+                        for n, key in enumerate(placed)
                     ]
                 )
             ]
         ),
-        parts=[library],
+        parts=[library for _, library in made],
         name=None,
         bom=[],
         files={},
-        record=_record([library.piece_key]),
-        provenance={entry.part: entry},
+        record=_record([library.piece_key for _, library in made]),
+        provenance={entry.part: entry for entry, _ in made},
     )
     written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
     with zipfile.ZipFile(paths.root / written.result.model_3mf) as archive:
@@ -722,6 +740,17 @@ def test_a_numbered_copy_never_takes_another_pieces_name() -> None:
 
     assert names == ["demo 2", "demo 1", "demo 4", "demo 3 1", "demo 3 2"]
     assert len(set(names)) == len(names)
+
+
+async def test_a_written_plate_never_names_two_objects_alike(tmp_path: Path) -> None:
+    """#4465 review: the names the writer gives the 3MF's objects, not only the list."""
+    from tests.test_objects3mf import _cut_project
+
+    objects = await _written_pieces(
+        tmp_path, read_objects(_cut_project()), [("ch", "demo", 2), ("ci", "demo 1", 1)]
+    )
+
+    assert [name for *_, name in objects] == ["demo 2", "demo 3", "demo 1"]
 
 
 async def test_a_layout_plate_with_nothing_to_print_is_refused(tmp_path: Path) -> None:
