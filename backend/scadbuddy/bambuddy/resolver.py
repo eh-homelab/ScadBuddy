@@ -390,8 +390,12 @@ def resolve(
                     or _by_filament_id(catalogue.filament, preset_id, printer)
                     for preset_id in own
                 }
-                if None in mapped.values():
-                    # Said, so a slot that falls back to a name is not a mystery.
+                if any(
+                    native is None and not preset_id.isdigit()
+                    for preset_id, native in mapped.items()
+                ):
+                    # Said, so a slot that falls back to a name is not a mystery; a
+                    # Bambuddy local id (all digits) is never in the image, so not said.
                     logger.debug(
                         "a spool's own preset is not in the native catalogue",
                         extra={"spool_id": option.spool_id},

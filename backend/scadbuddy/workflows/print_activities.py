@@ -115,12 +115,12 @@ async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error:
             return True
         # Why the plate was not sliced again, which the queue error re-raised does not
         # say (#3895).
-        logger.debug(
+        logger.info(
             "a refused queue's slice could not be read back",
             extra={"library_file_id": input.sliced, "status": gone.status},
         )
         return False
-    logger.debug(
+    logger.info(
         "a queue was refused while its slice is still present",
         extra={"library_file_id": input.sliced, "status": code},
     )
