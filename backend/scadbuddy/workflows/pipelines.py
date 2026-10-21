@@ -21,6 +21,8 @@ from temporalio.exceptions import (
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
+    from pydantic import ValidationError
+
     from scadbuddy.render.job_models import (
         CANCELLED_ERROR,
         SUPERSEDED_ERROR,
@@ -281,7 +283,13 @@ def _failure_of(error: BaseException) -> Failure:
     while cause is not None:
         if isinstance(cause, ApplicationError) and cause.type in FAILURE_TYPES and cause.details:
             detail = cause.details[0]
-            return detail if isinstance(detail, Failure) else Failure.model_validate(detail)
+            if isinstance(detail, Failure):
+                return detail
+            # A detail that is no `Failure` (a template's own raise of such a type):
+            # its message, not the validation error.
+            with contextlib.suppress(ValidationError):
+                return Failure.model_validate(detail)
+            return Failure(error=cause.message)
         if isinstance(cause, ActivityError) and cause.activity_type in _STAGES:
             stage = _STAGES[cause.activity_type]
         innermost = cause
@@ -906,8 +914,9 @@ class TemplatePipeline:
             # An ApplicationError is a local activity's failure, unwrapped (the pack's),
             # and reads as a regular activity's cause does: its message. One a template
             # raised itself reads the same way, and one of a `FAILURE_TYPES` type with a
-            # `Failure` detail is taken as that failure, with no line: accepted, as the
-            # template's own code is trusted to say what failed.
+            # `Failure` detail is taken as that failure (the line added below, past the
+            # default pipeline): accepted, as the template's own code is trusted to say
+            # what failed.
             if is_cancelled_exception(error):
                 raise
             failure = _failure_of(error)

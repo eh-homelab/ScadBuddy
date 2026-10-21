@@ -767,12 +767,22 @@ async def test_a_pack_failing_otherwise_fails_with_its_line_and_message() -> Non
     assert final.failure.error == "pipeline/pipeline.py:3: the packer broke"
 
 
-async def test_an_application_error_the_template_raises_reads_as_its_message() -> None:
+@pytest.mark.parametrize(
+    "raised",
+    [
+        "ApplicationError('no rooms', type='Mine')",
+        # A failure type whose detail is no `Failure`: its message, not a ValidationError.
+        "ApplicationError('no rooms', 'not a failure', type='OpenSCADError')",
+    ],
+)
+async def test_an_application_error_the_template_raises_reads_as_its_message(
+    raised: str,
+) -> None:
     world = FakeWorld(
         "from temporalio.exceptions import ApplicationError\n"
         "\n"
         "async def run(ctx, inputs):\n"
-        "    raise ApplicationError('no rooms', type='Mine')\n"
+        f"    raise {raised}\n"
     )
     async with temporal_client() as client:
         await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
