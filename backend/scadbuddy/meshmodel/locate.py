@@ -71,6 +71,8 @@ def _winding_number(point: np.ndarray, triangles: np.ndarray) -> float:
     numerator = np.einsum("ij,ij->i", a, np.cross(b, c))
     dots = np.einsum("ij,ij->i", a, b) * lc
     dots += np.einsum("ij,ij->i", a, c) * lb + np.einsum("ij,ij->i", b, c) * la
+    # A point on a triangle's vertex makes its arctan2(0, 0), 0: harmless, since the
+    # point is then on the mesh, where `_nearness` reads 0 whichever side it falls.
     angles = 2.0 * np.arctan2(numerator, la * lb * lc + dots)
     return float(angles.sum() / (4.0 * np.pi))
 

@@ -614,6 +614,8 @@ class RenderActivities:
             # As unreusable: every retry would read the same file (#3449). Its
             # `piece.json` was found just above, so the volume is there and only the
             # layout is missing, unreadable or not a layout (an older or partial publish).
+            # A volume that reports a transient blip as ENOENT (a remote one can) is
+            # trusted too: a wrong guess costs this one cache row, rendered once more.
             logger.warning(
                 "the geometry's source layout is missing or unreadable; forgetting the"
                 " geometry and rendering the piece",

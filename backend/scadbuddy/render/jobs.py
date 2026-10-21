@@ -618,7 +618,9 @@ _Drawn = tuple[str, tuple[float, ...], tuple[int, int]]
 def _drawn_alike(parts: Sequence[ColourPart]) -> tuple[_Drawn, ...]:
     """What one object's render drew, to compare with another's: each colour, its box
     rounded to a micron, and its vertex and face counts, so two shapes of one colour in
-    one box (a block and a hollowed one) differ."""
+    one box (a block and a hollowed one) differ. Only an exact repeat (the same
+    geometry rendered again) is meant to match: the micron is float noise, not a
+    tolerance, so loosening it would call near-duplicates alike and warn about them."""
     return tuple(
         sorted(
             (

@@ -80,7 +80,16 @@ class PlacedObject:
         gantry and lid heights (``print_object->max_z()``, in the source the module
         docstring cites; #3223). An item lifted off the bed reads taller than its own
         extent; one sunk below it reads shorter, as the part under the bed is cut off and
-        never printed."""
+        never printed.
+
+        Lifted is assumed to stay lifted (#4465). Bambu Studio's CLI, which slices a
+        project 3MF as it is, drops nothing to the bed unless given ``--ensure-on-bed``
+        (``BambuStudio.cpp`` L6233-L6242), and ``max_z()`` is the instance box's top
+        (``PrintObject.cpp`` L93). Its GUI's project load does drop a lifted
+        single-part object (``Plater.cpp`` L9553, ``ModelObject::ensure_on_bed`` in
+        ``Model.cpp`` L1847-L1869), so there a one-colour lifted object may be warned
+        about when it fits; that is the over-warning this module allows. All read at the
+        commit the module docstring cites."""
         return max(0.0, self.high[2])
 
 

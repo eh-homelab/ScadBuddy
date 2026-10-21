@@ -715,6 +715,15 @@ async def test_packed_copies_are_named_after_their_piece(tmp_path: Path) -> None
     assert [name for *_, name in objects] == ["demo 1", "demo 2", "demo 3"]
 
 
+def test_a_numbered_copy_never_takes_another_pieces_name() -> None:
+    """#4465: two copies of ``demo`` were ``demo 1`` and ``demo 2`` beside a piece whose
+    file is ``demo 1``, so two objects shared a name; the number skips a name in use."""
+    names = outputs._copy_names(["demo", "demo 1", "demo", "demo 3", "demo 3"])
+
+    assert names == ["demo 2", "demo 1", "demo 4", "demo 3 1", "demo 3 2"]
+    assert len(set(names)) == len(names)
+
+
 async def test_a_layout_plate_with_nothing_to_print_is_refused(tmp_path: Path) -> None:
     """#2874 review: skipped, an empty plate would renumber every plate after it
     against the layout, so it is refused loudly instead."""
