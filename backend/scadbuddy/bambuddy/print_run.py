@@ -860,6 +860,19 @@ async def check_print(
     named = request.printer is not None and printers is not None
     if not named and (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
+    # The 3MF's download and the inventory wait on nothing `prepare_run` reads, so they
+    # are read beside it (#4196): awaited after it in the order they were read in, so a
+    # failure surfaces where it did, and dropped unread when it refuses. One inventory
+    # read for the plan, the rack, the slot refusals and the spool warnings (#2722);
+    # none for a plan with no slots, whose slot refusals read their own. `_fetch` keeps a
+    # download only once it is done, so `prepare_run` must not fetch the 3MF itself here
+    # (it does not, with `refuse_manual_pick` off): it would download it a second time.
+    laying_out = None if source.is_sliced else asyncio.ensure_future(source.states_nozzles(client))
+    reading = (
+        asyncio.ensure_future(read_inventory(client))
+        if request.filament_plan.slots and not source.is_sliced
+        else None
+    )
     try:
         prepared = await prepare_run(
             client,
@@ -872,16 +885,26 @@ async def check_print(
             reports=reports,
             catalogue=catalogue,
         )
-    except RunRefusalError as refused:
-        return PrintCheck(errors=[refused.detail])
-    if source.is_sliced:
+    except BaseException as error:
+        early = [task for task in (laying_out, reading) if task is not None]
+        for task in early:
+            task.cancel()
+        await asyncio.gather(*early, return_exceptions=True)
+        if isinstance(error, RunRefusalError):
+            return PrintCheck(errors=[error.detail])
+        raise
+    if laying_out is None:
         # Queued as it is, never refused (#2671): what to set right first is a warning,
         # and there is no nozzle plan, slots or rack side to judge before it.
         return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
-    laid_out = await source.states_nozzles(client)
-    # One read of the inventory for the plan, the rack, the slot refusals and the spool
-    # warnings (#2722); none for a plan with no slots, whose slot refusals read their own.
-    inventory = await read_inventory(client) if request.filament_plan.slots else None
+    try:
+        laid_out = await laying_out
+    except BaseException:
+        if reading is not None:
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+        raise
+    inventory = await reading if reading is not None else None
     nozzle_plan = (
         await plan_for(
             client,
