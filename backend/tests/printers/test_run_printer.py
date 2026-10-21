@@ -49,6 +49,10 @@ class OnePlate:
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return [1]
 
+    async def states_nozzles(self, client: BambuddyClient) -> bool:
+        """Read by the check beside `prepare_run` (#4196), and dropped when it refuses."""
+        return False
+
 
 class SlicedPlate(OnePlate):
     """A sliced file: the check judges it from `prepare_run` alone, status included."""

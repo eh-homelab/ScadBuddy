@@ -1,5 +1,5 @@
-"""How the print dialog's choices read Bambuddy (#2354, #2361): which reads wait on
-which, and which are kept between opens.
+"""How the print dialog's choices and its check read Bambuddy (#2354, #2361, #4196):
+which reads wait on which, and which are kept between opens.
 
 A gated route answers only once its partner has been asked, so a read that still waits
 on the one before it deadlocks and the test times out, rather than passing slowly."""
@@ -25,6 +25,7 @@ from scadbuddy.bambuddy.catalogue import cached_catalogue
 from scadbuddy.bambuddy.choices import choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
+from scadbuddy.bambuddy.print_run import PrintRunRequest, check_print
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
@@ -696,3 +697,56 @@ async def test_stalled_archives_cost_the_plate_preselection_not_the_dialog(
 
     assert view.last_bed_type is None
     assert view.filaments.slots
+
+
+class _CheckSource(_ReadSource):
+    """A source whose download starts and never ends, unless it is cancelled."""
+
+    def __init__(self) -> None:
+        self.downloading = asyncio.Event()
+        self.cancelled = False
+
+    async def states_nozzles(self, client: BambuddyClient) -> bool:
+        self.downloading.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return False
+
+
+@respx.mock
+async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4196: the check read the printer, then the 3MF, then the spools, one after
+    another. Here the printer list answers only once the download and the spools have
+    been asked for, and it lists no printer 1, so the check refuses and drops the
+    download it started."""
+    source = _CheckSource()
+    spools_asked = asyncio.Event()
+    respx.get(f"{API}/inventory/spools").mock(
+        side_effect=_marks(spools_asked, "inventory-spools.json")
+    )
+    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+
+    async def no_printers(request: httpx.Request) -> httpx.Response:
+        await source.downloading.wait()
+        await spools_asked.wait()
+        return httpx.Response(200, json=[])
+
+    respx.get(f"{API}/printers/").mock(side_effect=no_printers)
+    request = PrintRunRequest.model_validate(
+        {
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+            "printer_id": 1,
+        }
+    )
+
+    async with asyncio.timeout(5):
+        check = await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+
+    assert check.errors == ["Bambuddy has no printer 1. Pick another printer."]
+    assert source.cancelled
