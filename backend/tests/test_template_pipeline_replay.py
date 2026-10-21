@@ -29,34 +29,35 @@ from temporalio.worker import Replayer
 from scadbuddy.render.projection import workflow_id_for
 from scadbuddy.workflows import pipelines
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.support.pipelines import FakeWorld, a_job, run_job
+from tests.support.pipelines import (
+    FakeWorld,
+    a_job,
+    child_starts,
+    local_activities,
+    patch_ids,
+    run_job,
+)
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "template_pipeline_histories"
 NAMES = ["before_lookup", "cached"]
-LOOKUP_PATCH = b"piece-lookup-4199"
+#: The pre-#4438 history is recorded only on a build without the lookup, the other only
+#: on one with it.
+LOOKUP_BUILD = hasattr(pipelines, "PIECE_LOOKUP_PATCH")
+RECORDABLE = [
+    pytest.param(
+        name,
+        marks=pytest.mark.skipif(
+            (name == "before_lookup") == LOOKUP_BUILD,
+            reason=f"{name} is recorded on a build {'before' if LOOKUP_BUILD else 'with'} #4438",
+        ),
+    )
+    for name in NAMES
+]
 
 
 def _history(name: str) -> WorkflowHistory:
     return WorkflowHistory.from_json(f"render-{name}", (HISTORIES / f"{name}.json").read_text())
-
-
-def _marker_data(history: WorkflowHistory) -> list[bytes]:
-    return [
-        payload.data
-        for event in history.events
-        if event.HasField("marker_recorded_event_attributes")
-        for details in event.marker_recorded_event_attributes.details.values()
-        for payload in details.payloads
-    ]
-
-
-def _children(history: WorkflowHistory) -> int:
-    return sum(
-        1
-        for event in history.events
-        if event.HasField("start_child_workflow_execution_initiated_event_attributes")
-    )
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -69,10 +70,12 @@ async def test_template_pipeline_replays_its_recorded_history(name: str) -> None
 def test_the_histories_are_the_two_sides_of_the_lookup_guard() -> None:
     """What makes ``before_lookup`` worth replaying: a child start and no marker."""
     before, cached = _history("before_lookup"), _history("cached")
-    assert _children(before) == 1
-    assert not any(LOOKUP_PATCH in data for data in _marker_data(before))
-    assert _children(cached) == 0
-    assert any(LOOKUP_PATCH in data for data in _marker_data(cached))
+    assert len(child_starts(before)) == 1
+    assert "piece-lookup-4199" not in patch_ids(before)
+    assert "cached_piece" not in local_activities(before)
+    assert child_starts(cached) == []
+    assert "piece-lookup-4199" in patch_ids(cached)
+    assert "cached_piece" in local_activities(cached)
 
 
 @pytest.fixture
@@ -83,11 +86,8 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", RECORDABLE)
 async def test_record(recording_temporal: str, name: str) -> None:
-    if (name == "before_lookup") == hasattr(pipelines, "PIECE_LOOKUP_PATCH"):
-        when = "before" if name == "before_lookup" else "with"
-        pytest.skip(f"{name} is recorded on a build {when} #4438")
     world, job = FakeWorld(), a_job(params={"w": 12})
     job.model_version = "a" * 40
     client = await Client.connect(recording_temporal, data_converter=pydantic_data_converter)

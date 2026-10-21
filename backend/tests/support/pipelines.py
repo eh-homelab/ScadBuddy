@@ -4,6 +4,7 @@ by `cached_piece` from its params (width `w`, depth `d`), `pack` is the real one
 from __future__ import annotations
 
 import importlib.util
+import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from temporalio import activity, workflow
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHistory
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
@@ -207,3 +208,32 @@ class OldRenderPiece:
             await workflow.get_external_workflow_handle(job).signal(
                 "piece_finished", PieceOutcome(result=result)
             )
+
+
+def _markers(history: WorkflowHistory, name: str, key: str) -> list[dict[str, Any]]:
+    return [
+        json.loads(payload.data)
+        for event in history.events
+        if event.HasField("marker_recorded_event_attributes")
+        and event.marker_recorded_event_attributes.marker_name == name
+        for payload in event.marker_recorded_event_attributes.details[key].payloads
+    ]
+
+
+def patch_ids(history: WorkflowHistory) -> list[str]:
+    """The ids of the `workflow.patched` markers in a run's history, in order."""
+    return [marker["id"] for marker in _markers(history, "core_patch", "patch-data")]
+
+
+def local_activities(history: WorkflowHistory) -> list[str]:
+    """The activity types of the local activities a run's history records, in order."""
+    return [marker["activity_type"] for marker in _markers(history, "core_local_activity", "data")]
+
+
+def child_starts(history: WorkflowHistory) -> list[str]:
+    """The workflow ids of the children a run's history starts, in order."""
+    return [
+        event.start_child_workflow_execution_initiated_event_attributes.workflow_id
+        for event in history.events
+        if event.HasField("start_child_workflow_execution_initiated_event_attributes")
+    ]
