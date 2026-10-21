@@ -150,30 +150,48 @@ def test_a_trays_filament_id_resolves_only_a_preset_that_fits_the_printer(
     assert resolved.filament_presets == []
 
 
-@pytest.mark.parametrize("preset_id", ["GFSA00_99", "GFA00"])
+@pytest.mark.parametrize("preset_id", ["GFSA00_99", "GFA00", "Bambu PLA Basic @BBL H2C"])
 def test_a_spools_own_preset_resolves_to_its_standard_ref(
     profiles: Profiles, preset_id: str
 ) -> None:
-    """A spool's own preset is a Bambu Cloud ``setting_id`` or a BBL ``filament_id``; on
-    the native catalogue it is the preset that id names, not a name fallback (#4349)."""
+    """A spool's own preset is a Bambu Cloud ``setting_id``, a BBL ``filament_id`` or a
+    preset name; on the native catalogue it is the preset that id names, not a name
+    fallback (#4349)."""
+    resolved = _spool_with_own_preset(profiles, preset_id)
+    assert resolved.errors == [] and resolved.warnings == []
+    assert resolved.filament_presets == [
+        PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
+    ]
+
+
+def test_a_spools_bambuddy_local_preset_falls_back_on_native(profiles: Profiles) -> None:
+    """A Bambuddy local id is not in the image: the slot falls back as one with no preset
+    of its own does (#4349), here to the Generic preset, saying so."""
+    resolved = _spool_with_own_preset(profiles, "7")
+    fallback = _spool_with_own_preset(profiles, None)
+    assert resolved.filament_presets == fallback.filament_presets
+    assert resolved.warnings == fallback.warnings and resolved.errors == fallback.errors
+
+
+def _spool_with_own_preset(profiles: Profiles, preset_id: str | None) -> Any:
     options = FilamentOptions(
         library_file_id=None,
         slots=[SlotNeed(slot_id=1, colour="#FFFFFF")],
         spools=[SpoolOption(spool_id=7, material="PETG", colour="#FFFFFF")],
     )
     plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=7)])
-    own = {
-        7: [
-            SpoolFilamentPreset(
-                printer_model="H2C", nozzle_diameter="0.4", slicer_filament=preset_id
-            )
-        ]
-    }
-    resolved = resolve(options, plan, h2c_choices(), native_catalogue(profiles), own)
-    assert resolved.errors == [] and resolved.warnings == []
-    assert resolved.filament_presets == [
-        PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
-    ]
+    own = (
+        {}
+        if preset_id is None
+        else {
+            7: [
+                SpoolFilamentPreset(
+                    printer_model="H2C", nozzle_diameter="0.4", slicer_filament=preset_id
+                )
+            ]
+        }
+    )
+    return resolve(options, plan, h2c_choices(), native_catalogue(profiles), own)
 
 
 def test_an_override_by_cloud_ref_resolves_to_its_standard_ref(profiles: Profiles) -> None:
