@@ -103,7 +103,7 @@ def test_vectors_round_trip() -> None:
             assert cls.model_validate(raw).model_dump(mode="json") == raw
 
 
-@pytest.mark.parametrize("colour", ["#FF0000;#00FF00", "red", "#FFF", ""])
+@pytest.mark.parametrize("colour", ["#FF0000;#00FF00", "red", "#FFF", "", "#FF0000FF"])
 def test_a_colour_the_cli_would_misread_is_refused(colour: str) -> None:
     """#3962: the worker joins the colours with ``;``, so one must never hold one."""
     with pytest.raises(ValidationError):
