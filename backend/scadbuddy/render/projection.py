@@ -335,7 +335,8 @@ class JobProjection:
 
     def set_claims(self, job_id: str, claims: int) -> None:
         """The workflow's claim count, projected (#1053). Its wait for a connection is
-        bounded as the `project` writes' are: the write has `pipelines.PROJECT_TIMEOUT`."""
+        bounded as the `project` writes' are: a `PROJECT_POOL_TIMEOUT` (5 s) wait inside
+        the write's 10 s attempt (`pipelines.PROJECT_TIMEOUT`); keep the two in step."""
         with self._pool.connection(timeout=PROJECT_POOL_TIMEOUT) as conn:
             conn.execute(
                 "UPDATE render_jobs SET claims = %s"

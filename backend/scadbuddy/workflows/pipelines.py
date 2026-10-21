@@ -905,7 +905,9 @@ class TemplatePipeline:
         except (ActivityError, ChildWorkflowError, ApplicationError) as error:
             # An ApplicationError is a local activity's failure, unwrapped (the pack's),
             # and reads as a regular activity's cause does: its message. One a template
-            # raised itself reads the same way.
+            # raised itself reads the same way, and one of a `FAILURE_TYPES` type with a
+            # `Failure` detail is taken as that failure, with no line: accepted, as the
+            # template's own code is trusted to say what failed.
             if is_cancelled_exception(error):
                 raise
             failure = _failure_of(error)

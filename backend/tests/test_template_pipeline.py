@@ -27,8 +27,10 @@ from scadbuddy.workflows import pipelines
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.ctx import Ctx, _references
 from scadbuddy.workflows.models import (
+    Layout,
     LoadedPipeline,
     OutputRequest,
+    PackRequest,
     PieceRequest,
     PieceResult,
     PlateSize,
@@ -740,6 +742,43 @@ async def test_a_template_pack_the_packer_refuses_fails_with_its_line_and_reason
     assert final.failure.error.startswith("pipeline/pipeline.py:3: model.scad (400 x 10 mm)")
     assert "does not fit the plate" in final.failure.error
     assert world.outputs == []
+
+
+class _BrokenPack(FakeWorld):
+    """A packer that fails with something other than its refusal."""
+
+    @activity.defn(name="pack")
+    async def pack(self, req: PackRequest) -> Layout:
+        raise ApplicationError("the packer broke", type="PackerBug", non_retryable=True)
+
+
+async def test_a_pack_failing_otherwise_fails_with_its_line_and_message() -> None:
+    """Not only the refusal: any local `pack` failure reads as an activity's, its message
+    at the pipeline's line, not as the template's own raise."""
+    world = _BrokenPack(
+        "async def run(ctx, inputs):\n"
+        "    part = await ctx.render('model.scad', w=4)\n"
+        "    await ctx.output(plates=await ctx.pack([(part, 2)]))\n"
+    )
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    final = world.final()
+    assert final.state == "failed" and final.failure is not None
+    assert final.failure.error == "pipeline/pipeline.py:3: the packer broke"
+
+
+async def test_an_application_error_the_template_raises_reads_as_its_message() -> None:
+    world = FakeWorld(
+        "from temporalio.exceptions import ApplicationError\n"
+        "\n"
+        "async def run(ctx, inputs):\n"
+        "    raise ApplicationError('no rooms', type='Mine')\n"
+    )
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    final = world.final()
+    assert final.state == "failed" and final.failure is not None
+    assert final.failure.error == "pipeline/pipeline.py:4: no rooms"
 
 
 async def _children(client: Client, workflow_id: str) -> list[str]:
