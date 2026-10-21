@@ -420,6 +420,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           lease_until = now() + interval '1 hour'
         WHERE id = ${session.id}`
       await expect(m.send(session.id, agentA, 'hello')).rejects.toMatchObject({ code: 'busy' })
+      // Just past is enough: a turn is active only while `lease_until > now()` (manager.ts `turn_active`).
       await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 millisecond' WHERE id = ${session.id}`
       expect((await m.get(session.id, agentA)).turnActive).toBe(false)
       expect(await (await m.send(session.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
