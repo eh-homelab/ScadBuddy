@@ -672,6 +672,7 @@ class Lifecycle:
                 item = self.store.update_item(conn, item.id, status="quoted")
                 changed.append((item, None))
             self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+            order = self._rederive(conn, order, by)
         self._told(_Change(order, changed))
         return quote
 

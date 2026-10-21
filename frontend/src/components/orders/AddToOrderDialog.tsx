@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { api } from '../../api/client'
 import type { Customer, Order } from '../../api/types'
@@ -32,7 +32,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })),
     [chosen],
   )
-  const openOrders = (orders.data?.items ?? []).filter((o) => o.status === 'draft' || o.status === 'quoted')
+  const openOrders = useMemo(() => (orders.data?.items ?? []).filter((o) => o.status === 'draft' || o.status === 'quoted'), [orders.data])
   useEffect(() => {
     if (!open) {
       setError(null)
@@ -42,7 +42,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   useEffect(() => {
     // The newest open order of the customer, else a new one.
     setOrderId(openOrders[0]?.id ?? NEW)
-  }, [chosen, orders.data]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [chosen, openOrders])
 
   async function add() {
     const count = Number(quantity)

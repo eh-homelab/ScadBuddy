@@ -481,6 +481,20 @@ def test_quoted_falls_back_to_draft_when_an_item_is_added(shop: Shop) -> None:
     assert refused.value.slug == "item_not_draft"
 
 
+def test_a_quote_on_a_late_item_rederives_the_status_itself(shop: Shop) -> None:
+    """#4459: recording a quote settles the order's status under its own lock, not by
+    trusting that whatever made the draft item already moved the order to `draft`."""
+    order = shop.order()
+    shop.quoted(order, shop.item(order))
+    late = shop.item(order)
+    assert shop.get(order).status == "draft"
+    with shop.rows.transaction() as conn:  # a path that left the status stale
+        shop.rows.set_order_status(conn, order.id, "quoted")
+    shop.lifecycle.record_manual_quote(order.id, late.id, ManualQuoteInput(unit_price_minor=5), BY)
+    assert shop.get(order).status == "draft"
+    assert shop.kinds(order)[-1] == "order.status"
+
+
 def test_a_quote_is_the_items_own(shop: Shop) -> None:
     order = shop.order()
     one, two = shop.item(order), shop.item(order)

@@ -199,8 +199,9 @@ export const orderTools: Tool[] = [
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
       'charges, replaced whole, while draft or quoted. `hold` puts it on hold or releases it (true/false): on hold, ' +
-      'every step that advances the order is refused until released. `payment` records money the shop already ' +
-      'received, in any state but cancelled.',
+      'every step that advances the order is refused until released. Releasing is a write, as holding is: it ' +
+      'commits nothing to the customer, and every step that does (accepting, fulfilling, shipping, closing) stays ' +
+      'outward. `payment` records money the shop already received, in any state but cancelled.',
     input: z.object({
       order_id: orderId,
       notes: z.string().optional(),

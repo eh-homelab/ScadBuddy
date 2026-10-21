@@ -132,9 +132,12 @@ async def resolve_reference(
     """The checked reference, and its colours.
 
     With ``output_id``, the output's own slug, commit and inputs stand in for any the
-    caller leaves ``None``, and one the caller does give must agree with the output's.
+    caller leaves ``None``, and one the caller does give must agree with the output's:
+    the item keeps the output's colours and pointer, which describe that render only.
     """
     facts: OutputFacts | None = None
+    given_commit = commit if output_id is not None else None
+    given_inputs = inputs if output_id is not None else None
     if output_id is not None:
         try:
             meta = await asyncio.to_thread(outputs.get, output_id)
@@ -182,12 +185,30 @@ async def resolve_reference(
         raise ReferenceError("commit", f"no commit {commit!r} in the models repository") from None
     if not await asyncio.to_thread(history.touched, full, model_path(slug)):
         raise ReferenceError("commit", f"commit {full} is not a revision of {slug!r}")
+    if facts is not None and facts.commit is not None and given_commit is not None:
+        try:
+            rendered = await asyncio.to_thread(history.resolve, facts.commit)
+        except RevisionNotFoundError:
+            rendered = facts.commit
+        if rendered != full:
+            raise ReferenceError(
+                "commit", f"output {output_id!r} is a render of commit {rendered}, not {full}"
+            )
 
     source = await resolve_source(slug, full, paths=paths, history=history, fetcher=fetcher)
     try:
         normalized = normalize_inputs(inputs, None)
     except InputsError as error:
         raise ReferenceError("inputs", str(error)) from None
+    if facts is not None and given_inputs is not None:
+        try:
+            rendered_inputs = normalize_inputs(facts.inputs, None).data
+        except InputsError:
+            rendered_inputs = dict(facts.inputs)
+        if rendered_inputs != normalized.data:
+            raise ReferenceError(
+                "inputs", f"output {output_id!r} was rendered with other inputs than these"
+            )
     pipeline = await asyncio.to_thread(declares_pipeline, source.scad.parent, slug)
     if not pipeline:
         schema = await cached_schema(

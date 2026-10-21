@@ -131,6 +131,33 @@ async def test_reference_from_an_output_copies_commit_libraries_and_colours(
     assert refused.value.field == "output_id"
 
 
+async def test_a_commit_or_inputs_beside_an_output_must_be_the_outputs(
+    library: Library, paths: DataPaths
+) -> None:
+    """#4458: the item keeps the output's colours and pointer, so a commit or inputs
+    that describe another render are refused, not kept beside them."""
+    commit = library.create("demo")
+    paths.model_source("demo").write_text("width = 11;\n", encoding="utf-8")
+    later = library.history.commit("Widen", "demo")
+    assert later is not None and later != commit
+    library.write_output("demo", "out1", commit)
+    # The output's own, given back (a short commit, the same inputs) agree.
+    agreed = await library.resolve(
+        slug="demo", commit=commit[:7], inputs={"params": {"width": 12}, "v": 1}, output_id="out1"
+    )
+    assert agreed.reference.commit == commit  # type: ignore[attr-defined]
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=later, inputs=None, output_id="out1")
+    assert refused.value.field == "commit"
+    assert "out1" in refused.value.problem
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(
+            slug=None, commit=None, inputs={"params": {"width": 20}}, output_id="out1"
+        )
+    assert refused.value.field == "inputs"
+    assert "out1" in refused.value.problem
+
+
 async def test_an_output_without_a_revision_cannot_be_ordered(library: Library) -> None:
     library.create("demo")
     library.write_output("demo", "out2", None)

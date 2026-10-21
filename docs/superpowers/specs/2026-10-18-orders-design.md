@@ -560,7 +560,9 @@ What this relies on, and what the design adds for it:
   `price_book_get`.
 - `write`, a record the shop keeps: `customer_upsert`, `order_create`, `order_update`
   (notes, due date, addresses, charges, hold and release, and payments: a payment row
-  records money the shop already received and sends nothing), `order_item_add`,
+  records money the shop already received and sends nothing; a release is `write` as
+  the hold is, since it commits nothing to the customer and every step it lets through
+  is `outward` below, #4460), `order_item_add`,
   `order_item_update` (a `PATCH`, or the delete of a draft item), `order_item_quote`,
   `order_attach` (by `workspace_path`, as uploads are, #2329), `price_book_set`.
 - `outward`, a step that commits the shop to the customer or counts work as done:
