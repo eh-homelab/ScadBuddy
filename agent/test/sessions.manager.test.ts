@@ -410,15 +410,18 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('frees a claim whose replica died once its lease runs out', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
-      const m = manager({ sql: db.sql, paths, run: runner, leaseMs: 200 })
+      const m = manager({ sql: db.sql, paths, run: runner })
       const { session } = await m.start(agentA, { origin: 'mcp' })
-      // A turn claimed by a replica that is gone: no renewal.
+      // A turn claimed by a replica that is gone: no renewal. Its lease is moved past by
+      // hand, not waited out: a short real lease could run out before the first send
+      // claims under a loaded runner (#4446).
       await db.sql`
         UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(),
-          lease_until = now() + interval '150 milliseconds'
+          lease_until = now() + interval '1 hour'
         WHERE id = ${session.id}`
       await expect(m.send(session.id, agentA, 'hello')).rejects.toMatchObject({ code: 'busy' })
-      await new Promise((r) => setTimeout(r, 250))
+      // Just past is enough: a turn is active only while `lease_until > now()` (manager.ts `turn_active`).
+      await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 millisecond' WHERE id = ${session.id}`
       expect((await m.get(session.id, agentA)).turnActive).toBe(false)
       expect(await (await m.send(session.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
     })
