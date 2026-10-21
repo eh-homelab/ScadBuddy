@@ -1001,8 +1001,8 @@ export const printTools: Tool[] = [
       'derives from the chosen spools, nozzles, quality and plate, then queue it on one printer, behind one ' +
       'approval. Any choice left out is filled ' +
       "the way the print dialog opens: the chosen printer, the model's (or file's) remembered nozzles, tier or " +
-      "process and spools (else 0.4 mm, High Flow on each side with a High Flow nozzle of that size and Standard " +
-      "elsewhere, the Standard tier and the suggested spools), and the printer's " +
+      "process and spools (else 0.4 mm with one flow for both sides, High Flow when either side has a High Flow " +
+      "nozzle of that size and Standard otherwise, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
       'project: omit it for the default project (`last_project_id`), or pass null for "No project". ' +

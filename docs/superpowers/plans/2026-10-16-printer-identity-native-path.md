@@ -98,7 +98,7 @@ git commit -m "feat(bambuddy): Printer and PrinterStatus carry the serial"
   - `class PrinterRow(BaseModel)`: `id: str` (uuid4 text), `serial: str`, `name: str`, `model: str | None`, `bambuddy_printer_id: int | None`, `lan_host: str | None`, `has_access_code: bool`, `preferred_path: PrintPath`, `created_at: datetime`, `updated_at: datetime`.
   - `class PrinterCreate(BaseModel)`: `serial: str = Field(min_length=8, max_length=32, pattern=r"^[0-9A-Z]+$")`, `name: str = Field(min_length=1, max_length=80)`, `model: str | None = None`, `preferred_path: PrintPath = "auto"`.
   - `class PrinterPatch(BaseModel)`: `name: str | None`, `preferred_path: PrintPath | None`.
-  - `class LanLink(BaseModel)`: `host: str = Field(min_length=1, max_length=253)`, `access_code: str = Field(min_length=8, max_length=8, pattern=r"^[0-9]+$")`.
+  - `class LanLink(BaseModel)`: `host: str = Field(min_length=1, max_length=253)`, `access_code: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")` (any format but no control character, which ftplib refuses in the FTPS login: the printer decides, #4434; first written as 8 digits).
   - `PrinterRow.lan_cert_sha256: str | None` (the pinned leaf certificate's fingerprint, hex).
 - Produces (`printers/store.py`): `class PrinterStore` over `ConnectionPool[Connection[DictRow]]` and `Kek | None`:
   - `create(body: PrinterCreate) -> PrinterRow` (raises `SerialTakenError(existing_id)` on a duplicate serial)

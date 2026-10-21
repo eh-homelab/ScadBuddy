@@ -209,7 +209,11 @@ def _probe_ok(calls: list[tuple[str, str, str]]) -> Any:
     return probe
 
 
-def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatches) -> None:
+@pytest.mark.parametrize("code", [CODE, "aB3-xY9z12"])
+def test_lan_link_never_returns_code(
+    client: TestClient, watches: RecordedWatches, code: str
+) -> None:
+    """#4434: a code in any format reaches the probe as typed."""
     printers = registry(client)
     printers.store.kek = KEK
     calls: list[tuple[str, str, str]] = []
@@ -217,24 +221,24 @@ def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatche
     pid = create(client)["id"]
 
     response = client.put(
-        f"/api/v1/printers/{pid}/lan", json={"host": "10.0.0.9", "access_code": CODE}
+        f"/api/v1/printers/{pid}/lan", json={"host": "10.0.0.9", "access_code": code}
     )
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["has_access_code"] is True and "access_code" not in body
     assert body["lan_host"] == "10.0.0.9" and body["lan_cert_sha256"] == CERT
-    assert CODE not in response.text
-    assert calls == [("10.0.0.9", SERIAL, CODE)]
-    assert printers.store.open_access_code(pid) == CODE
+    assert code not in response.text
+    assert calls == [("10.0.0.9", SERIAL, code)]
+    assert printers.store.open_access_code(pid) == code
     for read in (client.get(f"/api/v1/printers/{pid}"), client.get("/api/v1/printers")):
-        assert CODE not in read.text
+        assert code not in read.text
     unlinked = client.delete(f"/api/v1/printers/{pid}/lan")
     assert unlinked.status_code == 200 and unlinked.json()["has_access_code"] is False
     assert watches.calls == [("restart", pid), ("stop", pid)]
 
 
-GENERIC = "the printer did not answer at that address"
+GENERIC = "the printer did not answer at that address, or did not take the access code: check both"
 
 
 @pytest.mark.parametrize(
@@ -310,10 +314,11 @@ def test_lan_link_without_kek_is_503(client: TestClient) -> None:
     assert calls == []
 
 
-def test_a_malformed_access_code_is_not_echoed(client: TestClient) -> None:
+def test_an_overlong_access_code_is_not_echoed(client: TestClient) -> None:
     pid = create(client)["id"]
+    code = "1234567x" * 17
     response = client.put(
-        f"/api/v1/printers/{pid}/lan", json={"host": "10.0.0.9", "access_code": "1234567x"}
+        f"/api/v1/printers/{pid}/lan", json={"host": "10.0.0.9", "access_code": code}
     )
     assert response.status_code == 422
     assert "1234567x" not in response.text

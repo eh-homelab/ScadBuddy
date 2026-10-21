@@ -122,6 +122,23 @@ describe('PrintersPanel (#3823)', () => {
     await waitFor(() => expect(garage).toHaveTextContent('No LAN link'))
   })
 
+  it('takes an access code in any format, as typed (#4434)', async () => {
+    const { user } = renderPage(<PrintersPanel />)
+    const garage = await screen.findByRole('listitem', { name: GARAGE })
+    const form = within(garage).getByRole('form', { name: 'LAN link for Garage' })
+    const code = within(form).getByLabelText('Access code')
+    expect(code).not.toHaveAttribute('pattern')
+    expect(code).not.toHaveAttribute('maxlength')
+    expect(code).not.toHaveAttribute('inputmode')
+
+    await user.type(within(form).getByLabelText('Host or IP address'), '10.0.0.9')
+    await user.type(code, 'aB3-xY9z12')
+    await user.click(within(form).getByRole('button', { name: 'Test and link' }))
+
+    await waitFor(() => expect(garage).toHaveTextContent('LAN 10.0.0.9'))
+    expect(printersState()[1]!.has_access_code).toBe(true)
+  })
+
   it('shows the probe failure from a 502', async () => {
     const { user } = renderPage(<PrintersPanel />)
     const garage = await screen.findByRole('listitem', { name: GARAGE })

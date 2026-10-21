@@ -15,7 +15,7 @@ import { Spinner } from '../ui/spinner'
  * physical printer, keyed by its serial (`backend/scadbuddy/api/printers.py`). A row links
  * a Bambuddy printer (picked from `/printers/discover`; one whose serial Bambuddy
  * withholds can only be linked from a row created by serial) and a LAN connection (host
- * and the printer's 8-digit access code, tested on the printer before it is stored). The
+ * and the printer's access code, tested on the printer before it is stored). The
  * code is sent once and never shown again: the row says only whether one is stored. The
  * path says how a print reaches it. Every change applies at once, and the list follows
  * the `printers` topic, so another tab's change shows here.
@@ -264,9 +264,7 @@ function LanForm({ row, onLinked }: { row: PrinterRow; onLinked: (row: PrinterRo
       <LabeledInput
         label="Access code"
         type="password"
-        inputMode="numeric"
-        pattern="\d{8}"
-        maxLength={8}
+        // Any format (#4434): the printer, asked by the link's probe, decides.
         value={code}
         onChange={(event) => setCode(event.target.value)}
         // Not "off", which Chrome ignores on a password: it would save one printer's code and

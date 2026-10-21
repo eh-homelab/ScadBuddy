@@ -10,7 +10,8 @@ import { emitRealtime } from '../realtime'
  */
 
 export const UNREACHABLE = '10.0.0.99'
-export const PROBE_FAILED = 'the printer did not answer at that address'
+export const PROBE_FAILED =
+  'the printer did not answer at that address, or did not take the access code: check both'
 const NO_SERIAL = 'Bambuddy did not report a serial: link it from a printer you created by serial'
 const STAMP = '2026-10-18T12:00:00Z'
 
@@ -176,8 +177,13 @@ export const handlers = [
     const printer = found(id)
     if (!printer) return notFound(id)
     const body = (await request.json()) as { host: string; access_code: string }
-    if (!/^\d{8}$/.test(body.access_code)) {
-      return HttpResponse.json({ detail: 'access_code: an 8-digit code' }, { status: 422 })
+    // As `LanLink` (backend/scadbuddy/printers/models.py): any format, no control character.
+    // eslint-disable-next-line no-control-regex
+    if (body.access_code.length > 128 || !/^[^\x00-\x1f\x7f]+$/.test(body.access_code)) {
+      return HttpResponse.json(
+        { detail: 'access_code: 1 to 128 characters, none of them a control character' },
+        { status: 422 },
+      )
     }
     if (body.host === UNREACHABLE) return HttpResponse.json({ detail: PROBE_FAILED }, { status: 502 })
     return HttpResponse.json(
