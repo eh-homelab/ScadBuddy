@@ -242,6 +242,9 @@ jobs:
       - name: Test the Go selector
         run: .github/scripts/select-go.test.sh
 
+      - name: Test the Go client's spec workarounds
+        run: .github/scripts/generate-go-client-jq.test.sh
+
       # verify-models.sh reaps a timed-out template's containers by the
       # `scadbuddy-verify=<slug>` label (#302). An unlabelled `docker run` that
       # mounts nothing would survive the timeout, so each one fails here.
@@ -1943,7 +1946,7 @@ jobs:
           # `--quiet`, not a `| head -1` of the names: a long list SIGPIPEs git
           # and pipefail fails the step.
           if [ "$LINES" = "0" ] \
-            && git diff --quiet "$BASE_SHA" HEAD -- tools/go/scadbuddy-client scripts/generate-go-client.sh; then
+            && git diff --quiet "$BASE_SHA" HEAD -- tools/go/scadbuddy-client scripts/generate-go-client.sh scripts/generate-go-client.jq; then
             echo "state=unchanged" | tee -a "$GITHUB_OUTPUT"; exit 0
           fi
           scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"

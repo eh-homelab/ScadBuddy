@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// CopyProgress one copy of a print: where it went and what it is doing.The queue route has one per plate, because Bambuddy's queue models repeats through“quantity“ rather than through separate rows.
+// CopyProgress one copy of a print: where it went and what it is doing. The queue route has one per plate, because Bambuddy's queue models repeats through “quantity“ rather than through separate rows.
 type CopyProgress struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

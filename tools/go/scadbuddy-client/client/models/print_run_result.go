@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// PrintRunResult what a run queued. “route“ is always “"slice_queue"“ now; it stays so areader of the result need not change until the dialog does (following it tocompletion is #89).
+// PrintRunResult what a run queued. “route“ is always “"slice_queue"“ now; it stays so a reader of the result need not change until the dialog does (following it to completion is #89).
 type PrintRunResult struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

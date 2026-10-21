@@ -29,14 +29,9 @@ else
   cp "$spec" "$SPEC_DIR/raw.json"
 fi
 
-# Two generator workarounds, both leaving the wire format alone:
-#  - Kiota's doc comments depend on hash order when a $ref has sibling descriptions;
-#    dropping them makes generation reproducible (forge #1043).
-#  - A default on an anyOf/oneOf property (PrintChoices.tier: Tier | None = "standard")
-#    makes Kiota's Go emit `m.SetTier(&"standard")` on a union wrapper, which does not
-#    compile; the default is only a hint to a client that never reads it.
-jq 'walk(if type == "object" and has("$ref") and (has("description") or has("summary")) then del(.description, .summary) else . end)
-    | walk(if type == "object" and (has("anyOf") or has("oneOf")) then del(.default) else . end)' \
+# The generator workarounds (generate-go-client.jq says what each is for) leave the
+# wire format alone.
+jq -f "$ROOT/scripts/generate-go-client.jq" \
   "$SPEC_DIR/raw.json" > "$SPEC_DIR/openapi.json"
 
 # Delete first: a file the generator no longer emits must show up as a deletion.

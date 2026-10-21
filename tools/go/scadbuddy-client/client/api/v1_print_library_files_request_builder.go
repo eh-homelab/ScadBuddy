@@ -37,7 +37,7 @@ func NewV1PrintLibraryFilesRequestBuilder(rawUrl string, requestAdapter i2ae4187
 	return NewV1PrintLibraryFilesRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post streams the “file“ part to disk and uploads it through Bambuddy, to the folderin “folder_id“ or the top level; its filename is the library name. The body may beas large as the library download cap (#2686).
+// Post streams the “file“ part to disk and uploads it through Bambuddy, to the folder in “folder_id“ or the top level; its filename is the library name. The body may be as large as the library download cap (#2686).
 // returns a LibraryEntryUpdatedable when successful
 // returns a V1PrintLibraryFilesLibraryEntryUpdated428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryFilesLibraryEntryUpdated4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryFilesRequestBuilder) Post(ctx context.Context, body i2ae4
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryEntryUpdatedable), nil
 }
 
-// ToPostRequestInformation streams the “file“ part to disk and uploads it through Bambuddy, to the folderin “folder_id“ or the top level; its filename is the library name. The body may beas large as the library download cap (#2686).
+// ToPostRequestInformation streams the “file“ part to disk and uploads it through Bambuddy, to the folder in “folder_id“ or the top level; its filename is the library name. The body may be as large as the library download cap (#2686).
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryFilesRequestBuilder) ToPostRequestInformation(ctx context.Context, body i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.MultipartBody, requestConfiguration *V1PrintLibraryFilesRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

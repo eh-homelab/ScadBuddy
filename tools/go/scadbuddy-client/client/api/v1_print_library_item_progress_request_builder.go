@@ -37,7 +37,7 @@ func NewV1PrintLibraryItemProgressRequestBuilder(rawUrl string, requestAdapter i
 	return NewV1PrintLibraryItemProgressRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get as “/print/outputs/{id}/progress“ (#1751): the file's newest run, its queueitems read off Bambuddy until it is “settled“. “null“ when ScadBuddy neverqueued the file. A newest run that failed before it queued anything is that failure(“route: "run"“). Changes are published on “print:library:<file id>“.
+// Get as “/print/outputs/{id}/progress“ (#1751): the file's newest run, its queue items read off Bambuddy until it is “settled“. “null“ when ScadBuddy never queued the file. A newest run that failed before it queued anything is that failure (“route: "run"“). Changes are published on “print:library:<file id>“.
 // returns a PrintProgressable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemProgressRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemProgressRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintProgressable, error) {
@@ -58,7 +58,7 @@ func (m *V1PrintLibraryItemProgressRequestBuilder) Get(ctx context.Context, requ
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.PrintProgressable), nil
 }
 
-// ToGetRequestInformation as “/print/outputs/{id}/progress“ (#1751): the file's newest run, its queueitems read off Bambuddy until it is “settled“. “null“ when ScadBuddy neverqueued the file. A newest run that failed before it queued anything is that failure(“route: "run"“). Changes are published on “print:library:<file id>“.
+// ToGetRequestInformation as “/print/outputs/{id}/progress“ (#1751): the file's newest run, its queue items read off Bambuddy until it is “settled“. “null“ when ScadBuddy never queued the file. A newest run that failed before it queued anything is that failure (“route: "run"“). Changes are published on “print:library:<file id>“.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemProgressRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemProgressRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

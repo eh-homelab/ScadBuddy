@@ -37,7 +37,7 @@ func NewV1PrintLibraryDeleteRequestBuilder(rawUrl string, requestAdapter i2ae418
 	return NewV1PrintLibraryDeleteRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post moves each file to Bambuddy's trash (#2167), one file with “DELETE“, several withBambuddy's bulk delete. An external file skips the trash and is gone for good(“trashed: false“). A file Bambuddy skipped is listed in “skipped“, never in“deleted“. A file a print waiting in Bambuddy's queue names is a 409, and oneBambuddy no longer has a 404, both before anything is deleted.
+// Post moves each file to Bambuddy's trash (#2167), one file with “DELETE“, several with Bambuddy's bulk delete. An external file skips the trash and is gone for good (“trashed: false“). A file Bambuddy skipped is listed in “skipped“, never in “deleted“. A file a print waiting in Bambuddy's queue names is a 409, and one Bambuddy no longer has a 404, both before anything is deleted.
 // returns a LibraryDeleteResultable when successful
 // returns a V1PrintLibraryLibraryDeleteResult428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryLibraryDeleteResult4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryDeleteRequestBuilder) Post(ctx context.Context, body i8d9
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryDeleteResultable), nil
 }
 
-// ToPostRequestInformation moves each file to Bambuddy's trash (#2167), one file with “DELETE“, several withBambuddy's bulk delete. An external file skips the trash and is gone for good(“trashed: false“). A file Bambuddy skipped is listed in “skipped“, never in“deleted“. A file a print waiting in Bambuddy's queue names is a 409, and oneBambuddy no longer has a 404, both before anything is deleted.
+// ToPostRequestInformation moves each file to Bambuddy's trash (#2167), one file with “DELETE“, several with Bambuddy's bulk delete. An external file skips the trash and is gone for good (“trashed: false“). A file Bambuddy skipped is listed in “skipped“, never in “deleted“. A file a print waiting in Bambuddy's queue names is a 409, and one Bambuddy no longer has a 404, both before anything is deleted.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryDeleteRequestBuilder) ToPostRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFilesRequestable, requestConfiguration *V1PrintLibraryDeleteRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

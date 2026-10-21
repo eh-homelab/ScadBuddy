@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// SupportsChoice supports for one print, over whatever the template declares. A field left outkeeps the template's value, else the process preset's.
+// SupportsChoice supports for one print, over whatever the template declares. A field left out keeps the template's value, else the process preset's.
 type SupportsChoice struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

@@ -11,6 +11,8 @@ expect true  go.work
 expect true  go.work.sum
 expect true  vendor/modules.txt
 expect true  scripts/generate-go-client.sh
+expect true  scripts/generate-go-client.jq
+expect true  .github/scripts/generate-go-client-jq.test.sh
 expect true  .github/workflows/go-module-ci.yml
 expect true  tools/go/bambuddy-fs/Dockerfile
 expect true  .github/workflows/ci.yml

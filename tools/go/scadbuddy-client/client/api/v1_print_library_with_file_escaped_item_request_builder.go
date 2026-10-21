@@ -67,7 +67,7 @@ func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Objects() *V1PrintLibraryIte
 	return NewV1PrintLibraryItemObjectsRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
-// Patch a partial update through Bambuddy: “filename“, “folder_id“ (“0“ is the toplevel), or both (#2686).
+// Patch a partial update through Bambuddy: “filename“, “folder_id“ (“0“ is the top level), or both (#2686).
 // returns a LibraryEntryUpdatedable when successful
 // returns a V1PrintLibraryItemLibraryEntryUpdated428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryItemLibraryEntryUpdated4XXError error when the service returns a 4XX status code
@@ -144,7 +144,7 @@ func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Thumbnail() *V1PrintLibraryI
 	return NewV1PrintLibraryItemThumbnailRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
-// ToPatchRequestInformation a partial update through Bambuddy: “filename“, “folder_id“ (“0“ is the toplevel), or both (#2686).
+// ToPatchRequestInformation a partial update through Bambuddy: “filename“, “folder_id“ (“0“ is the top level), or both (#2686).
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryWithFile_ItemRequestBuilder) ToPatchRequestInformation(ctx context.Context, body i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFileUpdateable, requestConfiguration *V1PrintLibraryWithFile_ItemRequestBuilderPatchRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.PATCH, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

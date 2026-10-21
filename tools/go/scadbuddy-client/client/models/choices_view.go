@@ -20,13 +20,13 @@ type ChoicesView struct {
 	default_nozzles []NozzleChoiceable
 	// The filament_presets property
 	filament_presets ChoicesView_filament_presetsable
-	// Everything the filament step of the dialog needs, in one answer.One route rather than three, because the join — inventory against assignmentsagainst the per-slot remaining weights — is the part that is easy to get wrong, anddoing it in the browser would mean shipping every spool's history to do it.
+	// Everything the filament step of the dialog needs, in one answer. One route rather than three, because the join — inventory against assignments against the per-slot remaining weights — is the part that is easy to get wrong, and doing it in the browser would mean shipping every spool's history to do it.
 	filaments FilamentOptionsable
 	// The installed property
 	installed []InstalledNozzleable
 	// The last_bed_type property
 	last_bed_type ChoicesView_ChoicesView_last_bed_typeable
-	// What the print dialog last chose for one model (#78). “printer_id“ is theprinter it printed on. “filament_plan“ is only a plan the user moved off theauto-match: a spool no longer in the inventory is dropped by the picker, which thenfalls back to the auto-match for that slot.“nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices(spec 2026-09-27 §7). All default to "nothing remembered", so a settings filewritten before them still loads; an empty “nozzles“ means the dialog's default.
+	// What the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 	model_choices ModelPrintChoicesable
 	// The nozzle_sizes property
 	nozzle_sizes []string
@@ -482,7 +482,7 @@ func (m *ChoicesView) GetFilamentPresets() ChoicesView_filament_presetsable {
 	return m.filament_presets
 }
 
-// GetFilaments gets the filaments property value. Everything the filament step of the dialog needs, in one answer.One route rather than three, because the join — inventory against assignmentsagainst the per-slot remaining weights — is the part that is easy to get wrong, anddoing it in the browser would mean shipping every spool's history to do it.
+// GetFilaments gets the filaments property value. Everything the filament step of the dialog needs, in one answer. One route rather than three, because the join — inventory against assignments against the per-slot remaining weights — is the part that is easy to get wrong, and doing it in the browser would mean shipping every spool's history to do it.
 // returns a FilamentOptionsable when successful
 func (m *ChoicesView) GetFilaments() FilamentOptionsable {
 	return m.filaments
@@ -500,7 +500,7 @@ func (m *ChoicesView) GetLastBedType() ChoicesView_ChoicesView_last_bed_typeable
 	return m.last_bed_type
 }
 
-// GetModelChoices gets the model_choices property value. What the print dialog last chose for one model (#78). “printer_id“ is theprinter it printed on. “filament_plan“ is only a plan the user moved off theauto-match: a spool no longer in the inventory is dropped by the picker, which thenfalls back to the auto-match for that slot.“nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices(spec 2026-09-27 §7). All default to "nothing remembered", so a settings filewritten before them still loads; an empty “nozzles“ means the dialog's default.
+// GetModelChoices gets the model_choices property value. What the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 // returns a ModelPrintChoicesable when successful
 func (m *ChoicesView) GetModelChoices() ModelPrintChoicesable {
 	return m.model_choices
@@ -704,7 +704,7 @@ func (m *ChoicesView) SetFilamentPresets(value ChoicesView_filament_presetsable)
 	m.filament_presets = value
 }
 
-// SetFilaments sets the filaments property value. Everything the filament step of the dialog needs, in one answer.One route rather than three, because the join — inventory against assignmentsagainst the per-slot remaining weights — is the part that is easy to get wrong, anddoing it in the browser would mean shipping every spool's history to do it.
+// SetFilaments sets the filaments property value. Everything the filament step of the dialog needs, in one answer. One route rather than three, because the join — inventory against assignments against the per-slot remaining weights — is the part that is easy to get wrong, and doing it in the browser would mean shipping every spool's history to do it.
 func (m *ChoicesView) SetFilaments(value FilamentOptionsable) {
 	m.filaments = value
 }
@@ -719,7 +719,7 @@ func (m *ChoicesView) SetLastBedType(value ChoicesView_ChoicesView_last_bed_type
 	m.last_bed_type = value
 }
 
-// SetModelChoices sets the model_choices property value. What the print dialog last chose for one model (#78). “printer_id“ is theprinter it printed on. “filament_plan“ is only a plan the user moved off theauto-match: a spool no longer in the inventory is dropped by the picker, which thenfalls back to the auto-match for that slot.“nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices(spec 2026-09-27 §7). All default to "nothing remembered", so a settings filewritten before them still loads; an empty “nozzles“ means the dialog's default.
+// SetModelChoices sets the model_choices property value. What the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 func (m *ChoicesView) SetModelChoices(value ModelPrintChoicesable) {
 	m.model_choices = value
 }

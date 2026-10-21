@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// FilamentOptions everything the filament step of the dialog needs, in one answer.One route rather than three, because the join — inventory against assignmentsagainst the per-slot remaining weights — is the part that is easy to get wrong, anddoing it in the browser would mean shipping every spool's history to do it.
+// FilamentOptions everything the filament step of the dialog needs, in one answer. One route rather than three, because the join — inventory against assignments against the per-slot remaining weights — is the part that is easy to get wrong, and doing it in the browser would mean shipping every spool's history to do it.
 type FilamentOptions struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

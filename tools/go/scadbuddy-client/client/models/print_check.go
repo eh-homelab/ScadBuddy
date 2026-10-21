@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// PrintCheck what the run would refuse for the dialog's choices before Print (#755, #760).“errors“ holds the run's 422 detail word for word (#758 review); “warnings“ whatit would carry back as advisories.
+// PrintCheck what the run would refuse for the dialog's choices before Print (#755, #760). “errors“ holds the run's 422 detail word for word (#758 review); “warnings“ what it would carry back as advisories.
 type PrintCheck struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// RackSentPick a rack position the run sent for one filament group of one plate (spec 2026-10-01§5), never with the hotend's serial (§7). Group ids repeat across plates.
+// RackSentPick a rack position the run sent for one filament group of one plate (spec 2026-10-01 §5), never with the hotend's serial (§7). Group ids repeat across plates.
 type RackSentPick struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

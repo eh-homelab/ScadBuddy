@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// PrintOptions a sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
+// PrintOptions a sparse overlay on “PrintQueueItemCreate“'s option fields. “extra="forbid"“ on purpose: a misspelled option must 422 rather than be remembered under a name nothing will ever read.
 type PrintOptions struct {
 	// The auto_off_after property
 	auto_off_after PrintOptions_PrintOptions_auto_off_afterable
