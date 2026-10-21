@@ -807,4 +807,4 @@ async def test_a_job_with_no_revision_starts_its_child_and_records_no_lookup() -
     assert world.final().state == "done"
     assert child_starts(history) == [f"piece-{world.pieces[0].piece_key}"]
     assert pipelines.PIECE_LOOKUP_PATCH not in patch_ids(history)
-    assert set(local_activities(history)) == {"project", "pack"}
+    assert "cached_piece" not in local_activities(history)

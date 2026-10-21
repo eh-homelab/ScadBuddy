@@ -12,7 +12,7 @@ while ``TemplatePipeline._cached`` keeps the lookup behind that guard. ``cached`
 the same job recorded after it: the marker, the local lookup that finds the piece, and
 no child. Each was recorded against the dev server with ``FakeWorld``'s activities
 (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below; ``before_lookup`` only on
-a build without ``PIECE_LOOKUP_PATCH``). Never re-record them.
+a build without ``PIECE_LOOKUP_PATCH``, and neither over its file). Never re-record them.
 """
 
 from __future__ import annotations
@@ -42,15 +42,22 @@ from tests.support.temporal import temporal_server
 HISTORIES = Path(__file__).parent / "fixtures" / "template_pipeline_histories"
 NAMES = ["before_lookup", "cached"]
 #: The pre-#4438 history is recorded only on a build without the lookup, the other only
-#: on one with it.
+#: on one with it, and neither over a recorded one.
 LOOKUP_BUILD = hasattr(pipelines, "PIECE_LOOKUP_PATCH")
+_OTHER_BUILD = "before" if LOOKUP_BUILD else "with"
 RECORDABLE = [
     pytest.param(
         name,
-        marks=pytest.mark.skipif(
-            (name == "before_lookup") == LOOKUP_BUILD,
-            reason=f"{name} is recorded on a build {'before' if LOOKUP_BUILD else 'with'} #4438",
-        ),
+        marks=[
+            pytest.mark.skipif(
+                (name == "before_lookup") == LOOKUP_BUILD,
+                reason=f"{name} is recorded on a build {_OTHER_BUILD} #4438",
+            ),
+            pytest.mark.skipif(
+                (HISTORIES / f"{name}.json").exists(),
+                reason=f"{name} is recorded; never re-record it",
+            ),
+        ],
     )
     for name in NAMES
 ]
@@ -95,4 +102,4 @@ async def test_record(recording_temporal: str, name: str) -> None:
     assert world.final().state == "done"
     history = await client.get_workflow_handle(workflow_id_for(job.id)).fetch_history()
     HISTORIES.mkdir(exist_ok=True)
-    (HISTORIES / f"{name}.json").write_text(history.to_json())
+    (HISTORIES / f"{name}.json").write_text(history.to_json() + "\n")
