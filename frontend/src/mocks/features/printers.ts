@@ -177,8 +177,13 @@ export const handlers = [
     const printer = found(id)
     if (!printer) return notFound(id)
     const body = (await request.json()) as { host: string; access_code: string }
-    if (body.access_code.length === 0 || body.access_code.length > 128) {
-      return HttpResponse.json({ detail: 'access_code: 1 to 128 characters' }, { status: 422 })
+    // As `LanLink` (backend/scadbuddy/printers/models.py): any format, no control character.
+    // eslint-disable-next-line no-control-regex
+    if (body.access_code.length > 128 || !/^[^\x00-\x1f\x7f]+$/.test(body.access_code)) {
+      return HttpResponse.json(
+        { detail: 'access_code: 1 to 128 characters, none of them a control character' },
+        { status: 422 },
+      )
     }
     if (body.host === UNREACHABLE) return HttpResponse.json({ detail: PROBE_FAILED }, { status: 502 })
     return HttpResponse.json(
