@@ -791,6 +791,24 @@ async def test_an_application_error_the_template_raises_reads_as_its_message(
     assert final.failure.error == "pipeline/pipeline.py:4: no rooms"
 
 
+async def test_a_failure_the_template_raises_as_openscads_is_taken_with_its_line() -> None:
+    """The trust decision in `_run_pipeline`: a template's own raise of a failure type
+    with a `Failure` detail sets the job's failure (its log tail too), at its line."""
+    world = FakeWorld(
+        "from temporalio.exceptions import ApplicationError\n"
+        "\n"
+        "async def run(ctx, inputs):\n"
+        "    raise ApplicationError('x', {'error': 'no rooms', 'log_tail': ['ERROR: boom']},"
+        " type='OpenSCADError')\n"
+    )
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    final = world.final()
+    assert final.state == "failed" and final.failure is not None
+    assert final.failure.error == "pipeline/pipeline.py:4: no rooms"
+    assert final.failure.log_tail == ["ERROR: boom"]
+
+
 async def _children(client: Client, workflow_id: str) -> list[str]:
     history = await client.get_workflow_handle(workflow_id).fetch_history()
     return [

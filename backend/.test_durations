@@ -4467,6 +4467,7 @@
     "tests/test_submit.py::test_with_no_valid_span_rows_carry_no_traceparent": 0.8878593070000989,
     "tests/test_template_pipeline.py::test_a_default_pipeline_output_refused_is_its_bare_error": 2.3994213010009844,
     "tests/test_template_pipeline.py::test_a_failed_piece_fails_the_job_with_its_log": 0.9649745920032728,
+    "tests/test_template_pipeline.py::test_a_failure_the_template_raises_as_openscads_is_taken_with_its_line": 1.31,
     "tests/test_template_pipeline.py::test_a_job_waiting_on_two_pieces_gets_each_its_own[released0]": 4.739675536984578,
     "tests/test_template_pipeline.py::test_a_job_waiting_on_two_pieces_gets_each_its_own[released1]": 5.481951289984863,
     "tests/test_template_pipeline.py::test_a_lost_projection_attempt_is_retried_within_seconds": 14.461165676038945,
