@@ -34,16 +34,22 @@ pub struct SlicePlateInput {
     pub allow_newer_file: bool,
     #[serde(default = "default_debug")]
     pub debug: u8,
-    /// Each slot's colour, in slot order: `--filament-colour` (#3962). Joined with `;`,
-    /// so a colour holding one is refused here, whoever sent it.
+    /// Each slot's colour (`#RRGGBB`), in slot order: `--filament-colour` (#3962). Joined
+    /// with `;`, so anything else is refused here, whoever sent it.
     #[serde(default, deserialize_with = "slot_colours")]
     pub filament_colours: Vec<String>,
 }
 
 fn slot_colours<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
     let colours = Vec::<String>::deserialize(deserializer)?;
-    if colours.iter().any(|colour| colour.contains(';')) {
-        return Err(D::Error::custom("a slot colour holds a ';'"));
+    // `#RRGGBB`, as Python's `COLOUR` pattern: never a `;`, which would split the list.
+    let valid = |colour: &String| {
+        colour.len() == 7
+            && colour.starts_with('#')
+            && colour[1..].bytes().all(|b| b.is_ascii_hexdigit())
+    };
+    if !colours.iter().all(valid) {
+        return Err(D::Error::custom("a slot colour is not #RRGGBB"));
     }
     Ok(colours)
 }
@@ -110,6 +116,8 @@ mod tests {
             }))
         };
         assert!(input("#FF0000;#00FF00").is_err());
+        assert!(input("#FF0000FF").is_err());
+        assert!(input("red").is_err());
         assert_eq!(input("#FF0000").unwrap().filament_colours, ["#FF0000"]);
     }
 

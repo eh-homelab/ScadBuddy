@@ -49,7 +49,7 @@ class TransferUrl(BaseModel):
 
 
 #: A slot colour the CLI takes in `--filament-colour` (#3962).
-COLOUR = r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+COLOUR = r"^#[0-9A-Fa-f]{6}$"
 
 
 class SlicePlateInput(BaseModel):
@@ -71,7 +71,8 @@ class SlicePlateInput(BaseModel):
     #: Without it the CLI turns the prime tower off whenever every slot loads a preset
     #: of one name (``BambuStudio.cpp`` ``disable_wipe_tower_after_mapping`` at
     #: v02.08.02.61), however many colours the plate prints (#3962). A colour is
-    #: ``#`` and 6 or 8 hex digits, never a ``;``, which would split it into another slot.
+    #: ``#`` and 6 hex digits, what every producer sends and what was measured; never
+    #: a ``;``, which would split it into another slot.
     filament_colours: list[Annotated[str, Field(pattern=COLOUR)]] = Field(default_factory=list)
 
 
