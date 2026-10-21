@@ -32,7 +32,7 @@ from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES, follow_operation
 from tests.api.test_model_operations import _workflow_ids
 from tests.support.media import MemoryMediaStore
-from tests.support.operations import press
+from tests.support.operations import accepted, press
 
 pytestmark = pytest.mark.requires_git
 
@@ -702,7 +702,13 @@ def test_a_re_sent_merge_whose_first_is_still_running_skips_the_conflict_check(
     monkeypatch.setattr(upstream_api, "merge_run", held)
     key = {"Idempotency-Key": "b" * 32}
     try:
-        first = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key), 202)
+        # Past its 1 s a loaded shard may not have written the record yet (#4424).
+        first = _json(
+            accepted(
+                lambda k: client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=k), key
+            ),
+            202,
+        )
         _restart_with(
             settings,
             bundled,

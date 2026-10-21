@@ -268,9 +268,12 @@ def heartbeated[S, **P, T](
 ) -> Callable[Concatenate[S, P], Coroutine[Any, Any, T]]:
     """An activity that heartbeats from its start to its end (#4199), not only around
     its downloads and openscad runs. Its workflow gives it a `heartbeat_timeout`, so a
-    stretch with no beat (a slow store upload or Postgres write, a template's code) as
-    long as that timeout fails a live attempt, and a lost attempt is freed at that
-    timeout rather than its start-to-close. Applied under `activity.defn`. The
+    slow stretch (a store upload or Postgres write, a template's code) no longer fails a
+    live attempt, and a lost attempt (its worker gone, or a task the server recorded as
+    started that no worker ran) is freed at that timeout rather than its
+    start-to-close. The beat therefore no longer catches a hung body: a stuck store call
+    or template keeps beating, and only the activity's start-to-close ends it, so each
+    one must stay as tight as its work allows. Applied under `activity.defn`. The
     `_heartbeating` calls inside the body stay, nested in this one: each beats only
     while its own work runs (the SDK throttles the beats), and a cancel reaches the
     inner work through the outer, which cancels and awaits it."""
