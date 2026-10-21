@@ -103,8 +103,8 @@ def test_a_lan_link_takes_the_code_as_typed(code: str) -> None:
     assert LanLink(host="h", access_code=code).access_code == code
 
 
-@pytest.mark.parametrize("code", ["", "x" * 129])
-def test_a_lan_link_refuses_an_empty_or_unbounded_code(code: str) -> None:
+@pytest.mark.parametrize("code", ["", "x" * 129, "1234\r\n5678", "12\x0034", "12\x7f34"])
+def test_a_lan_link_refuses_an_empty_unbounded_or_control_code(code: str) -> None:
     with pytest.raises(ValidationError):
         LanLink(host="h", access_code=code)
 

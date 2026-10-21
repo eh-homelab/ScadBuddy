@@ -87,5 +87,8 @@ class LanLink(BaseModel):
     #: connect (`address.lan_address`).
     host: Annotated[str, AfterValidator(_host)] = Field(min_length=1, max_length=253)
     #: As typed, in no format (#4434): the printer decides whether it is right, and the
-    #: link's probe asks it. The bound only keeps a pasted page out.
-    access_code: str = Field(min_length=1, max_length=128, repr=False)
+    #: link's probe asks it. The bound only keeps a pasted page out, and no control
+    #: character, which ftplib refuses in the FTPS login (`lan.py`), gets past the link.
+    access_code: str = Field(
+        min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$", repr=False
+    )
