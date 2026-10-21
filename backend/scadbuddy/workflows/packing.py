@@ -20,6 +20,11 @@ class PackError(ValueError):
     pass
 
 
+#: The ApplicationError type a packer's refusal travels as (`pipeline_activities.
+#: pack_layout`, and `write_output` for a layout that names a piece it was not given).
+PACK_REFUSED = "PackError"
+
+
 def explicit_plate(
     parts: Sequence[Part],
     at: Sequence[tuple[float, float, float]],
