@@ -218,7 +218,9 @@ async def unlink_bambuddy(printers: PrintersDep, printer_id: str) -> PrinterRow:
 
 #: Every way a probe fails, said one way (the security review of Task 3): a reason per
 #: failure would make the route an oracle for which hosts and ports answer.
-PROBE_FAILED = "the printer did not answer at that address"
+PROBE_FAILED = (
+    "the printer did not answer at that address, or did not take the access code: check both"
+)
 
 
 @router.put(
@@ -226,7 +228,7 @@ PROBE_FAILED = "the printer did not answer at that address"
     response_model=PrinterRow,
     summary="Link the printer over the LAN",
     description=(
-        "Tests the address and the 8-digit access code by asking the printer for its "
+        "Tests the address and the access code by asking the printer for its "
         "state (within 10 s), pins the certificate it presents, then stores the code "
         "sealed. 422 when the host is not a private LAN address, or the printer's serial "
         "is not known (Bambuddy withheld it); 502 when the printer "

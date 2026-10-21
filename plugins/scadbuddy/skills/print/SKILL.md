@@ -70,7 +70,7 @@ serial (`backend/scadbuddy/api/printers.py`; plan
 the Bambuddy printer it is, a LAN connection, or both, and `preferred_path` says
 how a print reaches it: `native` over the LAN, `bambuddy` through Bambuddy, `auto`
 the LAN when it answers. `list_printers` and `discover_printers` read it. No tool
-links a printer over the LAN: its 8-digit access code is a device credential, typed
+links a printer over the LAN: its access code is a device credential, typed
 only in Settings > Printers (`PUT /api/v1/printers/{printer_id}/lan` is listed as
 not a tool in `agent/src/tools/coverage.ts`). Send the user there, or open it with
 `browser_navigate` to `/settings#printers`, and never ask for the code in chat.

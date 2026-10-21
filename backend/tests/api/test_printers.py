@@ -234,7 +234,9 @@ def test_lan_link_never_returns_code(client: TestClient, watches: RecordedWatche
     assert watches.calls == [("restart", pid), ("stop", pid)]
 
 
-GENERIC = "the printer did not answer at that address"
+GENERIC = (
+    "the printer did not answer at that address, or did not take the access code: check both"
+)
 
 
 @pytest.mark.parametrize(
@@ -310,10 +312,11 @@ def test_lan_link_without_kek_is_503(client: TestClient) -> None:
     assert calls == []
 
 
-def test_a_malformed_access_code_is_not_echoed(client: TestClient) -> None:
+def test_an_overlong_access_code_is_not_echoed(client: TestClient) -> None:
     pid = create(client)["id"]
+    code = "1234567x" * 17
     response = client.put(
-        f"/api/v1/printers/{pid}/lan", json={"host": "10.0.0.9", "access_code": "1234567x"}
+        f"/api/v1/printers/{pid}/lan", json={"host": "10.0.0.9", "access_code": code}
     )
     assert response.status_code == 422
     assert "1234567x" not in response.text

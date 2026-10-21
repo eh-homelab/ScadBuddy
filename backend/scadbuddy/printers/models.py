@@ -86,4 +86,6 @@ class LanLink(BaseModel):
     #: An IP literal or an RFC 1123 host name; where it may point is checked at every
     #: connect (`address.lan_address`).
     host: Annotated[str, AfterValidator(_host)] = Field(min_length=1, max_length=253)
-    access_code: str = Field(min_length=8, max_length=8, pattern=r"^[0-9]+$", repr=False)
+    #: As typed, in no format (#4434): the printer decides whether it is right, and the
+    #: link's probe asks it. The bound only keeps a pasted page out.
+    access_code: str = Field(min_length=1, max_length=128, repr=False)
