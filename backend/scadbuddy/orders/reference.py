@@ -207,7 +207,9 @@ async def resolve_reference(
             rendered_inputs = dict(facts.inputs)
         if rendered_inputs != normalized.data:
             raise ReferenceError(
-                "inputs", f"output {output_id!r} was rendered with other inputs than these"
+                "inputs",
+                f"output {output_id!r} was rendered with other inputs than these; leave"
+                " inputs out to take the output's, or give them whole, `v` included",
             )
     pipeline = await asyncio.to_thread(declares_pipeline, source.scad.parent, slug)
     if not pipeline:

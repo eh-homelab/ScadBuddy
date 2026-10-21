@@ -259,7 +259,8 @@ export const orderTools: Tool[] = [
     name: 'order_item_add',
     description:
       'Add a line item: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
-      '`commit`, `inputs`). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
+      '`commit`, `inputs`). Beside `output_id`, leave the others out: one given must be the output\'s own (`inputs` ' +
+      'whole, `v` included). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
       'that is not a revision of the template, or an input the template does not take, is refused naming the field.',
     input: z.object({
       order_id: orderId,

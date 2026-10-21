@@ -493,6 +493,11 @@ def test_a_quote_on_a_late_item_rederives_the_status_itself(shop: Shop) -> None:
     shop.lifecycle.record_manual_quote(order.id, late.id, ManualQuoteInput(unit_price_minor=5), BY)
     assert shop.get(order).status == "draft"
     assert shop.kinds(order)[-1] == "order.status"
+    # A status the rows already say is not written again, nor put on the audit line.
+    other = shop.item(order)
+    shop.lifecycle.record_manual_quote(order.id, other.id, ManualQuoteInput(unit_price_minor=5), BY)
+    assert shop.get(order).status == "draft"
+    assert shop.kinds(order)[-1] == "quote.recorded"
 
 
 def test_a_quote_is_the_items_own(shop: Shop) -> None:

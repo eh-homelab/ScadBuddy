@@ -156,6 +156,13 @@ async def test_a_commit_or_inputs_beside_an_output_must_be_the_outputs(
         )
     assert refused.value.field == "inputs"
     assert "out1" in refused.value.problem
+    # The output's params without its `v` (1 here) read as `v` 0: give them whole.
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(
+            slug=None, commit=None, inputs={"params": {"width": 12}}, output_id="out1"
+        )
+    assert refused.value.field == "inputs"
+    assert "`v` included" in refused.value.problem
 
 
 async def test_an_output_without_a_revision_cannot_be_ordered(library: Library) -> None:
