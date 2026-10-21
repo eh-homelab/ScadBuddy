@@ -21,6 +21,8 @@ from temporalio.exceptions import (
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
+    from pydantic import ValidationError
+
     from scadbuddy.render.job_models import (
         CANCELLED_ERROR,
         SUPERSEDED_ERROR,
@@ -63,6 +65,7 @@ with workflow.unsafe.imports_passed_through():
         RenderStart,
         input_problem,
     )
+    from scadbuddy.workflows.packing import PACK_REFUSED
     from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
     from scadbuddy.workflows.sandbox import load_pipeline_module, pipeline_error, pipeline_error_at
 
@@ -107,7 +110,9 @@ PROJECT_TIMEOUT = timedelta(seconds=10)
 #: worker, and the worker's shutdown waits for them: on one that kept failing,
 #: `Worker.shutdown` was still waiting after 90 s (temporalio 1.34, measured against the
 #: dev server). Unbounded (`PROJECT_RETRY`), a Postgres outage would hold a deploy's
-#: drain, or the in-process worker's stop, for as long as it lasted.
+#: drain, or the in-process worker's stop, for as long as it lasted. Every row write
+#: has `PROJECT_TIMEOUT`, so the local attempts hold a workflow task (and so a stop) for
+#: at most 3 x 10 s plus 1 s and 2 s of backoff, about 33 s.
 LOCAL_ROW_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
@@ -118,11 +123,6 @@ PIECE_LOOKUP_PATCH = "piece-lookup-4199"
 LOOKUP_RETRY = RetryPolicy(
     maximum_attempts=2, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
-#: The packer's refusal (`pipeline_activities.pack_layout`): the job's outcome, with
-#: its message. `pack` runs as a local activity, whose failure reaches the workflow as
-#: this ApplicationError itself, not an ActivityError around it (temporalio 1.34,
-#: measured against the dev server).
-PACK_REFUSED = "PackError"
 #: `render_accept`, the run's first step: a bounded number of attempts, so a failure no
 #: retry fixes (an unexpected SQL error; an older build's row on the key that outlives
 #: them answers still-accepting) answers the request rather than holding its render key
@@ -283,7 +283,13 @@ def _failure_of(error: BaseException) -> Failure:
     while cause is not None:
         if isinstance(cause, ApplicationError) and cause.type in FAILURE_TYPES and cause.details:
             detail = cause.details[0]
-            return detail if isinstance(detail, Failure) else Failure.model_validate(detail)
+            if isinstance(detail, Failure):
+                return detail
+            # A detail that is no `Failure` (a template's own raise of such a type):
+            # its message, not the validation error.
+            with contextlib.suppress(ValidationError):
+                return Failure.model_validate(detail)
+            return Failure(error=cause.message)
         if isinstance(cause, ActivityError) and cause.activity_type in _STAGES:
             stage = _STAGES[cause.activity_type]
         innermost = cause
@@ -643,15 +649,16 @@ class TemplatePipeline:
         assert self._job is not None
         async with self._claims_lock:
             await _row_write(
-                CLAIMS_ACTIVITY, self._job.id, self._claims, start_to_close_timeout=SHORT
+                CLAIMS_ACTIVITY, self._job.id, self._claims, start_to_close_timeout=PROJECT_TIMEOUT
             )
 
     async def _project_released(
         self, job: Job, steps: list[StepInfo], version: str = "default"
     ) -> None:
-        """The cancelled job its last release leaves. Local, so it never waits behind
-        openscad runs (the piece goes on) for one of the worker's activity slots:
-        `release` waits for it."""
+        """The cancelled job its last release leaves, which `release` waits for. Local
+        first, so it does not wait behind openscad runs (the piece goes on) for one of
+        the worker's activity slots; past `LOCAL_ROW_RETRY` it is a regular activity
+        (`_row_write`), which does."""
         await _row_write(
             "project",
             Projection(
@@ -662,7 +669,7 @@ class TemplatePipeline:
                 steps=steps,
                 pipeline_version=version,
             ),
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=PROJECT_TIMEOUT,
         )
         self._cancelled = True
 
@@ -904,13 +911,14 @@ class TemplatePipeline:
                 return error.failure  # today's behaviour (§5.3): the one piece's own error
             return error.failure.model_copy(update={"error": str(error)})
         except (ActivityError, ChildWorkflowError, ApplicationError) as error:
+            # An ApplicationError is a local activity's failure, unwrapped (the pack's),
+            # and reads as a regular activity's cause does: its message. One a template
+            # raised itself reads the same way, and one of a `FAILURE_TYPES` type with a
+            # `Failure` detail is taken as that failure (the line added below, past the
+            # default pipeline): accepted, as the template's own code is trusted to say
+            # what failed.
             if is_cancelled_exception(error):
                 raise
-            if isinstance(error, ApplicationError) and error.type != PACK_REFUSED:
-                # Not a local activity's refusal: the template's own raise.
-                if loaded.version == "default":
-                    return Failure(error=f"{type(error).__name__}: {error}")
-                return Failure(error=pipeline_error(error, loaded.file))
             failure = _failure_of(error)
             if loaded.version == "default":
                 return failure  # no line in a file the template does not have
@@ -1142,7 +1150,12 @@ async def _row_write(
             isinstance(error, ApplicationError) and error.non_retryable
         ):
             raise
-        workflow.logger.warning("a job row write failed in this worker; retrying it: %s", error)
+        # Its kind only: a write's error may carry a SQL statement or a row's values.
+        workflow.logger.warning(
+            "a job row write (%s) failed in this worker (%s); Temporal retries it",
+            name,
+            type(error).__name__,
+        )
     return await workflow.execute_activity(
         name,
         args=args,

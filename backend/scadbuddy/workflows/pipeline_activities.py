@@ -47,7 +47,7 @@ from scadbuddy.workflows.models import (
     TemplateCall,
 )
 from scadbuddy.workflows.outputs import build_output
-from scadbuddy.workflows.packing import PackError
+from scadbuddy.workflows.packing import PACK_REFUSED, PackError
 from scadbuddy.workflows.template_process import TemplateError, run_template, template_out_key
 
 #: `migrate`'s own bound: under the `SHORT` (60 s) that the activity's budget gives it
@@ -98,7 +98,7 @@ def pack_layout(req: PackRequest) -> Layout:
             allow_own=req.allow_own,
         )
     except PackError as error:
-        raise ApplicationError(str(error), type="PackError", non_retryable=True) from None
+        raise ApplicationError(str(error), type=PACK_REFUSED, non_retryable=True) from None
 
 
 class PipelineActivities:

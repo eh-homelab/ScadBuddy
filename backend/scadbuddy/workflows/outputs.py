@@ -35,6 +35,7 @@ from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.template import Blob, Part
 from scadbuddy.workflows.activities import PIECE_NAME, WorkerDeps, _heartbeating, _read_piece
 from scadbuddy.workflows.models import OutputRequest
+from scadbuddy.workflows.packing import PACK_REFUSED
 
 _RESERVED = {MODEL_NAME, PREVIEW_NAME, LAYOUT_NAME, PIECE_NAME}
 
@@ -52,7 +53,7 @@ def _unknown_piece(key: str) -> ApplicationError:
     wrong, whichever piece it is."""
     return ApplicationError(
         f"the layout places piece {key}, which is not one of the output's parts",
-        type="PackError",
+        type=PACK_REFUSED,
         non_retryable=True,
     )
 
