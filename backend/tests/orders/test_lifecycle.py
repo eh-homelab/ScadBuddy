@@ -5,13 +5,15 @@ after commit."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
 from scadbuddy.core.events import Event, InProcessEventBus, OrderChanged, OrderItemChanged
 from scadbuddy.orders.lifecycle import (
+    QUOTE_HOLDER,
     FulfilmentInput,
     Lifecycle,
     LifecycleError,
@@ -20,21 +22,28 @@ from scadbuddy.orders.lifecycle import (
     ShipmentEdit,
     ShipmentInput,
     derive,
+    reap_quote_holds,
 )
 from scadbuddy.orders.models import (
     Actor,
     AddressInput,
     ChargeInput,
     ColourSlot,
+    FilamentInput,
     Fulfilment,
     Order,
     OrderItem,
+    PricingPolicy,
+    Quote,
     Reference,
     Shipment,
     ShipmentItem,
 )
+from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, price
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.store.refs import BlobRefs
+from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -58,12 +67,13 @@ def resolved(slug: str = "demo") -> ResolvedReference:
 class Shop:
     """A store, a lifecycle and the events it published."""
 
-    def __init__(self, rows: OrderStore) -> None:
+    def __init__(self, rows: OrderStore, refs: BlobRefs | None = None) -> None:
         self.rows = rows
+        self.refs = refs
         self.bus = InProcessEventBus()
         self.events: list[Event] = []
         self.bus.add_listener(self.events.append)
-        self.lifecycle = Lifecycle(rows, self.bus)
+        self.lifecycle = Lifecycle(rows, self.bus, refs)
         self.customer = rows.insert_customer(
             display_name="Ada",
             company=None,
@@ -126,8 +136,8 @@ class Shop:
 
 
 @pytest.fixture
-def shop(rows: OrderStore) -> Shop:
-    return Shop(rows)
+def shop(rows: OrderStore, pool: PgPool) -> Shop:
+    return Shop(rows, BlobRefs(pool))
 
 
 # -- the happy path -----------------------------------------------------------------------
@@ -765,3 +775,255 @@ def test_derive_is_pure(
     expected: str,
 ) -> None:
     assert derive(_order(status), items, shipments, attempted) == expected
+
+
+# -- phase 2 (#4250): slice quotes, their refs, an item's filaments ------------------------
+
+
+def _priced(shop: Shop) -> tuple[Priced, list[Plate]]:
+    filament = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour=f"#{len(shop.rows.filaments()):06d}", cost_per_kg="20")
+    )
+    plates = [
+        Plate(
+            index=1,
+            print_seconds=600,
+            filaments=[PlateFilament(slot=1, used_g=Decimal("10"))],
+            blob_key="quote-a",
+            sha256="a" * 64,
+        )
+    ]
+    return price(plates, {1: filament}, PricingPolicy(), currency="USD", quantity=1), plates
+
+
+def _slice_quote(shop: Shop, order: Order, item: OrderItem, key: str = "quote-a") -> Quote:
+    """As the run records one (Ruling 3): the ref first, under the id made first."""
+    priced, plates = _priced(shop)
+    quote_id = f"q{len(shop.rows.quotes(item.id))}-{item.id}"
+    assert shop.refs is not None
+    shop.refs.add(key, QUOTE_HOLDER, quote_id)
+    return shop.lifecycle.record_slice_quote(
+        order.id,
+        item.id,
+        priced,
+        plates,
+        sliced_sha256="a" * 64,
+        sliced_blob_key=key,
+        by=BY,
+        quote_id=quote_id,
+    )
+
+
+def _holders(shop: Shop) -> set[str]:
+    assert shop.refs is not None
+    with shop.refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT holder_id FROM blob_refs WHERE holder_kind = %s", (QUOTE_HOLDER,)
+        ).fetchall()
+    return {row["holder_id"] for row in rows}
+
+
+def test_a_slice_quote_is_recorded_with_its_file(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order, quantity=2)
+    quote = _slice_quote(shop, order, item)
+    assert quote.source == "slice"
+    assert (quote.sliced_sha256, quote.sliced_blob_key) == ("a" * 64, "quote-a")
+    assert quote.plates[0]["index"] == 1
+    assert quote.plates[0]["blob_key"] == "quote-a"
+    assert quote.plates[0]["filaments"] == [{"slot": 1, "used_g": "10"}]
+    assert quote.quantity == 2 and quote.total_minor == quote.unit_price_minor * 2
+    assert shop.get_item(item).status == "quoted"
+    assert "quote.recorded" in shop.kinds(order)
+    assert any(isinstance(e, OrderItemChanged) for e in shop.events)
+
+
+def test_quote_refs_follow_the_rules(shop: Shop) -> None:
+    """Review Focus 4: an item holds at most its accepted quote's ref and its newest
+    unaccepted one's; the rows stay."""
+    order = shop.order()
+    item = shop.item(order)
+    first = _slice_quote(shop, order, item)
+    second = _slice_quote(shop, order, item)
+    # Recording drops the older unaccepted quote's ref.
+    assert _holders(shop) == {second.id}
+    shop.lifecycle.accept_quote(order.id, item.id, second.id, BY)
+    third = _slice_quote(shop, order, item)
+    # The accepted one and the newest unaccepted one.
+    assert _holders(shop) == {second.id, third.id}
+    # A manual quote is a recorded quote too: it supersedes the newest unaccepted one.
+    shop.lifecycle.record_manual_quote(order.id, item.id, ManualQuoteInput(unit_price_minor=5), BY)
+    assert _holders(shop) == {second.id}
+    fourth = _slice_quote(shop, order, item)
+    # Accepting drops every other quote's.
+    shop.lifecycle.accept_quote(order.id, item.id, fourth.id, BY)
+    assert _holders(shop) == {fourth.id}
+    # Cancelling the item drops them all; the rows stay.
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    assert _holders(shop) == set()
+    assert len(shop.rows.quotes(item.id)) == 5
+    assert first.id in {q.id for q in shop.rows.quotes(item.id)}
+
+    # Cancelling the order drops its items' too.
+    other = shop.order()
+    one = shop.item(other)
+    held = _slice_quote(shop, other, one)
+    assert _holders(shop) == {held.id}
+    shop.lifecycle.cancel_order(other.id, BY)
+    assert _holders(shop) == set()
+
+
+def test_closing_the_order_drops_its_quote_refs(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item)
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    shop.fulfilled(order, shop.get_item(item))
+    # A fulfilled item's accepted quote keeps its file until the order closes.
+    assert _holders(shop) == {quote.id}
+    shop.shipped(order, shop.get_item(item))
+    shop.lifecycle.close_order(order.id, BY)
+    assert _holders(shop) == set()
+
+
+def _filaments(shop: Shop) -> tuple[str, str]:
+    one = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#111111", cost_per_kg="1")
+    )
+    two = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#222222", cost_per_kg="1")
+    )
+    return one.id, two.id
+
+
+def test_filaments_change_drops_the_quote(shop: Shop) -> None:
+    """Review Focus 6: like a reference change (§5.2: a colours change is a new quote)."""
+    one, two = _filaments(shop)
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    assert shop.get(order).status == "quoted"
+    item = shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: one})
+    assert item.colours == [ColourSlot(slot=0, colour="#ff0000", filament_id=one)]
+    assert item.status == "draft"
+    assert all(not q.accepted for q in shop.rows.quotes(item.id))
+    assert shop.get(order).status == "draft"
+    events = [e for e in shop.rows.events(order.id) if e.kind == "item.updated"]
+    assert events[-1].detail["repinned"] is True
+    # A slot cleared is a change too.
+    item = shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: None})
+    assert item.colours[0].filament_id is None
+    # Once accepted, the filaments are pinned like the reference.
+    shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: two})
+    order, item = shop.get(order), shop.get_item(item)
+    shop.quoted(order, item)
+    shop.lifecycle.accept_order(order.id, BY)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: one})
+    assert refused.value.slug == "item_locked"
+
+
+def test_the_same_filaments_drop_nothing(shop: Shop) -> None:
+    one, _ = _filaments(shop)
+    order = shop.order()
+    item = shop.item(order)
+    item = shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: one})
+    shop.quoted(order, item)
+    item = shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: one})
+    assert item.status == "approved"
+    assert any(q.accepted for q in shop.rows.quotes(item.id))
+    assert shop.get(order).status == "quoted"
+    # Unchanged on an accepted order too: nothing to refuse.
+    order = shop.lifecycle.accept_order(order.id, BY)
+    assert shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: one}).status == (
+        "approved"
+    )
+
+
+def test_filaments_name_known_slots_and_records(shop: Shop) -> None:
+    one, two = _filaments(shop)
+    order = shop.order()
+    item = shop.item(order)
+    for filaments, field in (({3: one}, "filaments"), ({0: "nobody"}, "filaments")):
+        with pytest.raises(LifecycleError) as refused:
+            shop.lifecycle.update_item(order.id, item.id, BY, filaments=filaments)
+        assert refused.value.slug == field and refused.value.unprocessable
+    shop.rows.archive_filament(two)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.update_item(order.id, item.id, BY, filaments={0: two})
+    assert "archived" in str(refused.value)
+    assert shop.get_item(item).colours[0].filament_id is None
+
+
+def _age(shop: Shop, holder_id: str, by: timedelta) -> None:
+    assert shop.refs is not None
+    with shop.refs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE blob_refs SET created_at = created_at - %s"
+            " WHERE holder_kind = %s AND holder_id = %s",
+            (by, QUOTE_HOLDER, holder_id),
+        )
+
+
+def test_the_reaper_drops_what_the_rules_say(shop: Shop) -> None:
+    """Ruling 3: a holder younger than the grace stays whatever it is; past it, one with
+    no row goes, and so do a superseded unaccepted quote's, a cancelled item's and a
+    closed order's, while an accepted quote's (a fulfilled item's on an order still
+    open too) and an open item's newest stay, whatever their age. It also catches what
+    an after-commit drop lost."""
+    assert shop.refs is not None
+    refs = shop.refs
+    old = timedelta(hours=1)
+    grace = timedelta(minutes=30)
+
+    # A ref whose run never inserted its row: young, then old.
+    refs.add("quote-x", QUOTE_HOLDER, "no-row-young")
+    refs.add("quote-x", QUOTE_HOLDER, "no-row-old")
+
+    # An open item: an older unaccepted quote whose drop was lost, and its newest.
+    order = shop.order()
+    item = shop.item(order)
+    superseded = _slice_quote(shop, order, item)
+    newest = _slice_quote(shop, order, item)
+    refs.add("quote-a", QUOTE_HOLDER, superseded.id)  # the lost drop
+
+    # An accepted quote on a fulfilled item, the order still open (shipped, not closed).
+    done_order = shop.order()
+    done_item = shop.item(done_order)
+    kept = _slice_quote(shop, done_order, done_item)
+    shop.lifecycle.accept_quote(done_order.id, done_item.id, kept.id, BY)
+    done_order = shop.lifecycle.accept_order(done_order.id, BY)
+    shop.fulfilled(done_order, shop.get_item(done_item))
+
+    # A cancelled item's and a closed order's, each re-added as a lost drop would leave.
+    cancelled_order = shop.order()
+    cancelled_item = shop.item(cancelled_order)
+    shop.item(cancelled_order)
+    cancelled_quote = _slice_quote(shop, cancelled_order, cancelled_item)
+    shop.lifecycle.cancel_item(cancelled_order.id, cancelled_item.id, BY)
+    refs.add("quote-a", QUOTE_HOLDER, cancelled_quote.id)
+
+    closed_order = shop.order()
+    closed_item = shop.item(closed_order)
+    closed_quote = _slice_quote(shop, closed_order, closed_item)
+    shop.lifecycle.accept_quote(closed_order.id, closed_item.id, closed_quote.id, BY)
+    closed_order = shop.lifecycle.accept_order(closed_order.id, BY)
+    shop.fulfilled(closed_order, shop.get_item(closed_item))
+    shop.shipped(closed_order, shop.get_item(closed_item))
+    shop.lifecycle.close_order(closed_order.id, BY)
+    refs.add("quote-a", QUOTE_HOLDER, closed_quote.id)
+
+    # Young, nothing goes: the grace is every row's.
+    assert reap_quote_holds(refs, shop.rows, grace=grace) == 0
+    for holder in (
+        "no-row-old",
+        superseded.id,
+        newest.id,
+        kept.id,
+        cancelled_quote.id,
+        closed_quote.id,
+    ):
+        _age(shop, holder, old)
+    assert reap_quote_holds(refs, shop.rows, grace=grace) == 4
+    assert _holders(shop) == {"no-row-young", newest.id, kept.id}

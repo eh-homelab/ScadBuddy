@@ -372,3 +372,37 @@ def test_the_refusals_are_409_problems_naming_their_ids(client: TestClient) -> N
     problem(client.post(f"/api/v1/orders/{order['id']}/cancel"), "order_not_cancellable")
     problem(client.post(f"/api/v1/orders/{order['id']}/hold"), "order_cancelled")
     assert client.post("/api/v1/orders/nope/accept").status_code == 404
+
+
+def test_a_patch_with_filaments_sets_the_slots(client: TestClient) -> None:
+    """#4250 Ruling 6: ``filaments`` writes ``colours[].filament_id``; a change drops the
+    accepted quote as a reference change does, the same filaments sent again drop
+    nothing, and an unknown slot or filament is 422 on the field."""
+    upload(client)
+    customer = create_customer(client)
+    order = create_order(client, customer["id"])
+    item = add_item(client, order["id"], output_id=make_output(client, SLUG), quantity=1)
+    made = client.post(
+        "/api/v1/orders/price-book/filaments",
+        json={"material": "PLA", "colour": "#FF0000", "cost_per_kg": "20"},
+    )
+    assert made.status_code == 201, made.text
+    filament_id = made.json()["id"]
+    path = f"/api/v1/orders/{order['id']}/items/{item['id']}"
+
+    set_ = client.patch(path, json={"filaments": {"0": filament_id}})
+    assert set_.status_code == 200, set_.text
+    assert set_.json()["colours"] == [{"slot": 0, "colour": "#FF0000", "filament_id": filament_id}]
+
+    quote_and_accept(client, order["id"], item["id"])
+    again = client.patch(path, json={"filaments": {"0": filament_id}})
+    assert again.json()["status"] == "approved"
+    cleared = client.patch(path, json={"filaments": {"0": None}})
+    assert cleared.json()["status"] == "draft"
+    assert cleared.json()["colours"][0]["filament_id"] is None
+
+    unknown_slot = client.patch(path, json={"filaments": {"4": filament_id}})
+    assert unknown_slot.status_code == 422, unknown_slot.text
+    assert unknown_slot.json()["errors"][0]["loc"] == ["body", "filaments"]
+    assert client.patch(path, json={"filaments": {"0": "nobody"}}).status_code == 422
+    assert client.patch(path, json={"filaments": {"zero": filament_id}}).status_code == 422

@@ -4,7 +4,8 @@ Building it does no I/O: the pool opens on first use, as `print_library/componen
 does, since `Components.build_all` runs before the lifespan opens anything. The sweep of
 uploads reads every item's inputs through `store` (``main.sweep_assets``); the routes
 reach `store` and `lifecycle` (every transition, publishing on the core's bus) through
-`OrdersDep`.
+`OrdersDep`. ``refs`` holds a slice quote's sliced files (#4250), which the lifecycle
+releases as §3.4 says.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.store.refs import BlobRefs
 
 #: The rows' own pool: an order's write is one short transaction under its row lock.
 ROW_POOL_SIZE = 4
@@ -37,6 +39,9 @@ class OrdersComponent:
         self.core = core
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
+        #: The slice quotes' holds on their sliced files (#4250 Ruling 3), on the
+        #: projection's autocommit pool as every `blob_refs` writer's.
+        self.refs = BlobRefs(core.projection.pool)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             core.settings.database_url,
             min_size=1,
@@ -68,7 +73,7 @@ class OrdersComponent:
     @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
-            self._lifecycle = Lifecycle(self.store, self.core.events)
+            self._lifecycle = Lifecycle(self.store, self.core.events, self.refs)
         return self._lifecycle
 
     def close(self) -> None:

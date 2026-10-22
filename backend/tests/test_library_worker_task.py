@@ -253,6 +253,9 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "stop_lost_native_slices", _broken_async)
     monkeypatch.setattr(main, "ensure_watches", _broken_async)
     monkeypatch.setattr(
+        main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
+    )
+    monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
     state = SimpleNamespace(
@@ -273,6 +276,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 serving_native=_broken_async,
                 temporal=object,
                 puts=SimpleNamespace(prune=_broken(OSError("the database is gone"))),
+                refs=object(),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -382,6 +386,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     monkeypatch.setattr(main, "sweep_library", slow_library)
     monkeypatch.setattr(main, "stop_lost_native_slices", slow_previews)
     monkeypatch.setattr(main, "ensure_watches", slow_watches)
+
+    # #4250: the quote holds' reaper, one read and one delete.
+    def slow_quote_holds(refs: object, store: object) -> int:
+        time.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "reap_orphan_quote_holds", slow_quote_holds)
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
@@ -394,6 +405,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             puts=SimpleNamespace(prune=lambda older_than: time.sleep(0.1)),
             temporal=object,
             store=None,
+            refs=None,
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]

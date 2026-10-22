@@ -802,6 +802,12 @@ class OrderStore:
             raise LookupError(f"no order item {item_id}")
         return _item_of(row)
 
+    def set_item_filaments(
+        self, conn: Conn, item_id: str, colours: Sequence[ColourSlot]
+    ) -> OrderItem:
+        """The item's colour slots with their price-book filaments (§3.3, #4250)."""
+        return self.update_item(conn, item_id, colours=colours)
+
     def delete_draft_item(self, conn: Conn, item_id: str) -> bool:
         """Deletes the item while it is `draft` (Ruling 6, 10); False when it is not."""
         deleted = conn.execute(
@@ -831,12 +837,17 @@ class OrderStore:
         plates: Sequence[dict[str, Any]] = (),
         sliced_sha256: str | None = None,
         sliced_blob_key: str | None = None,
+        quote_id: str | None = None,
     ) -> Quote:
+        """``quote_id`` when the caller made it first: a slice quote's ref is taken
+        under it before the row exists (#4250 Ruling 3)."""
         row = conn.execute(
-            "INSERT INTO order_item_quotes (order_item_id, source, sliced_sha256, sliced_blob_key,"
-            " plates, lines, unit_cost_minor, unit_price_minor, quantity, total_minor, created_by)"
-            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
+            "INSERT INTO order_item_quotes (id, order_item_id, source, sliced_sha256,"
+            " sliced_blob_key, plates, lines, unit_cost_minor, unit_price_minor, quantity,"
+            " total_minor, created_by) VALUES (COALESCE(%s, gen_random_uuid()::text),"
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
             (
+                quote_id,
                 item_id,
                 source,
                 sliced_sha256,
@@ -888,6 +899,23 @@ class OrderStore:
         if row is None:
             raise LookupError(f"no quote {quote_id} of item {item_id}")
         return Quote.model_validate(row)
+
+    def standing_quote_ids(self) -> set[str]:
+        """The quotes whose sliced file §3.4 keeps (#4250 Ruling 3): each item's accepted
+        quote and its newest unaccepted one, while the item is not cancelled and its
+        order neither closed nor cancelled. A fulfilled item's accepted quote stands
+        until its order closes."""
+        with self._pool.connection() as c:
+            rows = c.execute(
+                "SELECT q.id FROM order_item_quotes q"
+                " JOIN order_items i ON i.id = q.order_item_id"
+                " JOIN orders o ON o.id = i.order_id"
+                " WHERE i.status <> 'cancelled' AND o.status NOT IN ('closed', 'cancelled')"
+                " AND (q.accepted OR q.id = (SELECT n.id FROM order_item_quotes n"
+                " WHERE n.order_item_id = q.order_item_id AND NOT n.accepted"
+                " ORDER BY n.created_at DESC, n.id DESC LIMIT 1))"
+            ).fetchall()
+        return {row["id"] for row in rows}
 
     def unaccept_quotes(self, conn: Conn, item_id: str) -> None:
         """A reference or quantity change drops the accepted quote (Ruling 1); the row

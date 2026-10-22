@@ -146,6 +146,10 @@ class ItemPatch(BaseModel):
     quantity: int | None = Field(default=None, ge=1)
     title: str | None = Field(default=None, max_length=200)
     notes: str | None = None
+    #: ``{slot: filament_id | null}`` over the item's ``colours`` (#4250 Ruling 6): the
+    #: price-book filament each slot is priced with. A change drops the accepted quote,
+    #: as a reference change does; the item's own filaments sent again change nothing.
+    filaments: dict[int, str | None] | None = None
 
 
 class PaymentCreate(BaseModel):
@@ -200,6 +204,12 @@ class OrderPage(BaseModel):
 
 
 def _refused(error: LifecycleError) -> ApiError:
+    if error.unprocessable:
+        return ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            errors=[{"loc": ["body", error.slug], "msg": str(error)}],
+        )
     extensions: dict[str, Any] = {}
     if error.items:
         extensions["items"] = error.items
@@ -641,6 +651,7 @@ async def patch_item(
             quantity=body.quantity,
             title=body.title,
             notes=body.notes,
+            filaments=body.filaments,
         )
     )
 
