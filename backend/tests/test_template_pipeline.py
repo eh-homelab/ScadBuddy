@@ -836,7 +836,7 @@ async def test_a_failure_detail_that_is_no_failure_is_logged_by_its_type(
     assert record.getMessage().startswith(
         "a detail of type OpenSCADError is not a Failure; the job's error is its message"
     )
-    assert "secret" not in record.getMessage()
+    assert "secret" not in record.getMessage() and record.args == ("OpenSCADError",)
 
 
 async def _children(client: Client, workflow_id: str) -> list[str]:

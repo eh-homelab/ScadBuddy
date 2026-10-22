@@ -181,7 +181,8 @@ def _initialize_then_watch(
     session: WebSocketTestSession, monkeypatch: pytest.MonkeyPatch, timeout: float = 1.0
 ) -> dict[str, Any]:
     """``initialize`` under `START_TIMEOUT`, then the short ``timeout`` the test judges
-    the session's later requests by (read by the watchdog on its next pass)."""
+    the session's later requests by: the watchdog reads `lsp.REQUEST_TIMEOUT` on each
+    pass (``watchdog`` in `scadbuddy/library/lsp.py`), so it takes effect on the next."""
     monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", START_TIMEOUT)
     response = _initialize(session)
     monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", timeout)
