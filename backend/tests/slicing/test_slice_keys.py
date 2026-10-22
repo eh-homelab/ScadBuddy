@@ -23,7 +23,7 @@ async def test_plates_that_share_a_plan_build_its_presets_once(
     async def build(plan: SlicePlan, profiles: Profiles, client: Any) -> PresetFiles:
         built.append(plan)
         await asyncio.sleep(0.01)
-        return PresetFiles(machine=b"", process=b"", filaments=[], bambuddy_process="p")
+        return PresetFiles(machine=b"", process=b"", filaments=[], from_bambuddy={"process": "p"})
 
     monkeypatch.setattr(start, "build_presets", build)
     keys = start.NativeSliceKeys(SimpleNamespace(profiles=profiles), None)  # type: ignore[arg-type]
@@ -33,7 +33,7 @@ async def test_plates_that_share_a_plan_build_its_presets_once(
 
     assert built == [plan, other]
     assert list(found) == [
-        native_preset_key(plan, 1, profiles.version, "p"),
-        native_preset_key(plan, 2, profiles.version, "p"),
-        native_preset_key(other, 3, profiles.version, "p"),
+        native_preset_key(plan, 1, profiles.version, {"process": "p"}),
+        native_preset_key(plan, 2, profiles.version, {"process": "p"}),
+        native_preset_key(other, 3, profiles.version, {"process": "p"}),
     ]

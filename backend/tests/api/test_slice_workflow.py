@@ -684,7 +684,58 @@ def test_a_process_preset_changed_since_the_start_is_refused(
     )
     row = _slice(slice_client, plan=LOCAL_PLAN)
     assert row.status == "failed"
-    assert row.failure == "The process preset changed while the slice started: slice again."
+    assert row.failure == "A preset Bambuddy holds changed while the slice started: slice again."
+    assert slicer.calls == 0
+
+
+LOCAL_FILAMENT_PLAN = PLAN.model_copy(
+    update={"filament_presets": [PresetRef(source="local", id="7"), PLAN.filament_presets[1]]}
+)
+
+
+def _local_pla(nozzle_temperature: str) -> dict[str, Any]:
+    """Bambuddy's ``GET /local-presets/7``: a user's filament preset whose document
+    inherits a preset of the image's tree (#4233)."""
+    return {
+        "id": 7,
+        "name": "My PLA @H2C",
+        "preset_type": "filament",
+        "source": "orcaslicer",
+        "inherits": "Test PLA",
+        "setting": {
+            "type": "filament",
+            "name": "My PLA @H2C",
+            "inherits": "Test PLA",
+            "nozzle_temperature": [nozzle_temperature],
+        },
+    }
+
+
+def test_a_local_filament_preset_slices_from_bambuddys_document(
+    slice_client: TestClient, bambuddy: respx.MockRouter, slicer: FakeSlicer
+) -> None:
+    """#4233: a ``local`` filament preset is read from Bambuddy's local presets, at the
+    start for the key and again in ``slice_prepare`` for the file."""
+    route = bambuddy.get(f"{API}/local-presets/7").mock(
+        return_value=httpx.Response(200, json=_local_pla("215"))
+    )
+    row = _slice(slice_client, plan=LOCAL_FILAMENT_PLAN)
+    assert (row.status, row.failure) == ("completed", None)
+    assert slicer.calls == 1 and route.call_count == 2
+    assert "/bambuddy-filament_1=" in row.preset_key
+
+
+def test_a_local_filament_preset_changed_since_the_start_is_refused(
+    slice_client: TestClient, bambuddy: respx.MockRouter, slicer: FakeSlicer
+) -> None:
+    """#4233: ``PUT /local-presets/{id}`` rewrites a preset under its id, so one edited
+    between the start and ``slice_prepare`` is refused as changed process values are."""
+    bambuddy.get(f"{API}/local-presets/7").mock(
+        side_effect=[httpx.Response(200, json=_local_pla(t)) for t in ("215", "220")]
+    )
+    row = _slice(slice_client, plan=LOCAL_FILAMENT_PLAN)
+    assert row.status == "failed"
+    assert row.failure == "A preset Bambuddy holds changed while the slice started: slice again."
     assert slicer.calls == 0
 
 

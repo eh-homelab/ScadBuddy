@@ -204,13 +204,13 @@ class SliceActivities:
                 raise _refused(str(error), status=UNAVAILABLE) from None
             except ProfileError as error:
                 raise _refused(str(error)) from None
-        built = native_preset_key(
-            input.plan, input.plate_id, profiles.version, files.bambuddy_process
-        )
+        built = native_preset_key(input.plan, input.plate_id, profiles.version, files.from_bambuddy)
         if built != input.preset_key:
-            # Bambuddy's process values changed since the start keyed this slice.
+            # What Bambuddy holds for a preset (a process preset's values, a local
+            # preset's document) changed since the start keyed this slice.
             raise _refused(
-                "The process preset changed while the slice started: slice again.", status=AGAIN
+                "A preset Bambuddy holds changed while the slice started: slice again.",
+                status=AGAIN,
             )
         documents = [
             ("machine.json", files.machine),

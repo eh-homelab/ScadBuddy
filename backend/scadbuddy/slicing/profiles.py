@@ -298,6 +298,26 @@ class Profiles:
     def filament(self, ref_or_name: str) -> Flat:
         return self._flat("filament", ref_or_name)
 
+    def flatten_over(self, kind: Kind, name: str, doc: dict[str, Any]) -> Flat:
+        """``doc``, a ``kind`` preset outside the tree named ``name`` (a user's own, held
+        by Bambuddy), flattened over the tree's preset its ``inherits`` names and that
+        one's chain, child over parent as :func:`flatten` applies it. That is how Bambu
+        Studio loads a user preset (``PresetCollection::load_presets``, Preset.cpp,
+        v02.08.02.61,
+        https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/libslic3r/Preset.cpp):
+        a copy of the system preset ``inherits`` names (``find_preset`` by name; none
+        found skips the preset), the preset's own values written over it by
+        ``DynamicPrintConfig::update_diff_values_to_child_config`` (PrintConfig.cpp), where
+        a scalar, a filament extruder-override key or any option not tied to extruder
+        variants replaces the parent's whole, as :func:`flatten` applies every key. An
+        option tied to extruder variants is merged there by variant (``set_only_diff``),
+        which :func:`flatten` does not reproduce: a user printer preset whose variant list
+        is shorter than its parent's is flattened to the shorter list, as a vendor preset's
+        is (``test_a_childs_list_replaces_the_parents_whole``). A parent the tree lacks
+        is refused, naming it, as any preset's is; so is a ``doc`` that inherits ``name``
+        itself, which reads as a loop."""
+        return flatten(name, lambda parent: doc if parent == name else self._load(kind, parent))
+
     def find(self, kind: Kind, ref_or_name: str) -> str | None:
         """The name of the ``kind`` preset whose ``setting_id``, then ``name``, is
         ``ref_or_name``."""
