@@ -586,7 +586,7 @@ async def quote_run(
         except LifecycleError as error:
             raise refused(error) from None
     except QuoteError as error:
-        _drop(run.refs, quote_id, held)
+        await _drop(run.refs, quote_id, held)
         extensions: dict[str, Any] = {}
         if error.plate is not None:
             extensions["plate"] = error.plate
@@ -599,16 +599,17 @@ async def quote_run(
             **extensions,
         ) from None
     except BaseException:
-        _drop(run.refs, quote_id, held)
+        await _drop(run.refs, quote_id, held)
         raise
 
 
-def _drop(refs: BlobRefs, quote_id: str, held: bool) -> None:
+async def _drop(refs: BlobRefs, quote_id: str, held: bool) -> None:
     """A run that fails after its first add drops its own holder before it raises
-    (Ruling 3); one the drop misses is the reaper's."""
+    (Ruling 3); one the drop misses is the reaper's. Off the loop, as every other store
+    call of the run: a slow database must not stall the worker."""
     if not held:
         return
     try:
-        refs.drop_holder(QUOTE_HOLDER, quote_id)
+        await asyncio.to_thread(refs.drop_holder, QUOTE_HOLDER, quote_id)
     except Exception:
         logger.exception("could not drop a failed quote's hold", extra={"id": quote_id})
