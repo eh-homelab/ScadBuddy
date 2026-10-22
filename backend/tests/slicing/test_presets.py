@@ -5,6 +5,7 @@ import json
 import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import respx
@@ -141,40 +142,157 @@ async def test_build_presets_does_not_write_the_colours(
     assert all("#FF0000" not in f.decode() for f in files.filaments)
 
 
-async def test_a_local_filament_is_refused_by_name(profiles: Profiles, plan: SlicePlan) -> None:
+async def test_a_local_filament_needs_bambuddy(profiles: Profiles, plan: SlicePlan) -> None:
     local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
-    with pytest.raises(ProfileError, match="local filament preset"):
+    with pytest.raises(ProfileError, match=r"local filament preset 7.*needs Bambuddy, and none"):
         await build_presets(local, profiles, None)
 
 
-async def test_a_local_printer_is_refused_by_name(profiles: Profiles, plan: SlicePlan) -> None:
+async def test_a_local_printer_needs_bambuddy(profiles: Profiles, plan: SlicePlan) -> None:
     local = plan.model_copy(update={"printer_preset": PresetRef(source="local", id="3")})
-    with pytest.raises(ProfileError, match=r"local printer preset 3.*only process"):
+    with pytest.raises(ProfileError, match=r"local printer preset 3.*needs Bambuddy, and none"):
         await build_presets(local, profiles, None)
+
+
+#: A user's filament preset as Bambuddy's ``GET /local-presets/7`` answers it (#4233): the
+#: row's columns beside ``setting``, the imported document merged over its OrcaSlicer base
+#: with ``inherits`` kept, here naming a preset of the image's tree.
+LOCAL_PLA: dict[str, Any] = {
+    "id": 7,
+    "name": "Inland PLA Black (3DFP OyJSo2eL7) @H2C",
+    "preset_type": "filament",
+    "source": "orcaslicer",
+    "inherits": "Test PLA",
+    "setting": {
+        "type": "filament",
+        "name": "Inland PLA Black (3DFP OyJSo2eL7) @H2C",
+        "from": "User",
+        "inherits": "Test PLA",
+        "filament_vendor": ["Inland"],
+        "nozzle_temperature": ["215"],
+    },
+}
+
+
+@respx.mock
+async def test_a_local_filament_takes_bambuddys_document_over_the_trees_parent(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    """The document is flattened over the tree's preset its ``inherits`` names, child
+    over parent, as Bambu Studio loads a user preset; the row names the preset, so the
+    catalogue is not read (respx refuses any route not mocked here)."""
+    respx.get(f"{API}/local-presets/7").respond(200, json=LOCAL_PLA)
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
+    files = await build_presets(local, profiles, client)
+    flat = json.loads(files.filaments[0])
+    assert flat["nozzle_temperature"] == ["215"] and flat["filament_vendor"] == ["Inland"]
+    assert flat["filament_id"] == "GFL_TEST" and flat["filament_type"] == ["PLA"]
+    assert flat["name"] == LOCAL_PLA["name"] and "inherits" not in flat
+    assert files.from_bambuddy == {"filament_1": hashlib.sha256(files.filaments[0]).hexdigest()}
+
+
+@respx.mock
+async def test_a_local_printer_takes_bambuddys_document_over_the_trees_parent(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    respx.get(f"{API}/local-presets/3").respond(
+        200,
+        json={
+            "id": 3,
+            "name": "My Printer",
+            "preset_type": "printer",
+            "source": "orcaslicer",
+            "setting": {
+                "type": "machine",
+                "name": "My Printer",
+                "inherits": "Test Printer 0.4 nozzle",
+                "printable_height": "300",
+            },
+        },
+    )
+    local = plan.model_copy(update={"printer_preset": PresetRef(source="local", id="3")})
+    files = await build_presets(local, profiles, client)
+    machine = json.loads(files.machine)
+    assert machine["printable_height"] == "300" and machine["nozzle_diameter"] == ["0.4"]
+    assert files.from_bambuddy == {"printer": hashlib.sha256(files.machine).hexdigest()}
+
+
+@respx.mock
+async def test_a_local_preset_whose_parent_the_tree_lacks_is_refused(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    """Bambuddy's document is merged over OrcaSlicer's BBL tree, which may name a preset
+    this Bambu Studio does not ship: refused, naming it, rather than sliced as a root
+    the CLI fills from its defaults."""
+    setting: dict[str, Any] = {**LOCAL_PLA["setting"], "inherits": "Generic PLA @BBL H2D"}
+    doc = {**LOCAL_PLA, "setting": setting}
+    respx.get(f"{API}/local-presets/7").respond(200, json=doc)
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
+    with pytest.raises(
+        ProfileError,
+        match=r"local filament preset Inland.*over Bambu Studio 02\.08\.02\.61's presets:"
+        r" .*inherits Generic PLA @BBL H2D: no such preset",
+    ):
+        await build_presets(local, profiles, client)
+
+
+@respx.mock
+async def test_a_local_preset_of_another_slot_is_refused(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    respx.get(f"{API}/local-presets/7").respond(200, json={**LOCAL_PLA, "preset_type": "process"})
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
+    with pytest.raises(ProfileError, match=r"local preset 7 is a process preset"):
+        await build_presets(local, profiles, client)
+
+
+@respx.mock
+async def test_a_local_preset_bambuddy_no_longer_has_is_refused(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    respx.get(f"{API}/local-presets/7").respond(404, json={"detail": "Local preset not found"})
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
+    with pytest.raises(ProfileError, match=r"Bambuddy has no local preset 7 any more"):
+        await build_presets(local, profiles, client)
+
+
+@respx.mock
+async def test_a_local_preset_without_settings_is_refused(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    # Bambuddy answers {} for a stored document it cannot parse.
+    respx.get(f"{API}/local-presets/7").respond(200, json={**LOCAL_PLA, "setting": {}})
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
+    with pytest.raises(ProfileError, match=r"holds no settings"):
+        await build_presets(local, profiles, client)
+
+
+async def test_a_local_id_that_is_no_number_is_refused(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="GFL")]})
+    with pytest.raises(ProfileError, match=r"local filament preset GFL.*is a number"):
+        await build_presets(local, profiles, client)
+
+
+def test_a_local_preset_from_bambuddy_keys_apart(plan: SlicePlan) -> None:
+    """An edit in Bambuddy rewrites a local preset under the same id, so the key carries
+    each such file's digest, after the process's, in slot order."""
+    image = native_preset_key(plan, 1, "02.08.02.61")
+    filament = native_preset_key(plan, 1, "02.08.02.61", {"filament_2": "ab" * 32})
+    edited = native_preset_key(plan, 1, "02.08.02.61", {"filament_2": "cd" * 32})
+    assert len({image, filament, edited}) == 3
+    assert filament.endswith("/bambuddy-filament_2=" + "ab" * 32 + "/colours=#FF0000,#00FF00")
+    every = native_preset_key(
+        plan, 1, "02.08.02.61", {"filament_1": "f1", "printer": "m", "process": "p"}
+    )
+    assert "/bambuddy-process=p/bambuddy-printer=m/bambuddy-filament_1=f1/colours=" in every
 
 
 async def test_an_orca_cloud_preset_is_refused(profiles: Profiles, plan: SlicePlan) -> None:
     orca = plan.model_copy(update={"process_preset": PresetRef(source="orca_cloud", id="9")})
     with pytest.raises(ProfileError, match="orca_cloud process preset 9"):
         await build_presets(orca, profiles, None)
-
-
-@respx.mock
-async def test_a_local_filament_is_refused_by_its_catalogue_name(
-    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
-) -> None:
-    respx.get(f"{API}/slicer/presets").respond(200, json={})
-    respx.get(f"{API}/local-presets/").respond(
-        200,
-        json={
-            "filament": [
-                {"id": 7, "name": "My PLA", "preset_type": "filament", "source": "orcaslicer"}
-            ]
-        },
-    )
-    local = plan.model_copy(update={"filament_presets": [PresetRef(source="local", id="7")]})
-    with pytest.raises(ProfileError, match="local filament preset My PLA"):
-        await build_presets(local, profiles, client)
 
 
 @respx.mock
@@ -293,7 +411,7 @@ async def test_a_cloud_user_process_takes_bambuddys_values(
     files = await build_presets(user, profiles, client)
     assert json.loads(files.process)["layer_height"] == "0.12"
     assert values.calls.last.request.url.params["source"] == "cloud"
-    assert files.bambuddy_process == hashlib.sha256(files.process).hexdigest()
+    assert files.from_bambuddy == {"process": hashlib.sha256(files.process).hexdigest()}
 
 
 @respx.mock
@@ -313,15 +431,17 @@ async def test_a_cloud_user_process_bambuddy_cannot_read_is_refused(
 async def test_a_process_from_the_image_has_no_bambuddy_digest(
     profiles: Profiles, plan: SlicePlan
 ) -> None:
-    assert (await build_presets(plan, profiles, None)).bambuddy_process is None
+    assert (await build_presets(plan, profiles, None)).from_bambuddy == {}
 
 
 def test_a_process_from_bambuddy_keys_apart(plan: SlicePlan) -> None:
     image = native_preset_key(plan, 1, "02.08.02.61")
-    bambuddy = native_preset_key(plan, 1, "02.08.02.61", bambuddy_process="ab" * 32)
-    other = native_preset_key(plan, 1, "02.08.02.61", bambuddy_process="cd" * 32)
+    bambuddy = native_preset_key(plan, 1, "02.08.02.61", {"process": "ab" * 32})
+    other = native_preset_key(plan, 1, "02.08.02.61", {"process": "cd" * 32})
     assert len({image, bambuddy, other}) == 3
     assert bambuddy.startswith("native@02.08.02.61/")
+    # The segment a slice keyed before the other slots were keyed (#4233) still has.
+    assert "/bambuddy-process=" + "ab" * 32 + "/colours=" in bambuddy
 
 
 def test_a_list_over_a_scalar_option_is_refused() -> None:
@@ -426,9 +546,12 @@ async def test_only_a_preset_outside_the_tree_needs_bambuddy(
     assert await needs_bambuddy(local, profiles)
     unknown = plan.model_copy(update={"filament_presets": [PresetRef(source="cloud", id="GF?")]})
     assert await needs_bambuddy(unknown, profiles)
-    # Refused with or without Bambuddy: opening one would change nothing.
+    # A local printer or filament preset is Bambuddy's document (#4233).
     printer = plan.model_copy(update={"printer_preset": PresetRef(source="local", id="3")})
-    assert not await needs_bambuddy(printer, profiles)
+    assert await needs_bambuddy(printer, profiles)
+    # Refused with or without Bambuddy: opening one would change nothing.
+    orca = plan.model_copy(update={"printer_preset": PresetRef(source="orca_cloud", id="3")})
+    assert not await needs_bambuddy(orca, profiles)
 
 
 async def test_a_name_lookup_with_no_bambuddy_says_so(profiles: Profiles, plan: SlicePlan) -> None:

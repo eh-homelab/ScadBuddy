@@ -347,11 +347,25 @@ tree's `VERSION`, the API image's `BAMBU_STUDIO_VERSION` (`Profiles.version`,
 a Bambuddy one and a new Bambu Studio slices again (§8). A process preset the tree does
 not hold (`local`, a cloud user preset) is built from Bambuddy's values
 (`GET /slicer/preset-values?slot=process`), and the key then carries their sha256 as well.
-A `local` filament or printer preset is refused on the native slicer, as the plan's 422:
-Bambuddy serves process values only (re-measured 2026-10-18 against the live Bambuddy,
+A `local` filament or printer preset (a user's own, imported into Bambuddy's
+`/local-presets/`, as the spool intake imports 3dfilamentprofiles) is read from
+`GET /local-presets/{id}` (#4233): its `setting` is the preset's document as Bambuddy
+stores it, merged at import over the OrcaSlicer BBL base its `inherits` names with
+`inherits` kept, and what Bambuddy's own slicer slices with verbatim (read in Bambuddy's
+source on 2026-10-22: `routes/local_presets.py` `get_local_preset`,
+`services/orca_profiles.py` `import_orca_file` and `resolve_preset`,
+`services/preset_resolver.py` `_resolve_local`; not yet measured against a live
+Bambuddy). ScadBuddy flattens it over the image's tree by that `inherits`
+(`Profiles.flatten_over`, as Bambu Studio loads a user preset over the system preset it
+inherits), so a parent this Bambu Studio lacks is the plan's 422 naming it, never a
+file the CLI fills from its defaults; and the key carries the sha256 of each file so
+built (`PresetFiles.from_bambuddy`, `/bambuddy-<slot>=<sha256>` after the process's),
+since `PUT /local-presets/{id}` rewrites a preset under the same id. Without Bambuddy
+configured such a ref is the plan's 422 saying so. Bambuddy's values route serves no
+other slot (re-measured 2026-10-18 against the live Bambuddy,
 `ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`: `slot=filament` answers
-`400 "Only the 'process' slot is supported"`). A user's OrcaSlicer-imported filament
-therefore slices on `slicer_backend` `bambuddy` only, until #4233.
+`400 "Only the 'process' slot is supported"`), so a Bambu Cloud user preset in the
+filament or printer slot is still refused on the native slicer.
 
 ### 5.4 Where the slice sits in the print flow
 

@@ -75,14 +75,14 @@ async def start_native_slice(
     copy_sha256: str | None,
 ) -> NativeSlice:
     """The row of copy ``library_file_id`` sliced with ``plan``, its execution started
-    unless it completed. The presets are built here only for their key: a process
-    preset Bambuddy's values built is keyed by what it held
-    (`PresetFiles.bambuddy_process`), and the key names the execution, so it is known
-    before the start; `slice_prepare` builds them again, where they are stored. A
-    `ProfileError` propagates: no row is written. ``client`` is None with no Bambuddy
-    configured: then only the image's presets resolve. ``copy_sha256`` is the copy's
-    ``file_hash`` as its library states it (Task 12 review M6): it names the execution
-    with the id, and `slice_prepare` refuses other bytes.
+    unless it completed. The presets are built here only for their key: a file built
+    from what Bambuddy holds (a process preset's values, a local preset's document) is
+    keyed by what it held (`PresetFiles.from_bambuddy`), and the key names the
+    execution, so it is known before the start; `slice_prepare` builds them again, where
+    they are stored. A `ProfileError` propagates: no row is written. ``client`` is None
+    with no Bambuddy configured: then only the image's presets resolve. ``copy_sha256``
+    is the copy's ``file_hash`` as its library states it (Task 12 review M6): it names
+    the execution with the id, and `slice_prepare` refuses other bytes.
 
     A failed or cancelled row is returned running (`NativeSliceStore.start`), so a read
     straight after this never sees the last outcome (Task 12 review I1)."""
@@ -124,7 +124,7 @@ async def native_slice_key(
     slice was recorded under (Task 13). A `ProfileError` propagates."""
     profiles = starter.profiles
     files = await build_presets(plan, profiles, client)
-    return native_preset_key(plan, plate_id, profiles.version, files.bambuddy_process)
+    return native_preset_key(plan, plate_id, profiles.version, files.from_bambuddy)
 
 
 class NativeSliceKeys:
@@ -135,20 +135,20 @@ class NativeSliceKeys:
     def __init__(self, starter: NativeSliceStarter, client: BambuddyClient | None) -> None:
         self.starter = starter
         self.client = client
-        self._processes: dict[str, asyncio.Task[str | None]] = {}
+        self._held: dict[str, asyncio.Task[dict[str, str]]] = {}
 
     async def key(self, plan: SlicePlan, plate_id: int) -> str:
         built = plan.model_dump_json()
-        task = self._processes.get(built)
+        task = self._held.get(built)
         if task is None:
-            task = asyncio.ensure_future(self._process(plan))
-            self._processes[built] = task
-        process = await asyncio.shield(task)
-        return native_preset_key(plan, plate_id, self.starter.profiles.version, process)
+            task = asyncio.ensure_future(self._from_bambuddy(plan))
+            self._held[built] = task
+        held = await asyncio.shield(task)
+        return native_preset_key(plan, plate_id, self.starter.profiles.version, held)
 
-    async def _process(self, plan: SlicePlan) -> str | None:
+    async def _from_bambuddy(self, plan: SlicePlan) -> dict[str, str]:
         files = await build_presets(plan, self.starter.profiles, self.client)
-        return files.bambuddy_process
+        return files.from_bambuddy
 
 
 async def _has_execution(temporal: Client, workflow_id: str) -> bool:

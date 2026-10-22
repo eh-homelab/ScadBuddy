@@ -13,12 +13,23 @@ Where a preset comes from:
   ``standard`` one this image's Bambu Studio does not ship) takes Bambuddy's flattened
   values (``GET /slicer/preset-values``). Bambuddy's slicer may carry other profiles
   than the image's (02.08.00.06 against 02.08.00.05 on 2026-10-18), so such a slice's
-  key carries a digest of the process file it wrote (:attr:`PresetFiles.bambuddy_process`,
+  key carries a digest of the process file it wrote (:attr:`PresetFiles.from_bambuddy`,
   :func:`native_preset_key`), never only the image's version.
-- A printer or filament preset that is not in the tree is refused: Bambuddy answers
+- A ``local`` printer or filament preset (a user's own, imported into Bambuddy from an
+  OrcaSlicer or Bambu Studio profile, as the spool intake does from 3dfilamentprofiles)
+  is read from Bambuddy's ``GET /local-presets/{id}`` (#4233): its ``setting`` is the
+  preset's own document, already merged over the OrcaSlicer BBL base its ``inherits``
+  names, which Bambuddy's own slicer slices with verbatim
+  (:class:`~scadbuddy.bambuddy.models.LocalPresetDetail`). Here it is flattened over the
+  image's tree by that same ``inherits`` (:meth:`Profiles.flatten_over`), so a parent
+  this Bambu Studio lacks refuses it, naming the parent, rather than slicing a document
+  that the CLI would fill from its defaults. The slice's key carries the sha256 of each
+  such file (:attr:`PresetFiles.from_bambuddy`): ``PUT /local-presets/{id}`` rewrites a
+  preset under the same id. Bambuddy's values route serves no other slot: it answers
   ``GET /slicer/preset-values?slot=filament`` with ``400 "Only the 'process' slot is
   supported"`` (measured 2026-09-27, and again 2026-10-18 against the live
-  ``ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`` with ``source=cloud&id=GFSB00_22``).
+  ``ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`` with ``source=cloud&id=GFSB00_22``),
+  so a cloud user preset in the printer or filament slot is still refused.
 - ``orca_cloud`` presets are OrcaSlicer's, not Bambu Studio's, and are refused.
 
 The plate type goes in the process file's ``curr_bed_type``: the v02.08.02.61 CLI has
@@ -41,13 +52,22 @@ import json
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import BaseModel
+from fastapi import status
+from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import read_catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
-from scadbuddy.slicing.profiles import Flat, Kind, ProfileError, Profiles, flatten
+from scadbuddy.core.problems import ApiError
+from scadbuddy.slicing.profiles import (
+    Flat,
+    Kind,
+    ProfileError,
+    ProfileImageError,
+    Profiles,
+    flatten,
+)
 
 Slot = Literal["printer", "process", "filament"]
 _KINDS: dict[Slot, Kind] = {"printer": "machine", "process": "process", "filament": "filament"}
@@ -60,9 +80,11 @@ class PresetFiles(BaseModel):
     machine: bytes
     process: bytes
     filaments: list[bytes]
-    #: The sha256 of :attr:`process` when Bambuddy's values built it, for
-    #: :func:`native_preset_key`; ``None`` when the image's tree did.
-    bambuddy_process: str | None = None
+    #: The sha256 of each file built from what Bambuddy holds, by slot (``process``: its
+    #: flattened values; ``printer`` and ``filament_<n>``, ``n`` the slot from 1: a local
+    #: preset's document), for :func:`native_preset_key`. A file the image's tree built
+    #: is not in it.
+    from_bambuddy: dict[str, str] = Field(default_factory=dict)
 
 
 def apply_overrides(process: Flat, overrides: Mapping[str, ProcessValue]) -> Flat:
@@ -136,10 +158,12 @@ async def _resolve(
                 found = await asyncio.to_thread(profiles.find, kind, name)
         if found is not None:
             return await asyncio.to_thread(getattr(profiles, kind), found), False
+    if ref.source == "local" and slot != "process":
+        return await _local(slot, ref, profiles, client), True
     name = await names.of(ref) or ref.id
     if slot != "process":
         version = await asyncio.to_thread(lambda: profiles.version)
-        if client is None and ref.source in ("standard", "cloud"):
+        if client is None:
             raise ProfileError(
                 f"the native slicer cannot find {ref.source} {slot} preset {name} among Bambu"
                 f" Studio {version}'s by its id: finding it by name needs Bambuddy, and none"
@@ -165,15 +189,61 @@ async def _resolve(
     return flatten(name, {name: own}.get), True
 
 
+async def _local(
+    slot: Slot, ref: PresetRef, profiles: Profiles, client: BambuddyClient | None
+) -> Flat:
+    """A ``local`` printer or filament preset's file (#4233): Bambuddy's document for it
+    (``GET /local-presets/{id}``), flattened over the image's tree by its ``inherits``
+    (the module's docstring). The row names the preset, so the catalogue is not read."""
+    what = f"the native slicer cannot read local {slot} preset"
+    if client is None:
+        version = await asyncio.to_thread(lambda: profiles.version)
+        raise ProfileError(
+            f"{what} {ref.id}: it is not one of Bambu Studio {version}'s, and reading it"
+            " from Bambuddy's local presets needs Bambuddy, and none is configured"
+        )
+    try:
+        preset_id = int(ref.id)
+    except ValueError:
+        raise ProfileError(f"{what} {ref.id}: a Bambuddy local preset's id is a number") from None
+    try:
+        row = await client.local_preset(preset_id)
+    except ApiError as error:
+        if error.status != status.HTTP_404_NOT_FOUND:
+            raise
+        raise ProfileError(
+            f"{what} {ref.id}: Bambuddy has no local preset {preset_id} any more"
+        ) from None
+    if row.preset_type != slot:
+        raise ProfileError(
+            f"{what} {row.name}: Bambuddy's local preset {preset_id} is a {row.preset_type} preset"
+        )
+    if not row.setting:
+        raise ProfileError(f"{what} {row.name}: Bambuddy holds no settings for it")
+    try:
+        return await asyncio.to_thread(profiles.flatten_over, _KINDS[slot], row.name, row.setting)
+    except ProfileImageError:
+        raise
+    except ProfileError as error:
+        version = await asyncio.to_thread(lambda: profiles.version)
+        raise ProfileError(
+            f"{what} {row.name} from Bambuddy over Bambu Studio {version}'s presets: {error}"
+        ) from None
+
+
 def _document(flat: Flat) -> bytes:
     return json.dumps(flat, indent=4, ensure_ascii=False).encode()
 
 
+def _digest(document: bytes) -> str:
+    return hashlib.sha256(document).hexdigest()
+
+
 async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
     """Whether building ``plan``'s presets reads Bambuddy: a ref the image's tree does
-    not hold by its id that Bambuddy could resolve (by name, or a process preset's
-    values). A ref refused either way (``orca_cloud``, a ``local`` printer or filament)
-    does not count."""
+    not hold by its id that Bambuddy could resolve (by name, a process preset's values,
+    or a local preset's document). A ref refused either way (``orca_cloud``) does not
+    count."""
     refs: list[tuple[Slot, PresetRef]] = [
         ("printer", plan.printer_preset),
         ("process", plan.process_preset),
@@ -185,7 +255,7 @@ async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
         if ref.source in ("standard", "cloud"):
             if await asyncio.to_thread(profiles.find, _KINDS[slot], ref.id) is None:
                 return True
-        elif slot == "process":
+        else:
             return True
     return False
 
@@ -194,36 +264,51 @@ async def build_presets(
     plan: SlicePlan, profiles: Profiles, client: BambuddyClient | None
 ) -> PresetFiles:
     """The files that slice ``plan``: its presets flattened, its process overrides and
-    plate type written over the process. ``client`` names refs and reads a process
-    preset only Bambuddy holds; without one, only the image's presets resolve."""
+    plate type written over the process. ``client`` names refs and reads a preset only
+    Bambuddy holds (a process preset's values, a local preset's document); without one,
+    only the image's presets resolve."""
     names = _Names(client)
-    machine, _ = await _resolve("printer", plan.printer_preset, profiles, client, names)
-    process, from_bambuddy = await _resolve("process", plan.process_preset, profiles, client, names)
+    machine, machine_held = await _resolve("printer", plan.printer_preset, profiles, client, names)
+    process, process_held = await _resolve("process", plan.process_preset, profiles, client, names)
     filaments = [
-        (await _resolve("filament", ref, profiles, client, names))[0]
-        for ref in plan.filament_presets
+        await _resolve("filament", ref, profiles, client, names) for ref in plan.filament_presets
     ]
     process = apply_overrides(process, plan.process_overrides)
     if plan.bed_type:
         process["curr_bed_type"] = plan.bed_type
-    document = _document(process)
+    machine_document = _document(machine)
+    process_document = _document(process)
+    filament_documents = [_document(filament) for filament, _ in filaments]
+    from_bambuddy: dict[str, str] = {}
+    if machine_held:
+        from_bambuddy["printer"] = _digest(machine_document)
+    if process_held:
+        from_bambuddy["process"] = _digest(process_document)
+    for slot, ((_, held), document) in enumerate(
+        zip(filaments, filament_documents, strict=True), start=1
+    ):
+        if held:
+            from_bambuddy[f"filament_{slot}"] = _digest(document)
     return PresetFiles(
-        machine=_document(machine),
-        process=document,
-        filaments=[_document(filament) for filament in filaments],
-        bambuddy_process=hashlib.sha256(document).hexdigest() if from_bambuddy else None,
+        machine=machine_document,
+        process=process_document,
+        filaments=filament_documents,
+        from_bambuddy=from_bambuddy,
     )
 
 
 def native_preset_key(
-    plan: SlicePlan, plate_id: int, version: str, bambuddy_process: str | None = None
+    plan: SlicePlan, plate_id: int, version: str, from_bambuddy: Mapping[str, str] | None = None
 ) -> str:
     """What makes two native slices the same: Bambuddy's preset key behind the image's
     Bambu Studio version, so a native slice never answers for a Bambuddy one, and a new
-    slicer slices again (Ruling C7). ``bambuddy_process`` is
-    :attr:`PresetFiles.bambuddy_process`: a process file Bambuddy's values built is
-    keyed by what it held, since the image's version does not say which profiles
-    Bambuddy's slicer flattened it from.
+    slicer slices again (Ruling C7). ``from_bambuddy`` is
+    :attr:`PresetFiles.from_bambuddy`: a file built from what Bambuddy holds is keyed by
+    what it held, since the image's version does not say which profiles Bambuddy's
+    slicer flattened a process preset's values from, nor what a local preset's document
+    is, which an edit in Bambuddy changes under the same id (#4233). The process's digest
+    goes first, where it went before the other slots were keyed, so a slice keyed then
+    still answers.
 
     The slots' colours are in it too (#3962): the CLI takes them as ``--filament-colour``,
     which sets each slot's colour in the sliced file and decides whether slots of one
@@ -231,8 +316,15 @@ def native_preset_key(
     that names the old colours. Keys of slices from before then never match, and those
     slices, without the tower, are not reused."""
     key = f"native@{version}/" + slice_request(plan, plate_id).preset_key
-    if bambuddy_process is not None:
-        key += f"/bambuddy-process={bambuddy_process}"
+    held = from_bambuddy or {}
+    slots = [
+        "process",
+        "printer",
+        *(f"filament_{n}" for n in range(1, len(plan.filament_presets) + 1)),
+    ]
+    for slot in slots:
+        if slot in held:
+            key += f"/bambuddy-{slot}={held[slot]}"
     if plan.filament_colours:
         key += "/colours=" + ",".join(colour.upper() for colour in plan.filament_colours)
     return key

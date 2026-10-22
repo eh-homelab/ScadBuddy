@@ -101,6 +101,21 @@ class LocalPreset(BambuddyModel):
         return PresetRef(source="local", id=str(self.id))
 
 
+class LocalPresetDetail(LocalPreset):
+    """``GET /api/v1/local-presets/{id}``: a :class:`LocalPreset` row with ``setting``,
+    the preset's own JSON document as Bambuddy stores it, which is what its slicer slices
+    with when the preset is chosen (``routes/local_presets.py`` ``get_local_preset`` and
+    ``services/preset_resolver.py`` ``_resolve_local``, which hands the sidecar the stored
+    text verbatim; read in Bambuddy's source on 2026-10-22,
+    https://github.com/maziggy/bambuddy/tree/main/backend/app). An import stores the
+    uploaded document merged over the OrcaSlicer BBL base its ``inherits`` names, child
+    over parent, with ``inherits`` kept (``services/orca_profiles.py`` ``import_orca_file``
+    and ``resolve_preset``); ``PUT /local-presets/{id}`` rewrites it under the same id. A
+    stored document Bambuddy cannot parse answers ``{}``."""
+
+    setting: dict[str, Any] = Field(default_factory=dict)
+
+
 class LocalPresetCatalogue(BambuddyModel):
     """``GET /api/v1/local-presets/`` — grouped by type, not by source tier."""
 

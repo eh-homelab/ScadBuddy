@@ -53,6 +53,7 @@ from scadbuddy.bambuddy.models import (
     LibraryListRow,
     LibraryPlates,
     LocalPresetCatalogue,
+    LocalPresetDetail,
     MoveResult,
     PresetCatalogue,
     PresetRef,
@@ -186,6 +187,7 @@ Operation = Literal[
     "settings.read",
     "slice.job.status",
     "slice.start",
+    "slicer.local_preset",
     "slicer.local_presets",
     "slicer.preset_values",
     "slicer.presets",
@@ -515,6 +517,23 @@ class BambuddyClient:
             what="list the local presets",
         )
         return LocalPresetCatalogue.model_validate(response.json())
+
+    async def local_preset(self, preset_id: int) -> LocalPresetDetail:
+        """``GET /api/v1/local-presets/{id}`` — one local preset with its ``setting``, the
+        document Bambuddy's slicer slices with: what the native slicer builds a ``local``
+        filament or printer preset's file from (``slicing/presets.py``, #4233). Bambuddy
+        gates it as it gates the list (``Permission.SETTINGS_READ`` on both, read in its
+        source on 2026-10-22), so the same scope is named here. A preset deleted since the
+        plan named it is a 404.
+        """
+        response = await self._send(
+            "GET",
+            f"/local-presets/{preset_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_preset",
+            what=f"read local preset {preset_id}",
+        )
+        return LocalPresetDetail.model_validate(response.json())
 
     # --- inventory -----------------------------------------------------------
 
