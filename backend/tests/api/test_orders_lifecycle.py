@@ -280,6 +280,13 @@ def test_inputs_beside_an_output_are_given_whole(client: TestClient) -> None:
     )
     assert repinned.status_code == 422, repinned.text
     assert repinned.json()["errors"][0]["loc"][-1] == "inputs"
+    # Given whole, `v` included, the repin agrees too.
+    whole = client.patch(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}",
+        json={"reference": {"inputs": inputs}, "output_id": output_id},
+    )
+    assert whole.status_code == 200, whole.text
+    assert whole.json()["reference"]["inputs"]["v"] == 1
 
 
 def test_a_deleted_template_is_409(client: TestClient) -> None:
