@@ -264,7 +264,9 @@ function LanForm({ row, onLinked }: { row: PrinterRow; onLinked: (row: PrinterRo
       <LabeledInput
         label="Access code"
         type="password"
-        // Any format (#4434): the printer, asked by the link's probe, decides.
+        // Any format (#4434): the printer, asked by the link's probe, decides. The length is
+        // `LanLink`'s bound (backend/scadbuddy/printers/models.py), so a long paste is cut here.
+        maxLength={128}
         value={code}
         onChange={(event) => setCode(event.target.value)}
         // Not "off", which Chrome ignores on a password: it would save one printer's code and

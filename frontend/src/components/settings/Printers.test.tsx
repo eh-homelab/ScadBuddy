@@ -128,7 +128,8 @@ describe('PrintersPanel (#3823)', () => {
     const form = within(garage).getByRole('form', { name: 'LAN link for Garage' })
     const code = within(form).getByLabelText('Access code')
     expect(code).not.toHaveAttribute('pattern')
-    expect(code).not.toHaveAttribute('maxlength')
+    // LanLink's bound only (#4483), never a format.
+    expect(code).toHaveAttribute('maxlength', '128')
     expect(code).not.toHaveAttribute('inputmode')
 
     await user.type(within(form).getByLabelText('Host or IP address'), '10.0.0.9')
