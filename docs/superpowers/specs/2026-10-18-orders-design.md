@@ -178,12 +178,28 @@ unique index), the measured facts and the arithmetic:
   releases them all. The quote rows stay (Ruling 6 is about the record, not the
   bytes), with `sliced_sha256` saying what was priced. §6.1's attempt takes a ref of
   its own on the same key, so a print's file outlives the quote's ref. A `manual`
-  quote has no sliced file: both fields are null and no ref is taken;
-- `plates` (jsonb: per plate `{index, print_seconds, filaments: [{slot, used_g}]}`
-  as `read_sliced` gives them, §5.2);
+  quote has no sliced file: both fields are null and no ref is taken.
+  As built in phase 2 (#4250, plan 2026-10-22 Ruling 3): each sliced plate's file is a
+  directory blob of the blob store (`StoreBundle.blobs`, on every backend) under the key
+  `quote-<sha256>` (its `sliced.3mf`), one per plate; `sliced_blob_key` and
+  `sliced_sha256` are the first plate's, and each entry of `plates` carries its own
+  `blob_key` and `sha256`, all held by the one holder `(order_item_quote, <quote id>)`.
+  The run makes the quote's id first and takes the ref (`blob_refs.add`) after the
+  blob's publish and before the quote's row, so a crash between them leaves at most a
+  blob with no ref (the blob sweep's) or a ref with no row, never a row whose bytes the
+  sweep could free; a run that fails after the add drops its own holder. The releases
+  above are made after the transition commits, and the `housekeeping_reap_quote_holds`
+  sweep (on the prune Schedule) drops any `order_item_quote` holder older than the
+  quote's run timeout that no standing quote names: one whose quote has no row, or
+  whose quote this section releases (a release lost between its commit and its drop);
+- `plates` (jsonb: per plate `{index, print_seconds, filaments: [{slot, used_g}],
+  blob_key, sha256}` as `read_sliced` gives them, §5.2, with `used_g` a decimal string
+  and `slot` the item's colour slot, from 0: the sliced file's slot less one);
 - `lines` (jsonb): the priced lines, each `{kind, label, quantity, unit_minor,
   amount_minor}` with `kind` one of `filament` (one per slot: grams × price per g),
-  `machine_time`, `setup`, `labour`, `markup`, `manual`;
+  `machine_time`, `setup` (one per plate), `labour`, `markup`, `rounding` (phase 2:
+  `to_major`'s difference up to a whole unit, 0 when there is none, so the lines always
+  add to the unit price), `manual`;
 - `unit_cost_minor`, `unit_price_minor`, `quantity`, `total_minor`.
 
 The item's price is its accepted quote's `total_minor`. The order's subtotal is the sum
@@ -226,7 +242,13 @@ fulfilment attempts and their provenance; the record is never thinned.
 Amounts are integer minor units (`*_minor`, bigint) with the order's `currency`.
 Rates in the price book are decimal strings parsed with `Decimal`, never floats; each
 quote line rounds half-up to a minor unit once, at the line, and the totals add
-rounded lines. Float `cost` figures Bambuddy reports (F8) are shown beside a quote as
+rounded lines (`orders/pricing.py`); under `to_major` the difference up to a whole unit
+is a `rounding` line of its own. The minor unit's exponent is the backend's one table,
+`orders/currency.py` (ISO 4217's current codes, 2 unless listed), published as
+`minor_exponent` on every order and on the price book; the browser formats and parses
+with the exponent it is given and never asks `Intl` for it, whose CLDR digits differ
+from ISO 4217's for several codes. `orders_currency` refuses the codes ISO 4217 lists
+with no minor unit (#4250, plan 2026-10-22 Ruling 5). Float `cost` figures Bambuddy reports (F8) are shown beside a quote as
 "Bambuddy's cost" and never enter one.
 
 ## 4. API
@@ -239,8 +261,8 @@ agent's follow a 202.
 |---|---|
 | `GET/POST /customers`, `GET/PATCH /customers/{id}`, `POST /customers/{id}/archive` | customers; contacts and addresses as nested lists in the body, replaced whole |
 | `GET /orders` (`status`, `customer_id`, `q`, `from`, `to`, cursor), `POST /orders`, `GET/PATCH /orders/{id}` | orders; `PATCH` edits notes, due date, addresses, charges while `draft` or `quoted` |
-| `POST /orders/{id}/items`, `PATCH/DELETE /orders/{id}/items/{item}` | line items; the reference is set on create and replaced whole on `PATCH` while `draft` or `quoted` (a new reference drops the accepted quote); `DELETE` only while the item is `draft` (never quoted), else it is a cancel (§3.5) |
-| `POST /orders/{id}/items/{item}/quote` (operation `order_item_quote`) | render if needed, slice, price (§5); 202 then the quote |
+| `POST /orders/{id}/items`, `PATCH/DELETE /orders/{id}/items/{item}` | line items; the reference is set on create and replaced whole on `PATCH` while `draft` or `quoted` (a new reference drops the accepted quote); `PATCH`'s `filaments` (`{slot: filament_id \| null}`, phase 2) sets `colours[].filament_id` and drops the accepted quote only when it changes a slot; `DELETE` only while the item is `draft` (never quoted), else it is a cancel (§3.5) |
+| `POST /orders/{id}/items/{item}/quote` (operation `order_item_quote`) | render if needed, slice every plate, price (§5); the body is the print dialog's `printer_id`, `filament_plan` and `choices` and a price-book filament per colour slot (`filaments`); 202 then the quote |
 | `POST /orders/{id}/items/{item}/quotes/{quote}/accept` | pins the quote; the item becomes `approved` |
 | `POST /orders/{id}/items/{item}/quotes` with `{unit_price_minor, label?}` | a typed price: one `manual` line, `unit_cost_minor = unit_price_minor`, the item's quantity as it is now (Ruling 1 of the phase 1 plan) |
 | `POST /orders/{id}/accept`, `/cancel`, `/hold`, `/release`, `/close` | lifecycle (§3.5); `accept` publishes the event |
@@ -250,7 +272,9 @@ agent's follow a 202.
 | `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
 | `GET /orders/{id}/costs` | the quote against the actuals (§6.4) |
-| `GET/PUT /orders/price-book` | §5.1 |
+| `GET/PUT /orders/price-book` | §5.1: the currency (with its `minor_exponent`), the policy and the filaments not archived; `PUT` takes the policy whole and the estimate's factor |
+| `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record |
+| `GET /orders/estimate?output_id=&filament_id=` | §5.3: the rough estimate of every plate of an output, never recorded; 422 `filament_density` for a filament with no density |
 | `GET /orders/{id}/events` | the audit line |
 
 Every body has `extra="forbid"`; no body carries an author, a principal or a status
@@ -262,8 +286,11 @@ frontend's list re-reads on, as the Activity page does.
 
 ### 5.1 The price book
 
-Settings, in the settings tables (`library/settings_store.py`), edited on a Pricing
-tab of the Orders page:
+Settings, in the settings tables (`library/settings_store.py`), edited in the Settings
+page's Orders section (phase 2, plan 2026-10-22 Ruling 4: the policy as six stored
+settings, `pricing_machine_rate_per_hour`, `pricing_setup_fee`, `pricing_labour_per_item`,
+`pricing_markup_percent`, `pricing_rounding` and `rough_estimate_factor`, each read by
+every quote; the filaments in a table of their own with an editor beside them):
 
 - `orders_currency` (ISO 4217, default `USD`); changing it affects new orders only.
 - `filaments`: ScadBuddy's own filament records, a new table `filaments`: `id`,
@@ -284,26 +311,34 @@ book can change freely afterwards.
 
 ### 5.2 A slice quote
 
-The `order_item_quote` operation, on the `library` queue, as activities of one
-`OrderQuote` workflow (the same shape as `Arrange`, `workflows/pipelines.py`):
+The `order_item_quote` operation, on the `library` queue, as the run of an operation
+kind (`operations/kinds.py`), which gives it its record, its follow and its activity row
+(phase 2, plan 2026-10-22 Ruling 1; `orders/operations.py`, its steps
+`orders/quote.py`). Its check refuses from the rows alone and writes nothing;
+the run writes the body's filaments onto the item first, then:
 
 1. **Render.** If `output_id` is null, or the output is gone, or its `meta.json` does
    not match the reference (slug, `model_version`, inputs), submit the render through
    `RenderService` with the reference's slug, commit and inputs (`render_model`'s
    path, pinned to the commit as a versioned render is) and save an output; set
    `output_id`. A matching output is reused: `render_key` joins the piece.
-2. **Slice.** Slice the output's 3MF with the item's colours mapped to the chosen
-   filaments' slicer profiles, through the slicer the stack has: the print dialog's
-   background slice (`housekeeping_sweep_preview_slices`' path) today, the native
-   `slice_plate` activity once #3822 lands. The quote keeps the sliced file
-   (`sliced_blob_key`, §3.4) and records its `sliced_sha256`.
+2. **Slice.** Slice every plate the output lays out with the print dialog's own choices
+   (`printer_id`, `filament_plan`, `choices`), the slice `POST /outputs/{id}/preview-slice`
+   makes (`bambuddy/preview.py` `start_preview_plates`, one background slice per plate
+   under the subject `order_item:<id>`, on whichever slicer the stack has), and the
+   price-book filament named per slot; a spool and a filament record are matched only
+   from phase 5 (§8.3). A quote is the whole output's price. The quote keeps each
+   plate's sliced file (`sliced_blob_key`, §3.4) and records its `sliced_sha256`.
 3. **Read usage.** For each plate, `slice_info.read_sliced(payload, plate_id)` (F4):
    `print_time_seconds` and `grams_by_slot`, from the sliced 3MF's
    `Metadata/slice_info.config`. It sits over the parser the Bambuddy path reads
    with (F5), so both slicers price from one reader and no second parser is written.
    A plate that reads as unknown (`read_sliced`'s every-field-None answer), or a slot
    at `0` grams (not sliced, as F5's code treats it), fails the quote rather than
-   pricing a slot at nothing.
+   pricing a slot at nothing. As built (#4250), so do a plate the sliced file lacks
+   (`read_sliced`'s 404) and a colour slot of the item no plate reads grams for (the
+   sliced read leaves a 0 g slot out), on any plate, naming the plate or the slot; the
+   run then drops its own hold and records no quote.
 4. **Price.** For each slot: `used_g × cost_per_kg / 1000` at the slot's filament; a
    slot with no `filament_id` fails the quote naming the slot. Then machine time
    (`print_time_seconds` summed over plates × rate), setup (per plate), labour, markup on the
@@ -577,7 +612,12 @@ What this relies on, and what the design adds for it:
   In the panel an outward call parks for the person as any does; in a flow it is
   covered by a grant rule naming it (§7.2) or parks the same way.
 
-`order_item_quote` runs an operation (§4). The agent's tool follows it as every command
+`order_item_quote` takes two modes (phase 2, plan 2026-10-22 Ruling 11): `manual`
+(`{unit_price_minor, label?}`, the typed price) or `slice` (`{printer_id?,
+filament_plan, choices, filaments}`), exactly one; `price_book_set` keeps the policy
+(merged over the one in force), the estimate's factor and a filament's record (add,
+edit, archive); `order_estimate` (`read`) is the rough estimate (§5.3). A slice quote
+runs an operation (§4). The agent's tool follows it as every command
 tool does (`tools/command.ts`: the answer, or `{status: "running", operation_id}` past
 the follow window); in a flow the activity follows it to the answer, as `queue_print`
 follows a print run, so a script gets the quote. Every route of §4 is covered, or named

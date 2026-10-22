@@ -549,6 +549,32 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   extracted from the Activity components, which wrap them) and `components/orders/`; the
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
+  Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
+  `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and
+  the stored settings `pricing_*` and `rough_estimate_factor` (`live`), behind `GET`/`PUT
+  /orders/price-book` and `…/price-book/filaments`; `currency.py` is the one table of
+  minor-unit exponents (ISO 4217), published as `minor_exponent` on every order and on the
+  book (the browser's `lib/money.ts` takes it as an argument and never asks `Intl` for the
+  digits), and `orders_currency` refuses a code with no minor unit. `pricing.py` is the
+  arithmetic on `Decimal` (one rounding per line, `to_major`'s difference a `rounding`
+  line). A slice quote is the `order_item_quote` kind of `operations.py` on the `library`
+  queue (`POST /orders/{id}/items/{item}/quote`, subject `order_item:<id>`, 30-minute
+  `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
+  body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
+  changes), renders and saves an output through `output_create`'s run when the item has
+  none matching, slices every plate through `bambuddy/preview.py` `start_preview_plates`
+  (the dialog's background slice, either slicer), keeps each plate's sliced file as the
+  directory blob `quote-<sha256>` held by `blob_refs (order_item_quote, <quote id>)`
+  before the quote's row exists, reads each plate with `read_sliced`, prices and records
+  it (`Lifecycle.record_slice_quote`). The lifecycle drops the quote holders §3.4 releases
+  after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
+  drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
+  /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
+  The agent's `order_item_quote` takes `manual` or `slice`, beside `price_book_get`,
+  `price_book_set` and `order_estimate`. Frontend: the Settings page's Orders section
+  (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
+  `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
+  `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

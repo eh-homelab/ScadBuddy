@@ -46,9 +46,12 @@ multi-colour rules, connecting Bambuddy and each feature.
   kept. Advanced also lists STLs, which print as one plate, and sliced
   `.gcode.3mf` files, which print from Bambuddy directly.
 - **Orders**: customers with their contact points and addresses, and orders of line
-  items, each pinning one template commit with its inputs, priced by hand, fulfilled,
-  shipped and closed, with an audit line per order; the pages under Orders, and the
-  assistant's `order_*` tools (phase 1 of #4248).
+  items, each pinning one template commit with its inputs, priced by hand or priced from
+  the slice (every plate's grams and time at the price book's filaments and rates, kept
+  with the sliced file it was read from), fulfilled, shipped and closed, with an audit
+  line per order; a rough estimate from a render's volume before anything is sliced; the
+  pages under Orders, the price book in Settings, and the assistant's `order_*` and
+  `price_book_*` tools (phases 1 and 2 of #4248).
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
