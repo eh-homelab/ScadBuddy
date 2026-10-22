@@ -172,7 +172,8 @@ def _initialize(session: WebSocketTestSession, root: str | None = CLIENT_ROOT) -
 #: What ``initialize`` is given in a test that judges a short `lsp.REQUEST_TIMEOUT`:
 #: it waits on the fake server's start, which past a second on a loaded runner ended
 #: the session before the test began (#4478). Ten times a second's start, and short
-#: enough that the watchdog's first pass, a tenth of it, sleeps 1 s.
+#: enough that the watchdog's first pass, a tenth of it (`lsp.py`'s
+#: ``anyio.sleep(REQUEST_TIMEOUT / 10)``), sleeps 1 s.
 START_TIMEOUT = 10.0
 
 
