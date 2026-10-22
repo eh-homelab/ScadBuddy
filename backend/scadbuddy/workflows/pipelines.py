@@ -287,7 +287,9 @@ def _failure_of(error: BaseException) -> Failure:
                 return detail
             # A detail that is no `Failure` (a template's own raise of such a type):
             # its message, not the validation error. Logged by its type only, so a
-            # template's author can tell their detail was ignored (#4480).
+            # template's author can tell their detail was ignored (#4480). The type is
+            # the template's own string, not a fixed set: fine at debug, as §9 trusts
+            # template code, but no level a template could flood.
             try:
                 return Failure.model_validate(detail)
             except ValidationError:

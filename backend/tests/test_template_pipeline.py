@@ -833,8 +833,10 @@ async def test_a_failure_detail_that_is_no_failure_is_logged_by_its_type(
     assert final.state == "failed" and final.failure is not None
     assert final.failure.error == "pipeline/pipeline.py:4: the secret part"
     [record] = [r for r in caplog.records if "is not a Failure" in r.getMessage()]
-    assert "OpenSCADError" in record.getMessage()
-    assert "secret" not in record.getMessage() and "log_tail" not in record.getMessage()
+    assert record.getMessage().startswith(
+        "a OpenSCADError detail is not a Failure; the job's error is its message"
+    )
+    assert "secret" not in record.getMessage()
 
 
 async def _children(client: Client, workflow_id: str) -> list[str]:
