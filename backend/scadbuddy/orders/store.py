@@ -14,10 +14,11 @@ import binascii
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, NoReturn
 
-from psycopg import Connection, sql
+from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -33,6 +34,9 @@ from scadbuddy.orders.models import (
     Contact,
     ContactInput,
     Customer,
+    Filament,
+    FilamentInput,
+    FilamentPatch,
     Fulfilment,
     ItemStatus,
     Order,
@@ -80,7 +84,20 @@ class RowNotOwnedError(LookupError):
         self.customer_id = customer_id
 
 
+class FilamentExistsError(ValueError):
+    """A filament record with the same identity (material, subtype, brand and colour,
+    upper-cased; #4250 Ruling 4) is there already: the routes answer 409 naming it."""
+
+    def __init__(self, existing_id: str) -> None:
+        super().__init__("a filament with that material, subtype, brand and colour exists")
+        self.existing_id = existing_id
+
+
 _CUSTOMER = "id, display_name, company, notes, tags, created_at, updated_at, archived_at"
+_FILAMENT = (
+    "id, material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3,"
+    " archived_at, created_at, updated_at"
+)
 _CONTACT = 'id, kind, value, label, "primary", position'
 _ADDRESS = (
     "id, label, recipient, lines, locality, region, postal_code, country, phone,"
@@ -162,6 +179,25 @@ def _item_of(row: DictRow) -> OrderItem:
         output_id=row["output_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    """A ``numeric`` as the shortest decimal string that is the same number: ``25.5000``
+    reads ``25.5``, and ``0E-4`` reads ``0``."""
+    if value is None:
+        return None
+    text = format(value.normalize(), "f")
+    return text
+
+
+def _filament_of(row: DictRow) -> Filament:
+    return Filament.model_validate(
+        {
+            **row,
+            "cost_per_kg": _decimal_text(row["cost_per_kg"]),
+            "density_g_cm3": _decimal_text(row["density_g_cm3"]),
+        }
     )
 
 
@@ -436,6 +472,107 @@ class OrderStore:
             return None
         customer_id = row.pop("customer_id")
         return customer_id, Address.model_validate(row)
+
+    # -- the price book's filaments (§5.1, #4250) -------------------------------------
+
+    def _existing_filament(
+        self, conn: Conn, material: str, subtype: str | None, brand: str | None, colour: str
+    ) -> str | None:
+        row = conn.execute(
+            "SELECT id FROM filaments WHERE upper(material) = upper(%s)"
+            " AND upper(coalesce(subtype, '')) = upper(coalesce(%s, ''))"
+            " AND upper(coalesce(brand, '')) = upper(coalesce(%s, ''))"
+            " AND upper(colour) = upper(%s)",
+            (material, subtype, brand, colour),
+        ).fetchone()
+        return None if row is None else str(row["id"])
+
+    def insert_filament(self, body: FilamentInput, *, conn: Conn | None = None) -> Filament:
+        """A new record; :class:`FilamentExistsError` for an identity already taken."""
+        values = (
+            body.material,
+            body.subtype,
+            body.brand,
+            body.colour_name,
+            body.colour,
+            Decimal(body.cost_per_kg),
+            None if body.density_g_cm3 is None else Decimal(body.density_g_cm3),
+        )
+        try:
+            with self._write(conn) as c:
+                row = c.execute(
+                    "INSERT INTO filaments (material, subtype, brand, colour_name, colour,"
+                    " cost_per_kg, density_g_cm3) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    f" RETURNING {_FILAMENT}",
+                    values,
+                ).fetchone()
+        except errors.UniqueViolation:
+            self._raise_exists(body.material, body.subtype, body.brand, body.colour)
+        assert row is not None
+        return _filament_of(row)
+
+    def _raise_exists(
+        self, material: str, subtype: str | None, brand: str | None, colour: str
+    ) -> NoReturn:
+        with self._pool.connection() as c:
+            existing = self._existing_filament(c, material, subtype, brand, colour)
+        raise FilamentExistsError(existing or "")
+
+    def update_filament(
+        self, filament_id: str, patch: FilamentPatch, *, conn: Conn | None = None
+    ) -> Filament | None:
+        """The fields ``patch`` sends; ``None`` for no such record."""
+        sent = patch.model_fields_set
+        fields: dict[str, Any] = {}
+        for name in ("material", "colour", "cost_per_kg"):
+            value = getattr(patch, name)
+            if name in sent and value is not None:
+                fields[name] = Decimal(value) if name == "cost_per_kg" else value
+        for name in ("subtype", "brand", "colour_name", "density_g_cm3"):
+            if name in sent:
+                value = getattr(patch, name)
+                fields[name] = (
+                    Decimal(value) if name == "density_g_cm3" and value is not None else value
+                )
+        try:
+            with self._write(conn) as c:
+                row = _update(c, "filaments", filament_id, fields, _FILAMENT)
+        except errors.UniqueViolation:
+            current = self.filament(filament_id)
+            assert current is not None
+            merged = current.model_copy(update=fields)
+            self._raise_exists(merged.material, merged.subtype, merged.brand, merged.colour)
+        return None if row is None else _filament_of(row)
+
+    def archive_filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
+        """Hidden from the book from now on; a quote priced with it keeps its lines."""
+        with self._write(conn) as c:
+            row = c.execute(
+                "UPDATE filaments SET archived_at = COALESCE(archived_at, now()),"
+                f" updated_at = now() WHERE id = %s RETURNING {_FILAMENT}",
+                (filament_id,),
+            ).fetchone()
+        return None if row is None else _filament_of(row)
+
+    def filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s", (filament_id,)
+            ).fetchone()
+        return None if row is None else _filament_of(row)
+
+    def filaments(
+        self, *, include_archived: bool = False, conn: Conn | None = None
+    ) -> list[Filament]:
+        """By material, brand and colour name."""
+        where = "" if include_archived else " WHERE archived_at IS NULL"
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_FILAMENT} FROM filaments{where}"
+                " ORDER BY upper(material), upper(coalesce(subtype, '')),"
+                " upper(coalesce(brand, '')), upper(coalesce(colour_name, colour)), id"
+            ).fetchall()
+        return [_filament_of(row) for row in rows]
 
     # -- orders (§3.2) ----------------------------------------------------------------
 

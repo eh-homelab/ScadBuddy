@@ -22,6 +22,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.store import OrderStore
 
 #: The rows' own pool: an order's write is one short transaction under its row lock.
@@ -58,6 +59,11 @@ class OrdersComponent:
             self._pool.open(wait=False)
             self._store = OrderStore(self._pool)
         return self._store
+
+    @property
+    def price_book(self) -> PriceBookReader:
+        """The book in force (#4250): the stored policy and the filament records."""
+        return PriceBookReader(self.core.settings_store, self.store)
 
     @property
     def lifecycle(self) -> Lifecycle:

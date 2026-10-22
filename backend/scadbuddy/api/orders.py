@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -32,8 +32,11 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
     SettingsStoreDep,
+    StateDep,
 )
+from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import SettingsPatch
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.lifecycle import (
@@ -47,6 +50,9 @@ from scadbuddy.orders.lifecycle import (
 from scadbuddy.orders.models import (
     Charge,
     ChargeInput,
+    Filament,
+    FilamentInput,
+    FilamentPatch,
     Fulfilment,
     Money,
     Order,
@@ -55,11 +61,13 @@ from scadbuddy.orders.models import (
     OrderItem,
     OrderStatus,
     Payment,
+    PriceBook,
+    PricingPolicy,
     Quote,
     Shipment,
 )
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
-from scadbuddy.orders.store import UNSET, UnsetType
+from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -264,6 +272,111 @@ async def create_order(body: OrderCreate, orders: OrdersDep, settings: SettingsS
             body.customer_id, by, currency=currency, notes=body.notes, due_at=body.due_at
         )
     )
+
+
+# -- the price book (§5.1, #4250 Ruling 4) ---------------------------------------------------
+# Before ``/{order_id}``: a path is matched in the order its routes were declared.
+
+
+class PolicyUpdate(PricingPolicy):
+    """`PUT /orders/price-book`: the policy, whole; the estimate's factor when sent."""
+
+    rough_estimate_factor: str | None = None
+
+
+def _filament_exists(error: FilamentExistsError) -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        f"{error}: {error.existing_id}",
+        type_=PROBLEMS + "filament_exists",
+        filament_id=error.existing_id,
+    )
+
+
+@router.get("/price-book", response_model=PriceBook, summary="The price book")
+async def get_price_book(orders: OrdersDep) -> PriceBook:
+    """The currency the next order copies, the pricing policy, the rough estimate's
+    factor and the filament records not archived, in one read (§5.1)."""
+    return await asyncio.to_thread(orders.price_book.snapshot)
+
+
+@router.put("/price-book", response_model=PriceBook, summary="Set the pricing policy")
+async def put_price_book(
+    body: PolicyUpdate, orders: OrdersDep, store: SettingsStoreDep, state: StateDep
+) -> PriceBook:
+    """The policy, saved as the stored settings it is (``pricing_*``, and
+    ``rough_estimate_factor`` when sent): the next quote is priced with it, and a
+    recorded quote keeps the rates its lines carry."""
+    fields: dict[str, Any] = {
+        "pricing_machine_rate_per_hour": body.machine_rate_per_hour,
+        "pricing_setup_fee": body.setup_fee,
+        "pricing_labour_per_item": body.labour_per_item,
+        "pricing_markup_percent": body.markup_percent,
+        "pricing_rounding": body.rounding,
+    }
+    if body.rough_estimate_factor is not None:
+        fields["rough_estimate_factor"] = body.rough_estimate_factor
+    try:
+        patch = SettingsPatch.model_validate(fields)
+    except ValidationError as error:
+        problem = error.errors()[0]
+        name = str(problem["loc"][0]).removeprefix("pricing_")
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            problem["msg"],
+            errors=[{"loc": ["body", name], "msg": problem["msg"]}],
+        ) from None
+    await asyncio.to_thread(store.save, patch)
+    snapshot = await asyncio.to_thread(store.snapshot)
+    apply_runtime(state, snapshot.runtime)
+    return await asyncio.to_thread(orders.price_book.snapshot)
+
+
+@router.post(
+    "/price-book/filaments",
+    response_model=Filament,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a filament to the price book",
+)
+async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
+    """409 ``filament_exists`` naming the record of the same material, subtype, brand
+    and colour (in any case)."""
+    try:
+        return await asyncio.to_thread(orders.store.insert_filament, body)
+    except FilamentExistsError as error:
+        raise _filament_exists(error) from None
+
+
+@router.patch(
+    "/price-book/filaments/{filament_id}",
+    response_model=Filament,
+    summary="Edit a filament of the price book",
+)
+async def patch_filament(filament_id: str, body: FilamentPatch, orders: OrdersDep) -> Filament:
+    """Only what is sent changes. A quote already priced keeps the rate its lines carry."""
+    _path(filament_id)
+    try:
+        found = await asyncio.to_thread(orders.store.update_filament, filament_id, body)
+    except FilamentExistsError as error:
+        raise _filament_exists(error) from None
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    return found
+
+
+@router.post(
+    "/price-book/filaments/{filament_id}/archive",
+    response_model=Filament,
+    summary="Archive a filament of the price book",
+)
+async def archive_filament(filament_id: str, orders: OrdersDep) -> Filament:
+    """Hidden from the book and refused by a new quote; never deleted, since an item may
+    name it."""
+    _path(filament_id)
+    found = await asyncio.to_thread(orders.store.archive_filament, filament_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    return found
 
 
 def _totals(items: list[ItemDetail], charges: list[Charge], payments: list[Payment]) -> OrderTotals:
