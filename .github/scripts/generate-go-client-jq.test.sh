@@ -24,6 +24,8 @@ spec='{
       "default": {"type": "string", "description": "a property\nnamed default"},
       "content": {"type": "object", "description": "a property\nnamed content",
                   "default": {"description": "c\nd"}},
+      "headers": {"type": "object", "properties": {
+        "default": {"type": "string", "description": "nested\nnamed default"}}},
       "kept": {"type": "object", "default": {"description": "a\nvalue"},
                "example": {"summary": "x\ny"}, "examples": [{"description": "p\nq"}]},
       "ref": {"$ref": "#/components/schemas/T", "description": "dropped"},
@@ -51,6 +53,7 @@ expect '.paths["/a"].post.responses.default.content["application/json"].examples
 expect '.paths["/a"].post.responses.default.content["application/json"].examples.default.value.description' '"d\ne"'
 expect '.components.schemas.S.properties.content.description' '"a property named content"'
 expect '.components.schemas.S.properties.content.default.description' '"c\nd"'
+expect '.components.schemas.S.properties.headers.properties.default.description' '"nested named default"'
 expect '.components.examples.e2.summary' '"an example object"'
 expect '.components.examples.e2.description' '"its description"'
 expect '.components.examples.e2.value.summary' '"v\nw"'
