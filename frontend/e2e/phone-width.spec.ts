@@ -141,8 +141,9 @@ async function cardOverlaps(page: Page): Promise<string[]> {
       const head = summary.firstElementChild
       const parts = [
         ...card.querySelectorAll('[aria-label^="Preview "], [aria-label^="No preview of "]'),
-        ...head.querySelectorAll('button[role="checkbox"], [role="img"], [title]'),
-        ...[...head.children].filter((el) => el.tagName === 'SPAN' && !el.hasAttribute('title')),
+        ...head.querySelectorAll(
+          'button[role="checkbox"], [role="img"], [data-testid="output-name"], [data-testid="output-age"]',
+        ),
         ...summary.querySelector('p.sb-num').children,
         ...card.querySelector('[data-testid="output-actions"]').children,
       ]
@@ -215,7 +216,7 @@ test.describe('History cards at phone widths (#4491)', () => {
       // The long name truncates to one line, its whole text in the title.
       expect((await page.getByTitle(long).boundingBox())!.height).toBeLessThan(24)
       // The age and the library copy each on one line.
-      for (const line of [page.getByText('last month').first(), page.getByText(/^in library #/).first()]) {
+      for (const line of [page.getByTestId('output-age').last(), page.getByText(/^in library #/).first()]) {
         expect((await line.boundingBox())!.height).toBeLessThan(20)
       }
       // Every action a finger has to hit is 40 px tall.

@@ -605,7 +605,11 @@ function OutputRow({
             <Checkbox aria-label={`Select ${output.name ?? shortId(output.id)}`} checked={picked} onCheckedChange={onPick} />
             <ColorStrip colors={output.colors ?? []} size="sm" />
             {naming === null ? (
-              <span className="max-w-full min-w-0 truncate text-sm font-medium" title={label}>
+              <span
+                className="max-w-full min-w-0 truncate text-sm font-medium"
+                title={label}
+                data-testid="output-name"
+              >
                 {label}
               </span>
             ) : (
@@ -633,7 +637,9 @@ function OutputRow({
                 </Button>
               </form>
             )}
-            <span className="text-xs whitespace-nowrap text-muted-foreground">{timeAgo(output.created_at)}</span>
+            <span className="text-xs whitespace-nowrap text-muted-foreground" data-testid="output-age">
+              {timeAgo(output.created_at)}
+            </span>
           </div>
           {renameError && (
             <p role="alert" className="mt-1 text-xs text-destructive">
@@ -714,7 +720,7 @@ function OutputRow({
             url={api.downloadUrl(output.id)}
             // The server names it (`download_filename`), as every other download of it.
             filename={`${output.slug}-${output.id}.3mf`}
-            className="px-1 text-sm text-primary underline-offset-4 hover:underline max-sm:inline-flex max-sm:h-10 max-sm:items-center"
+            className={`px-1 text-sm text-primary underline-offset-4 hover:underline max-sm:inline-flex max-sm:items-center ${PHONE_TAP}`}
           >
             Download 3MF
           </BlobDownload>
@@ -725,7 +731,7 @@ function OutputRow({
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                className="max-sm:size-10"
+                className={`max-sm:w-10 ${PHONE_TAP}`}
                 aria-label={`More for ${label}`}
                 disabled={deleting}
               >
