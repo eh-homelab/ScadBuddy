@@ -1,15 +1,17 @@
 """`/api/v1/orders` (#4249, spec 2026-10-18 §3.2-3.5, §4, §6.1 by hand, §6.3; plan
 Rulings 1-3, 8-12): orders, their line items, manual quotes, fulfilment attempts,
-shipments, payments and the audit line.
+shipments, payments and the audit line; the price book, the slice quote and the rough
+estimate (#4250, §5).
 
-Plain reads and writes: nothing here does work an operation kind would run (the slice
-quote is phase 2). Every write goes through the lifecycle (``orders/lifecycle.py``),
-which locks the order, derives its status and publishes ``order.changed`` /
-``order_item.changed`` after commit; a refusal arrives as a `LifecycleError` and leaves
-as a 409 problem typed ``https://scadbuddy.dev/problems/orders/<slug>`` with the ids in
-the way (``items``, ``shipments``), or a 404 for a row that is not there. A reference
-that cannot be made is 422 naming the field (``orders/reference.py``). ``created_by`` and
-every audit row's ``by`` come from the author header, never a body (Ruling 12).
+Plain reads and writes, but for the slice quote, which is the ``order_item_quote``
+operation (``orders/operations.py``) through ``run_operation``. Every write goes through
+the lifecycle (``orders/lifecycle.py``), which locks the order, derives its status and
+publishes ``order.changed`` / ``order_item.changed`` after commit; a refusal arrives as a
+`LifecycleError` and leaves as a 409 problem typed
+``https://scadbuddy.dev/problems/orders/<slug>`` with the ids in the way (``items``,
+``shipments``), or a 404 for a row that is not there. A reference that cannot be made is
+422 naming the field (``orders/reference.py``). ``created_by`` and every audit row's
+``by`` come from the author header, never a body (Ruling 12).
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -21,6 +23,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
@@ -34,9 +37,16 @@ from scadbuddy.api.deps import (
     SettingsStoreDep,
     StateDep,
 )
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsPatch
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.lifecycle import (
@@ -66,6 +76,8 @@ from scadbuddy.orders.models import (
     Quote,
     Shipment,
 )
+from scadbuddy.orders.operations import ORDER_ITEM_QUOTE
+from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 
@@ -694,6 +706,45 @@ async def record_quote(
     _path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.record_manual_quote(order_id, item_id, body, by))
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/quote",
+    response_model=Quote,
+    summary="Quote an item from its slice",
+    responses=OPERATION_RESPONSES,
+)
+async def quote_item(
+    order_id: str,
+    item_id: str,
+    body: SliceQuoteRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Quote | JSONResponse:
+    """The ``order_item_quote`` operation (#4250, §5.2): render the item if it has no
+    matching output, slice every plate with the print dialog's choices, read each
+    plate's grams and seconds, price them with the book in force and record a `slice`
+    quote. Answered 202 once recorded; follow ``GET /operations/{id}`` to the quote.
+    Refused before anything is written: 404 for an unknown order or item, 409
+    ``order_not_open`` and ``item_not_open``, 422 ``filaments`` (a slot with no
+    filament, or one archived) and ``price_book`` (a book that prices nothing)."""
+    _path(order_id, item_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_QUOTE],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "request": body.model_dump(mode="json"),
+            # Ruling 12: who it is for comes from the author header, never the body.
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Quote)
 
 
 @router.post(
