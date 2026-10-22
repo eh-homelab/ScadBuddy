@@ -108,13 +108,14 @@ def test_a_lan_link_takes_the_code_as_typed(code: str) -> None:
     assert LanLink(host="h", access_code=code).access_code == code
 
 
-def test_the_access_code_bound_is_the_fields() -> None:
-    """#4497 review: Printers.tsx's `ACCESS_CODE_MAX_LENGTH` is 128 too; change both."""
-    assert ACCESS_CODE_MAX_LENGTH == 128
-    assert LanLink(host="h", access_code="x" * 128).access_code == "x" * 128
+def test_a_lan_link_takes_a_code_of_the_whole_bound() -> None:
+    assert LanLink(host="h", access_code="x" * ACCESS_CODE_MAX_LENGTH).access_code
 
 
-@pytest.mark.parametrize("code", ["", "x" * 129, "1234\r\n5678", "12\x0034", "12\x7f34", "\taB3"])
+@pytest.mark.parametrize(
+    "code",
+    ["", "x" * (ACCESS_CODE_MAX_LENGTH + 1), "1234\r\n5678", "12\x0034", "12\x7f34", "\taB3"],
+)
 def test_a_lan_link_refuses_an_empty_unbounded_or_control_code(code: str) -> None:
     with pytest.raises(ValidationError):
         LanLink(host="h", access_code=code)

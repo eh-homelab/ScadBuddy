@@ -21,7 +21,7 @@ SYNTHETIC_SERIAL_PREFIX = "bambuddy-"
 
 #: The longest access code a LAN link takes, in code points. Settings > Printers'
 #: `ACCESS_CODE_MAX_LENGTH` (frontend/src/components/settings/Printers.tsx) is the same
-#: number; `test_the_access_code_bound_is_the_fields` pins it, so the two move together.
+#: number, and its test reads this one from the API spec, so the two move together.
 ACCESS_CODE_MAX_LENGTH = 128
 
 
@@ -95,5 +95,8 @@ class LanLink(BaseModel):
     #: link's probe asks it. The bound only keeps a pasted page out, and no control
     #: character, which ftplib refuses in the FTPS login (`lan.py`), gets past the link.
     access_code: str = Field(
-        min_length=1, max_length=ACCESS_CODE_MAX_LENGTH, pattern=r"^[^\x00-\x1f\x7f]+$", repr=False
+        min_length=1,
+        max_length=ACCESS_CODE_MAX_LENGTH,
+        pattern=r"^[^\x00-\x1f\x7f]+$",
+        repr=False,
     )

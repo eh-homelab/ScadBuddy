@@ -223,8 +223,8 @@ function PrinterItem({
 }
 
 /**
- * `ACCESS_CODE_MAX_LENGTH` in backend/scadbuddy/printers/models.py, which a backend test
- * pins at 128: change both together. The browser counts UTF-16 units and the backend code
+ * `ACCESS_CODE_MAX_LENGTH` in backend/scadbuddy/printers/models.py: Printers.test.tsx
+ * compares this with the API spec's `maxLength`, so one changed alone fails it. The browser counts UTF-16 units and the backend code
  * points, so a code with characters outside the BMP is cut a little short here, never long.
  */
 const ACCESS_CODE_MAX_LENGTH = 128

@@ -1349,7 +1349,7 @@ def test_a_library_files_check_fetches_the_file_once(
     assert check.json()["errors"] == []
     assert fetches == [89]
     # The slot read's spool and this fetch: #4495 makes it one, and this then reads 1.
-    assert download.call_count == 2
+    assert download.call_count == 2, "#4495: two downloads, the spool and the fetch"
 
 
 @respx.mock
