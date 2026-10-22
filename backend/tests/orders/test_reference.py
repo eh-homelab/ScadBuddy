@@ -186,6 +186,29 @@ async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> No
     assert refused.value.field == "commit"
     assert "0" * 40 in refused.value.problem
     assert "no longer has" in refused.value.problem
+    # The same words when the output's commit stands in for one left out (#4484).
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=None, inputs=None, output_id="out3")
+    assert refused.value.field == "commit"
+    assert "out3" in refused.value.problem
+    assert "no longer has" in refused.value.problem
+
+
+async def test_an_outputs_unreadable_inputs_are_named_as_its_own(
+    library: Library, paths: DataPaths
+) -> None:
+    """#4484: the fault is the output's stored inputs, not a mismatch with the caller's."""
+    commit = library.create("demo")
+    library.write_output("demo", "out4", commit)
+    (paths.output_dir("demo", "out4") / INPUTS_NAME).write_text(
+        json.dumps({"params": 3}), encoding="utf-8"
+    )
+    for given in (None, {"params": {"width": 12}, "v": 1}):
+        with pytest.raises(ReferenceError) as refused:
+            await library.resolve(slug=None, commit=None, inputs=given, output_id="out4")
+        assert refused.value.field == "inputs", given
+        assert "stored inputs" in refused.value.problem, given
+        assert "out4" in refused.value.problem, given
 
 
 async def test_a_commit_of_another_model_is_refused(library: Library) -> None:

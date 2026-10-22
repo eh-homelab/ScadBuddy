@@ -116,6 +116,13 @@ def _template_name(directory: Any, slug: str) -> str:
         return slug
 
 
+def _gone(output_id: str | None, commit: str) -> ReferenceError:
+    return ReferenceError(
+        "commit",
+        f"output {output_id!r} names revision {commit}, which the models repository no longer has",
+    )
+
+
 async def resolve_reference(
     catalogue: Catalogue,
     history: ModelHistory,
@@ -183,6 +190,8 @@ async def resolve_reference(
     try:
         full = await asyncio.to_thread(history.resolve, commit)
     except RevisionNotFoundError:
+        if facts is not None and given_commit is None:
+            raise _gone(output_id, commit) from None
         raise ReferenceError("commit", f"no commit {commit!r} in the models repository") from None
     if not await asyncio.to_thread(history.touched, full, model_path(slug)):
         raise ReferenceError("commit", f"commit {full} is not a revision of {slug!r}")
@@ -190,32 +199,31 @@ async def resolve_reference(
         try:
             rendered = await asyncio.to_thread(history.resolve, facts.commit)
         except RevisionNotFoundError:
-            raise ReferenceError(
-                "commit",
-                f"output {output_id!r} names revision {facts.commit}, which the models"
-                " repository no longer has",
-            ) from None
+            raise _gone(output_id, facts.commit) from None
         if rendered != full:
             raise ReferenceError(
                 "commit", f"output {output_id!r} is a render of commit {rendered}, not {full}"
             )
 
     source = await resolve_source(slug, full, paths=paths, history=history, fetcher=fetcher)
+    rendered_inputs: dict[str, Any] | None = None
+    if facts is not None:
+        try:
+            rendered_inputs = normalize_inputs(facts.inputs, None).data
+        except InputsError as error:
+            raise ReferenceError(
+                "inputs", f"output {output_id!r} has unreadable stored inputs: {error}"
+            ) from None
     try:
         normalized = normalize_inputs(inputs, None)
     except InputsError as error:
         raise ReferenceError("inputs", str(error)) from None
-    if facts is not None and given_inputs is not None:
-        try:
-            rendered_inputs = normalize_inputs(facts.inputs, None).data
-        except InputsError:
-            rendered_inputs = dict(facts.inputs)
-        if rendered_inputs != normalized.data:
-            raise ReferenceError(
-                "inputs",
-                f"output {output_id!r} was rendered with other inputs than these; leave"
-                " inputs out to take the output's, or give them whole, `v` included",
-            )
+    if given_inputs is not None and rendered_inputs != normalized.data:
+        raise ReferenceError(
+            "inputs",
+            f"output {output_id!r} was rendered with other inputs than these; leave"
+            " inputs out to take the output's, or give them whole, `v` included",
+        )
     pipeline = await asyncio.to_thread(declares_pipeline, source.scad.parent, slug)
     if not pipeline:
         schema = await cached_schema(
