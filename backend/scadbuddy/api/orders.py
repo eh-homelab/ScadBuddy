@@ -82,6 +82,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.operations import ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
+from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
@@ -89,7 +90,6 @@ from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 #: The lifecycle's refusals, typed by their slug.
-PROBLEMS = "https://scadbuddy.dev/problems/orders/"
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
@@ -220,26 +220,6 @@ class OrderPage(BaseModel):
 # -- errors ------------------------------------------------------------------------------------
 
 
-def _refused(error: LifecycleError) -> ApiError:
-    if error.unprocessable:
-        return ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            str(error),
-            errors=[{"loc": ["body", error.slug], "msg": str(error)}],
-        )
-    extensions: dict[str, Any] = {}
-    if error.items:
-        extensions["items"] = error.items
-    if error.shipments:
-        extensions["shipments"] = error.shipments
-    return ApiError(
-        status.HTTP_404_NOT_FOUND if error.not_found else status.HTTP_409_CONFLICT,
-        str(error),
-        type_=PROBLEMS + error.slug,
-        **extensions,
-    )
-
-
 def _bad_reference(error: ReferenceError) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -253,7 +233,7 @@ async def _run[T](call: Callable[[], T]) -> T:
     try:
         return await asyncio.to_thread(call)
     except LifecycleError as error:
-        raise _refused(error) from None
+        raise refused(error) from None
 
 
 def _path(*values: str) -> None:
@@ -346,12 +326,15 @@ async def put_price_book(
     try:
         patch = SettingsPatch.model_validate(fields)
     except ValidationError as error:
-        problem = error.errors()[0]
-        name = str(problem["loc"][0]).removeprefix("pricing_")
+        # Every bad field at once, so the Settings form can flag them all.
+        problems = [
+            {"loc": ["body", str(p["loc"][0]).removeprefix("pricing_")], "msg": p["msg"]}
+            for p in error.errors()
+        ]
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            problem["msg"],
-            errors=[{"loc": ["body", name], "msg": problem["msg"]}],
+            "; ".join(f"{p['loc'][1]}: {p['msg']}" for p in problems),
+            errors=problems,
         ) from None
     await asyncio.to_thread(store.save, patch)
     snapshot = await asyncio.to_thread(store.snapshot)

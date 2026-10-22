@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ from scadbuddy.orders.lifecycle import (
 )
 from scadbuddy.orders.models import Actor, Filament, Order, OrderItem, PricingPolicy, Quote
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, PricingError, price
+from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.reference import colours_of
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.inputs import inputs_key
@@ -96,24 +98,6 @@ class QuoteError(ValueError):
         super().__init__(message)
         self.plate = plate
         self.slot = slot
-
-
-def _refused(error: LifecycleError) -> ApiError:
-    """A lifecycle refusal as the routes answer it (``api/orders.py`` ``_refused``)."""
-    if error.unprocessable:
-        return ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            str(error),
-            errors=[{"loc": ["body", error.slug], "msg": str(error)}],
-        )
-    return ApiError(
-        status.HTTP_404_NOT_FOUND if error.not_found else status.HTTP_409_CONFLICT,
-        str(error),
-        type_=PROBLEMS + error.slug,
-    )
-
-
-PROBLEMS = "https://scadbuddy.dev/problems/orders/"
 
 
 def _unprocessable(field: str, message: str) -> ApiError:
@@ -353,7 +337,7 @@ async def ensure_output(
             )
         )
     except LifecycleError as error:
-        raise _refused(error) from None
+        raise refused(error) from None
     return output_id
 
 
@@ -462,9 +446,14 @@ def sliced_key(sha256: str) -> str:
 
 
 def _write_sliced(blobs: BlobStore, key: str, payload: bytes) -> Path:
+    """Written under a name of its own and moved into place (``os.replace``, as
+    ``store/local.py`` writes), so two quotes of byte-identical slices writing the same
+    key at once never leave a half-written ``sliced.3mf`` for the other to publish."""
     directory = blobs.dir_for(key)
     path = directory / SLICED_NAME
-    path.write_bytes(payload)
+    staging = directory / f".{SLICED_NAME}.{uuid.uuid4().hex}"
+    staging.write_bytes(payload)
+    os.replace(staging, path)
     return path
 
 
@@ -540,7 +529,7 @@ async def quote_run(
     try:
         await asyncio.to_thread(set_filaments, lifecycle, order_id, item_id, request.filaments, by)
     except LifecycleError as error:
-        raise _refused(error) from None
+        raise refused(error) from None
     order = await asyncio.to_thread(store.order, order_id)
     item = await asyncio.to_thread(store.item, item_id)
     if order is None or item is None:
@@ -595,7 +584,7 @@ async def quote_run(
                 )
             )
         except LifecycleError as error:
-            raise _refused(error) from None
+            raise refused(error) from None
     except QuoteError as error:
         _drop(run.refs, quote_id, held)
         extensions: dict[str, Any] = {}

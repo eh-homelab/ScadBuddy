@@ -301,7 +301,9 @@ class Quote(BaseModel):
     created_at: datetime
     source: QuoteSource
     accepted: bool
-    #: Null for a `manual` quote (§3.4's last amendment); phase 2's slice fills them.
+    #: Null for a `manual` quote (§3.4's last amendment); phase 2's slice fills them with
+    #: the FIRST plate's file alone (one sliced file per plate, plan Ruling 3): every
+    #: plate's own `blob_key` and `sha256` are in `plates`, never summed up here.
     sliced_sha256: str | None
     sliced_blob_key: str | None
     plates: list[dict[str, Any]]

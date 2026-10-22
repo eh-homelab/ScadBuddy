@@ -482,13 +482,14 @@ class OrderStore:
             "SELECT id FROM filaments WHERE upper(material) = upper(%s)"
             " AND upper(coalesce(subtype, '')) = upper(coalesce(%s, ''))"
             " AND upper(coalesce(brand, '')) = upper(coalesce(%s, ''))"
-            " AND upper(colour) = upper(%s)",
+            " AND upper(colour) = upper(%s) AND archived_at IS NULL",
             (material, subtype, brand, colour),
         ).fetchone()
         return None if row is None else str(row["id"])
 
     def insert_filament(self, body: FilamentInput, *, conn: Conn | None = None) -> Filament:
-        """A new record; :class:`FilamentExistsError` for an identity already taken."""
+        """A new record; :class:`FilamentExistsError` for an identity a record in the book
+        holds (an archived one frees its identity: the index is partial)."""
         values = (
             body.material,
             body.subtype,

@@ -30,9 +30,9 @@ from scadbuddy.operations.kinds import KindsBuild, OperationKind
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT
 from scadbuddy.orders.models import Actor
+from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
-    PROBLEMS,
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,

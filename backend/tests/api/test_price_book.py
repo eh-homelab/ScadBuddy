@@ -96,6 +96,11 @@ def test_a_filament_is_edited_and_archived(client: TestClient) -> None:
     assert archived.json()["archived_at"] is not None
     assert client.get(BOOK).json()["filaments"] == []
     assert client.post(f"{BOOK}/filaments/nobody/archive").status_code == 404
+    # An archived record frees its identity: the same filament can be added again.
+    again = client.post(f"{BOOK}/filaments", json=PLA)
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] != made["id"]
+    assert [f["id"] for f in client.get(BOOK).json()["filaments"]] == [again.json()["id"]]
 
 
 def test_the_exponent_is_on_the_order_and_the_book(client: TestClient) -> None:

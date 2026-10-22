@@ -113,6 +113,21 @@ def test_archiving_hides_a_filament_from_the_book(rows: OrderStore, book: PriceB
     assert rows.archive_filament("nobody") is None
 
 
+def test_an_archived_filament_frees_its_identity(rows: OrderStore, book: PriceBookReader) -> None:
+    """There is no unarchive, so the identity index covers the records in the book only:
+    archive "PLA / Basic / Bambu / #FFFFFF" and the same filament can be added again,
+    and the book shows the new record."""
+    first = rows.insert_filament(PLA)
+    rows.archive_filament(first.id)
+    second = rows.insert_filament(PLA)
+    assert second.id != first.id
+    assert [f.id for f in book.snapshot().filaments] == [second.id]
+    # Only the record in the book holds the identity against a third.
+    with pytest.raises(FilamentExistsError) as raised:
+        rows.insert_filament(PLA)
+    assert raised.value.existing_id == second.id
+
+
 def test_the_price_book_reads_policy_and_filaments_together(
     rows: OrderStore, book: PriceBookReader, settings_store: SettingsStore
 ) -> None:

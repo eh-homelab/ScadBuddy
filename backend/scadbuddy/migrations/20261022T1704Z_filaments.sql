@@ -4,7 +4,10 @@
 -- (material, subtype, brand, colour; `bambuddy/farm.py`), upper-cased, so phase 5 can
 -- match a record to Bambuddy's spools by it; every column of the index is non-null or
 -- coalesced, so two records can never both pass it. `archived_at` hides a record from
--- the book and the pickers; a quote already priced with it keeps its lines (§5.1).
+-- the book and the pickers; a quote already priced with it keeps its lines (§5.1), and
+-- the index is over the records in the book only, so an archived record frees its
+-- identity for a new one (there is no unarchive): phase 5's matcher takes the record
+-- that is not archived.
 
 CREATE TABLE filaments (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -21,4 +24,4 @@ CREATE TABLE filaments (
 );
 CREATE UNIQUE INDEX filaments_identity ON filaments (
   upper(material), upper(coalesce(subtype, '')), upper(coalesce(brand, '')), upper(colour)
-);
+) WHERE archived_at IS NULL;

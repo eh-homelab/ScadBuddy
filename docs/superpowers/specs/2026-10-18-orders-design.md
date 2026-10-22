@@ -182,7 +182,8 @@ unique index), the measured facts and the arithmetic:
   As built in phase 2 (#4250, plan 2026-10-22 Ruling 3): each sliced plate's file is a
   directory blob of the blob store (`StoreBundle.blobs`, on every backend) under the key
   `quote-<sha256>` (its `sliced.3mf`), one per plate; `sliced_blob_key` and
-  `sliced_sha256` are the first plate's, and each entry of `plates` carries its own
+  `sliced_sha256` are the first plate's alone, never the whole job's (a matcher that
+  wants every plate reads `plates[].blob_key` and `plates[].sha256`), and each entry of `plates` carries its own
   `blob_key` and `sha256`, all held by the one holder `(order_item_quote, <quote id>)`.
   The run makes the quote's id first and takes the ref (`blob_refs.add`) after the
   blob's publish and before the quote's row, so a crash between them leaves at most a
@@ -273,7 +274,7 @@ agent's follow a 202.
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
 | `GET /orders/{id}/costs` | the quote against the actuals (§6.4) |
 | `GET/PUT /orders/price-book` | §5.1: the currency (with its `minor_exponent`), the policy and the filaments not archived; `PUT` takes the policy whole and the estimate's factor |
-| `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record |
+| `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record in the book (an archived record frees its identity: there is no unarchive, so the same filament can be added again) |
 | `GET /orders/estimate?output_id=&filament_id=` | §5.3: the rough estimate of every plate of an output, never recorded; 422 `filament_density` for a filament with no density |
 | `GET /orders/{id}/events` | the audit line |
 
