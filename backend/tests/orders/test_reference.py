@@ -186,12 +186,14 @@ async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> No
     assert refused.value.field == "commit"
     assert "0" * 40 in refused.value.problem
     assert "no longer has" in refused.value.problem
-    # The same words when the output's commit stands in for one left out (#4484).
-    with pytest.raises(ReferenceError) as refused:
-        await library.resolve(slug=None, commit=None, inputs=None, output_id="out3")
-    assert refused.value.field == "commit"
-    assert "out3" in refused.value.problem
-    assert "no longer has" in refused.value.problem
+    # The same words when the output's commit stands in for one left out, or is
+    # given back, whole or short (#4484).
+    for given in (None, "0" * 40, "0" * 7):
+        with pytest.raises(ReferenceError) as refused:
+            await library.resolve(slug=None, commit=given, inputs=None, output_id="out3")
+        assert refused.value.field == "commit", given
+        assert "out3" in refused.value.problem, given
+        assert "no longer has" in refused.value.problem, given
 
 
 async def test_an_outputs_unreadable_inputs_are_named_as_its_own(

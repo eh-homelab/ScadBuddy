@@ -190,8 +190,9 @@ async def resolve_reference(
     try:
         full = await asyncio.to_thread(history.resolve, commit)
     except RevisionNotFoundError:
-        if facts is not None and given_commit is None:
-            raise _gone(output_id, commit) from None
+        # The output's own revision, standing in or given back (whole or short).
+        if facts is not None and facts.commit is not None and facts.commit.startswith(commit):
+            raise _gone(output_id, facts.commit) from None
         raise ReferenceError("commit", f"no commit {commit!r} in the models repository") from None
     if not await asyncio.to_thread(history.touched, full, model_path(slug)):
         raise ReferenceError("commit", f"commit {full} is not a revision of {slug!r}")
