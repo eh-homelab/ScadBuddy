@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from scadbuddy.core.gitrepo import RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
@@ -194,6 +195,26 @@ async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> No
         assert refused.value.field == "commit", given
         assert "out3" in refused.value.problem, given
         assert "no longer has" in refused.value.problem, given
+
+
+async def test_an_ambiguous_short_id_of_a_live_output_revision_is_not_gone(
+    library: Library, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short id `rev-parse` refuses as ambiguous: the output's revision is still there."""
+    commit = library.create("demo")
+    library.write_output("demo", "out5", commit)
+    resolve = library.history.resolve
+
+    def ambiguous(given: str) -> str:
+        if len(given) < 40:
+            raise RevisionNotFoundError(given)
+        return resolve(given)
+
+    monkeypatch.setattr(library.history, "resolve", ambiguous)
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=commit[:7], inputs=None, output_id="out5")
+    assert refused.value.field == "commit"
+    assert "no longer has" not in refused.value.problem
 
 
 async def test_an_outputs_unreadable_inputs_are_named_as_its_own(

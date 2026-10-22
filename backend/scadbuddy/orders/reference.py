@@ -116,6 +116,14 @@ def _template_name(directory: Any, slug: str) -> str:
         return slug
 
 
+async def _resolves(history: ModelHistory, commit: str) -> bool:
+    try:
+        await asyncio.to_thread(history.resolve, commit)
+    except RevisionNotFoundError:
+        return False
+    return True
+
+
 def _gone(output_id: str | None, commit: str) -> ReferenceError:
     return ReferenceError(
         "commit",
@@ -190,8 +198,14 @@ async def resolve_reference(
     try:
         full = await asyncio.to_thread(history.resolve, commit)
     except RevisionNotFoundError:
-        # The output's own revision, standing in or given back (whole or short).
-        if facts is not None and facts.commit is not None and facts.commit.startswith(commit):
+        # The output's own revision, standing in or given back (whole or short), and gone
+        # itself: a short id that fails only as ambiguous names no gone revision.
+        if (
+            facts is not None
+            and facts.commit is not None
+            and facts.commit.startswith(commit)
+            and (commit == facts.commit or not await _resolves(history, facts.commit))
+        ):
             raise _gone(output_id, facts.commit) from None
         raise ReferenceError("commit", f"no commit {commit!r} in the models repository") from None
     if not await asyncio.to_thread(history.touched, full, model_path(slug)):
