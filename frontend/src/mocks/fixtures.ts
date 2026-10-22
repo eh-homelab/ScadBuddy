@@ -966,6 +966,13 @@ export const settingsDefaults = {
   library_backend: 'bambuddy',
   slicer_backend: 'bambuddy',
   orders_currency: 'USD',
+  // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
+  pricing_machine_rate_per_hour: '0',
+  pricing_setup_fee: '0',
+  pricing_labour_per_item: '0',
+  pricing_markup_percent: '0',
+  pricing_rounding: 'to_minor_unit',
+  rough_estimate_factor: '1.15',
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,

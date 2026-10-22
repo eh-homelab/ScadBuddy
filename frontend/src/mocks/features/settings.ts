@@ -49,6 +49,16 @@ const NULLABLE = new Set([
   'store_s3_access_key_id',
   'store_s3_secret_access_key',
 ])
+/** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
+const NO_MINOR_UNIT = new Set(['XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX'])
+/** #4250 — the price book's decimal strings (`core/settings.py` `decimal_string`). */
+const PRICING_DECIMALS = new Set([
+  'pricing_machine_rate_per_hour',
+  'pricing_setup_fee',
+  'pricing_labour_per_item',
+  'pricing_markup_percent',
+  'rough_estimate_factor',
+])
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = [
   'store_backend',
@@ -112,6 +122,18 @@ function putSettings(body: Record<string, unknown>) {
     }
     if (name === 'orders_currency' && !(typeof value === 'string' && /^[A-Z]{3}$/.test(value))) {
       return refused(name, "String should match pattern '^[A-Z]{3}$'")
+    }
+    // #4250 Ruling 5: ISO 4217 lists no minor unit for these, so nothing is priced in them.
+    if (name === 'orders_currency' && NO_MINOR_UNIT.has(String(value))) {
+      return refused(name, `Value error, ${envName(name)}: ${String(value)} has no minor unit in ISO 4217, so nothing can be priced in it`)
+    }
+    if (PRICING_DECIMALS.has(name)) {
+      const text = typeof value === 'string' ? value.trim() : ''
+      if (!/^\d+(\.\d+)?$/.test(text)) return refused(name, `Value error, ${envName(name)} must be at least 0`)
+      if (name === 'rough_estimate_factor' && Number(text) <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0`)
+    }
+    if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
+      return refused(name, "Input should be 'to_minor_unit' or 'to_major'")
     }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)

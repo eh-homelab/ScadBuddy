@@ -6,7 +6,18 @@ import { ItemStatusBadge } from './OrderStatusBadge'
 import { itemPrice } from './price'
 
 /** An order's line items (§3.3): title, status, quantity and price; a row opens the item. */
-export function OrderItemsTable({ items, currency, onOpen }: { items: OrderItemDetail[]; currency: string; onOpen: (item: OrderItemDetail) => void }) {
+export function OrderItemsTable({
+  items,
+  currency,
+  exponent,
+  onOpen,
+}: {
+  items: OrderItemDetail[]
+  currency: string
+  /** The order's `minor_exponent`. */
+  exponent: number
+  onOpen: (item: OrderItemDetail) => void
+}) {
   const columns: Column<OrderItemDetail>[] = [
     {
       key: 'title',
@@ -26,7 +37,7 @@ export function OrderItemsTable({ items, currency, onOpen }: { items: OrderItemD
       className: 'sb-num whitespace-nowrap',
       cell: (item) => {
         const price = itemPrice(item)
-        return price === null ? <span className="text-muted-foreground">Not priced</span> : formatMoney(price, currency)
+        return price === null ? <span className="text-muted-foreground">Not priced</span> : formatMoney(price, currency, exponent)
       },
     },
   ]

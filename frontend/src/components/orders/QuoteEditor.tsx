@@ -15,6 +15,7 @@ export function QuoteEditor({
   orderId,
   itemId,
   currency,
+  exponent,
   quotes,
   editable,
   onChanged,
@@ -22,6 +23,8 @@ export function QuoteEditor({
   orderId: string
   itemId: string
   currency: string
+  /** The order's `minor_exponent`. */
+  exponent: number
   quotes: Quote[]
   editable: boolean
   onChanged: () => void
@@ -32,7 +35,7 @@ export function QuoteEditor({
   const [error, setError] = useState<string | null>(null)
 
   async function record(accept: boolean) {
-    const minor = toMinor(price, currency)
+    const minor = toMinor(price, exponent)
     if (minor === null || minor < 0) {
       setError('Enter a price per unit, such as 12.50.')
       return
@@ -72,7 +75,7 @@ export function QuoteEditor({
         <ul className="flex flex-col gap-1 text-[13px]">
           {quotes.map((quote) => (
             <li key={quote.id} className="flex flex-wrap items-center gap-2">
-              <span className="sb-num">{formatMoney(quote.unit_price_minor, currency)} × {quote.quantity} = {formatMoney(quote.total_minor, currency)}</span>
+              <span className="sb-num">{formatMoney(quote.unit_price_minor, currency, exponent)} × {quote.quantity} = {formatMoney(quote.total_minor, currency, exponent)}</span>
               <span className="text-muted-foreground">{quote.lines[0]?.label ?? quote.source}</span>
               {quote.accepted ? (
                 <span className="text-xs text-primary">Accepted</span>

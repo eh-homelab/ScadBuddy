@@ -17,9 +17,9 @@ import type {
   ShipmentEdit,
   ShipmentInput,
 } from '../../../api/types'
-import { mockModels, mockOutput } from '../../handlers'
+import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
-import { BAD_CURSOR, BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, state, UNKNOWN_PARAMETER } from './state'
+import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state, UNKNOWN_PARAMETER } from './state'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -30,10 +30,10 @@ import { BAD_CURSOR, BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refus
 
 const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'cursor', 'limit'])
 const STATUSES = new Set<OrderStatus>(['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled'])
-const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
+export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
 const DERIVED = new Set<OrderStatus>(['accepted', 'in_production', 'ready', 'shipped'])
-const SETTLED = new Set(['fulfilled', 'cancelled'])
+export const SETTLED = new Set(['fulfilled', 'cancelled'])
 const FULFILLABLE = new Set(['approved', 'failed'])
 
 const encodeCursor = (o: Order) => btoa(`${o.created_at}|${o.id}`).replaceAll('+', '-').replaceAll('/', '_')
@@ -50,32 +50,32 @@ function decodeCursor(cursor: string): [string, string] | null {
 }
 
 const itemsOf = (orderId: string) => state.items.filter((i) => i.order_id === orderId).sort((a, b) => a.position - b.position)
-const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_item_id === itemId)
+export const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_item_id === itemId)
 const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_item_id === itemId).sort((a, b) => a.attempt - b.attempt)
 const shipmentsOf = (orderId: string) => state.shipments.filter((s) => s.order_id === orderId)
 
-function lock(orderId: string): Order {
+export function lock(orderId: string): Order {
   const order = state.orders.find((o) => o.id === orderId)
   if (!order) throw new Refused('order_not_found', `no order ${orderId}`, [], true)
   return order
 }
-function itemOf(order: Order, itemId: string): OrderItem {
+export function itemOf(order: Order, itemId: string): OrderItem {
   const found = state.items.find((i) => i.id === itemId && i.order_id === order.id)
   if (!found) throw new Refused('item_not_found', `no item ${itemId} of order ${order.number}`, [], true)
   return found
 }
-function notEnded(order: Order) {
+export function notEnded(order: Order) {
   if (ENDED.has(order.status)) throw new Refused(`order_${order.status}`, `order ${order.number} is ${order.status}`)
 }
 function notOnHold(order: Order) {
   if (order.on_hold) throw new Refused('order_on_hold', `order ${order.number} is on hold`)
 }
-function openForItems(order: Order, what: string) {
+export function openForItems(order: Order, what: string) {
   if (!OPEN_FOR_EDITS.has(order.status)) {
     throw new Refused('item_locked', `order ${order.number} is ${order.status}: ${what} is pinned once accepted`)
   }
 }
-function event(order: Order, kind: string, detail: Record<string, unknown> = {}) {
+export function event(order: Order, kind: string, detail: Record<string, unknown> = {}) {
   state.events.push({ id: state.events.length + 1, order_id: order.id, at: now(), by: BROWSER, kind, detail })
 }
 function setStatus(order: Order, status: OrderStatus) {
@@ -94,7 +94,7 @@ function uncovered(items: OrderItem[], shipments: Shipment[]): string[] {
 }
 
 /** `orders/lifecycle.py` `derive`, and the `draft`/`quoted` settling before accept. */
-function rederive(order: Order) {
+export function rederive(order: Order) {
   const items = itemsOf(order.id)
   let status: OrderStatus = order.status
   if (OPEN_FOR_EDITS.has(order.status)) {
@@ -128,10 +128,32 @@ function detail(order: Order): OrderDetail {
 }
 
 /** The backend's answer for a `Refused`: 404 for a missing row, 409 typed by the slug otherwise. */
-function refused(request: Request, error: unknown) {
+export function refused(request: Request, error: unknown) {
+  if (error instanceof FilamentsRefused) return fieldProblem(request, 'filaments', error.message)
   if (!(error instanceof Refused)) throw error
   const extensions = error.items.length > 0 ? { items: error.items } : {}
   return error.notFound ? problem(request, 404, error.message) : problem(request, 409, error.message, PROBLEMS + error.slug, extensions)
+}
+
+/** A body naming a slot or a filament that cannot be (#4250): a 422 on `filaments`. */
+export class FilamentsRefused extends Error {}
+
+/**
+ * The item's slots with `filaments` (`{slot: filament_id | null}`) applied, as
+ * `orders/lifecycle.py` `update_item` does (#4250 Ruling 6): a slot the item lacks, or a
+ * filament not in the book or archived, is refused; whether a slot changed (a repin).
+ */
+export function withFilaments(found: OrderItem, filaments: Record<string, string | null>): { colours: OrderItem['colours']; changed: boolean } {
+  const known = new Set(found.colours.map((c) => c.slot))
+  for (const [slot, id] of Object.entries(filaments)) {
+    if (!known.has(Number(slot))) throw new FilamentsRefused(`the item has no colour slot ${slot}`)
+    if (id === null) continue
+    const record = state.filaments.find((f) => f.id === id)
+    if (!record) throw new FilamentsRefused(`slot ${slot}: no filament ${id} in the price book`)
+    if (record.archived_at) throw new FilamentsRefused(`slot ${slot}: filament ${id} is archived`)
+  }
+  const colours = found.colours.map((c) => (String(c.slot) in filaments ? { ...c, filament_id: filaments[String(c.slot)] ?? null } : c))
+  return { colours, changed: colours.some((c, i) => c.filament_id !== found.colours[i]?.filament_id) }
 }
 
 /** A transition: the lifecycle's rules, then the derivation, then the answer. */
@@ -230,7 +252,8 @@ export const handlers = [
       number: `ORD-${year}-${taken}`,
       customer_id: customer.id,
       status: 'draft',
-      currency: state.customers.length > 0 ? 'USD' : 'USD',
+      currency: mockSettings().orders_currency,
+      minor_exponent: minorExponent(mockSettings().orders_currency),
       on_hold: false,
       shipping_address_id: customer.addresses.find((a) => a.default_shipping)?.id ?? null,
       billing_address_id: customer.addresses.find((a) => a.default_billing)?.id ?? null,
@@ -251,6 +274,8 @@ export const handlers = [
   }),
 
   http.get('/api/v1/orders/:id', ({ request, params }) => {
+    // `priceBook.ts` answers these: a path is matched by the first handler that answers.
+    if (params.id === 'price-book' || params.id === 'estimate') return undefined
     const order = state.orders.find((o) => o.id === params.id)
     return order ? HttpResponse.json(detail(order)) : problem(request, 404, `no order '${String(params.id)}'`)
   }),
@@ -427,7 +452,7 @@ export const handlers = [
   }),
   http.patch('/api/v1/orders/:id/items/:item', async ({ request, params }) => {
     const body = (await request.json()) as OrderItemPatch & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes'])
+    const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments'])
     if (extra) return extra
     let resolved: Resolved | undefined
     if (body.reference || body.output_id) {
@@ -440,12 +465,14 @@ export const handlers = [
       notEnded(order)
       const found = itemOf(order, String(params.item))
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
-      const repins = resolved !== undefined || body.quantity != null
-      if (repins) openForItems(order, "an item's reference and quantity")
+      const refiled = body.filaments ? withFilaments(found, body.filaments) : undefined
+      const repins = resolved !== undefined || body.quantity != null || refiled?.changed === true
+      if (repins) openForItems(order, "an item's reference, quantity and filaments")
       if (resolved) {
         found.reference = resolved.reference
         found.colours = resolved.colours
       }
+      if (refiled?.changed) found.colours = refiled.colours
       if ('output_id' in body) found.output_id = body.output_id ?? null
       if (body.quantity != null) found.quantity = body.quantity
       if (body.title != null) found.title = body.title
