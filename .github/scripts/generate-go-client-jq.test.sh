@@ -13,7 +13,8 @@ spec='{
     "responses": {"default": {"description": "a problem\ndocument",
       "headers": {"default": {"description": "a header\nnamed default"}},
       "content": {"application/json": {"examples": {
-        "e1": {"summary": "a media\nexample", "value": {"description": "m\nn"}}}}}}}
+        "e1": {"summary": "a media\nexample", "value": {"description": "m\nn"}},
+        "default": {"summary": "an example\nnamed default", "value": {"description": "d\ne"}}}}}}}
   }}},
   "components": {"examples": {"e2": {"summary": "an example\nobject",
                                     "description": "its\ndescription",
@@ -21,6 +22,8 @@ spec='{
                  "schemas": {"S": {
     "properties": {
       "default": {"type": "string", "description": "a property\nnamed default"},
+      "content": {"type": "object", "description": "a property\nnamed content",
+                  "default": {"description": "c\nd"}},
       "kept": {"type": "object", "default": {"description": "a\nvalue"},
                "example": {"summary": "x\ny"}, "examples": [{"description": "p\nq"}]},
       "ref": {"$ref": "#/components/schemas/T", "description": "dropped"},
@@ -44,6 +47,10 @@ expect '.components.schemas.S.properties.kept.examples[0].description' '"p\nq"'
 expect '.paths["/a"].post.responses.default.headers.default.description' '"a header named default"'
 expect '.paths["/a"].post.responses.default.content["application/json"].examples.e1.summary' '"a media example"'
 expect '.paths["/a"].post.responses.default.content["application/json"].examples.e1.value.description' '"m\nn"'
+expect '.paths["/a"].post.responses.default.content["application/json"].examples.default.summary' '"an example named default"'
+expect '.paths["/a"].post.responses.default.content["application/json"].examples.default.value.description' '"d\ne"'
+expect '.components.schemas.S.properties.content.description' '"a property named content"'
+expect '.components.schemas.S.properties.content.default.description' '"c\nd"'
 expect '.components.examples.e2.summary' '"an example object"'
 expect '.components.examples.e2.description' '"its description"'
 expect '.components.examples.e2.value.summary' '"v\nw"'

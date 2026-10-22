@@ -12,13 +12,15 @@
 #    Only string description/summary keys change, and none inside a payload: a
 #    `default` or `example` value, an `examples` array, or an Example Object's `value`.
 #    A key of those names in a map of names (a response, a property, a header named
-#    `default`) is no keyword, and an Example Object's own summary is documentation.
+#    `default`) is no keyword, and an Example Object's own summary is documentation. A
+#    key in `name_maps` is a map only where it is a keyword itself: a property named
+#    `content` is a name, so a `default` inside it is its keyword.
 def name_maps: ["responses", "properties", "patternProperties", "headers", "content",
   "examples", "schemas", "parameters", "requestBodies", "securitySchemes", "links",
   "callbacks", "pathItems", "encoding", "$defs", "definitions"];
 def payload: . as $q | any(range(1; length);
   ($q[.] | IN("default", "example", "examples"))
-  and ($q[. - 1] | IN(name_maps[]) | not)
+  and ((($q[. - 1] | IN(name_maps[])) and (. < 2 or ($q[. - 2] | IN(name_maps[]) | not))) | not)
   and ($q[.] != "examples" or ($q[. + 1] | type) == "number" or $q[. + 2] == "value"));
 walk(if type == "object" and has("$ref") and (has("description") or has("summary")) then del(.description, .summary) else . end)
 | walk(if type == "object" and (has("anyOf") or has("oneOf")) then del(.default) else . end)
