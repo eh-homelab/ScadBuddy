@@ -16,9 +16,14 @@
 #    `payload` reads the path from the root, keyword then name in turn: a key in
 #    `name_maps` (in keyword position) makes the next key a name, so a property named
 #    `content` is a name and a `default` inside it is its keyword, at any depth.
-def name_maps: ["responses", "properties", "patternProperties", "headers", "content",
-  "schemas", "parameters", "requestBodies", "securitySchemes", "links", "callbacks",
-  "pathItems", "encoding", "$defs", "definitions"];
+#: OpenAPI 3.1's and JSON Schema's maps of names. A Link Object's `parameters`, a map
+#: of values, is not told apart from the operation's; the backend's export has no links.
+#: A map keyword missing here makes its `default` entries read as payload, so add any
+#: new one the export starts to use.
+def name_maps: ["responses", "properties", "patternProperties", "dependentSchemas",
+  "headers", "content", "schemas", "parameters", "requestBodies", "securitySchemes",
+  "links", "callbacks", "pathItems", "webhooks", "encoding", "mapping", "$defs",
+  "definitions"];
 #: Whether a path is inside a payload. State: `kw` (the next key is a keyword),
 #: `name` (it is a name in a map), `examples` (an `examples` array index or Example
 #: Object name), `exobj` (a keyword of an Example Object, whose `value` is payload).
