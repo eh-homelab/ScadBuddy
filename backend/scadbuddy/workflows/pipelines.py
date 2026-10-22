@@ -293,7 +293,8 @@ def _failure_of(error: BaseException) -> Failure:
                 return Failure.model_validate(detail)
             except ValidationError:
                 workflow.logger.debug(
-                    "a %s detail is not a Failure; the job's error is its message", cause.type
+                    "a detail of type %s is not a Failure; the job's error is its message",
+                    cause.type,
                 )
             return Failure(error=cause.message)
         if isinstance(cause, ActivityError) and cause.activity_type in _STAGES:
