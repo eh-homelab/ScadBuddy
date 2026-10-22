@@ -200,7 +200,12 @@ async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> No
 async def test_an_ambiguous_short_id_of_a_live_output_revision_is_not_gone(
     library: Library, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A short id `rev-parse` refuses as ambiguous: the output's revision is still there."""
+    """A short id `rev-parse` refuses as ambiguous: the output's revision is still there.
+
+    The stub stands in for git's ambiguity, which a small test repository cannot
+    produce: `rev-parse --verify --quiet` exits non-zero for a short id naming more
+    than one object (https://git-scm.com/docs/git-rev-parse#Documentation/git-rev-parse.txt---verify),
+    so `GitRepo.resolve` raises `RevisionNotFoundError` for it as for a missing one."""
     commit = library.create("demo")
     library.write_output("demo", "out5", commit)
     resolve = library.history.resolve
