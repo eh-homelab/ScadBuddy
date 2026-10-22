@@ -207,6 +207,8 @@ async def resolve_reference(
             )
 
     source = await resolve_source(slug, full, paths=paths, history=history, fetcher=fetcher)
+    # The output's stored inputs first: when both are malformed, the fault to name is the
+    # output's, which no change to the request would fix.
     rendered_inputs: dict[str, Any] | None = None
     if facts is not None:
         try:
