@@ -89,7 +89,6 @@ from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
-#: The lifecycle's refusals, typed by their slug.
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
@@ -327,8 +326,12 @@ async def put_price_book(
         patch = SettingsPatch.model_validate(fields)
     except ValidationError as error:
         # Every bad field at once, so the Settings form can flag them all.
+        # A model-level error has no field in its `loc`: it is the body's.
         problems = [
-            {"loc": ["body", str(p["loc"][0]).removeprefix("pricing_")], "msg": p["msg"]}
+            {
+                "loc": ["body", str(p["loc"][0]).removeprefix("pricing_") if p["loc"] else "body"],
+                "msg": p["msg"],
+            }
             for p in error.errors()
         ]
         raise ApiError(
