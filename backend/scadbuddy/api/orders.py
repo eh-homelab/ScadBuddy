@@ -18,8 +18,10 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+import zipfile
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -45,10 +47,12 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
     LifecycleError,
@@ -77,6 +81,7 @@ from scadbuddy.orders.models import (
     Shipment,
 )
 from scadbuddy.orders.operations import ORDER_ITEM_QUOTE
+from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
@@ -399,6 +404,104 @@ async def archive_filament(filament_id: str, orders: OrdersDep) -> Filament:
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
     return found
+
+
+# -- the rough estimate (§5.3, #4250 Ruling 9) ---------------------------------------------------
+
+
+class EstimatedPart(BaseModel):
+    """One part of one plate: its enclosed volume, or ``None`` when it is not checked
+    and closed (``render/geometry.py`` measures only those), and so not counted."""
+
+    plate: int
+    part: int
+    name: str
+    colour: str
+    volume_mm3: float | None
+
+
+class OrderEstimate(BaseModel):
+    """A rough estimate (§5.3): never a quote, never stored, never accepted."""
+
+    #: Always true: this is an estimate.
+    estimate: bool = True
+    #: Decimal string, to the hundredth of a gram.
+    grams: str
+    #: The grams at the filament's cost per kilogram, rounded as a quote line is.
+    filament_minor: Money
+    currency: str
+    minor_exponent: int
+    #: ``rough_estimate_factor`` as it stood.
+    factor: str
+    parts: list[EstimatedPart]
+    #: How many parts have no volume and are left out of ``grams``.
+    unknown_parts: int
+
+
+@router.get("/estimate", response_model=OrderEstimate, summary="A rough estimate of an output")
+async def estimate(
+    output_id: str, filament_id: str, orders: OrdersDep, outputs: OutputsDep
+) -> OrderEstimate:
+    """The output's parts' enclosed volumes over every plate, times the filament's
+    density and the ``rough_estimate_factor`` for walls, infill and purge (§5.3). A
+    read: nothing is recorded. 404 for an unknown output or filament, 422
+    ``filament_density`` for a filament with no density."""
+    _path(output_id, filament_id)
+    record = await asyncio.to_thread(orders.store.filament, filament_id)
+    if record is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    if record.density_g_cm3 is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"filament {filament_id} has no density, so there is no estimate",
+            type_=PROBLEMS + "filament_density",
+            errors=[{"loc": ["query", "filament_id"], "msg": "the filament has no density"}],
+        )
+    await asyncio.to_thread(require_output, outputs, output_id)
+
+    def measured() -> list[EstimatedPart]:
+        parts: list[EstimatedPart] = []
+        plate, plates = 1, 1
+        while plate <= plates:
+            analysis = outputs.geometry(output_id, plate)
+            plates = analysis.plates
+            parts += [
+                EstimatedPart(
+                    plate=plate,
+                    part=part.part,
+                    name=part.name,
+                    colour=part.colour,
+                    volume_mm3=part.volume_mm3,
+                )
+                for part in analysis.parts
+            ]
+            plate += 1
+        return parts
+
+    try:
+        parts = await asyncio.to_thread(measured)
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
+    except (ValueError, zipfile.BadZipFile) as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the 3MF of output {output_id!r} cannot be analysed: {error}",
+        ) from None
+    currency, _, factor = await asyncio.to_thread(orders.price_book.policy)
+    grams = estimate_grams(
+        [part.volume_mm3 for part in parts if part.volume_mm3 is not None],
+        record.density_g_cm3,
+        factor,
+    )
+    return OrderEstimate(
+        grams=format(grams, "f"),
+        filament_minor=to_minor(grams * Decimal(record.cost_per_kg) / 1000, currency),
+        currency=currency,
+        minor_exponent=minor_exponent(currency),
+        factor=factor,
+        parts=parts,
+        unknown_parts=sum(1 for part in parts if part.volume_mm3 is None),
+    )
 
 
 def _totals(items: list[ItemDetail], charges: list[Charge], payments: list[Payment]) -> OrderTotals:
