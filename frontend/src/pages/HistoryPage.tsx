@@ -496,6 +496,9 @@ function OutputLibraries({
   )
 }
 
+/** #4491 — a row's actions are a finger's target on a phone: 40 px tall, below `sm`. */
+const PHONE_TAP = 'max-sm:h-10'
+
 function OutputRow({
   output,
   schema,
@@ -594,12 +597,17 @@ function OutputRow({
             No preview
           </div>
         )}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2.5">
+        {/* #4491 — at least 10rem beside the picture, so on a phone the actions wrap below
+            instead of squeezing this column to one word wide. */}
+        <div className="min-w-40 flex-1" data-testid="output-summary">
+          {/* #4491 — wraps: the chips keep a row, the name truncates, the age stays one line. */}
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <Checkbox aria-label={`Select ${output.name ?? shortId(output.id)}`} checked={picked} onCheckedChange={onPick} />
             <ColorStrip colors={output.colors ?? []} size="sm" />
             {naming === null ? (
-              <span className="text-sm font-medium">{label}</span>
+              <span className="max-w-full min-w-0 truncate text-sm font-medium" title={label}>
+                {label}
+              </span>
             ) : (
               <form
                 className="flex items-center gap-1.5"
@@ -625,22 +633,25 @@ function OutputRow({
                 </Button>
               </form>
             )}
-            <span className="text-xs text-muted-foreground">{timeAgo(output.created_at)}</span>
+            <span className="text-xs whitespace-nowrap text-muted-foreground">{timeAgo(output.created_at)}</span>
           </div>
           {renameError && (
             <p role="alert" className="mt-1 text-xs text-destructive">
               {renameError}
             </p>
           )}
-          <p className="sb-num mt-1 text-xs text-muted-foreground">
-            {output.bbox_mm ? formatBbox(output.bbox_mm, unit) : 'No dimensions recorded'}
+          {/* #4491 — each fact on one line, the line wrapping between them. */}
+          <p className="sb-num mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+            <span className="whitespace-nowrap">
+              {output.bbox_mm ? formatBbox(output.bbox_mm, unit) : 'No dimensions recorded'}
+            </span>
             {/* #2288 — how its last print went, linked to ScadBuddy's print page. Being
                 queued says nothing of that, so the queue ids are neutral and show only
                 until a print is on record. */}
             {lastPrint && (
               <Link
                 to={`/prints/${lastPrint.archive_id}`}
-                className={`ml-2 underline underline-offset-2 ${printTone(lastPrint.status)}`}
+                className={`underline underline-offset-2 ${printTone(lastPrint.status)}`}
               >
                 {`Last print: ${statusLabel(lastPrint.status)}`}
               </Link>
@@ -650,7 +661,7 @@ function OutputRow({
               (output.plates ?? []).map((plate) => (
                 <BambuddyId
                   key={plate.queue_item_id}
-                  className="ml-2 text-muted-foreground"
+                  className="whitespace-nowrap text-muted-foreground"
                   href={bambuddyUrl && `${bambuddyUrl}/queue/${plate.queue_item_id}`}
                 >
                   {plateLabel(plateNames, plate.plate_id)} queued #{plate.queue_item_id}
@@ -658,14 +669,14 @@ function OutputRow({
               ))}
             {!lastPrint && output.queue_item_id && (output.plates ?? []).length <= 1 && (
               <BambuddyId
-                className="ml-2 text-muted-foreground"
+                className="whitespace-nowrap text-muted-foreground"
                 href={bambuddyUrl && `${bambuddyUrl}/queue/${output.queue_item_id}`}
               >
                 queued #{output.queue_item_id}
               </BambuddyId>
             )}
             {!output.queue_item_id && lastCopy(output) && (
-              <BambuddyId className="ml-2 text-muted-foreground" href={bambuddyUrl && `${bambuddyUrl}/library`}>
+              <BambuddyId className="whitespace-nowrap text-muted-foreground" href={bambuddyUrl && `${bambuddyUrl}/library`}>
                 in library #{lastCopy(output)?.id}
               </BambuddyId>
             )}
@@ -675,35 +686,49 @@ function OutputRow({
           {arrangedFrom > 0 && !platesAbove && <LazyArrangedPlates outputId={output.id} size="sm" />}
         </div>
 
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="output-actions">
           {arrangedFrom > 0 ? (
             <span className="text-xs text-muted-foreground">
               {`Arranged from ${arrangedSources(output.arranged_from ?? [])}`}
             </span>
           ) : (
-            <Button type="button" variant="outline" size="sm" onClick={onEdit} aria-label={`Edit ${label}`}>
+            <Button type="button" variant="outline" size="sm" className={PHONE_TAP} onClick={onEdit} aria-label={`Edit ${label}`}>
               Edit
             </Button>
           )}
-          <Button type="button" size="sm" onClick={onPrint} aria-label={`Print ${label}`}>
+          <Button type="button" size="sm" className={PHONE_TAP} onClick={onPrint} aria-label={`Print ${label}`}>
             Print
           </Button>
           {/* #2287 — "again" only for an output that went to Bambuddy before. */}
-          <Button type="button" variant="outline" size="sm" onClick={onSend} aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={PHONE_TAP}
+            onClick={onSend}
+            aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}
+          >
             {sent ? 'Send again' : 'Send'}
           </Button>
           <BlobDownload
             url={api.downloadUrl(output.id)}
             // The server names it (`download_filename`), as every other download of it.
             filename={`${output.slug}-${output.id}.3mf`}
-            className="px-1 text-sm text-primary underline-offset-4 hover:underline"
+            className="px-1 text-sm text-primary underline-offset-4 hover:underline max-sm:inline-flex max-sm:h-10 max-sm:items-center"
           >
             Download 3MF
           </BlobDownload>
           {/* #3672 — the row's other actions, in one menu. */}
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="icon-sm" aria-label={`More for ${label}`} disabled={deleting}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="max-sm:size-10"
+                aria-label={`More for ${label}`}
+                disabled={deleting}
+              >
                 {deleting ? <Spinner /> : <MoreHorizontalIcon />}
               </Button>
             </DropdownMenuTrigger>

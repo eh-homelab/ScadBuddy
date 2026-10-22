@@ -128,3 +128,100 @@ test.describe('model lists at 390 px (#1036)', () => {
     expect((await value.boundingBox())!.width).toBeGreaterThan(0)
   })
 })
+
+/**
+ * #4491 — every pair of a History card's parts (picture, checkbox, colour chips, name, age,
+ * the size line's facts and each action) whose boxes overlap, and every part outside its card.
+ */
+async function cardOverlaps(page: Page): Promise<string[]> {
+  return (await page.evaluate(`(() => {
+    const out = []
+    for (const card of document.querySelectorAll('li:has([data-testid="output-actions"])')) {
+      const summary = card.querySelector('[data-testid="output-summary"]')
+      const head = summary.firstElementChild
+      const parts = [
+        ...card.querySelectorAll('[aria-label^="Preview "], [aria-label^="No preview of "]'),
+        ...head.querySelectorAll('button[role="checkbox"], [role="img"], [title]'),
+        ...[...head.children].filter((el) => el.tagName === 'SPAN' && !el.hasAttribute('title')),
+        ...summary.querySelector('p.sb-num').children,
+        ...card.querySelector('[data-testid="output-actions"]').children,
+      ]
+      const name = (el) => el.getAttribute('aria-label') || el.textContent.trim().slice(0, 24) || el.tagName
+      const frame = card.firstElementChild.getBoundingClientRect()
+      const boxes = parts.map((el) => [el, el.getBoundingClientRect()]).filter(([, b]) => b.width > 0 && b.height > 0)
+      for (const [el, b] of boxes) {
+        if (b.left < frame.left - 0.5 || b.right > frame.right + 0.5) out.push(name(el) + ' outside its card')
+      }
+      for (let i = 0; i < boxes.length; i++) {
+        for (let j = i + 1; j < boxes.length; j++) {
+          const [a, p] = boxes[i]
+          const [c, q] = boxes[j]
+          if (a.contains(c) || c.contains(a)) continue
+          const x = Math.min(p.right, q.right) - Math.max(p.left, q.left)
+          const y = Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top)
+          if (x > 0.5 && y > 0.5) out.push(name(a) + ' over ' + name(c))
+        }
+      }
+    }
+    return out
+  })()`)) as string[]
+}
+
+test.describe('History cards at phone widths (#4491)', () => {
+  for (const width of [320, 375, 390, 430]) {
+    test(`nothing on a card overlaps at ${width} px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 })
+      await page.goto('/m/name-keychain/history')
+      await expect(page.getByRole('button', { name: 'Print Reagan' })).toBeVisible()
+      // The report's cards: a long name, and an output in six colours.
+      const long = 'Coach Alan trophy v2 for the end of season dinner'
+      await page.evaluate(`(async () => {
+        const json = { 'Content-Type': 'application/json' }
+        const outputs = await (await fetch('/api/v1/models/name-keychain/outputs')).json()
+        const reagan = outputs.find((o) => o.name === 'Reagan')
+        const renamed = await fetch('/api/v1/outputs/' + reagan.id, {
+          method: 'PATCH',
+          headers: json,
+          body: JSON.stringify({ name: ${JSON.stringify(long)} }),
+        })
+        if (!renamed.ok) throw new Error('rename failed: ' + renamed.status)
+        const colours = ['#111111', '#EEEEEE', '#E8532F', '#1B6CA8', '#F2A93B', '#2E7D5B']
+        const arranged = await fetch('/api/v1/outputs/arrange', {
+          method: 'POST',
+          headers: json,
+          body: JSON.stringify({ objects: [{ output_id: reagan.id, count: 1 }], colours }),
+        })
+        const job = await arranged.json()
+        const saved = await fetch('/api/v1/models/name-keychain/outputs', {
+          method: 'POST',
+          headers: json,
+          body: JSON.stringify({ job_id: job.id, name: 'Six colours' }),
+        })
+        if (!saved.ok) throw new Error('save failed: ' + saved.status)
+      })()`)
+      // Away and back client-side, so the list is read again and the mock keeps its state
+      // (the model's tabs are behind a menu at 320 px).
+      await page.evaluate(`(() => {
+        history.pushState(null, '', '/m/name-keychain/versions')
+        dispatchEvent(new PopStateEvent('popstate'))
+      })()`)
+      await expect(page.getByRole('button', { name: 'Print Reagan' })).toBeHidden()
+      await page.goBack()
+      await expect(page.getByRole('button', { name: `Print ${long}` })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Print Six colours' })).toBeVisible()
+
+      expect(await sidewaysScrollers(page)).toEqual([])
+      expect(await cardOverlaps(page)).toEqual([])
+      // The long name truncates to one line, its whole text in the title.
+      expect((await page.getByTitle(long).boundingBox())!.height).toBeLessThan(24)
+      // The age and the library copy each on one line.
+      for (const line of [page.getByText('last month').first(), page.getByText(/^in library #/).first()]) {
+        expect((await line.boundingBox())!.height).toBeLessThan(20)
+      }
+      // Every action a finger has to hit is 40 px tall.
+      for (const action of await page.getByTestId('output-actions').first().locator('button, a').all()) {
+        expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(40)
+      }
+    })
+  }
+})

@@ -18,7 +18,7 @@ export function ColorStrip({
   const box = size === 'sm' ? 'size-4 text-[9px]' : 'size-6 text-[10px]'
 
   return (
-    <ul className="flex items-center gap-1" aria-label="Filament colours by extruder">
+    <ul className="flex flex-wrap items-center gap-1" aria-label="Filament colours by extruder">
       {colors.map((color, index) => {
         const hex = normalizeHex(color)
         return (
