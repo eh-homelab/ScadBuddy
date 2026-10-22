@@ -78,6 +78,8 @@ def test_the_histories_are_the_two_sides_of_the_lookup_guard() -> None:
     """What makes ``before_lookup`` worth replaying: a child start and no marker."""
     before, cached = _history("before_lookup"), _history("cached")
     assert len(child_starts(before)) == 1
+    # The literal, not the constant: replay pins the marker the recorded histories
+    # carry, and a check against the constant would follow a rename that breaks it.
     assert "piece-lookup-4199" not in patch_ids(before)
     assert "cached_piece" not in local_activities(before)
     assert child_starts(cached) == []

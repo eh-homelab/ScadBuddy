@@ -169,6 +169,26 @@ def _initialize(session: WebSocketTestSession, root: str | None = CLIENT_ROOT) -
     return response
 
 
+#: What ``initialize`` is given in a test that judges a short `lsp.REQUEST_TIMEOUT`:
+#: it waits on the fake server's start, which past a second on a loaded runner ended
+#: the session before the test began (#4478). Ten times a second's start, and short
+#: enough that the watchdog's first pass, a tenth of it (`lsp.py`'s
+#: ``anyio.sleep(REQUEST_TIMEOUT / 10)``), sleeps 1 s.
+START_TIMEOUT = 10.0
+
+
+def _initialize_then_watch(
+    session: WebSocketTestSession, monkeypatch: pytest.MonkeyPatch, timeout: float = 1.0
+) -> dict[str, Any]:
+    """``initialize`` under `START_TIMEOUT`, then the short ``timeout`` the test judges
+    the session's later requests by: the watchdog reads `lsp.REQUEST_TIMEOUT` on each
+    pass (``watchdog`` in `scadbuddy/library/lsp.py`), so it takes effect on the next."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", START_TIMEOUT)
+    response = _initialize(session)
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", timeout)
+    return response
+
+
 def _gone(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -624,14 +644,13 @@ def test_a_wedged_server_is_killed_and_its_slot_freed(
 ) -> None:
     """A server that stops answering would hold its permit for as long as the editor
     stays open (#201); an unanswered request ends the session instead."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
     route = f"/api/v1/models/{model}/lsp"
     with TestClient(app) as client:
         # The app's start reconfigures logging, dropping the handler caplog put there.
         logging.getLogger().addHandler(caplog.handler)
         with client.websocket_connect(route) as session:
-            _initialize(session)
+            _initialize_then_watch(session, monkeypatch)
             pid = int(pid_file.read_text())
             session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
             with pytest.raises(WebSocketDisconnect) as closed:
@@ -641,7 +660,7 @@ def test_a_wedged_server_is_killed_and_its_slot_freed(
         assert _wait_until(lambda: _gone(pid))
         assert "left a request unanswered" in caplog.text
         with client.websocket_connect(route) as again:
-            assert "result" in _initialize(again)
+            assert "result" in _initialize_then_watch(again, monkeypatch)
 
 
 def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
@@ -654,7 +673,6 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
 ) -> None:
     """A process stuck in the kernel outlives SIGKILL; waiting on it forever would
     hold the permit all the same (#201), so cleanup gives up after KILL_WAIT."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
     spawn = asyncio.create_subprocess_exec
 
@@ -674,7 +692,7 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
     with TestClient(app) as client:
         logging.getLogger().addHandler(caplog.handler)
         with client.websocket_connect(route) as session:
-            _initialize(session)
+            _initialize_then_watch(session, monkeypatch)
             pid = int(pid_file.read_text())
             session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
             with pytest.raises(WebSocketDisconnect) as closed:
@@ -685,7 +703,7 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
         assert "1 killed server(s) not yet reaped" in caplog.text
         assert len(unreaped) == 1
         with client.websocket_connect(route) as again:
-            assert "result" in _initialize(again)
+            assert "result" in _initialize_then_watch(again, monkeypatch)
 
     assert _wait_until(lambda: _gone(pid))
 
@@ -699,7 +717,6 @@ def test_unreaped_servers_are_counted(
 ) -> None:
     """A server that outlives its kill no longer holds a permit, so the log keeps
     count of how many are still around past SCADBUDDY_LSP_SESSIONS."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
     spawn = asyncio.create_subprocess_exec
 
@@ -723,7 +740,7 @@ def test_unreaped_servers_are_counted(
             logging.getLogger().addHandler(caplog.handler)
             for _ in range(2):
                 with client.websocket_connect(route) as session:
-                    _initialize(session)
+                    _initialize_then_watch(session, monkeypatch)
                     pids.append(int(pid_file.read_text()))
                     session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
                     with pytest.raises(WebSocketDisconnect) as closed:
@@ -747,7 +764,6 @@ def test_a_late_reaped_server_is_no_longer_counted(
 ) -> None:
     """A server that outlives KILL_WAIT but is reaped later drops out of the count on
     its own, without waiting for another server to be left unreaped."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
     spawn = asyncio.create_subprocess_exec
 
@@ -767,7 +783,7 @@ def test_a_late_reaped_server_is_no_longer_counted(
     with TestClient(app) as client:
         logging.getLogger().addHandler(caplog.handler)
         with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
-            _initialize(session)
+            _initialize_then_watch(session, monkeypatch)
             session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
             with pytest.raises(WebSocketDisconnect):
                 session.receive_json()
@@ -780,9 +796,8 @@ def test_a_reused_request_id_is_still_watched(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two requests in flight under one id: the first reply leaves the second watched."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
-        _initialize(session)
+        _initialize_then_watch(session, monkeypatch)
         session.send_json(
             {"jsonrpc": "2.0", "id": 2, "method": "delay", "params": {"seconds": 0.3}}
         )
@@ -797,11 +812,10 @@ def test_an_idle_session_is_not_ended(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only an unanswered request counts: an editor left open with nothing to ask
-    keeps its server. The timeout stays above the fake server's start, which
-    ``initialize`` waits on, so only the idle stretch is judged."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    keeps its server. ``initialize`` waits on the fake server's start, so it is given
+    `START_TIMEOUT` and only the idle stretch is judged."""
     with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
-        _initialize(session)
+        _initialize_then_watch(session, monkeypatch)
         session.send_json({"jsonrpc": "2.0", "method": "initialized", "params": {}})
         time.sleep(2.5)
         session.send_json({"jsonrpc": "2.0", "id": 2, "method": "shutdown"})

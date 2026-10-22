@@ -589,7 +589,9 @@ async def test_a_lost_projection_attempt_is_retried_within_seconds() -> None:
 
 
 def test_a_projection_gives_up_on_the_pool_before_its_attempt_times_out() -> None:
-    assert timedelta(seconds=PROJECT_POOL_TIMEOUT) < pipelines.PROJECT_TIMEOUT
+    """#4481: the pool wait ends inside the attempt with as long again left for the
+    write itself, so a wait cannot outlast the attempt (#4468)."""
+    assert timedelta(seconds=2 * PROJECT_POOL_TIMEOUT) <= pipelines.PROJECT_TIMEOUT
 
 
 async def test_a_snapshot_download_longer_than_short_still_loads_the_pipeline(
@@ -810,6 +812,31 @@ async def test_a_failure_the_template_raises_as_openscads_is_taken_with_its_line
     assert final.state == "failed" and final.failure is not None
     assert final.failure.error == "pipeline/pipeline.py:4: no rooms"
     assert final.failure.log_tail == ["ERROR: boom"]
+
+
+async def test_a_failure_detail_that_is_no_failure_is_logged_by_its_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4480: a template's raise of a failure type whose detail does not validate as a
+    `Failure` reads as its message, and the log says the detail was ignored, by the
+    error's type only: never the detail or the message."""
+    world = FakeWorld(
+        "from temporalio.exceptions import ApplicationError\n"
+        "\n"
+        "async def run(ctx, inputs):\n"
+        "    raise ApplicationError('the secret part', {'log_tail': 3}, type='OpenSCADError')\n"
+    )
+    with caplog.at_level("DEBUG", logger="temporalio.workflow"):
+        async with temporal_client() as client:
+            await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    final = world.final()
+    assert final.state == "failed" and final.failure is not None
+    assert final.failure.error == "pipeline/pipeline.py:4: the secret part"
+    [record] = [r for r in caplog.records if "is not a Failure" in r.getMessage()]
+    assert record.getMessage().startswith(
+        "a detail of type OpenSCADError is not a Failure; the job's error is its message"
+    )
+    assert "secret" not in record.getMessage() and record.args == ("OpenSCADError",)
 
 
 async def _children(client: Client, workflow_id: str) -> list[str]:
