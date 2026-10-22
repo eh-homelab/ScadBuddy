@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.api.conftest import wait_for_job
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_send import make_output
@@ -249,6 +250,43 @@ def test_a_commit_or_inputs_beside_an_output_must_be_its_own(client: TestClient)
         )
         assert repinned.status_code == 422, (reference, repinned.text)
         assert repinned.json()["errors"][0]["loc"][-1] == field, reference
+
+
+def test_inputs_beside_an_output_are_given_whole(client: TestClient) -> None:
+    """#4485: the output's own params without its `v` read as `v` 0, so beside an
+    output rendered at `v` 1 they are 422 on `inputs`, on an add and on a repin."""
+    upload(client)
+    customer = create_customer(client)
+    order = create_order(client, customer["id"])
+    inputs = {"params": {"width": 12}, "v": 1}
+    job_id = client.post(f"/api/v1/models/{SLUG}/render", json={"inputs": inputs}).json()["job_id"]
+    wait_for_job(client, job_id)
+    output_id = client.post(
+        f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id, "name": "v1"}, headers=press()
+    ).json()["id"]
+    item = add_item(client, order["id"], output_id=output_id, inputs=inputs, quantity=1)
+    assert item["reference"]["inputs"]["v"] == 1
+    reference = {"inputs": {"params": inputs["params"]}}
+    added = client.post(
+        f"/api/v1/orders/{order['id']}/items",
+        json={**reference, "output_id": output_id, "quantity": 1},
+    )
+    assert added.status_code == 422, added.text
+    assert added.json()["errors"][0]["loc"][-1] == "inputs"
+    assert "`v` included" in added.text
+    repinned = client.patch(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}",
+        json={"reference": reference, "output_id": output_id},
+    )
+    assert repinned.status_code == 422, repinned.text
+    assert repinned.json()["errors"][0]["loc"][-1] == "inputs"
+    # Given whole, `v` included, the repin agrees too.
+    whole = client.patch(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}",
+        json={"reference": {"inputs": inputs}, "output_id": output_id},
+    )
+    assert whole.status_code == 200, whole.text
+    assert whole.json()["reference"]["inputs"]["v"] == 1
 
 
 def test_a_deleted_template_is_409(client: TestClient) -> None:
