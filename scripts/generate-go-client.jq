@@ -9,12 +9,19 @@
 #  - Kiota joins a description's lines, and its paragraphs, with no space
 #    ("Bambuddy (#755, #760);its slots", "there.#2788", #4464) and writes each as one
 #    comment line, so each run of whitespace holding a newline becomes one space first.
-#    Only string description/summary keys change, and none inside a default, example
-#    or examples value, which is payload rather than documentation (a response named
-#    `default` and a property named so are documentation still).
+#    Only string description/summary keys change, and none inside a payload: a
+#    `default` or `example` value, an `examples` array, or an Example Object's `value`.
+#    A key of those names in a map of names (a response, a property, a header named
+#    `default`) is no keyword, and an Example Object's own summary is documentation.
+def name_maps: ["responses", "properties", "patternProperties", "headers", "content",
+  "examples", "schemas", "parameters", "requestBodies", "securitySchemes", "links",
+  "callbacks", "pathItems", "encoding", "$defs", "definitions"];
+def payload: . as $q | any(range(1; length);
+  ($q[.] | IN("default", "example", "examples"))
+  and ($q[. - 1] | IN(name_maps[]) | not)
+  and ($q[.] != "examples" or ($q[. + 1] | type) == "number" or $q[. + 2] == "value"));
 walk(if type == "object" and has("$ref") and (has("description") or has("summary")) then del(.description, .summary) else . end)
 | walk(if type == "object" and (has("anyOf") or has("oneOf")) then del(.default) else . end)
 | reduce (paths(strings) | select(.[-1] == "description" or .[-1] == "summary")
-          | select(. as $q | any(range(1; length); ($q[.] | IN("default", "example", "examples"))
-              and ($q[. - 1] | IN("responses", "properties") | not)) | not)) as $p
+          | select(payload | not)) as $p
     (.; setpath($p; getpath($p) | gsub("\\s*\n\\s*"; " ")))

@@ -10,9 +10,15 @@ spec='{
   "paths": {"/a": {"post": {
     "summary": "one\r\n  two",
     "description": "Bambuddy (#755, #760);\nits slots\n\n#2788: more",
-    "responses": {"default": {"description": "a problem\ndocument"}}
+    "responses": {"default": {"description": "a problem\ndocument",
+      "headers": {"default": {"description": "a header\nnamed default"}},
+      "content": {"application/json": {"examples": {
+        "e1": {"summary": "a media\nexample", "value": {"description": "m\nn"}}}}}}}
   }}},
-  "components": {"schemas": {"S": {
+  "components": {"examples": {"e2": {"summary": "an example\nobject",
+                                    "description": "its\ndescription",
+                                    "value": {"summary": "v\nw"}}},
+                 "schemas": {"S": {
     "properties": {
       "default": {"type": "string", "description": "a property\nnamed default"},
       "kept": {"type": "object", "default": {"description": "a\nvalue"},
@@ -35,6 +41,12 @@ expect '.components.schemas.S.properties.default.description' '"a property named
 expect '.components.schemas.S.properties.kept.default.description' '"a\nvalue"'
 expect '.components.schemas.S.properties.kept.example.summary' '"x\ny"'
 expect '.components.schemas.S.properties.kept.examples[0].description' '"p\nq"'
+expect '.paths["/a"].post.responses.default.headers.default.description' '"a header named default"'
+expect '.paths["/a"].post.responses.default.content["application/json"].examples.e1.summary' '"a media example"'
+expect '.paths["/a"].post.responses.default.content["application/json"].examples.e1.value.description' '"m\nn"'
+expect '.components.examples.e2.summary' '"an example object"'
+expect '.components.examples.e2.description' '"its description"'
+expect '.components.examples.e2.value.summary' '"v\nw"'
 expect '.components.schemas.S.properties.ref | has("description")' 'false'
 expect '.components.schemas.S.properties.tier | has("default")' 'false'
 exit "$fail"
