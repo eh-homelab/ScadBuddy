@@ -862,7 +862,7 @@ async def check_print(
         return PrintCheck()
     # The 3MF's download and the inventory wait on nothing `prepare_run` reads, so they
     # are read beside it (#4196): awaited after it in the order they were read in, so a
-    # failure surfaces where it did, and dropped unread when it refuses. One inventory
+    # failure surfaces where it did, and cancelled when it refuses. One inventory
     # read for the plan, the rack, the slot refusals and the spool warnings (#2722);
     # none for a plan with no slots, whose slot refusals read their own. `_fetch` keeps a
     # download only once it is done, so `prepare_run` must not fetch the 3MF itself here
