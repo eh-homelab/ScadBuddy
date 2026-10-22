@@ -233,7 +233,7 @@ export const printOptions = z
   .default({})
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
-const presetRef = z.object({
+export const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),
 })
@@ -242,8 +242,8 @@ const nozzleChoice = z.object({
   size: z.enum(['0.2', '0.4', '0.6', '0.8']),
   flow: z.enum(['standard', 'high_flow']).default('standard'),
 })
-const nozzles = z.array(nozzleChoice).min(1).max(2)
-const tier = z.enum(['fine', 'standard', 'draft'])
+export const nozzles = z.array(nozzleChoice).min(1).max(2)
+export const tier = z.enum(['fine', 'standard', 'draft'])
 
 type NozzleChoice = z.infer<typeof nozzleChoice>
 type SlotChoice = z.infer<typeof slotChoice>
