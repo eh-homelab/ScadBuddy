@@ -45,7 +45,10 @@ ContactKind = Literal[
 ]
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
 QuoteSource = Literal["slice", "manual"]
-QuoteLineKind = Literal["filament", "machine_time", "setup", "labour", "markup", "manual"]
+#: ``rounding`` is ``to_major``'s difference (#4250 Ruling 5), so the lines always add.
+QuoteLineKind = Literal[
+    "filament", "machine_time", "setup", "labour", "markup", "rounding", "manual"
+]
 Outcome = Literal["succeeded", "failed", "partial", "unknown"]
 
 #: The ``#RRGGBB`` of a colour slot as rendered (§3.3).
