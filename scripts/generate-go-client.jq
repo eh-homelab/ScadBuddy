@@ -20,7 +20,7 @@
 #: of values, is not told apart from the operation's; the backend's export has no links.
 #: A map keyword missing here makes its `default` entries read as payload, so add any
 #: new one the export starts to use.
-def name_maps: ["responses", "properties", "patternProperties", "dependentSchemas",
+def name_maps: ["paths", "responses", "properties", "patternProperties", "dependentSchemas",
   "headers", "content", "schemas", "parameters", "requestBodies", "securitySchemes",
   "links", "callbacks", "pathItems", "webhooks", "encoding", "mapping", "$defs",
   "definitions"];
