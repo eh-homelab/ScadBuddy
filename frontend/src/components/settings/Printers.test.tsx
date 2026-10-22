@@ -15,7 +15,13 @@ import { PrintersPanel } from './Printers'
  * exported: the backend's bound, read rather than restated (#4497 review). */
 function specAccessCodeMax(): number {
   const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
-  const spec = JSON.parse(readFileSync(path, 'utf8')) as {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (cause) {
+    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
+  }
+  const spec = JSON.parse(text) as {
     components: { schemas: { LanLink: { properties: { access_code: { maxLength: number } } } } }
   }
   return spec.components.schemas.LanLink.properties.access_code.maxLength
