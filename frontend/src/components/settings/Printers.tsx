@@ -222,6 +222,13 @@ function PrinterItem({
   )
 }
 
+/**
+ * `ACCESS_CODE_MAX_LENGTH` in backend/scadbuddy/printers/models.py, which a backend test
+ * pins at 128: change both together. The browser counts UTF-16 units and the backend code
+ * points, so a code with characters outside the BMP is cut a little short here, never long.
+ */
+const ACCESS_CODE_MAX_LENGTH = 128
+
 /** The LAN link: the code goes once, to `PUT /lan`, which asks the printer first. User-only. */
 function LanForm({ row, onLinked }: { row: PrinterRow; onLinked: (row: PrinterRow) => void }) {
   const [host, setHost] = useState('')
@@ -264,9 +271,9 @@ function LanForm({ row, onLinked }: { row: PrinterRow; onLinked: (row: PrinterRo
       <LabeledInput
         label="Access code"
         type="password"
-        // Any format (#4434): the printer, asked by the link's probe, decides. The length is
-        // `LanLink`'s bound (backend/scadbuddy/printers/models.py), so a long paste is cut here.
-        maxLength={128}
+        // Any format (#4434): the printer, asked by the link's probe, decides. A long paste
+        // is cut here, at the backend's bound (see ACCESS_CODE_MAX_LENGTH).
+        maxLength={ACCESS_CODE_MAX_LENGTH}
         value={code}
         onChange={(event) => setCode(event.target.value)}
         // Not "off", which Chrome ignores on a password: it would save one printer's code and
