@@ -22,9 +22,11 @@ function specAccessCodeMax(): number {
     throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
   }
   const spec = JSON.parse(text) as {
-    components: { schemas: { LanLink: { properties: { access_code: { maxLength: number } } } } }
+    components?: { schemas?: { LanLink?: { properties?: { access_code?: { maxLength?: unknown } } } } }
   }
-  return spec.components.schemas.LanLink.properties.access_code.maxLength
+  const max = spec.components?.schemas?.LanLink?.properties?.access_code?.maxLength
+  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength not in the spec at ${path}`)
+  return max
 }
 
 const H2C = 'Printer 3DP-31B-598'
