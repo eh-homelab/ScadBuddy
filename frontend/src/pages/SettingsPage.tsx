@@ -77,6 +77,7 @@ import {
 import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { SpoolInventoryPanel } from './settings/SpoolInventoryPanel'
+import { FilamentsEditor } from '../components/orders/FilamentsEditor'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { sectionId, useSectionNav } from './settings/sectionNav'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
@@ -1187,8 +1188,12 @@ function SettingsSections() {
 
           {saved(
             'orders',
-            runtimeRows('orders'),
-            'What a new order records (#4249). Nothing here changes an order already made.',
+            <>
+              {runtimeRows('orders')}
+              {/* #4250 — the price book's filaments, saved on their own: each edit is a row. */}
+              <FilamentsEditor />
+            </>,
+            'What a new order records and how a quote is priced (#4249, #4250). A recorded quote keeps the rates it was priced at.',
           )}
 
           {saved(

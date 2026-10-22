@@ -52,7 +52,13 @@ export type FieldSpec = {
   help?: string
   /** In a section's "Advanced" disclosure. */
   advanced?: boolean
+  /** A `select`'s choices. */
+  choices?: readonly { value: string; label: string }[]
 }
+
+/** #4250 — the help each price-book rate shows: a decimal string, never a float. */
+const DECIMAL_HELP = 'A decimal amount in the shop\'s currency, such as 1.50; 0 adds no line.'
+
 
 /**
  * The runtime settings (#322): each is env-seeded, so it carries a source badge and a
@@ -66,6 +72,55 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     label: 'Orders currency',
     kind: 'text',
     help: 'The ISO 4217 code, such as USD or EUR, an order copies when it is made. A change applies to the next order; an existing order keeps its own.',
+  },
+  // #4250 — the price book's policy (spec 2026-10-18 §5.1): read by each quote and copied
+  // into its lines, so a change never moves a recorded quote.
+  {
+    name: 'pricing_machine_rate_per_hour',
+    section: 'orders',
+    label: 'Machine rate per hour',
+    kind: 'text',
+    help: `What an hour of print time costs, from the slice. ${DECIMAL_HELP}`,
+  },
+  {
+    name: 'pricing_setup_fee',
+    section: 'orders',
+    label: 'Setup fee per plate',
+    kind: 'text',
+    help: `Charged once for each plate an item prints. ${DECIMAL_HELP}`,
+  },
+  {
+    name: 'pricing_labour_per_item',
+    section: 'orders',
+    label: 'Labour per item',
+    kind: 'text',
+    help: `Charged once per unit. ${DECIMAL_HELP}`,
+  },
+  {
+    name: 'pricing_markup_percent',
+    section: 'orders',
+    label: 'Markup, percent',
+    kind: 'text',
+    help: 'A percentage of the other lines, such as 15 for 15 %. 0 adds no line.',
+  },
+  {
+    name: 'pricing_rounding',
+    section: 'orders',
+    label: 'Round the unit price',
+    kind: 'select',
+    choices: [
+      { value: 'to_minor_unit', label: 'Each line to the cent' },
+      { value: 'to_major', label: 'Up to a whole unit' },
+    ],
+    help: 'Every line is rounded to the minor unit once. Up to a whole unit then adds the difference as a line of its own.',
+  },
+  {
+    name: 'rough_estimate_factor',
+    section: 'orders',
+    label: 'Rough estimate factor',
+    kind: 'text',
+    help: 'Multiplies a part\'s enclosed volume for walls, infill and purge in the estimate before a slice, such as 1.15. More than 0.',
+    advanced: true,
   },
   {
     name: 'temporal_ui_url',
