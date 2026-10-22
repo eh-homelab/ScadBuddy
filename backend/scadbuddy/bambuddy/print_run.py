@@ -868,8 +868,8 @@ async def check_print(
     # download only once it is done, so `prepare_run` must not fetch the 3MF itself here
     # (it does not, with `refuse_manual_pick` off): it would download it a second time
     # (`test_a_library_files_check_fetches_the_file_once`). Started before the check
-    # knows whether it refuses, these reads reach Bambuddy on a refused check too: the
-    # inventory's spools and assignments are asked for, then dropped unread.
+    # knows whether it refuses, these reads may reach Bambuddy on a refused check too: the
+    # inventory's spools and assignments may already be asked for, then are cancelled.
     laying_out = None if source.is_sliced else asyncio.create_task(source.states_nozzles(client))
     reading = (
         asyncio.create_task(read_inventory(client))
