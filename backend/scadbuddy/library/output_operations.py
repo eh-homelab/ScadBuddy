@@ -23,6 +23,7 @@ from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.jobs import require_job
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.project_file import ProjectFile, output_stem
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
@@ -33,7 +34,8 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import trash_copies
-from scadbuddy.print_library.filing import file_output, trash_filed
+from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
+from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.store.cache import materialize_result
@@ -46,6 +48,9 @@ if TYPE_CHECKING:
     from scadbuddy.core.components import Components
 
 logger = logging.getLogger(__name__)
+
+#: A native-library kind run while `library_backend` is ``bambuddy`` (#4507).
+NATIVE_LIBRARY_OFF_PROBLEM = "https://scadbuddy.dev/problems/native-library-not-in-use"
 
 
 def output_kinds(state: AppState, components: Components) -> list[OperationKind]:
@@ -300,6 +305,54 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         emit(state.events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
         return {}
 
+    async def serving_native() -> NativeLibrary:
+        """The native library, or the 409 when the Bambuddy one is in use."""
+        native = await components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "ScadBuddy's own library is not the one in use",
+                type_=NATIVE_LIBRARY_OFF_PROBLEM,
+            )
+        return native
+
+    async def native_file_check(request: dict[str, Any]) -> dict[str, Any]:
+        """The folder must be the native library's (404 otherwise), before anything is
+        written; the file's name, as a Bambuddy project file's is (#317)."""
+        native = await serving_native()
+        meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
+        # Any live native folder: unlike Bambuddy's (`require_destination_folder`), the
+        # native library has no inbox, project or external folders to leave out, and no
+        # root setting (`library_folder_id` is Bambuddy's inbox), as `require_native_folder`
+        # says for a print's destination.
+        await native.folder(request["folder_id"])
+        return {"stem": await output_stem(meta, state.outputs, state.catalogue)}
+
+    async def native_file_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """Generate's filing into a native folder (#4507): the output's 3MF uploaded there
+        once, with no Bambuddy at all (`put_in_folder`). A copy of this output already in
+        the folder is the answer, ``created: false``."""
+        native = await serving_native()
+        meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
+        folder_id: int = request["folder_id"]
+        model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
+        row, created = await put_in_folder(native, meta, model_3mf, folder_id, checked["stem"])
+        # The destination picker's "last touched" order (#3651), best effort as on Bambuddy.
+        try:
+            await state.uploads.touch_destination("folder", folder_id)
+        except psycopg.Error:
+            logger.warning("could not touch the destination of %s", meta.id, exc_info=True)
+        filed = ProjectFile(
+            project_id=None,
+            folder_id=folder_id,
+            library_file_id=row.id,
+            filename=row.name,
+            created=created,
+            bambuddy_url=None,
+        )
+        dumped: dict[str, Any] = filed.model_dump(mode="json")
+        return dumped
+
     def kind(name: str, check: Any, run: Any, where: str, **extra: Any) -> OperationKind:
         return OperationKind(
             name,
@@ -314,6 +367,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         kind("output_create", create_check, create_run, "the template's outputs"),
         kind("output_thumbnail", output_check, thumbnail_run, "the output"),
         kind("output_rename", output_check, rename_run, "the output"),
+        kind("output_native_file", native_file_check, native_file_run, "ScadBuddy's library"),
         kind(
             "output_delete",
             delete_check,

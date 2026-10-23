@@ -77,12 +77,13 @@ class ProjectFile(BaseModel):
     project_id: int | None
     folder_id: int
     library_file_id: int
-    #: The name Bambuddy holds it under.
+    #: The name the library holds it under.
     filename: str
     #: ``False`` when the project already had this output's file for this target.
     created: bool
-    #: The project's page in Bambuddy, which lists the folder's files.
-    bambuddy_url: str
+    #: The project's page in Bambuddy, which lists the folder's files; ``None`` when it
+    #: was filed into ScadBuddy's own library (#4507).
+    bambuddy_url: str | None
     #: The "Edit in ScadBuddy" link noted on the file, when one was attached (#80).
     edit_url: str | None = None
 

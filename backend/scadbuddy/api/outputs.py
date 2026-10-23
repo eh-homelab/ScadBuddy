@@ -1334,6 +1334,7 @@ async def post_project_file(
     response: Response,
     outputs: OutputsDep,
     ops: OperationsDep,
+    library: PrintLibraryDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ProjectFile | JSONResponse:
     """Upload the editable project 3MF into the project's folder (#317), as Generate does
@@ -1343,8 +1344,22 @@ async def post_project_file(
     already there (``created: false``), and a later print on the same printer reuses it
     (#316). The folder is created and linked if the project has none. Every Bambuddy
     call is made here, so the API key never reaches the browser.
+
+    On ``library_backend=native`` a folder (no project) is ScadBuddy's own (#4507): the
+    file goes there with no Bambuddy call, once per output and folder, and
+    ``bambuddy_url`` is null. A project is Bambuddy's on either backend.
     """
     require_output(outputs, output_id)
+    if body.folder_id is not None and await library.serving_native() is not None:
+        native = await run_operation(
+            ops,
+            response,
+            kind=ops.kinds["output_native_file"],
+            subject=output_id,
+            request={"output_id": output_id, "folder_id": body.folder_id},
+            idempotency_key=idempotency_key,
+        )
+        return operation_answer(native, ProjectFile)
     result = await run_operation(
         ops,
         response,

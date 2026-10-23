@@ -43,6 +43,8 @@ export const RESOURCE_TYPES = [
   'project',
   'bambuddy_file',
   'print_archive',
+  // A file in ScadBuddy's own print library (`library_backend=native`, #4507).
+  'library_file',
   'unclassified',
 ] as const
 export type ResourceType = (typeof RESOURCE_TYPES)[number]
@@ -63,6 +65,7 @@ export const LOOKUP_TYPES = [
   'project',
   'bambuddy_file',
   'print_archive',
+  'library_file',
 ] as const satisfies readonly Exclude<ResourceType, 'unclassified'>[]
 export type LookupType = (typeof LOOKUP_TYPES)[number]
 // Every kind but `unclassified` is in LOOKUP_TYPES: a kind added to RESOURCE_TYPES alone fails typecheck here.
@@ -98,9 +101,12 @@ export type ResourceAction = (typeof RESOURCE_ACTIONS)[number]
  * | `print`         | print_output, file_output_under_project       | the output printed or filed          |
  * | `print`         | print_again                                   | the print archive printed again      |
  * | `bambuddy_file` | send_to_bambuddy, file_output_in_project_folder, browser_generate | the output it holds |
+ * | `library_file`  | file_output_in_project_folder, browser_generate (a native folder) | the output it holds |
  * | `project`, `print_archive` | file_output_under_project          | the output filed                     |
  *
  * Every other row leaves it null.
+ *
+ * Every library file touch is `library_file` for a native id (`NATIVE_ID_BASE` and up), else `bambuddy_file`.
  */
 export type Touch = {
   type: ResourceType
@@ -192,19 +198,33 @@ function ids(value: unknown): string[] {
   })
 }
 
+/**
+ * ScadBuddy's own library ids start here (backend `print_library/ids.py` `NATIVE_ID_BASE`);
+ * Bambuddy's are far below it.
+ */
+export const NATIVE_ID_BASE = 1_000_000_000
+
+/**
+ * A library file's kind by its id: ScadBuddy's own library's (#4507) or Bambuddy's.
+ * Rows recorded before #4507 keep `bambuddy_file` for native ids; nothing rewrites them.
+ */
+function libraryFileType(id: string): 'library_file' | 'bambuddy_file' {
+  return Number(id) >= NATIVE_ID_BASE ? 'library_file' : 'bambuddy_file'
+}
+
 /** Each library file a list of them names by `id` (a skipped one is in another list, untouched). */
 function libraryFiles(files: unknown, action: ResourceAction): Touch[] {
   return (Array.isArray(files) ? files : []).flatMap((file) => {
     const id = bambuddyId(field(file, 'id'))
-    return id ? [{ type: 'bambuddy_file' as const, id, action }] : []
+    return id ? [{ type: libraryFileType(id), id, action }] : []
   })
 }
 
-/** A Bambuddy library file holding an output: new only when the answer says it was made. */
+/** A library file holding an output, Bambuddy's or ScadBuddy's own (#4507): new only when the answer says it was made. */
 function bambuddyFile(result: unknown, output: string | null): Touch[] {
   const id = bambuddyId(field(result, 'library_file_id'))
   if (!id) return []
-  return [{ type: 'bambuddy_file', id, action: field(result, 'created') === true ? 'created' : 'modified', before: output }]
+  return [{ type: libraryFileType(id), id, action: field(result, 'created') === true ? 'created' : 'modified', before: output }]
 }
 
 /** A ProjectFile: the library file, and the project it was filed in. */
@@ -417,16 +437,16 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>
-    ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
+    ids(field(result, 'restored')).map((id) => ({ type: libraryFileType(id), id, action: 'created' as const })),
   // #2686: an upload makes a file, an update changes one. A folder delete records the files it
   // deleted (as delete_library_files does); the folders themselves are no recorded resource.
   upload_library_file: (_input, result) => {
     const id = bambuddyId(field(result, 'id'))
-    return id ? [{ type: 'bambuddy_file', id, action: 'created' }] : []
+    return id ? [{ type: libraryFileType(id), id, action: 'created' }] : []
   },
   update_library_file: (input, result) => {
     const id = bambuddyId(field(result, 'id')) ?? bambuddyId(input.file_id)
-    return id ? [{ type: 'bambuddy_file', id, action: 'modified' }] : []
+    return id ? [{ type: libraryFileType(id), id, action: 'modified' }] : []
   },
   delete_library_folder: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   // #2670: a move or rename changes the file under its id; a copy creates a new one.
