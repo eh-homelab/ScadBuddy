@@ -547,16 +547,21 @@ async def test_one_overlay_numbers_the_shelf_alike_on_every_plate() -> None:
     )
 
 
-def test_a_tray_with_no_material_is_not_asked_about(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#4511: a tray reporting no material has nothing to match on, so a shelf record
-    with none is not close to it. `_filled` drops such a tray before `seen_trays` today;
-    the question does not lean on that."""
+@pytest.mark.parametrize("material", [None, ""])
+def test_a_tray_with_no_material_is_not_asked_about(
+    monkeypatch: pytest.MonkeyPatch, material: str | None
+) -> None:
+    """#4511: a tray reporting no material (none, or an empty one) has nothing to match
+    on, so a shelf record with none is not close to it. `_filled` drops such a tray
+    before `seen_trays` today; the question does not lean on that."""
     monkeypatch.setattr(
-        trays, "seen_trays", lambda status: [SeenTray(ams_id=0, tray_id=2, colour="#FFFFFF")]
+        trays,
+        "seen_trays",
+        lambda status: [SeenTray(ams_id=0, tray_id=2, material=material, colour="#FFFFFF")],
     )
     overlay = Overlay(
         trays=[TraySpool(ams_id=0, tray_id=2)],
-        shelf=[_shelf(_record("bare", material=None, colour="#FFFFFF"))],
+        shelf=[_shelf(_record("bare", material=material, colour="#FFFFFF"))],
     )
     assert trays.tray_questions(h2c_status(), overlay) == ([], [])
 
