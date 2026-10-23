@@ -542,3 +542,66 @@ def test_repointing_waits_for_the_stores_writers(pg_pool: PgPool) -> None:
             conn.execute("SET LOCAL lock_timeout = '200ms'")
             with pytest.raises(psycopg.errors.LockNotAvailable):
                 repoint_tray_links(conn, uuid.uuid4(), uuid.uuid4())
+
+
+# -- the shelf (#4504) ------------------------------------------------------------------
+
+
+async def test_the_shelf_is_every_fresh_record_no_tray_holds(store: SpoolStore) -> None:
+    """#4504: what an untagged tray's question offers. A record a tray holds (a person's
+    link, the provider's own assignment), one the provider places in any tray, one of a
+    tagged spool and a stale provider's are not on it."""
+    await store.replace_records(
+        "bambuddy",
+        [
+            record("free", colour="#FFFFFF", remaining_g=500.0),
+            record("linked", colour="#FFFFFF"),
+            located("placed", 1, 2),
+            record("tagged", tray_uuid=UUID_A),
+        ],
+        NOW,
+    )
+    await store.replace_records("old", [record("o1")], NOW - SPOOL_OVERLAY_STALE * 2)
+    await store.link(PRINTER, tray(0, 1, colour="#FFFFFF"), provider="bambuddy", record_id="linked")
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(0, 1, colour="#FFFFFF"), tray(1, 2)],
+        now=NOW,
+        providers=["bambuddy", "old"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    (only,) = overlay.shelf
+    assert only.physical_spool_id is None
+    assert list(only.records) == ["bambuddy"]
+    assert only.records["bambuddy"].record_id == "free"
+    assert only.records["bambuddy"].remaining_g == 500.0
+
+
+async def test_one_spools_records_are_one_shelf_entry(store: SpoolStore) -> None:
+    """Two providers' records of one physical spool no tray holds: one entry, its records
+    in the providers' order, under the spool a link names."""
+    await store.replace_records("bambuddy", [record("b1")], NOW)
+    await store.replace_records("native", [record("n1")], NOW)
+    first = await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="b1")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    overlay = await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["native", "bambuddy"])
+    (only,) = overlay.shelf
+    assert only.physical_spool_id == first.physical_spool_id
+    assert list(only.records) == ["native", "bambuddy"]
+
+
+async def test_a_spool_whose_tray_changed_is_back_on_the_shelf(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """A person's link this printer's tray no longer matches holds nothing: the spool
+    came out, so it may be linked again. A link on another printer still holds it."""
+    other = uuid.UUID("6e1d9f2a-0000-4000-8000-000000000002")
+    registered(pg_pool, other)
+    await store.replace_records("bambuddy", [record("13"), record("14")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(other, tray(0, 1), provider="bambuddy", record_id="14")
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 1, colour="#00FF00")], now=NOW, providers=["bambuddy"]
+    )
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]

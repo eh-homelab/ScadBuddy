@@ -264,6 +264,10 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's filled trays with no spool assigned (#2164): the dialog
     #: asks which spool each holds. Each is also offered in ``spools`` as itself.
     trays: list[UnknownTray] = Field(default_factory=list)
+    #: A native run's spools no tray holds (#4504, `trays.shelf_options`): what its
+    #: ``trays`` questions' ``candidates`` name, each with its providers' ``records``.
+    #: Never a print choice, so never in ``spools``; empty on the Bambuddy path.
+    shelf: list[SpoolOption] = Field(default_factory=list)
     #: Where ``spools`` came from: Bambuddy's inventory, or (a native run, #3818) the
     #: printer's loaded trays with the spool providers' records over them.
     source: Literal["inventory", "trays"] = "inventory"
@@ -1064,7 +1068,7 @@ async def _tray_plate_options(
     now: datetime | None,
 ) -> list[FilamentOptions]:
     # Here, not at the top: `trays` builds its choices from this module's models.
-    from scadbuddy.bambuddy.trays import loaded_trays
+    from scadbuddy.bambuddy.trays import loaded_trays, tray_questions
 
     answers = await asyncio.gather(
         *(
@@ -1081,6 +1085,7 @@ async def _tray_plate_options(
     here = printer_id if printer_id is not None else status.id
     options = loaded_trays(status, here, status.name, overlay)
     notes = overlay_notes(overlay, labels, now=now) if overlay is not None else []
+    questions, shelf = tray_questions(status, overlay)
     return [
         _options(
             library_file_id=library_file_id,
@@ -1090,6 +1095,11 @@ async def _tray_plate_options(
             printer_name=status.name,
             source="trays",
             notes=notes,
+        ).model_copy(
+            update={
+                "trays": [question.model_copy() for question in questions],
+                "shelf": [spool.model_copy() for spool in shelf],
+            }
         )
         for requirements in per_plate
     ]
