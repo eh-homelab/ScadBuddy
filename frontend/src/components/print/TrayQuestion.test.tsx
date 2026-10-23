@@ -112,6 +112,20 @@ describe('TrayQuestion on the native path', () => {
     )
   })
 
+  it('says so, and reports nothing linked, when the picked spool lost its record', async () => {
+    const link = vi.spyOn(api, 'linkTraySpool')
+    const onAssigned = vi.fn()
+    const other = { ...record, spool_id: 18, records: { bambuddy: { record_id: '28' } } }
+    const props = { native: { printer }, tray, onAssigned, onDecline: vi.fn() }
+    const { rerender } = render(<TrayQuestion {...props} spools={[record, other]} />)
+    // A re-read drops the picked spool's record; the pick stays on it.
+    rerender(<TrayQuestion {...props} spools={[{ ...record, records: {} }, other]} />)
+    fireEvent.click(screen.getByRole('button', { name: /^Yes/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('ScadBuddy has no record of that spool to link.')
+    expect(link).not.toHaveBeenCalled()
+    expect(onAssigned).not.toHaveBeenCalled()
+  })
+
   it('offers no candidate it could not link', () => {
     render(
       <TrayQuestion native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[black]} onAssigned={vi.fn()} onDecline={vi.fn()} />,

@@ -376,8 +376,11 @@ export function PrintPicker({
     () => (nativeBackends(backends.data) ? registryRows.filter(printsNatively) : NO_ROWS),
     [backends.data, registryRows],
   )
+  // The row that links the Bambuddy printer in view, only when there is one: a LAN-only
+  // row's `bambuddy_printer_id` is null too, so a null printer must match no row.
   const registryPrinter =
-    picker.registryAsked ?? registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
+    picker.registryAsked ??
+    (printerId === null ? null : (registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null))
   const nativeRow = nativeRows.find((row) => row.id === registryPrinter) ?? null
   const native = nativeRow !== null
   /** The printer's name, whichever link names it. */
@@ -408,13 +411,15 @@ export function PrintPicker({
     askRegistry(nativeFirst)
   }, [open, nativeFirst, askRegistry])
   /**
-   * Whether the dialog knows its path yet: the registry read, and Settings when a row
-   * could print natively. Until then nothing that differs by path (the destinations and
+   * Whether the dialog knows its path yet: the registry read, Settings when a row could
+   * print natively, and, with a LAN row to open on, the printer it opened on. Until then nothing that differs by path (the destinations and
    * their default) is read, so a hot-path dialog never asks Bambuddy first.
    */
   const pathKnown =
     (registry.data !== undefined || registry.error !== undefined) &&
-    (!lanCapable || backends.data !== undefined || backends.error !== undefined)
+    (!lanCapable || backends.data !== undefined || backends.error !== undefined) &&
+    // Opening on the LAN row is still to come: until it lands the printer is not known.
+    (lanChoosable.length === 0 || (choices !== null && nativeFirst === null))
   /** #3818 (D6) — projects are Bambuddy's: a native print is filed in a native folder. */
   const project = native ? undefined : pageProjectGiven
   const { nozzles, tier, processName, bedType, overrides } = selection
@@ -1487,9 +1492,12 @@ export function PrintPicker({
                         value={
                           picker.registryAsked !== null
                             ? `registry:${picker.registryAsked}`
-                            : printerId === null
-                              ? ''
-                              : String(printerId)
+                            : // The printer asked for, while its read is out; then the one read.
+                              picker.printerAsked !== null
+                              ? String(picker.printerAsked)
+                              : printerId === null
+                                ? ''
+                                : String(printerId)
                         }
                         onValueChange={(next) =>
                           next.startsWith('registry:')

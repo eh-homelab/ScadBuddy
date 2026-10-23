@@ -5009,6 +5009,73 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     expect(choices.urls.at(-1)).toContain(`printer_id=${bambuddyPrinter.id}`)
   })
 
+  it('names the picked printer on the trigger while its read is out', async () => {
+    setHotPath(true)
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        if (asked !== null) await delay(600)
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: asked === null ? null : Number(asked),
+          filaments: asked === null ? hotFilaments() : { ...fixtures.filamentOptions, printer_id: Number(asked) },
+          model_choices: { printer_id: null, filament_plan: [] },
+        })
+      }),
+    )
+    const choices = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    const printer = await screen.findByRole('combobox', { name: 'Printer' })
+    await waitFor(() => expect(printer).toHaveTextContent('over the LAN'))
+    const bambuddyPrinter = choicesView.printers![0]!
+    await choose(user, printer, new RegExp(`^${bambuddyPrinter.name}`))
+    await waitFor(() => expect(choices.urls.at(-1)).toContain(`printer_id=${bambuddyPrinter.id}`))
+    // The read is still out: the old view says no printer, the trigger says the pick.
+    expect(choices.answered).toBeLessThan(choices.urls.length)
+    expect(screen.getByRole('combobox', { name: 'Printer' })).toHaveTextContent(bambuddyPrinter.name)
+    expect(screen.getByRole('combobox', { name: 'Printer' })).not.toHaveTextContent('Choose a printer')
+    // Nor is the dialog on the LAN row's path any more: the old view's null printer
+    // names no registry row (a LAN-only row's Bambuddy id is null too).
+    expect(screen.queryByText(/sends it to the printer over the LAN/)).not.toBeInTheDocument()
+  })
+
+  it('never names the LAN row once a Bambuddy printer is picked, though its read fails', async () => {
+    setHotPath(true)
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        if (asked !== null) {
+          await delay(200)
+          return problem(504, 'Gateway Timeout', 'could not reach Bambuddy')
+        }
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: null,
+          filaments: hotFilaments(),
+          model_choices: { printer_id: null, filament_plan: [] },
+        })
+      }),
+    )
+    const checks = watch('POST', '/check')
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    const printer = await screen.findByRole('combobox', { name: 'Printer' })
+    await waitFor(() => expect(printer).toHaveTextContent('over the LAN'))
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer: HOT_PRINTER.id }))
+    const before = checks.bodies.length
+    await choose(user, printer, new RegExp(`^${choicesView.printers![0]!.name}`))
+    expect(await screen.findByText(/could not reach Bambuddy/)).toBeInTheDocument()
+    await act(() => new Promise((resolve) => setTimeout(resolve, 300)))
+    // The old view is gone with the failed read: nothing prints until a read lands.
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+    expect(runs.bodies).toEqual([])
+    for (const body of checks.bodies.slice(before)) {
+      expect(body['printer']).not.toBe(HOT_PRINTER.id)
+    }
+  })
+
   it('offers the folders, not projects, in Advanced', async () => {
     setHotPath(true)
     const { user } = renderPicker()
@@ -5017,5 +5084,21 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
     expect(await screen.findByRole('combobox', { name: 'Folder' })).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: /Project/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('PrintPicker · the registry printer it names', () => {
+  it('sends no `printer` on the check when no printer is in view, though a LAN-only row exists', async () => {
+    printersState()[1]!.lan_host = '10.0.0.9'
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({ ...choicesView, printer_id: null, filaments: { ...fixtures.filamentOptions, printer_id: null } }),
+      ),
+    )
+    const checks = watch('POST', '/check')
+    renderPicker()
+    await loaded()
+    await waitFor(() => expect(checks.bodies.length).toBeGreaterThan(0))
+    for (const body of checks.bodies) expect(body).not.toHaveProperty('printer')
   })
 })

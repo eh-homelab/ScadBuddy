@@ -67,7 +67,12 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
       if (target.native) {
         const spool = candidates.find((entry) => entry.spool_id === picked)
         const link = spool ? linkOf(spool) : null
-        if (link) await api.linkTraySpool(target.native.printer, tray.ams_id, tray.tray_id, link)
+        if (!link) {
+          // Nothing to name: never report a link that was not made.
+          setError('ScadBuddy has no record of that spool to link.')
+          return
+        }
+        await api.linkTraySpool(target.native.printer, tray.ams_id, tray.tray_id, link)
       } else {
         await api.assignTraySpool(target.printerId, tray.ams_id, tray.tray_id, picked)
       }

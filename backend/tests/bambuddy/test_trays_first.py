@@ -165,6 +165,8 @@ def test_every_filled_tray_is_a_choice() -> None:
     assert first.spool_id == tray_spool_id(0, 0) and first.tray_only
     assert (first.material, first.colour, first.slicer_filament) == ("PLA", "#000000", "GFA00")
     assert first.remain_percent == 80 and first.loaded is not None
+    # The word the dialog reads ("PLA black in AMS-A slot 1"), never worked out there.
+    assert first.colour_word == "black"
     # An untagged tray's -1 is "unknown", never a percentage.
     assert options[1].remain_percent is None
 

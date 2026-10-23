@@ -12,6 +12,7 @@ import type {
   ProjectFile,
   ProjectView,
   SendResult,
+  Settings,
 } from '../api/types'
 import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
@@ -29,7 +30,7 @@ import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
 import { breadcrumbs, useProjectList } from '../lib/projects'
 import { useSubscription } from '../lib/realtime'
-import { useAsync } from '../lib/useAsync'
+import { useAsync, type AsyncState } from '../lib/useAsync'
 import { listsNativeFolders } from '../lib/printerRegistry'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
@@ -66,6 +67,11 @@ export interface ActionBarHandle {
 
 interface Props {
   ref?: Ref<ActionBarHandle>
+  /**
+   * #3818 — the page's own Settings read, shared so the destinations need no second one.
+   * Left out (a test, another page), the bar reads Settings itself.
+   */
+  settings?: Pick<AsyncState<Settings>, 'data' | 'error'>
   slug: string
   job: Job | undefined
   rendering: boolean
@@ -115,6 +121,7 @@ interface Props {
 
 export function ActionBar({
   ref,
+  settings: pageSettings,
   slug,
   job,
   rendering,
@@ -174,7 +181,11 @@ export function ActionBar({
    * folders (plan 2026-10-18 D6): Bambuddy has no projects to list. Read once the
    * settings say which, so a page with no Bambuddy never asks it.
    */
-  const backends = useAsync(() => api.getSettings(), [])
+  const ownSettings = useAsync(
+    async () => (pageSettings ? undefined : await api.getSettings()),
+    [pageSettings === undefined],
+  )
+  const backends = pageSettings ?? ownSettings
   const settled = backends.data !== undefined || backends.error !== undefined
   // The one rule for a page with no printer (`listsNativeFolders`); the dialog's is per printer.
   const nativeLibrary = listsNativeFolders(backends.data)

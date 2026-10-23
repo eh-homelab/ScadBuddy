@@ -329,6 +329,7 @@ def loaded_trays(
                     if ams_id == EXTERNAL
                     else tray_label(ams_id, tray.id)
                 ),
+                colour_word=colour_word(tray.tray_color),
                 remain_percent=tray.remain if tray.remain >= 0 else None,
                 physical_spool_id=spool.physical_spool_id if spool is not None else None,
                 records=records,

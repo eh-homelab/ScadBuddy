@@ -507,4 +507,16 @@ describe('ActionBar destinations on the hot path', () => {
       server.events.removeListener('request:start', listener)
     }
   })
+
+  it("takes the page's Settings read in place of its own", async () => {
+    setHotPath(true)
+    const read = vi.spyOn(api, 'getSettings')
+    const settings = await api.getSettings()
+    read.mockClear()
+    setup(false, job, undefined, {
+      settings: { data: settings, error: undefined },
+    })
+    expect(await screen.findByRole('combobox', { name: 'Folder' })).toBeInTheDocument()
+    expect(read).not.toHaveBeenCalled()
+  })
 })

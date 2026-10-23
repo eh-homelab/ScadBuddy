@@ -169,6 +169,9 @@ class SpoolOption(BaseModel):
     #: The tray, as a person reads it ("AMS-A slot 1", "HT-A", "External"), on a native
     #: run's tray choices only.
     label: str | None = None
+    #: The tray's colour as a word ("blue", `trays.colour_word`), for "PLA blue in AMS-A
+    #: slot 1"; on a native run's tray choices only, as ``UnknownTray.colour_word``.
+    colour_word: str | None = None
     #: What the AMS says is left, in percent: an RFID spool's ``remain``; ``None`` for an
     #: untagged one, which reports -1.
     remain_percent: int | None = None
