@@ -2,6 +2,7 @@ import { HttpResponse } from 'msw'
 import type {
   Customer,
   CustomerAddress,
+  Filament,
   Fulfilment,
   Order,
   OrderCharge,
@@ -69,6 +70,8 @@ export type State = {
   events: OrderEvent[]
   /** The year's last number (`order_numbers`). */
   numbers: Record<string, number>
+  /** The price book's filament records (#4250), archived ones included. */
+  filaments: Filament[]
 }
 
 let counter = 0
@@ -107,6 +110,37 @@ function address(id: string, customerId: string): CustomerAddress {
   }
 }
 
+/**
+ * The minor unit's decimal places of a currency, as the backend's table has them (ISO 4217,
+ * `backend/scadbuddy/orders/currency.py`); the mock answers `minor_exponent` from it, and the
+ * pages take what they are answered, as they do from the backend.
+ */
+export function minorExponent(currency: string): number {
+  if (['BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'UGX', 'UYI', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'].includes(currency)) return 0
+  if (['BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND'].includes(currency)) return 3
+  if (['CLF', 'UYW'].includes(currency)) return 4
+  return 2
+}
+
+export const FILAMENT_PLA = 'f1a00000-0000-4000-8000-000000000001'
+export const FILAMENT_PETG = 'f1a00000-0000-4000-8000-000000000002'
+
+function filament(id: string, material: string, colour: string, colourName: string, cost: string): Filament {
+  return {
+    id,
+    material,
+    subtype: 'Basic',
+    brand: 'Bambu',
+    colour_name: colourName,
+    colour,
+    cost_per_kg: cost,
+    density_g_cm3: '1.24',
+    archived_at: null,
+    created_at: '2026-10-18T10:00:00Z',
+    updated_at: '2026-10-18T10:00:00Z',
+  }
+}
+
 function order(id: string, number: string, customerId: string, status: Order['status'], at: string, extra: Partial<Order> = {}): Order {
   return {
     id,
@@ -114,6 +148,7 @@ function order(id: string, number: string, customerId: string, status: Order['st
     customer_id: customerId,
     status,
     currency: 'USD',
+    minor_exponent: 2,
     on_hold: false,
     shipping_address_id: customerId === CUSTOMER_ADA ? ADDRESS_ADA : null,
     billing_address_id: null,
@@ -283,6 +318,10 @@ function fixtures(): State {
       { id: 3, order_id: ORDER_ACCEPTED, at: '2026-10-18T13:00:00Z', by: BROWSER, kind: 'order.status', detail: { from_status: 'quoted', to: 'accepted' } },
     ],
     numbers: { '2026': 3 },
+    filaments: [
+      filament(FILAMENT_PLA, 'PLA', '#F9D72C', 'Sunflower Yellow', '25.5'),
+      filament(FILAMENT_PETG, 'PETG', '#1E1E1E', 'Black', '30'),
+    ],
   }
 }
 

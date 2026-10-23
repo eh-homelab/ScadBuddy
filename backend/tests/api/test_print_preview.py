@@ -26,8 +26,10 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import library_view, preview
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
-from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
+from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.print_source import OutputSource, ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
 from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared, queue_route
@@ -644,3 +646,77 @@ def test_a_sliced_file_replaced_under_its_id_is_never_removed(
 
     assert _sweep(client) == 0
     assert not deleted.called
+
+
+def _start_every_plate(client: TestClient, output_id: str, subject: str) -> list[Any]:
+    """``start_preview_plates`` as the quote's run calls it (#4250 Ruling 2)."""
+    state = _state(client)
+    settings = state.settings_store.load()
+
+    async def start() -> list[Any]:
+        outputs = LocalOutputs(state.outputs, state.catalogue)
+        meta = await require(outputs, output_id)
+        naming = await outputs.naming(meta)
+        source = OutputSource(
+            store=outputs,
+            meta=meta,
+            uploads=state.uploads,
+            settings=settings,
+            stem=None,
+            print_settings=naming.print_settings,
+        )
+        async with client_for(settings) as bambuddy:
+            return await preview.start_preview_plates(
+                bambuddy,
+                source,
+                settings,
+                state.uploads,
+                PrintRunRequest.model_validate(body()),
+                subject=subject,
+            )
+
+    return asyncio.run(start())
+
+
+@respx.mock
+def test_start_preview_plates_slices_every_plate(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#4250 Ruling 2: a quote is every plate the output lays out, each sliced and
+    recorded under the one subject; ``start_preview`` still slices the first alone."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    run_routes()
+    jobs = iter((9, 10, 11))
+    sliced = respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+        side_effect=lambda _: httpx.Response(200, json={"job_id": next(jobs), "status": "pending"})
+    )
+    for job_id in (9, 10, 11):
+        respx.get(f"{API}/slice-jobs/{job_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "job_id": job_id,
+                    "status": "running",
+                    "kind": "library_file",
+                    "source_id": COPY,
+                    "created_at": CREATED,
+                },
+            )
+        )
+
+    started = _start_every_plate(client, output_id, "order_item:i-1")
+
+    assert [(one.job_id, one.plate_id) for one in started] == [(9, 1), (10, 2)]
+    assert sliced.call_count == 2
+    plates = [json.loads(call.request.content)["plate"] for call in sliced.calls]
+    assert plates == [1, 2]
+    state = _state(client)
+    for one in started:
+        row = asyncio.run(state.uploads.preview(one.job_id, "order_item:i-1"))
+        assert row is not None and row.plate_id == one.plate_id
+
+    # The dialog's own start is unchanged: the first plate only.
+    first = start_slice(client, output_id, body())
+    assert first["plate_id"] == 1
+    assert sliced.call_count == 3

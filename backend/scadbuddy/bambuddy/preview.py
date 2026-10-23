@@ -35,6 +35,8 @@ from scadbuddy.bambuddy.dispatch import ReuseSlice, SlicePlan, slice_request
 from scadbuddy.bambuddy.models import SliceJob
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.print_run import (
+    PlannedRun,
+    PlatePlan,
     PreparedPlates,
     PrintRunRequest,
     plan_run,
@@ -92,26 +94,14 @@ class SlicePreview(BaseModel):
     slicer: Literal["bambuddy", "native"] = "bambuddy"
 
 
-async def start_preview(
+async def _planned(
     client: BambuddyClient,
     source: PrintSource,
     settings: StoredSettings,
-    uploads: BambuddyUploadStore,
     request: PrintRunRequest,
-    *,
-    subject: str,
-    native: NativeSliceStarter | None = None,
-    native_slices: NativeSliceStore | None = None,
-    temporal: Client | None = None,
-    native_reads: LibraryReads | None = None,
-) -> PreviewStarted:
-    """Lay out, upload and slice what ``request`` would print, as the run does, and
-    record the slice for ``subject``; the first plate when every plate prints.
-
-    The copy goes to the inbox even when a project is chosen: the dialog slices on every
-    change, and a copy filed in a project's folder is that project's record, never
-    removed (#317), so trying spools would fill the project. A print into the project
-    then slices its own copy."""
+    native: NativeSliceStarter | None,
+) -> PlannedRun:
+    """The run's own layout, upload and presets for ``request``, never into a project."""
     if source.is_sliced:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -131,7 +121,24 @@ async def start_preview(
     )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
-    plate = planned.plates[0]
+    return planned
+
+
+async def _start_plate(
+    client: BambuddyClient,
+    settings: StoredSettings,
+    uploads: BambuddyUploadStore,
+    planned: PlannedRun,
+    plate: PlatePlan,
+    *,
+    subject: str,
+    native: NativeSliceStarter | None,
+    native_slices: NativeSliceStore | None,
+    temporal: Client | None,
+    native_reads: LibraryReads | None,
+) -> PreviewStarted:
+    """One planned plate's background slice, recorded for ``subject``: a finished one of
+    the same copy and presets answered again rather than sliced twice."""
     if plate.plan is None:
         # Only a sliced file's plates have no plan, and those are refused above; said
         # rather than asserted, which python -O strips (#2691 review).
@@ -173,6 +180,79 @@ async def start_preview(
             )
         )
     return PreviewStarted(job_id=job_id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
+
+
+async def start_preview(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    uploads: BambuddyUploadStore,
+    request: PrintRunRequest,
+    *,
+    subject: str,
+    native: NativeSliceStarter | None = None,
+    native_slices: NativeSliceStore | None = None,
+    temporal: Client | None = None,
+    native_reads: LibraryReads | None = None,
+) -> PreviewStarted:
+    """Lay out, upload and slice what ``request`` would print, as the run does, and
+    record the slice for ``subject``; the first plate when every plate prints.
+
+    The copy goes to the inbox even when a project is chosen: the dialog slices on every
+    change, and a copy filed in a project's folder is that project's record, never
+    removed (#317), so trying spools would fill the project. A print into the project
+    then slices its own copy."""
+    planned = await _planned(client, source, settings, request, native)
+    return await _start_plate(
+        client,
+        settings,
+        uploads,
+        planned,
+        planned.plates[0],
+        subject=subject,
+        native=native,
+        native_slices=native_slices,
+        temporal=temporal,
+        native_reads=native_reads,
+    )
+
+
+async def start_preview_plates(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    uploads: BambuddyUploadStore,
+    request: PrintRunRequest,
+    *,
+    subject: str,
+    native: NativeSliceStarter | None = None,
+    native_slices: NativeSliceStore | None = None,
+    temporal: Client | None = None,
+    native_reads: LibraryReads | None = None,
+) -> list[PreviewStarted]:
+    """:func:`start_preview` for every plate the source lays out (#4250 Ruling 2): a
+    quote is the whole output's price, so ``request``'s ``plate_id``, ``plate_ids`` and
+    ``all_plates`` are ignored and every plate is planned and sliced, each recorded for
+    ``subject`` as the dialog records its one, on either slicer. One started slice per
+    plate, in plate order. A plate that fails to start leaves the earlier plates'
+    records to the preview sweeps, as the dialog leaves its own."""
+    every = request.model_copy(update={"all_plates": True, "plate_ids": None, "plate_id": 1})
+    planned = await _planned(client, source, settings, every, native)
+    return [
+        await _start_plate(
+            client,
+            settings,
+            uploads,
+            planned,
+            plate,
+            subject=subject,
+            native=native,
+            native_slices=native_slices,
+            temporal=temporal,
+            native_reads=native_reads,
+        )
+        for plate in planned.plates
+    ]
 
 
 async def _start_native(
@@ -278,6 +358,18 @@ async def _still_sliced(
         return None
     if row.sliced_file_id is None and row.id is not None:
         await uploads.preview_sliced(row.id, sliced, name)
+    return job
+
+
+async def preview_job(
+    client: BambuddyClient, uploads: BambuddyUploadStore, job_id: int, subject: str
+) -> SliceJob:
+    """Bambuddy's job for background slice ``job_id`` of ``subject`` while it is still
+    that slice (#4250: a quote follows its plates with this); 404 once it is not."""
+    row = await uploads.preview(job_id, subject)
+    job = await _still_sliced(client, uploads, row) if row is not None else None
+    if job is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no background slice {job_id}")
     return job
 
 

@@ -12,11 +12,14 @@ author header (``core/authorship.py``), never from a request.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field
 
+from scadbuddy.core.settings import decimal_string
 from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.orders.currency import minor_exponent
 
 #: Integer minor units in the order's currency (§3.6).
 Money = int
@@ -42,11 +45,43 @@ ContactKind = Literal[
 ]
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
 QuoteSource = Literal["slice", "manual"]
-QuoteLineKind = Literal["filament", "machine_time", "setup", "labour", "markup", "manual"]
+#: ``rounding`` is ``to_major``'s difference (#4250 Ruling 5), so the lines always add.
+QuoteLineKind = Literal[
+    "filament", "machine_time", "setup", "labour", "markup", "rounding", "manual"
+]
 Outcome = Literal["succeeded", "failed", "partial", "unknown"]
 
 #: The ``#RRGGBB`` of a colour slot as rendered (§3.3).
 Colour = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
+
+
+def _rate(value: str) -> str:
+    return decimal_string(value, "the value")
+
+
+def _places(places: int, below: int, *, positive: bool = False) -> AfterValidator:
+    """A decimal string its column holds as it is: ``numeric(p, places)`` rounds a finer
+    one silently and refuses one past ``below``, so both are refused here instead."""
+
+    def check(value: str) -> str:
+        text = decimal_string(value, "the value", positive=positive)
+        number = Decimal(text)
+        exponent = number.as_tuple().exponent
+        if isinstance(exponent, int) and -exponent > places:
+            raise ValueError(f"at most {places} decimal places")
+        if number >= below:
+            raise ValueError(f"must be less than {below}")
+        return text
+
+    return AfterValidator(check)
+
+
+#: A non-negative decimal string (§3.6: a rate is never a float), as a policy holds one.
+Rate = Annotated[str, AfterValidator(_rate)]
+#: ``filaments.cost_per_kg``'s ``numeric(12,4)``.
+CostPerKg = Annotated[str, _places(4, 10**8)]
+#: ``filaments.density_g_cm3``'s ``numeric(6,3)``, above 0.
+Density = Annotated[str, _places(3, 1000, positive=True)]
 #: ISO 3166-1 alpha-2 (§3.1); the shape only, as the currency's is.
 Country = Annotated[str, Field(pattern=r"^[A-Z]{2}$")]
 
@@ -184,6 +219,13 @@ class Order(BaseModel):
     updated_at: datetime
     created_by: Actor
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def minor_exponent(self) -> int:
+        """The decimal places of ``currency``'s minor unit (#4250 Ruling 5): every
+        ``*_minor`` of the order is ``amount * 10 ** minor_exponent``."""
+        return minor_exponent(self.currency)
+
 
 class OrderFilter(BaseModel):
     """What ``GET /orders`` narrows by (§4)."""
@@ -259,7 +301,9 @@ class Quote(BaseModel):
     created_at: datetime
     source: QuoteSource
     accepted: bool
-    #: Null for a `manual` quote (§3.4's last amendment); phase 2's slice fills them.
+    #: Null for a `manual` quote (§3.4's last amendment); phase 2's slice fills them with
+    #: the FIRST plate's file alone (one sliced file per plate, plan Ruling 3): every
+    #: plate's own `blob_key` and `sha256` are in `plates`, never summed up here.
     sliced_sha256: str | None
     sliced_blob_key: str | None
     plates: list[dict[str, Any]]
@@ -308,3 +352,84 @@ class Shipment(BaseModel):
     notes: str
     created_at: datetime
     items: list[ShipmentItem]
+
+
+# -- the price book (§5.1, #4250) -----------------------------------------------------
+
+
+class FilamentInput(BaseModel):
+    """A filament record as a body carries it: what a kilogram costs (§5.1). Its
+    identity is material, subtype, brand and colour, upper-cased (Ruling 4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    material: str = Field(min_length=1, max_length=100)
+    subtype: str | None = Field(default=None, max_length=100)
+    brand: str | None = Field(default=None, max_length=100)
+    colour_name: str | None = Field(default=None, max_length=100)
+    colour: Colour
+    #: In the shop's currency, per kilogram; a decimal string.
+    cost_per_kg: CostPerKg
+    #: For the rough estimate (§5.3); none gives no estimate.
+    density_g_cm3: Density | None = None
+
+
+class FilamentPatch(BaseModel):
+    """`PATCH …/filaments/{id}`: only the fields sent change (``model_fields_set``);
+    ``null`` clears ``subtype``, ``brand``, ``colour_name`` or ``density_g_cm3``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    material: str | None = Field(default=None, min_length=1, max_length=100)
+    subtype: str | None = Field(default=None, max_length=100)
+    brand: str | None = Field(default=None, max_length=100)
+    colour_name: str | None = Field(default=None, max_length=100)
+    colour: Colour | None = None
+    cost_per_kg: CostPerKg | None = None
+    density_g_cm3: Density | None = None
+
+
+class Filament(BaseModel):
+    """A filament record, its decimals as strings on the wire (§3.6)."""
+
+    id: str
+    material: str
+    subtype: str | None
+    brand: str | None
+    colour_name: str | None
+    colour: str
+    cost_per_kg: str
+    density_g_cm3: str | None
+    archived_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+Rounding = Literal["to_minor_unit", "to_major"]
+
+
+class PricingPolicy(BaseModel):
+    """The policy a quote is priced under (§5.1), in the order's currency: decimal
+    strings, each at least 0. ``markup_percent`` is a percentage ("15" is 15 %)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    machine_rate_per_hour: Rate = "0"
+    #: Per plate.
+    setup_fee: Rate = "0"
+    labour_per_item: Rate = "0"
+    markup_percent: Rate = "0"
+    rounding: Rounding = "to_minor_unit"
+
+
+class PriceBook(BaseModel):
+    """The price book in force (§5.1): what the next quote is priced with."""
+
+    #: ``orders_currency``: the next order's; a quote is priced in its own order's.
+    currency: str
+    minor_exponent: int
+    policy: PricingPolicy
+    #: The rough estimate's factor (§5.3), a decimal string.
+    rough_estimate_factor: str
+    #: The records not archived, by material, brand and colour.
+    filaments: list[Filament]

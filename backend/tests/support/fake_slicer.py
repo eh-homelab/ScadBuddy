@@ -63,6 +63,9 @@ class FakeSlicer:
         self.hold: asyncio.Event | None = None
         #: The sliced 3MF it uploads.
         self.sliced = SLICED
+        #: A plate's own sliced 3MF, by the plate a call slices, over ``sliced``
+        #: (#4250: a quote slices every plate of an output).
+        self.sliced_by_plate: dict[int, bytes] = {}
         self.calls = 0
         #: Each call's input, as the slicer worker got it.
         self.inputs: list[SlicePlateInput] = []
@@ -116,15 +119,16 @@ class FakeSlicer:
         activity.heartbeat(PROGRESS)
         if self.hold is not None:
             await self.hold.wait()
+        sliced = self.sliced_by_plate.get(input.plate, self.sliced)
         async with self._http(input.sliced_3mf) as http:
             response = await http.put(
-                input.sliced_3mf.url, headers=input.sliced_3mf.headers, content=self.sliced
+                input.sliced_3mf.url, headers=input.sliced_3mf.headers, content=sliced
             )
         response.raise_for_status()
         self.downloads.append(downloaded)
         return SlicePlateOutput(
-            sliced_sha256=hashlib.sha256(b"other" if self.wrong_sha else self.sliced).hexdigest(),
-            sliced_size=len(self.sliced),
+            sliced_sha256=hashlib.sha256(b"other" if self.wrong_sha else sliced).hexdigest(),
+            sliced_size=len(sliced),
             warnings=["a warning"],
             exit_code=0,
             elapsed_seconds=1.5,

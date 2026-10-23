@@ -53,6 +53,8 @@ DEFAULTS: dict[str, object] = {
     "store_backend": "local",
     "library_backend": "bambuddy",
     "orders_currency": "USD",
+    "pricing_markup_percent": "0",
+    "rough_estimate_factor": "1.15",
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
@@ -510,6 +512,54 @@ def test_orders_currency_defaults_to_usd_and_is_three_letters(
     assert saved["sources"]["orders_currency"] == "stored"
     assert "orders_currency" not in saved["restart_required"]
     assert read_stored(settings.database_url)["orders_currency"] == "EUR"
+
+
+def test_a_currency_with_no_minor_unit_is_refused(client: TestClient) -> None:
+    """#4250 Ruling 5: ISO 4217 lists no minor unit for these codes, so nothing can be
+    priced in integer minor units of them."""
+    refused = client.put("/api/v1/settings", json={"orders_currency": "XAU"})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", "orders_currency"]
+    assert "no minor unit" in refused.json()["errors"][0]["msg"]
+    saved = client.put("/api/v1/settings", json={"orders_currency": "JPY"})
+    assert saved.status_code == 200
+    assert saved.json()["orders_currency"] == "JPY"
+
+
+def test_the_pricing_policy_defaults_and_is_checked(client: TestClient, settings: Settings) -> None:
+    """#4250 Ruling 4: decimal strings, read by each quote (``live``)."""
+    body = client.get("/api/v1/settings").json()
+    assert {
+        name: body[name]
+        for name in (
+            "pricing_machine_rate_per_hour",
+            "pricing_setup_fee",
+            "pricing_labour_per_item",
+            "pricing_markup_percent",
+            "pricing_rounding",
+            "rough_estimate_factor",
+        )
+    } == {
+        "pricing_machine_rate_per_hour": "0",
+        "pricing_setup_fee": "0",
+        "pricing_labour_per_item": "0",
+        "pricing_markup_percent": "0",
+        "pricing_rounding": "to_minor_unit",
+        "rough_estimate_factor": "1.15",
+    }
+    assert body["applies"]["pricing_markup_percent"] == "live"
+
+    refused = client.put("/api/v1/settings", json={"pricing_markup_percent": "-1"})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", "pricing_markup_percent"]
+    assert client.put("/api/v1/settings", json={"pricing_setup_fee": "lots"}).status_code == 422
+    assert client.put("/api/v1/settings", json={"rough_estimate_factor": "0"}).status_code == 422
+    assert client.put("/api/v1/settings", json={"pricing_rounding": "up"}).status_code == 422
+
+    saved = client.put("/api/v1/settings", json={"pricing_markup_percent": "12.5"}).json()
+    assert saved["pricing_markup_percent"] == "12.5"
+    assert saved["sources"]["pricing_markup_percent"] == "stored"
+    assert read_stored(settings.database_url)["pricing_markup_percent"] == "12.5"
 
 
 def test_the_temporal_ui_url_follows_its_variable(settings: Settings) -> None:

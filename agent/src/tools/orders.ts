@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
+import { command } from './command.js'
+import { nozzles, presetRef, slotChoice, tier } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
 
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
@@ -11,6 +13,12 @@ import { defineTool, json, type Tool, ToolError } from './registry.js'
 // terminal). An order on hold answers 409 `order_on_hold` to every tool that would advance
 // it, from the backend's lifecycle, not from each tool. The audit line (GET
 // /orders/{id}/events) is the page's; order_get carries the status (coverage.ts).
+//
+// Phase 2 (#4250, plan Ruling 11): the price book is `read` to look at and `write` to keep
+// (the policy, a filament's record); order_item_quote takes both modes, a typed price or a
+// slice of the item through the print dialog's own choices (the `order_item_quote`
+// operation, followed as every command is), and stays `write`: a quote records a price,
+// accepting it is the outward step. The rough estimate is a `read`, never a quote.
 
 const ID = z.string().min(1).max(100)
 const orderId = ID.describe('An order id, as order_list or order_create returns it')
@@ -68,6 +76,55 @@ const attempt = z
   })
   .strict()
 const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int().min(1) }).strict()
+
+/** A decimal string, as the price book keeps every rate (§3.6: never a float). */
+const decimal = z.string().regex(/^\d+(\.\d+)?$/).describe('A decimal string, such as "25.50"')
+const policyFields = z
+  .object({
+    machine_rate_per_hour: decimal.optional(),
+    setup_fee: decimal.optional().describe('Per plate'),
+    labour_per_item: decimal.optional(),
+    markup_percent: decimal.optional().describe('A percentage of the other lines: "15" is 15 %'),
+    rounding: z.enum(['to_minor_unit', 'to_major']).optional(),
+  })
+  .strict()
+const filamentFields = {
+  material: z.string().min(1).max(100).optional(),
+  subtype: z.string().max(100).nullable().optional(),
+  brand: z.string().max(100).nullable().optional(),
+  colour_name: z.string().max(100).nullable().optional(),
+  colour: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  cost_per_kg: decimal.optional().describe('In the shop\'s currency'),
+  density_g_cm3: decimal.nullable().optional().describe('g/cm³, for the rough estimate'),
+}
+/** The print dialog's choices (`PrintChoices`): what the item is sliced with. */
+const printChoices = z
+  .object({
+    nozzles,
+    tier: tier.nullable().optional(),
+    process_name: z.string().max(200).nullable().optional(),
+    bed_type: z.string().max(64).optional(),
+    // `catchall`, not `z.record`: see `params` in common.ts.
+    filament_overrides: z.object({}).catchall(presetRef).optional().describe("A filament preset per slot id, in place of the spool's own"),
+    sides: z.object({}).catchall(z.enum(['L', 'R'])).optional(),
+  })
+  .strict()
+const sliceQuote = z
+  .object({
+    printer_id: z.number().int().optional().describe('Omit for the configured printer'),
+    filament_plan: z
+      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
+      .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),
+    choices: printChoices,
+    filaments: z
+      .object({})
+      .catchall(ID)
+      .describe(
+        "The price-book filament (price_book_get) of each of the item's colour slots, keyed by `colours[].slot` " +
+          '(from 0; the dialog\'s slot_id - 1): the spool slices, the filament prices',
+      ),
+  })
+  .strict()
 
 /** The quiet-path answer for a `delete`: openapi-fetch gives no body for a 204. */
 const deleted = (what: string) => json({ deleted: what })
@@ -318,27 +375,44 @@ export const orderTools: Tool[] = [
   defineTool({
     name: 'order_item_quote',
     description:
-      'Record a typed price for a line item (a `manual` quote: one line, cost = price, the quantity as it is now). ' +
-      'The item is quoted; order_item_accept_quote pins it. A later reference or quantity change drops the pin.',
+      'Quote a line item, in one of two modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
+      'it is now). `slice`: render the item if it has no matching output, slice every plate with the print ' +
+      "dialog's own choices (printer, a spool per slot, nozzles and quality, as print_output takes them) and price " +
+      "the plates' grams and seconds with the price book in force, each slot at the filament `filaments` names; " +
+      "those filaments are written onto the item first (a change drops its accepted quote). A slice quote may run " +
+      'for minutes: past the follow window it answers the running operation, to follow with get_operation. The ' +
+      'item is quoted; order_item_accept_quote pins it.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
-      unit_price_minor: money.describe('Per unit'),
-      label: z.string().min(1).max(200).optional(),
+      manual: z
+        .object({ unit_price_minor: money.describe('Per unit'), label: z.string().min(1).max(200).optional() })
+        .strict()
+        .optional(),
+      slice: sliceQuote.optional(),
     }),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes'],
-    title: ({ order_id, item_id }) => `Price item ${item_id} of order ${order_id}`,
-    handler: async ({ order_id, item_id, ...body }, { backend }) =>
-      json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', {
-            params: { path: { order_id, item_id } },
-            body: body as never,
-          }),
-          `quote item ${item_id}`,
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes', 'POST /api/v1/orders/{order_id}/items/{item_id}/quote'],
+    title: ({ order_id, item_id, slice }) => `${slice ? 'Quote from a slice' : 'Price'} item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id, manual, slice }, ctx) => {
+      if ((manual === undefined) === (slice === undefined)) {
+        throw new ToolError('give exactly one of `manual` (a typed price) or `slice` (the print dialog\'s choices)')
+      }
+      const path = { order_id, item_id }
+      if (manual !== undefined) {
+        return json(
+          await ok(
+            ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
+            `quote item ${item_id}`,
+          ),
+        )
+      }
+      return json(
+        await command(ctx, `quote item ${item_id} from a slice`, (headers) =>
+          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quote', { params: { path }, body: slice as never, headers }),
         ),
-      ),
+      )
+    },
   }),
   defineTool({
     name: 'order_item_accept_quote',
@@ -501,5 +575,103 @@ export const orderTools: Tool[] = [
               `cancel item ${item_id}`,
             ),
       ),
+  }),
+
+  defineTool({
+    name: 'price_book_get',
+    description:
+      "The price book in force: the currency the next order copies (and its `minor_exponent`), the pricing policy " +
+      '(machine rate per hour, setup fee per plate, labour per item, markup percent, rounding), the rough ' +
+      "estimate's factor, and the filament records not archived, each with its cost per kilogram.",
+    input: z.object({}),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/price-book'],
+    handler: async (_input, { backend }) => json(await ok(backend.GET('/api/v1/orders/price-book'), 'read the price book')),
+  }),
+  defineTool({
+    name: 'price_book_set',
+    description:
+      'Keep the price book: `policy` (the fields given replace those in force, the rest stay), ' +
+      "`rough_estimate_factor`, and `filament`: a new record (no `filament_id`; material, colour and cost_per_kg), " +
+      'an edit of one (`filament_id` with the fields to change), or `archive: true` to hide it from the book. A ' +
+      'recorded quote keeps the rates it was priced at.',
+    input: z.object({
+      policy: policyFields.optional(),
+      rough_estimate_factor: decimal.optional(),
+      filament: z
+        .object({ filament_id: ID.optional(), archive: z.boolean().default(false), ...filamentFields })
+        .strict()
+        .optional(),
+    }),
+    risk: 'write',
+    routes: [
+      'PUT /api/v1/orders/price-book',
+      'POST /api/v1/orders/price-book/filaments',
+      'PATCH /api/v1/orders/price-book/filaments/{filament_id}',
+      'POST /api/v1/orders/price-book/filaments/{filament_id}/archive',
+    ],
+    title: ({ policy, filament }) =>
+      filament?.archive
+        ? `Archive filament ${filament.filament_id ?? ''}`.trim()
+        : filament
+          ? filament.filament_id
+            ? `Edit filament ${filament.filament_id}`
+            : `Add filament ${filament.material ?? ''}`.trim()
+          : policy
+            ? 'Set the pricing policy'
+            : 'Set the price book',
+    handler: async ({ policy, rough_estimate_factor, filament }, { backend }) => {
+      if (policy === undefined && rough_estimate_factor === undefined && filament === undefined) {
+        throw new ToolError('nothing to change: give a policy, a rough_estimate_factor or a filament')
+      }
+      const answer: Record<string, unknown> = {}
+      if (policy !== undefined || rough_estimate_factor !== undefined) {
+        // The PUT takes the whole policy: the fields not given keep their values.
+        const current = await ok(backend.GET('/api/v1/orders/price-book'), 'read the price book')
+        const given = Object.fromEntries(Object.entries(policy ?? {}).filter(([, v]) => v !== undefined))
+        answer.book = await ok(
+          backend.PUT('/api/v1/orders/price-book', {
+            body: { ...current.policy, ...given, ...(rough_estimate_factor === undefined ? {} : { rough_estimate_factor }) } as never,
+          }),
+          'set the pricing policy',
+        )
+      }
+      if (filament !== undefined) {
+        const { filament_id, archive, ...fields } = filament
+        const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+        if (filament_id === undefined) {
+          if (archive) throw new ToolError('archive needs a filament_id')
+          answer.filament = await ok(backend.POST('/api/v1/orders/price-book/filaments', { body: body as never }), 'add a filament')
+        } else {
+          const path = { filament_id }
+          if (Object.keys(body).length > 0) {
+            answer.filament = await ok(
+              backend.PATCH('/api/v1/orders/price-book/filaments/{filament_id}', { params: { path }, body: body as never }),
+              `edit filament ${filament_id}`,
+            )
+          }
+          if (archive) {
+            answer.filament = await ok(
+              backend.POST('/api/v1/orders/price-book/filaments/{filament_id}/archive', { params: { path } }),
+              `archive filament ${filament_id}`,
+            )
+          }
+          if (answer.filament === undefined) throw new ToolError('give the fields to change, or archive: true')
+        }
+      }
+      return json(answer)
+    },
+  }),
+  defineTool({
+    name: 'order_estimate',
+    description:
+      "A rough estimate of an output's filament before anything is sliced: its parts' enclosed volumes over every " +
+      "plate times the filament's density and the shop's factor, in grams and at the filament's price. Labelled " +
+      'an estimate and never recorded: quote with order_item_quote. A filament with no density gives none.',
+    input: z.object({ output_id: ID, filament_id: ID.describe('A price-book filament (price_book_get)') }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/estimate'],
+    handler: async (query, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders/estimate', { params: { query } }), `estimate output ${query.output_id}`)),
   }),
 ]

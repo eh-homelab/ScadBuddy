@@ -52,4 +52,16 @@ describe('AddToOrderDialog (#4249)', () => {
     const customers = await api.customers({ q: 'grace' })
     expect(customers).toHaveLength(1)
   })
+
+  it('shows a rough estimate once a filament is picked, and records nothing (#4250)', async () => {
+    const add = vi.spyOn(api, 'addOrderItem')
+    const { user } = renderPage(<AddToOrderDialog open outputId={OUTPUT_REAGAN} outputName="Reagan" onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, await within(dialog).findByRole('combobox', { name: 'Estimate with' }), /Sunflower Yellow/)
+    const estimate = await within(dialog).findByTestId('order-estimate')
+    expect(estimate).toHaveTextContent(/An estimate: about [\d.]+ g/)
+    expect(estimate).toHaveTextContent('$')
+    expect(add).not.toHaveBeenCalled()
+    add.mockRestore()
+  })
 })

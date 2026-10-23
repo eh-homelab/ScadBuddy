@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Collection
+from datetime import timedelta
+
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
@@ -32,6 +35,20 @@ class BlobRefs:
                 "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
                 (holder_kind, holder_id),
             )
+
+    def drop_unlisted(
+        self, holder_kind: str, keep: Collection[str], *, older_than: timedelta
+    ) -> int:
+        """Drop every ``holder_kind`` row whose holder is not in ``keep`` and that was
+        added more than ``older_than`` ago (a younger one may be a holder about to write
+        the row that keeps it); how many went."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND NOT (holder_id = ANY(%s))"
+                " AND created_at < now() - %s",
+                (holder_kind, list(keep), older_than),
+            )
+            return cursor.rowcount
 
     def referenced(self) -> set[str]:
         with self._pool.connection() as conn:

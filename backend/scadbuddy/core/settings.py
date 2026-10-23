@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
@@ -54,6 +55,7 @@ from scadbuddy.core.config import (
     StoreBackend,
 )
 from scadbuddy.core.proxies import Network, parse_cidr_list
+from scadbuddy.orders.currency import NO_MINOR_UNIT
 
 CONTAINER_SEED_MODELS_DIR = Path("/app/models")
 # The curated libraries the image bakes in (#169); no dev equivalent.
@@ -154,6 +156,21 @@ class Settings(BaseSettings):
     # (orders spec 2026-10-18 §3.2, #4249) and never changes; a change applies to the
     # next order. The three-letter shape is checked, not the code list.
     orders_currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+    # SCADBUDDY_PRICING_*: the price book's policy (orders spec §5.1, #4250), read by
+    # each quote and copied into its lines, so a change never moves a recorded quote.
+    # Decimal strings in the order's currency (§3.6: rates are never floats), each at
+    # least 0: the machine's rate per hour of print time, a setup fee per plate, labour
+    # per item, and a markup as a percentage of the rest ("15" is 15 %).
+    pricing_machine_rate_per_hour: str = "0"
+    pricing_setup_fee: str = "0"
+    pricing_labour_per_item: str = "0"
+    pricing_markup_percent: str = "0"
+    # `to_minor_unit`: the unit price is its lines, each rounded once; `to_major`: then
+    # rounded up to a whole currency unit, the difference a line of its own.
+    pricing_rounding: Literal["to_minor_unit", "to_major"] = "to_minor_unit"
+    # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
+    # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
+    rough_estimate_factor: str = "1.15"
     # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
     # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
     slicer_backend: Slicer = "bambuddy"
@@ -199,6 +216,31 @@ class Settings(BaseSettings):
     # runs with --no-proxy-headers in the image, so it believes none either). Not a
     # stored setting: it decides who the server believes about who it is talking to.
     trusted_proxies: str = ""
+
+    @field_validator("orders_currency")
+    @classmethod
+    def _currency_has_a_minor_unit(cls, code: str) -> str:
+        # Orders spec §3.6, #4250 plan Ruling 5: an amount is integer minor units, and
+        # these codes have none (precious metals, drawing units, the testing codes).
+        if code in NO_MINOR_UNIT:
+            raise ValueError(
+                f"SCADBUDDY_ORDERS_CURRENCY: {code} has no minor unit in ISO 4217, so"
+                " nothing can be priced in it"
+            )
+        return code
+
+    @field_validator(
+        "pricing_machine_rate_per_hour",
+        "pricing_setup_fee",
+        "pricing_labour_per_item",
+        "pricing_markup_percent",
+        "rough_estimate_factor",
+    )
+    @classmethod
+    def _decimal_rate(cls, value: str, info: ValidationInfo) -> str:
+        name = info.field_name or ""
+        positive = name == "rough_estimate_factor"
+        return decimal_string(value, env_var(name), positive=positive)
 
     @field_validator("store_s3_prefix")
     @classmethod
@@ -695,6 +737,13 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "library_backend": "restart",
         # Copied by each order at create (orders spec §3.2); never an existing order's.
         "orders_currency": "next order",
+        # Read from the store by each quote and each rough estimate (orders spec §5.1).
+        "pricing_machine_rate_per_hour": "live",
+        "pricing_setup_fee": "live",
+        "pricing_labour_per_item": "live",
+        "pricing_markup_percent": "live",
+        "pricing_rounding": "live",
+        "rough_estimate_factor": "live",
         # Read from the store by every slice's start.
         "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",
@@ -710,6 +759,30 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "worker_cache_max_bytes": "restart",
     }
 )
+
+
+#: The most a price-book rate may be: a sum of money or a factor past this is a typo.
+MAX_DECIMAL_RATE = Decimal(10) ** 9
+
+
+def decimal_string(value: str, label: str, *, positive: bool = False) -> str:
+    """``value`` as a decimal string (orders spec §3.6: rates are parsed with ``Decimal``,
+    never as floats), stripped: finite, at least 0 (above 0 with ``positive``) and below
+    :data:`MAX_DECIMAL_RATE`, else ``ValueError`` naming ``label``."""
+    text = value.strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise ValueError(f"{label}: {value!r} is not a decimal number") from None
+    if not number.is_finite():
+        raise ValueError(f"{label}: {value!r} is not a decimal number")
+    if positive and number <= 0:
+        raise ValueError(f"{label} must be more than 0")
+    if number < 0:
+        raise ValueError(f"{label} must be at least 0")
+    if number >= MAX_DECIMAL_RATE:
+        raise ValueError(f"{label} must be less than {MAX_DECIMAL_RATE}")
+    return text
 
 
 def split_urls(value: str | None) -> list[str]:

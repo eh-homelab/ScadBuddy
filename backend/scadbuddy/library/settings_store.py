@@ -563,6 +563,15 @@ class SettingsPatch(BaseModel):
     slicer_backend: Slicer | None = None
     #: The ISO 4217 code the next order copies (#4249); an existing order keeps its own.
     orders_currency: str | None = None
+    #: The price book's policy (#4250, orders spec §5.1): decimal strings in the order's
+    #: currency, read by each quote and copied into its lines; a recorded quote keeps its.
+    pricing_machine_rate_per_hour: str | None = None
+    pricing_setup_fee: str | None = None
+    pricing_labour_per_item: str | None = None
+    pricing_markup_percent: str | None = None
+    pricing_rounding: Literal["to_minor_unit", "to_major"] | None = None
+    #: The rough estimate's factor over a part's volume (orders spec §5.3).
+    rough_estimate_factor: str | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None

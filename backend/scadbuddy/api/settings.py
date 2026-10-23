@@ -115,6 +115,14 @@ class SettingsView(BaseModel):
     slicer_backend: Slicer = "bambuddy"
     #: The ISO 4217 code the next order copies (#4249, orders spec §3.2).
     orders_currency: str
+    #: The price book's policy and the rough estimate's factor (#4250, orders spec §5.1,
+    #: §5.3): decimal strings, read by each quote.
+    pricing_machine_rate_per_hour: str
+    pricing_setup_fee: str
+    pricing_labour_per_item: str
+    pricing_markup_percent: str
+    pricing_rounding: Literal["to_minor_unit", "to_major"]
+    rough_estimate_factor: str
     store_s3_endpoint: str | None = None
     store_s3_region: str = "us-east-1"
     store_s3_bucket: str | None = None
