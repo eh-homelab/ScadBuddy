@@ -127,6 +127,26 @@ async def test_a_put_into_a_folder_deleted_since_its_check_is_404(
     assert [await native.content.stat(key) for key in staged] == [None]
 
 
+async def test_overlapping_puts_of_two_outputs_take_two_names(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """#4508 review: the per-output lock alone let two outputs of one stem both take
+    `Sign.3mf`; the folder's lock around the name pick keeps them apart."""
+    gifts = native.rows.create_folder("Gifts", None).id
+    placed = await asyncio.gather(
+        *(
+            put_in_folder(native, _meta(f"{i + 0xA0:032x}"), three_mf, gifts, "Sign")
+            for i in range(4)
+        )
+    )
+    assert sorted(row.name for row, _ in placed) == [
+        "Sign (2).3mf",
+        "Sign (3).3mf",
+        "Sign (4).3mf",
+        "Sign.3mf",
+    ]
+
+
 async def test_a_put_names_its_copy_unique_in_the_folder(
     native: NativeLibrary, three_mf: Path
 ) -> None:

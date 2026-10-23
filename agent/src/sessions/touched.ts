@@ -102,11 +102,11 @@ export type ResourceAction = (typeof RESOURCE_ACTIONS)[number]
  * | `print`         | print_again                                   | the print archive printed again      |
  * | `bambuddy_file` | send_to_bambuddy, file_output_in_project_folder, browser_generate | the output it holds |
  * | `library_file`  | file_output_in_project_folder, browser_generate (a native folder) | the output it holds |
- *
- * Every library file touch is `library_file` for a native id (`NATIVE_ID_BASE` and up), else `bambuddy_file`.
  * | `project`, `print_archive` | file_output_under_project          | the output filed                     |
  *
  * Every other row leaves it null.
+ *
+ * Every library file touch is `library_file` for a native id (`NATIVE_ID_BASE` and up), else `bambuddy_file`.
  */
 export type Touch = {
   type: ResourceType

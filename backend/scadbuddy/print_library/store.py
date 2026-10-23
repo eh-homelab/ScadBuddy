@@ -349,6 +349,15 @@ class NativeLibraryStore:
             ).fetchone()
             if live is None:
                 raise FolderGoneError(folder_id)
+            # The name pick and the insert under the folder's lock too: the output's lock
+            # alone lets two outputs of one stem both take `Sign.3mf`. Nothing in the
+            # schema or the native upload makes names unique; this put promises it, as the
+            # Bambuddy path's `project_filename` does (the mount names files by name).
+            conn.execute(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('scadbuddy:library:folder-names:' || %s, 0))",
+                (folder_id,),
+            )
             taken = conn.execute(
                 "SELECT name FROM library_files WHERE folder_id = %s AND deleted_at IS NULL",
                 (folder_id,),
