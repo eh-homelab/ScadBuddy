@@ -47,9 +47,12 @@ export function useFilamentPlan(
   choices: ChoicesView | null,
   plate: PlateChoice,
   carry?: CarryBox,
+  /** #3818 — the registry printer the choices were read for, named on each plate's read. */
+  printer: string | null = null,
 ) {
   const key = sourceKey(source)
   const latest = useLatest(source)
+  const latestPrinter = useLatest(printer)
   const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
   const [plan, setPlan] = useState<SlotChoice[]>([])
   const [filamentError, setFilamentError] = useState<string | null>(null)
@@ -135,6 +138,7 @@ export function useFilamentPlan(
       setPlan(seeded)
     }
     const printerId = choices.printer_id ?? null
+    const named = latestPrinter.current ? { printer: latestPrinter.current } : {}
     // This render's plates: `useLatest` writes its ref in a layout effect, which runs
     // before this passive one (#3970). Written in a `useEffect`, it would hold the last.
     const asked = latestPlate.current
@@ -148,10 +152,10 @@ export function useFilamentPlan(
     sourceApi(current)
       .getFilaments(
         asked === 'all'
-          ? { printerId, allPlates: true }
+          ? { printerId, ...named, allPlates: true }
           : chosen.length > 1
-            ? { printerId, plateIds: [...chosen] }
-            : { printerId, plateId: chosen[0] ?? 1 },
+            ? { printerId, ...named, plateIds: [...chosen] }
+            : { printerId, ...named, plateId: chosen[0] ?? 1 },
       )
       .then((next) => token === filamentAttempt.current && seed(next))
       .catch((cause: unknown) => {
@@ -165,7 +169,7 @@ export function useFilamentPlan(
       })
     // `latest` and `latestPlate` are stable refs, listed for exhaustive-deps, which cannot
     // see through `useLatest`; `chosenPlates` is what re-runs this on a change of plates.
-  }, [choices, key, latest, latestPlate, chosenPlates, rememberedPlan, carry, retries])
+  }, [choices, key, latest, latestPlate, latestPrinter, chosenPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =

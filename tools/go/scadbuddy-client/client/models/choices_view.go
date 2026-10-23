@@ -24,6 +24,8 @@ type ChoicesView struct {
 	filaments FilamentOptionsable
 	// The installed property
 	installed []InstalledNozzleable
+	// The lan_printers property
+	lan_printers []string
 	// The last_bed_type property
 	last_bed_type ChoicesView_ChoicesView_last_bed_typeable
 	// What the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
@@ -371,6 +373,22 @@ func (m *ChoicesView) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		return nil
 	}
+	res["lan_printers"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("string")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]string, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*string))
+				}
+			}
+			m.SetLanPrinters(res)
+		}
+		return nil
+	}
 	res["last_bed_type"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateChoicesView_ChoicesView_last_bed_typeFromDiscriminatorValue)
 		if err != nil {
@@ -494,6 +512,12 @@ func (m *ChoicesView) GetInstalled() []InstalledNozzleable {
 	return m.installed
 }
 
+// GetLanPrinters gets the lan_printers property value. The lan_printers property
+// returns a []string when successful
+func (m *ChoicesView) GetLanPrinters() []string {
+	return m.lan_printers
+}
+
 // GetLastBedType gets the last_bed_type property value. The last_bed_type property
 // returns a ChoicesView_ChoicesView_last_bed_typeable when successful
 func (m *ChoicesView) GetLastBedType() ChoicesView_ChoicesView_last_bed_typeable {
@@ -600,6 +624,12 @@ func (m *ChoicesView) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("installed", cast)
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetLanPrinters() != nil {
+		err := writer.WriteCollectionOfStringValues("lan_printers", m.GetLanPrinters())
 		if err != nil {
 			return err
 		}
@@ -714,6 +744,11 @@ func (m *ChoicesView) SetInstalled(value []InstalledNozzleable) {
 	m.installed = value
 }
 
+// SetLanPrinters sets the lan_printers property value. The lan_printers property
+func (m *ChoicesView) SetLanPrinters(value []string) {
+	m.lan_printers = value
+}
+
 // SetLastBedType sets the last_bed_type property value. The last_bed_type property
 func (m *ChoicesView) SetLastBedType(value ChoicesView_ChoicesView_last_bed_typeable) {
 	m.last_bed_type = value
@@ -769,6 +804,7 @@ type ChoicesViewable interface {
 	GetFilamentPresets() ChoicesView_filament_presetsable
 	GetFilaments() FilamentOptionsable
 	GetInstalled() []InstalledNozzleable
+	GetLanPrinters() []string
 	GetLastBedType() ChoicesView_ChoicesView_last_bed_typeable
 	GetModelChoices() ModelPrintChoicesable
 	GetNozzleSizes() []string
@@ -785,6 +821,7 @@ type ChoicesViewable interface {
 	SetFilamentPresets(value ChoicesView_filament_presetsable)
 	SetFilaments(value FilamentOptionsable)
 	SetInstalled(value []InstalledNozzleable)
+	SetLanPrinters(value []string)
 	SetLastBedType(value ChoicesView_ChoicesView_last_bed_typeable)
 	SetModelChoices(value ModelPrintChoicesable)
 	SetNozzleSizes(value []string)

@@ -244,6 +244,11 @@ export type NewBatchFile = Schemas['NewBatchFile']
 /** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
 export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
+/** #3818 — a provider's record of a spool, as the overlay keeps it (Task 6c). */
+export type SpoolSnapshot = Schemas['SpoolSnapshot']
+/** #3818 — the native manual link's body: a physical spool, or one provider's record. */
+export type TraySpoolLink = Schemas['TraySpoolLink']
+export type TraySpool = Schemas['TraySpool-Output']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']

@@ -14,6 +14,7 @@ import type {
   ProjectFile,
   ProjectView,
   SendResult,
+  Settings,
 } from '../api/types'
 import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
@@ -31,7 +32,8 @@ import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
 import { breadcrumbs, useProjectList } from '../lib/projects'
 import { useSubscription } from '../lib/realtime'
-import { useAsync } from '../lib/useAsync'
+import { useAsync, type AsyncState } from '../lib/useAsync'
+import { listsNativeFolders } from '../lib/printerRegistry'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Hint } from './Hint'
@@ -68,6 +70,11 @@ export interface ActionBarHandle {
 
 interface Props {
   ref?: Ref<ActionBarHandle>
+  /**
+   * #3818 — the page's own Settings read, shared so the destinations need no second one.
+   * Left out (a test, another page), the bar reads Settings itself.
+   */
+  settings?: Pick<AsyncState<Settings>, 'data' | 'error'>
   slug: string
   job: Job | undefined
   rendering: boolean
@@ -117,6 +124,7 @@ interface Props {
 
 export function ActionBar({
   ref,
+  settings: pageSettings,
   slug,
   job,
   rendering,
@@ -171,8 +179,28 @@ export function ActionBar({
    * the 3MF there. Not remembered per model, as a project is: a folder holds no prints.
    */
   const [folderId, setFolderId] = useState<number | null>(null)
+  /**
+   * #3818 — with no Bambuddy and the native library, the destinations are ScadBuddy's own
+   * folders (plan 2026-10-18 D6): Bambuddy has no projects to list. Read once the
+   * settings say which, so a page with no Bambuddy never asks it.
+   */
+  const ownSettings = useAsync(
+    async () => (pageSettings ? undefined : await api.getSettings()),
+    [pageSettings === undefined],
+  )
+  const backends = pageSettings ?? ownSettings
+  // Deliberate: the list waits for Settings, since listing first would ask Bambuddy for
+  // projects on a page with no Bambuddy (a 409 the picker would show). A failed Settings
+  // read counts as settled and lists Bambuddy's projects, as before #3818: an unknown
+  // setup is treated as today's, and the picker's own error and Retry cover a Bambuddy
+  // that is not there, where holding the list forever would hide the picker.
+  const settled = backends.data !== undefined || backends.error !== undefined
+  // The one rule for a page with no printer (`listsNativeFolders`); the dialog's is per printer.
+  const nativeLibrary = listsNativeFolders(backends.data)
   /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
-  const projects = useProjectList()
+  const list = useProjectList(undefined, settled, nativeLibrary)
+  // Loading until it is read, settings first: a list not yet asked for is not an empty one.
+  const projects = useMemo(() => (settled ? list : { ...list, loading: true }), [settled, list])
   const listed = projects.choices?.projects
   const paths = useMemo(() => breadcrumbs(listed ?? []), [listed])
   const projectPath = (id: number) => paths.get(id) ?? `project ${id}`
@@ -541,6 +569,7 @@ export function ActionBar({
       folder={folderChoice}
       list={projects}
       onProject={setProject}
+      native={nativeLibrary}
       // #666 — locked while Generate files, so the project on screen is where it went.
       disabled={generating || confirming !== null}
       onCreating={setPageCreating}

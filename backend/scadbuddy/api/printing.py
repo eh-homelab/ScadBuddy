@@ -60,7 +60,7 @@ from scadbuddy.api.operations import (
     temporal_unavailable,
 )
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
-from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
+from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output, with_lan_printers
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
@@ -1187,6 +1187,7 @@ async def get_choices(
     store: SettingsStoreDep,
     rack: RackUsageDep,
     paths: PathsDep,
+    printers: PrintersDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """Printers, installed nozzles, quality tiers and processes, plates with the last one
@@ -1194,7 +1195,7 @@ async def get_choices(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await choices_for_output(
+        view = await choices_for_output(
             client,
             outputs,
             uploads,
@@ -1205,6 +1206,7 @@ async def get_choices(
             catalogue_key=catalogue_name_key(store.kek),
             rack=rack,
         )
+    return await with_lan_printers(view, settings, printers)
 
 
 async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:

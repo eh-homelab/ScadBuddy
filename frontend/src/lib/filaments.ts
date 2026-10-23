@@ -30,6 +30,32 @@ export function fromTrays(options: Pick<FilamentOptions, 'source'> | { source?: 
 }
 
 /**
+ * #3818 — a loaded tray as a native run's choice: `"PLA blue in AMS-A slot 1"`, from the
+ * tray's material, its `colour_word` and its `label`, each the backend's (`trays.py`
+ * `colour_word`, `tray_label`): nothing about the colour is worked out here.
+ */
+export function trayChoiceLabel(spool: SpoolOption): string {
+  const where = spool.label ?? (spool.loaded ? trayPlace(spool.loaded) : null)
+  const what = [spool.material, spool.colour_word].filter(Boolean).join(' ')
+  return where ? `${what} in ${where}` : what
+}
+
+/**
+ * A spool provider as a person reads it: Bambuddy's inventory, or another's name. A
+ * provider's own label (`SpoolProvider.label`) is not on the wire, so any other key is
+ * title-cased, its underscores read as spaces (`open_spool` is "Open Spool").
+ */
+export function providerLabel(provider: string): string {
+  if (provider === 'bambuddy') return 'Bambuddy'
+  if (provider === 'native') return 'ScadBuddy'
+  return provider
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+/**
  * `"Bambu Lab PLA Silk — Blue"`.
  *
  * Brand, subtype and colour name are each nullable on the wire — a spool added by hand

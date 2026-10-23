@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -35,7 +36,7 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
 )
-from scadbuddy.bambuddy.print_run import filament_options, read_status
+from scadbuddy.bambuddy.print_run import filament_options, lan_printers, native_runs, read_status
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -46,6 +47,9 @@ from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
+
+if TYPE_CHECKING:
+    from scadbuddy.printers.component import Printers
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,10 @@ class ChoicesView(BaseModel):
     #: place of the slicer steps; empty when that could not be read. ``None`` for a file
     #: the print slices.
     sliced: SlicedProfile | None = None
+    #: #3818 — the registry printers a run would reach over the LAN
+    #: (`print_run.lan_printers`): a print on one is filed in a native folder with no
+    #: project. Empty until plan 3a Task 9, while every run goes through Bambuddy.
+    lan_printers: list[str] = Field(default_factory=list)
 
 
 def filament_presets_by_size(catalogue: Catalogue) -> dict[str, list[FilamentPresetOption]]:
@@ -329,3 +337,14 @@ async def _last_bed_type(client: BambuddyClient, printer_id: int) -> str | None:
     except (ApiError, ValueError, TimeoutError):
         logger.info("archives unreadable; the plate falls back to the remembered one")
         return None
+
+
+async def with_lan_printers(
+    view: ChoicesView, settings: StoredSettings, printers: Printers | None
+) -> ChoicesView:
+    """``view`` with the registry printers a run would reach over the LAN (#3818)."""
+    if not native_runs(settings) or printers is None:
+        # Nothing on the native path: the registry is not read (none until Task 9).
+        return view
+    rows = await lan_printers(settings, printers.store, printers.reports)
+    return view.model_copy(update={"lan_printers": rows})

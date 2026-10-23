@@ -119,6 +119,8 @@ import type {
   PreviewStarted,
   SlicePreview,
   TrayAssigned,
+  TraySpool,
+  TraySpoolLink,
   PrintRun,
   FlowDecided,
   FlowProposal,
@@ -872,6 +874,34 @@ async function followOperation<T>(
  * queues a second print. `signal` stops following; the run itself goes on. `within`
  * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
  */
+/** The filament step's read: a Bambuddy printer, and (#3818) the registry printer beside it. */
+export type FilamentsQuery = {
+  printerId?: number | null
+  printer?: string | null
+  plateId?: number
+  allPlates?: boolean
+  plateIds?: readonly number[]
+}
+
+function filamentSearch(query: FilamentsQuery): URLSearchParams {
+  const search = choicesSearch(query.printerId, query.printer)
+  if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
+  if (query.allPlates) search.set('all_plates', 'true')
+  for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
+  return search
+}
+
+/**
+ * `printer_id` names a Bambuddy printer; `printer` (#3818) a registry row, the one way to
+ * name a printer only the LAN reaches. Both go out when both are known.
+ */
+function choicesSearch(printerId?: number | null, printer?: string | null): URLSearchParams {
+  const search = new URLSearchParams()
+  if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
+  if (printer) search.set('printer', printer)
+  return search
+}
+
 async function followPrintRun(
   path: string,
   body: PrintRunRequest,
@@ -1695,15 +1725,9 @@ export const api = {
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
+    query: FilamentsQuery = {},
   ) => {
-    const search = new URLSearchParams()
-    if (query.printerId !== null && query.printerId !== undefined) {
-      search.set('printer_id', String(query.printerId))
-    }
-    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
-    if (query.allPlates) search.set('all_plates', 'true')
-    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
+    const search = filamentSearch(query)
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
@@ -1718,9 +1742,8 @@ export const api = {
    * last one used, and the filament step. `printerId` narrows the per-printer bits
    * (mounted nozzles, last plate) the same way `getFilaments`'s does.
    */
-  getChoices: (outputId: string, printerId?: number | null) => {
-    const search = new URLSearchParams()
-    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
+  getChoices: (outputId: string, printerId?: number | null, printer?: string | null) => {
+    const search = choicesSearch(printerId, printer)
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
   },
@@ -1841,14 +1864,21 @@ export const api = {
    * membership: which prints belong to a project is on the project's own page. What it
    * remembers per model is only the default the Customize page's picker opens on (#1660).
    */
-  getProjects: () => request<ProjectChoices>('/print/projects'),
+  getProjects: ({ native = false }: { native?: boolean } = {}) =>
+    request<ProjectChoices>(`/print/projects${native ? '?native=true' : ''}`),
 
   /**
    * #3651 — the project a print of this content opens on: the one project it is all in
    * already, else the Settings default, else none.
    */
-  getDefaultProject: (content: { outputIds?: readonly string[]; libraryFileIds?: readonly number[] }) => {
+  getDefaultProject: (content: {
+    outputIds?: readonly string[]
+    libraryFileIds?: readonly number[]
+    /** A native print: no project, and Bambuddy is not asked (plan 2026-10-18 D6). */
+    native?: boolean
+  }) => {
     const search = new URLSearchParams()
+    if (content.native) search.set('native', 'true')
     for (const id of content.outputIds ?? []) search.append('output_id', id)
     for (const id of content.libraryFileIds ?? []) search.append('library_file_id', String(id))
     const query = search.toString()
@@ -1936,6 +1966,15 @@ export const api = {
   linkPrinterLan: (id: string, body: LanLink) =>
     request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'PUT', body: JSON.stringify(body) }),
   unlinkPrinterLan: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'DELETE' }),
+  /**
+   * #3818 — the native path's manual link: which physical spool, or which provider's
+   * record, is in an untagged tray. Writes ScadBuddy only, never Bambuddy's assignment.
+   */
+  linkTraySpool: (printer: string, amsId: number, trayId: number, body: TraySpoolLink) =>
+    request<TraySpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/spool`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
   getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
@@ -2139,24 +2178,17 @@ export const api = {
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
   getLibraryObjects: (fileId: number) => request<LibraryFileObjects>(`/print/library/${fileId}/objects`),
 
-  getLibraryChoices: (fileId: number, printerId?: number | null) => {
-    const search = new URLSearchParams()
-    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
+  getLibraryChoices: (fileId: number, printerId?: number | null, printer?: string | null) => {
+    const search = choicesSearch(printerId, printer)
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<ChoicesView>(`/print/library/${fileId}/choices${suffix}`)
   },
 
   getLibraryFilaments: (
     fileId: number,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
+    query: FilamentsQuery = {},
   ) => {
-    const search = new URLSearchParams()
-    if (query.printerId !== null && query.printerId !== undefined) {
-      search.set('printer_id', String(query.printerId))
-    }
-    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
-    if (query.allPlates) search.set('all_plates', 'true')
-    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
+    const search = filamentSearch(query)
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
   },

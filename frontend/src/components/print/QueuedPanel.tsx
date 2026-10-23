@@ -15,6 +15,8 @@ type Props = {
 
 /** What a started print shows in place of the steps: what was queued, and its progress (#89). */
 export function QueuedPanel({ result, printerName, progress, polling, plates = [] }: Props) {
+  // #3818 — the path the run reports it took: over the LAN there is no queue to name (§6.3).
+  const native = result.path === 'native'
   const items = result.queue_item_ids ?? []
   /** #836 — the rack position each sliced group went out with; positions only, never a serial. */
   const picks = result.rack_picks ?? []
@@ -22,12 +24,19 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
   return (
     <div className="space-y-2 text-[13px] text-foreground">
       <div data-testid="queued-items">
+        {native ? (
+          <p>
+            Sliced and sent to {printerName ?? 'the printer you chose'} over the LAN —{' '}
+            <span className="sb-num">{result.copies}</span> {result.copies === 1 ? 'copy' : 'copies'}.
+          </p>
+        ) : (
         <p>
           Sliced and queued for {printerName ?? 'the printer you chose'} —{' '}
           <span className="sb-num">{result.copies}</span>{' '}
           {result.copies === 1 ? 'copy' : 'copies'} in{' '}
           <span className="sb-num">{items.length}</span> {items.length === 1 ? 'item' : 'items'}.
         </p>
+        )}
         {items.length > 0 && (
           <ul className="mt-1.5 flex flex-wrap gap-1.5">
             {items.map((itemId) => (

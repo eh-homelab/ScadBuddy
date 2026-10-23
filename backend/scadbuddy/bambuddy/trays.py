@@ -340,6 +340,7 @@ def loaded_trays(
                 side=side_of(extruder),
                 tray_only=True,
                 label=_native_label(ams_id, tray.id, status),
+                colour_word=colour_word(tray.tray_color),
                 remain_percent=tray.remain if tray.remain >= 0 else None,
                 physical_spool_id=spool.physical_spool_id if spool is not None else None,
                 records=records,

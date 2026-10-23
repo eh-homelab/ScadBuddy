@@ -3384,6 +3384,7 @@ export const handlers = [
     const warnings: PrintRunResult['warnings'] = []
     const result = {
       route: 'slice_queue',
+      path: 'bambuddy',
       library_file_id: libraryFileId,
       printer_id: body.printer_id ?? null,
       slice_job_id: nextNumber(),

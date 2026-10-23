@@ -6,6 +6,8 @@ type Props = {
   onToggle: () => void
   /** A project create is in flight; switching would unmount the picker running it. */
   disabled?: boolean
+  /** #3818 — a native print is filed in a folder: projects are Bambuddy's (D6). */
+  native?: boolean
 }
 
 /**
@@ -14,7 +16,7 @@ type Props = {
  * process list, the plate type, the print options, the project, copies and a per-slot
  * filament preset override; Simple sends their defaults.
  */
-export function AdvancedSwitch({ value, onToggle, disabled }: Props) {
+export function AdvancedSwitch({ value, onToggle, disabled, native = false }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <Switch
@@ -26,7 +28,7 @@ export function AdvancedSwitch({ value, onToggle, disabled }: Props) {
       />
       <Label htmlFor="print-advanced">Advanced</Label>
       <span id="print-advanced-help" className="text-xs text-muted-foreground">
-        Choose the nozzle, process, plate, options, project and copies.
+        Choose the nozzle, process, plate, options, {native ? 'folder' : 'project'} and copies.
       </span>
     </div>
   )

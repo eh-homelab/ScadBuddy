@@ -32,11 +32,13 @@ export interface ProjectList {
 /**
  * Fetches the project list once and reports the Settings default project through
  * `onLoaded`, so the parent can seed its value. `enabled` false fetches nothing, for a
- * picker handed a list by its parent.
+ * picker handed a list by its parent. `native` (#3818, plan 2026-10-18 D6) reads
+ * ScadBuddy's own library folders instead, with no projects, and asks Bambuddy nothing.
  */
 export function useProjectList(
   onLoaded?: (projectId: number | null) => void,
   enabled = true,
+  native = false,
 ): ProjectList {
   const [choices, setChoices] = useState<ProjectChoices | null>(null)
   const [loading, setLoading] = useState(enabled)
@@ -57,21 +59,26 @@ export function useProjectList(
    * project was created (`add`) and chosen. Either way a later read must not seed it.
    */
   const seeded = useRef(false)
+  /** The newest read: an older one (say, before `native` flipped) lands as nothing. */
+  const reads = useRef(0)
   const fetchList = useCallback(async (seed: boolean) => {
+    const mine = ++reads.current
     if (seed) setLoading(true)
     setError(null)
     try {
-      const next = await api.getProjects()
+      const next = native ? await api.getProjects({ native: true }) : await api.getProjects()
+      if (mine !== reads.current) return
       setChoices(next)
       // A create while this read was in flight already chose the value (#1045 review).
       if (seed && !seeded.current) report.current?.(next.last_project_id ?? null)
       seeded.current = true
     } catch (cause) {
+      if (mine !== reads.current) return
       setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
     } finally {
-      setLoading(false)
+      if (mine === reads.current) setLoading(false)
     }
-  }, [])
+  }, [native])
 
   useEffect(() => {
     if (enabled) void fetchList(true)
