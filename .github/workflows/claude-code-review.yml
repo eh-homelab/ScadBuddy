@@ -88,6 +88,99 @@ jobs:
       # ever added, materialize it from the BASE ref rather than the checkout —
       # the checked-out tree is the PR author's, so reading an MCP config out of
       # it would let any PR add tools to the very reviewer reviewing that PR.
+
+      # Install Claude Code once for the three claude-code-action steps below
+      # (#4501). Left to itself, each of them runs `curl -fsSL
+      # https://claude.ai/install.sh | bash` with three attempts 5 s apart, and a
+      # 429 on all three failed the merge-gate classification and so the gate
+      # (run 39741430676, twice in a row). This step asks only
+      # downloads.claude.ai, for the version the pinned action itself installs
+      # (read from the action's run.ts, so a bump of the pin moves it too), with
+      # exponential backoff and jitter, Retry-After honoured on a 429, within a
+      # 10-minute budget, and checks the manifest's sha256. Inline rather than a
+      # .github/scripts file: the PR's own checkout runs here, and only this
+      # file is guarded by the action's workflow-validation check. If it fails,
+      # the output is empty and each action installs as before.
+      # No actions/cache: this workflow runs on PR refs, whose caches no other
+      # PR can read, and the repo's Actions cache is already at its ceiling.
+      - name: Install Claude Code
+        id: claude_install
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 600))
+          base=https://downloads.claude.ai/claude-code-releases
+          dir="$RUNNER_TEMP/claude-code"
+          mkdir -p "$dir"
+
+          # The version the pinned action installs (`const claudeCodeVersion =
+          # "x.y.z"` in its run.ts). One action SHA in this job, so one match.
+          mapfile -t found < <(grep -hoE 'claudeCodeVersion = "[0-9]+\.[0-9]+\.[0-9]+"' \
+            "$(dirname "$RUNNER_WORKSPACE")"/_actions/anthropics/claude-code-action/*/src/entrypoints/run.ts \
+            2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u || true)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::warning::Could not read the action's Claude Code version (found ${#found[@]}); the action installs it itself."
+            exit 0
+          fi
+          version="${found[0]}"
+
+          # fetch URL FILE: retries 429, 408, 5xx and connection failures until
+          # the deadline; any other status fails at once.
+          fetch() {
+            local url="$1" out="$2" hdr="$dir/headers" delay=5 attempt=0 code wait ra when
+            while :; do
+              attempt=$((attempt + 1))
+              code="$(curl -sS -L --connect-timeout 20 --max-time 300 -D "$hdr" -o "$out" \
+                -w '%{http_code}' "$url")" || code=000
+              [ "$code" = 200 ] && return 0
+              case "$code" in
+                429 | 408 | 5?? | 000) ;;
+                *) echo "::warning::$url answered HTTP $code"; return 1 ;;
+              esac
+              wait=$((delay + RANDOM % delay))
+              if [ "$code" = 429 ]; then
+                # Seconds, or an HTTP date (RFC 9110 §10.2.3).
+                ra="$(grep -i '^retry-after:' "$hdr" | tail -n 1 | cut -d: -f2- | tr -d '\r' || true)"
+                ra="${ra# }"
+                if [[ "$ra" =~ ^[0-9]+$ ]]; then
+                  wait=$((ra + RANDOM % 5))
+                elif [ -n "$ra" ] && when="$(date -d "$ra" +%s 2>/dev/null)"; then
+                  wait=$((when - $(date +%s) + RANDOM % 5))
+                  [ "$wait" -ge 1 ] || wait=1
+                fi
+              fi
+              if [ $((SECONDS + wait)) -ge "$deadline" ]; then
+                echo "::warning::$url: HTTP $code on attempt $attempt; out of time to retry"
+                return 1
+              fi
+              echo "$url: HTTP $code on attempt $attempt; retrying in ${wait}s"
+              sleep "$wait"
+              delay=$((delay * 2 > 60 ? 60 : delay * 2))
+            done
+          }
+
+          case "$(uname -m)" in
+            x86_64) platform=linux-x64 ;;
+            aarch64) platform=linux-arm64 ;;
+            *) echo "::warning::No Claude Code build for $(uname -m)"; exit 0 ;;
+          esac
+          fetch "$base/$version/manifest.json" "$dir/manifest.json" || exit 0
+          checksum="$(jq -r --arg p "$platform" '.platforms[$p].checksum // empty' "$dir/manifest.json")"
+          if ! [[ "$checksum" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::warning::No $platform checksum in the $version manifest"
+            exit 0
+          fi
+          fetch "$base/$version/$platform/claude" "$dir/claude" || exit 0
+          if ! echo "$checksum  $dir/claude" | sha256sum -c --quiet -; then
+            echo "::warning::Claude Code $version failed its checksum"
+            rm -f "$dir/claude"
+            exit 0
+          fi
+          chmod +x "$dir/claude"
+          "$dir/claude" --version
+          echo "path=$dir/claude" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Review
         id: review
         # The review step must never red the job on its own — it has succeeded as long
@@ -100,6 +193,8 @@ jobs:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Empty when the install step failed: the action then installs itself.
+          path_to_claude_code_executable: ${{ steps.claude_install.outputs.path }}
           # Review bot-authored PRs too (weekly cache-refresh, image digest bumps);
           # the action otherwise hard-fails on non-human actors. Also covers the
           # actor this run itself carries as a workflow_dispatch call.
@@ -476,6 +571,8 @@ jobs:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Empty when the install step failed: the action then installs itself.
+          path_to_claude_code_executable: ${{ steps.claude_install.outputs.path }}
           allowed_bots: "*"
           # Same tools, model and deny list as the review step: this is the same
           # reviewer continuing, not a new one with more reach.
@@ -572,6 +669,8 @@ jobs:
         uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Empty when the install step failed: the action then installs itself.
+          path_to_claude_code_executable: ${{ steps.claude_install.outputs.path }}
           # Classify bot-authored PRs too (weekly cache-refresh, image digest bumps);
           # the action otherwise hard-fails on non-human actors and the gate then fails
           # closed with no verdict. Must match the review step's allowed_bots.
