@@ -19,6 +19,8 @@ type PrintRunResult struct {
 	folder_id PrintRunResult_PrintRunResult_folder_idable
 	// The library_file_id property
 	library_file_id *int32
+	// The path property
+	path *PrintRunResult_path
 	// The printer_id property
 	printer_id PrintRunResult_PrintRunResult_printer_idable
 	// The project_id property
@@ -605,6 +607,8 @@ type PrintRunResult_PrintRunResult_sliced_library_file_idable interface {
 func NewPrintRunResult() *PrintRunResult {
 	m := &PrintRunResult{}
 	m.SetAdditionalData(make(map[string]any))
+	pathValue := BAMBUDDY_PRINTRUNRESULT_PATH
+	m.SetPath(&pathValue)
 	routeValue := "slice_queue"
 	m.SetRoute(&routeValue)
 	return m
@@ -675,6 +679,16 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		if val != nil {
 			m.SetLibraryFileId(val)
+		}
+		return nil
+	}
+	res["path"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetEnumValue(ParsePrintRunResult_path)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPath(val.(*PrintRunResult_path))
 		}
 		return nil
 	}
@@ -791,6 +805,12 @@ func (m *PrintRunResult) GetLibraryFileId() *int32 {
 	return m.library_file_id
 }
 
+// GetPath gets the path property value. The path property
+// returns a *PrintRunResult_path when successful
+func (m *PrintRunResult) GetPath() *PrintRunResult_path {
+	return m.path
+}
+
 // GetPrinterId gets the printer_id property value. The printer_id property
 // returns a PrintRunResult_PrintRunResult_printer_idable when successful
 func (m *PrintRunResult) GetPrinterId() PrintRunResult_PrintRunResult_printer_idable {
@@ -861,6 +881,13 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 	}
 	{
 		err := writer.WriteInt32Value("library_file_id", m.GetLibraryFileId())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetPath() != nil {
+		cast := (*m.GetPath()).String()
+		err := writer.WriteStringValue("path", &cast)
 		if err != nil {
 			return err
 		}
@@ -959,6 +986,11 @@ func (m *PrintRunResult) SetLibraryFileId(value *int32) {
 	m.library_file_id = value
 }
 
+// SetPath sets the path property value. The path property
+func (m *PrintRunResult) SetPath(value *PrintRunResult_path) {
+	m.path = value
+}
+
 // SetPrinterId sets the printer_id property value. The printer_id property
 func (m *PrintRunResult) SetPrinterId(value PrintRunResult_PrintRunResult_printer_idable) {
 	m.printer_id = value
@@ -1006,6 +1038,7 @@ type PrintRunResultable interface {
 	GetCopies() *int32
 	GetFolderId() PrintRunResult_PrintRunResult_folder_idable
 	GetLibraryFileId() *int32
+	GetPath() *PrintRunResult_path
 	GetPrinterId() PrintRunResult_PrintRunResult_printer_idable
 	GetProjectId() PrintRunResult_PrintRunResult_project_idable
 	GetQueueItemIds() []int32
@@ -1018,6 +1051,7 @@ type PrintRunResultable interface {
 	SetCopies(value *int32)
 	SetFolderId(value PrintRunResult_PrintRunResult_folder_idable)
 	SetLibraryFileId(value *int32)
+	SetPath(value *PrintRunResult_path)
 	SetPrinterId(value PrintRunResult_PrintRunResult_printer_idable)
 	SetProjectId(value PrintRunResult_PrintRunResult_project_idable)
 	SetQueueItemIds(value []int32)
