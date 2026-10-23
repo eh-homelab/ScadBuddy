@@ -115,6 +115,33 @@ Three traps worth stating because they are easy to get backwards:
   Joining them on `(ams_id, tray_id)` alone hands a spool sitting in printer B's
   AMS 0 slot 1 printer A's remaining weight — a different filament's.
 
+### A native run's tray question (#4504)
+
+On a native (LAN) run (#3818, plan `2026-10-18-hot-path-without-bambuddy.md` D1) none of
+the reads above happen. The answer is `source: "trays"`: the printer's filled trays
+from its last LAN report, with the spool providers' cached records laid over them
+(`spools/store.py` `SpoolStore.overlay`). Each filled untagged tray the overlay finds no
+spool for gets a `trays` question. Its `candidates` name rows of the answer's `shelf`
+(`FilamentOptions.shelf`), not of `spools`:
+
+- The shelf is the fresh provider records no tray holds (`store.py` `_shelf`). A
+  record is left out when it or its physical spool carries an RFID key, when any record
+  of its spool has a provider `location`, or when a person's link on an untagged tray
+  still holds its spool. It is a Postgres read in the overlay's own read, of records
+  the background refresh cached (`workflows/spool_refresh.py`), so the dialog never
+  calls Bambuddy or any other provider. `tests/bambuddy/test_trays_first.py` and
+  `tests/api/test_tray_spools.py` check this inside `forbid_bambuddy`.
+- A tray's candidates are the shelf rows of the same material family within
+  `CLOSE_COLOUR`, most filament first and empty last (`bambuddy/trays.py`
+  `close_spools`, shared with the Bambuddy path's `unknown_trays`). A tray with none is
+  not asked about, because it is a choice of its own already.
+- Shelf rows are never print choices. That is why they are not in `spools`, which
+  `suggest`, `check` and the resolver match a plan against. Their `spool_id` is
+  positional and valid within that one answer only. "Yes" links the row by its
+  `physical_spool_id`, else one of its `records` (`{provider, record_id}`), through
+  `PUT /api/v1/printers/{id}/trays/{ams_id}/{tray_id}/spool` (`api/tray_spools.py`).
+  That writes `tray_spool_links` and nothing in any provider.
+
 ## 4. What ScadBuddy sends, and what Bambuddy decides
 
 **ScadBuddy sends no `ams_mapping`.** Bambuddy's scheduler computes one itself

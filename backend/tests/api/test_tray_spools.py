@@ -13,11 +13,13 @@ from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.filaments import FilamentOptions, gather_plate_options
+from scadbuddy.bambuddy.models import FilamentRequirements
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.spools.component import SPOOLS, Spools
 from scadbuddy.spools.models import SpoolSnapshot
-from scadbuddy.spools.overlay import printer_overlay
+from scadbuddy.spools.overlay import printer_overlay, report_status
 from tests.printers.conftest import KEK
 from tests.support.no_bambuddy import forbid_bambuddy
 
@@ -150,6 +152,86 @@ def test_tray_spool_links_routes(
         gone = client.delete(_path(lan_printer))
         assert gone.status_code == 204
         assert _tray(_overlay(client, lan_printer), 0, 1).physical_spool_id is None
+
+
+def _filaments(client: TestClient, printer_id: str) -> FilamentOptions:
+    """The native dialog's filament answer for ``printer_id``: its report's trays with
+    the store's overlay over them, as the filaments route reads them (#3818 D1)."""
+    row = _printers(client).store.require(printer_id)
+    report = _printers(client).reports.get(printer_id)
+    assert report is not None
+
+    async def read() -> FilamentOptions:
+        now = datetime.now(UTC)
+        overlay = await printer_overlay(_spools(client), row, report, now=now)
+        (options,) = await gather_plate_options(
+            None,
+            library_file_id=None,
+            plate_ids=[1],
+            known=lambda plate: FilamentRequirements(filaments=[]),
+            trays_from=report_status(row, report, now=now),
+            overlay=overlay,
+            now=now,
+        )
+        return options
+
+    result: FilamentOptions = client.portal.call(read)  # type: ignore[union-attr]
+    return result
+
+
+def test_an_untagged_trays_question_links_through_the_route(
+    client: TestClient, lan_printer: str, spans: InMemorySpanExporter
+) -> None:
+    """#4504: the untagged white tray is asked about with the Bambuddy record no tray
+    holds, and the link the dialog sends for it (#4505's ``linkOf``: the physical spool,
+    else the first record) is one the route takes; answered, it is not asked again. The
+    candidates are the store's, never a Bambuddy read."""
+    snapshots = [
+        SpoolSnapshot.model_validate(
+            {"record_id": record_id, "material": "PLA", "colour": "#FFFFFF", **fields}
+        )
+        for record_id, fields in (
+            ("16", {"brand": "Inland", "remaining_g": 515.0}),
+            ("17", {"brand": "Sunlu", "remaining_g": 200.0}),
+        )
+    ]
+    client.portal.call(  # type: ignore[union-attr]
+        _spools(client).store.replace_records, "bambuddy", snapshots, datetime.now(UTC)
+    )
+    # A second untagged white tray, asked about with the same record until it is linked.
+    report = _report()
+    report["ams"]["ams"][0]["tray"][2] = {
+        **report["ams"]["ams"][0]["tray"][1],
+        "id": "2",
+    }
+    _printers(client).reports.put(lan_printer, report, datetime.now(UTC))
+    with forbid_bambuddy(spans, "https://bambuddy.test"):
+        options = _filaments(client, lan_printer)
+        question, second = options.trays
+        assert (question.ams_id, question.tray_id, second.tray_id) == (0, 1, 2)
+        assert second.candidates == question.candidates
+        by_id = {spool.spool_id: spool for spool in options.shelf}
+        assert [by_id[c].records["bambuddy"].record_id for c in question.candidates] == [
+            "16",
+            "17",
+        ]
+        entry = by_id[question.candidates[0]]
+        provider, record = next(iter(entry.records.items()))
+        link: dict[str, str] = (
+            {"physical_spool_id": str(entry.physical_spool_id)}
+            if entry.physical_spool_id is not None
+            else {"provider": provider, "record_id": record.record_id}
+        )
+        linked = client.put(_path(lan_printer, question.ams_id, question.tray_id), json=link)
+        assert linked.status_code == 200, linked.text
+        after = _filaments(client, lan_printer)
+    # Linked, record 16 is tray (0,1)'s: the other white tray is offered only 17.
+    (left,) = after.trays
+    assert (left.ams_id, left.tray_id) == (0, 2)
+    named = {spool.spool_id: spool for spool in after.shelf}
+    assert [named[c].records["bambuddy"].record_id for c in left.candidates] == ["17"]
+    tray = next(spool for spool in after.spools if spool.spool_id == question.spool_id)
+    assert tray.records["bambuddy"].record_id == "16"
 
 
 def test_a_manual_link_overlays_an_untagged_tray_until_its_colour_changes(
