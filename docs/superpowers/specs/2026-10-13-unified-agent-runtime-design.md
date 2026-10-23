@@ -353,7 +353,10 @@ lack them (§2.3).
   a replica never runs more warm processes than `warm_max_per_replica`. `WarmSessions.acquire`
   alone would spawn past the cap, since its trim evicts only idle entries. A placement that
   fails before its spawn (`SessionGone`, a refusal, a move) gives the place back
-  (`WarmSessions.unreserve`), so it is not held for `RESERVATION_HOLD_MS`.
+  (`WarmSessions.unreserve`), so it is not held for `RESERVATION_HOLD_MS`; a turn that
+  ended so keeps that replica as `home`, and the next turn's arrival reserves again. Only the
+  latest arrival of a session gives its place back: a placement cut by a newer one of the same
+  session leaves the newer one's place alone.
 - **The turn.** `session_turn(input)` is scheduled on `home` with these options:
   - `scheduleToStartTimeout: 5s`. It is non-retryable; this is how a dead home is
     detected (§2.3).

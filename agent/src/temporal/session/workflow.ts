@@ -298,6 +298,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       try {
         // Inside the try: a replica that refuses (NoCapacity past its retries) costs a placement, as a lost one does.
         if (!home) {
+          // The last placement names no exclusion; `placements` grows by one after a kept home's free move.
           const exclude = cycle < placements - 1 && lost.length ? { exclude: [...lost] } : {}
           const acquired = (await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId, ...exclude } satisfies AcquireInput)) as {
             hostQueue: string

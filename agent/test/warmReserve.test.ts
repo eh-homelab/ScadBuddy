@@ -247,6 +247,39 @@ describe('WarmSessions.reserve and release', () => {
     expect(warm.reserve('next')).toBe('reserved')
   })
 
+  it('a placement cut by a newer one of the same session never gives back the newer one`s place', async () => {
+    const { warm } = cache(1)
+    // Each claim waits until the test fails it: the older placement is still claiming when the newer arrives.
+    const claims: ((err: Error) => void)[] = []
+    const sql = (() => new Promise((_resolve, reject) => claims.push(reject))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const control = () => ({ heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const })
+    const older = host.run({ sessionId: 's', turnId: 't1', attempt: 'run:0' }, control())
+    await vi.waitFor(() => expect(claims).toHaveLength(1))
+    // The newer arrives (the same attempt id: the next turn's first placement in a run shares it) and cuts the older.
+    const newer = host.run({ sessionId: 's', turnId: 't2', attempt: 'run:0' }, control())
+    claims[0]!(new Error('the older claim failed'))
+    await expect(older).rejects.toThrow('the older claim failed')
+    await vi.waitFor(() => expect(claims).toHaveLength(2))
+    // The one place is still the newer placement's.
+    expect(warm.reserve('other')).toBe('full')
+    claims[1]!(new Error('the newer claim failed'))
+    await expect(newer).rejects.toThrow('the newer claim failed')
+    expect(warm.reserve('other')).toBe('reserved')
+  })
+
+  it('unreserve gives back only a reservation: a session`s process stays', async () => {
+    const { warm, spawned, running } = cache(1)
+    const turn = await running('a')
+    warm.unreserve('a')
+    turn.left()
+    warm.unreserve('a')
+    expect(spawned.get('a')?.closed()).toBe(false)
+    expect(warm.size()).toBe(1)
+    // Still its place: another session takes it only by evicting the idle process.
+    expect(warm.reserve('a')).toBe('reserved')
+  })
+
   it('a session with a process here keeps it, without a second place', async () => {
     const { warm, running } = cache(1)
     const own = await running('own')
