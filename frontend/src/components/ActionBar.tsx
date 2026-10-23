@@ -5,6 +5,7 @@ import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type {
+  FolderView,
   Job,
   ModelSummary,
   Output,
@@ -54,7 +55,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react'
 import { bambuddyLink } from '../lib/bambuddyLinks'
-import { libraryPath } from '../lib/libraryPath'
+import { LIBRARY_ROOT, libraryPath } from '../lib/libraryPath'
 
 /** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
 const MAX_BREAKDOWN_COLOURS = 16
@@ -665,7 +666,7 @@ export function ActionBar({
                 <span className="truncate text-ok">
                   Saved to{' '}
                   <Link
-                    to={libraryPath(projects.choices?.folders ?? [], filed.file.folder_id)}
+                    to={nativeFiledLink(projects.choices?.folders ?? [], filed.file)}
                     className="underline underline-offset-2"
                   >
                     {filed.name}
@@ -832,6 +833,17 @@ export function ActionBar({
  * the render broken down by colour. #968, #3672 — Radix's menu button: the arrows, Home,
  * End and Escape, focus back on the button as it closes.
  */
+/**
+ * #4507 — where a native filing's "Saved to" goes: its folder's Library page, or, when the
+ * picker's list lacks that folder, the file itself (`?file=`, which the Library page
+ * resolves to its folder), as the session panel links one.
+ */
+function nativeFiledLink(folders: FolderView[], file: ProjectFile): string {
+  return folders.some((folder) => folder.id === file.folder_id)
+    ? libraryPath(folders, file.folder_id)
+    : `${LIBRARY_ROOT}?file=${encodeURIComponent(String(file.library_file_id))}`
+}
+
 function GenerateMenu({
   disabled,
   onImage,

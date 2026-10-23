@@ -334,7 +334,13 @@ class NativeLibraryStore:
         as `file_for_output`, so overlapping calls put one copy (#4507). The folder is
         locked ``FOR KEY SHARE`` first, so it is live until the commit, and one deleted
         since the caller's check is `FolderGoneError`; a delete waits for the commit and
-        then trashes this copy with the folder's other files."""
+        then trashes this copy with the folder's other files.
+
+        Only these puts are made unique among themselves and the names already there: the
+        per-folder ``folder-names`` lock is taken here alone, so an upload, move or rename
+        into the folder at the same moment can still repeat a name. Nothing relies on
+        unique names (no constraint; rows are found by id, and an upload or copy keeps the
+        name it is given), so the other writers take no such lock."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
             there = conn.execute(
@@ -350,9 +356,7 @@ class NativeLibraryStore:
             if live is None:
                 raise FolderGoneError(folder_id)
             # The name pick and the insert under the folder's lock too: the output's lock
-            # alone lets two outputs of one stem both take `Sign.3mf`. Nothing in the
-            # schema or the native upload makes names unique; this put promises it, as the
-            # Bambuddy path's `project_filename` does (the mount names files by name).
+            # alone lets two outputs of one stem both take `Sign.3mf`.
             conn.execute(
                 "SELECT pg_advisory_xact_lock("
                 "hashtextextended('scadbuddy:library:folder-names:' || %s, 0))",

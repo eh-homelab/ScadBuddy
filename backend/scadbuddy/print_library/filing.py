@@ -25,6 +25,8 @@ async def file_output(
     first releases its own upload. Only a filed copy counts: one put in a folder of the
     user's choosing (`put_in_folder`, #4507) or moved (``filed`` cleared) is the user's,
     so it never stands in for the template folder's."""
+    # If retries after a move show up in practice: a marker telling a moved copy from a
+    # chosen-folder copy would let a moved one count again.
     existing = await asyncio.to_thread(native.rows.filed_rows_for_output, meta.id)
     if existing:
         return existing[0]

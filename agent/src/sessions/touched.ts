@@ -204,7 +204,10 @@ function ids(value: unknown): string[] {
  */
 export const NATIVE_ID_BASE = 1_000_000_000
 
-/** A library file's kind by its id: ScadBuddy's own library's (#4507) or Bambuddy's. */
+/**
+ * A library file's kind by its id: ScadBuddy's own library's (#4507) or Bambuddy's.
+ * Rows recorded before #4507 keep `bambuddy_file` for native ids; nothing rewrites them.
+ */
 function libraryFileType(id: string): 'library_file' | 'bambuddy_file' {
   return Number(id) >= NATIVE_ID_BASE ? 'library_file' : 'bambuddy_file'
 }

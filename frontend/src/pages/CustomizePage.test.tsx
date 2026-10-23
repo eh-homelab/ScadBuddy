@@ -1904,6 +1904,41 @@ describe('CustomizePage, project file (#317)', () => {
     )
   })
 
+  it('links a native file to itself when its folder is not among the destinations', async () => {
+    // #4507 — a native folder's answer has no Bambuddy page.
+    withLastProject(1)
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({
+          projects: projectViews,
+          // The folder the file went into (4) is not listed.
+          folders: [{ id: 3, name: 'Supplies', path: 'Supplies', parent_id: null }],
+          last_project_id: 1,
+        }),
+      ),
+      http.post('/api/v1/outputs/:id/project-file', () =>
+        HttpResponse.json({
+          project_id: null,
+          folder_id: 4,
+          library_file_id: 1_000_000_002,
+          filename: 'Keychain.3mf',
+          created: true,
+          bambuddy_url: null,
+          edit_url: null,
+        }),
+      ),
+    )
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await generate(user)
+
+    const status = await screen.findByTestId('project-filed')
+    expect(within(status).queryByRole('button', { name: 'Open in Bambuddy' })).not.toBeInTheDocument()
+    expect(status).toHaveTextContent('Saved to Reagan Keychain')
+    // #4507 — the file itself, which the Library page resolves to its folder.
+    expect(within(status).getByRole('link')).toHaveAttribute('href', '/library?file=1000000002')
+  })
+
   it('uploads nothing on Generate with "No project", and leaves the default project alone', async () => {
     withLastProject(1)
     const filed = watchBodies('POST', '/project-file')
