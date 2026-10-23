@@ -226,7 +226,10 @@ stored settings and remembered choices (`setting`, by what they are for:
 `print_options:<scope>[:<key>]`, `print_choices:<slug>`, `last_project`,
 `bed_type:<printer>`), and Bambuddy's projects, library files (`bambuddy_file`, with the
 output sent as `before`; `created` only when the answer says Bambuddy made one, since a
-send reuses a copy already in the inbox) and print archives (`print_archive`, an archive
+send reuses a copy already in the inbox; a file of ScadBuddy's own print library, #4507,
+is `library_file` instead, told by its id: `NATIVE_ID_BASE`, 1 000 000 000, and up, as
+`backend/scadbuddy/print_library/ids.py` defines and `agent/test/nativeIdBase.test.ts`
+pins; rows recorded before #4507 keep `bambuddy_file`) and print archives (`print_archive`, an archive
 id, not a queue item; filing an output under a project also records the queue items and
 archives it filed). A `font` row means "asked to install": an installed family is
 answered again without a download, and the answer does not say which. The browser tools

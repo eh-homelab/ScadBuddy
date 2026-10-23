@@ -104,6 +104,52 @@ def _insert_file(conn: Connection[DictRow], row: NativeFile) -> NativeFile:
     return NativeFile.model_validate(out)
 
 
+def _lock_folder_names(conn: Connection[DictRow], folder_id: int | None) -> bool:
+    """In a transaction of ``conn``'s: one writer of a folder's names at a time, taken by
+    every write that puts a name in a folder (an insert, a move, a rename, a put), after
+    the folder's ``FOR KEY SHARE`` and before the write, so a holder waits on nothing
+    else. Holding it, `put_for_output`'s pick sees every name committed in the folder,
+    and no writer lands one between that pick and its insert. A row with no folder is
+    never put, so the top level takes none. A folder gone (the KEY SHARE found no row)
+    takes none either, and is False: an insert or move then fails its FK, the 404."""
+    if folder_id is None:
+        return True
+    live = conn.execute(
+        "SELECT id FROM library_folders WHERE id = %s FOR KEY SHARE", (folder_id,)
+    ).fetchone()
+    if live is None:
+        return False
+    conn.execute(
+        "SELECT pg_advisory_xact_lock("
+        "hashtextextended('scadbuddy:library:folder-names:' || %s, 0))",
+        (str(folder_id),),
+    )
+    return True
+
+
+def _live_copy_in_folder(
+    conn: Connection[DictRow], output_id: str, folder_id: int
+) -> NativeFile | None:
+    """The output's oldest live copy in ``folder_id``: filed, put or moved there."""
+    row = conn.execute(
+        f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
+        f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
+        (output_id, folder_id),
+    ).fetchone()
+    return None if row is None else NativeFile.model_validate(row)
+
+
+def _update_file(
+    conn: Connection[DictRow], id: int, sets: list[str], params: list[Any]
+) -> NativeFile | None:
+    row = conn.execute(
+        f"UPDATE library_files SET {', '.join(sets)} WHERE id = %s AND deleted_at IS NULL"
+        f" RETURNING {_FILE_COLUMNS}".encode(),
+        (*params, id),
+    ).fetchone()
+    return None if row is None else NativeFile.model_validate(row)
+
+
 def _filed_for_output(conn: Connection[DictRow], output_id: str) -> list[NativeFile]:
     rows = conn.execute(
         f"SELECT {_FILE_COLUMNS} FROM library_files"
@@ -200,7 +246,10 @@ class NativeLibraryStore:
         return int(row["id"])
 
     def insert_file(self, row: NativeFile) -> NativeFile:
-        with self._pool.connection() as conn:
+        """An upload or a copy, under its folder's names lock (`_lock_folder_names`). It
+        keeps the name it is given, as a Bambuddy upload does."""
+        with self._pool.connection() as conn, conn.transaction():
+            _lock_folder_names(conn, row.folder_id)
             return _insert_file(conn, row)
 
     def file(self, id: int, *, trashed: bool = False) -> NativeFile | None:
@@ -239,6 +288,9 @@ class NativeLibraryStore:
         folder_id: int | UnsetType | None,
         filed: bool | None,
     ) -> NativeFile | None:
+        """A rename, a move or both, under the names lock of the folder the file ends up
+        in (`_lock_folder_names`); the row is locked first, as `trash` and
+        `delete_folder_tree` take it. Like an upload, it keeps the name it is given."""
         sets = ["updated_at = now()"]
         params: list[Any] = []
         if name is not None:
@@ -250,12 +302,18 @@ class NativeLibraryStore:
         if filed is not None:
             sets.append("filed = %s")
             params.append(filed)
-        found = self._files(
-            f"UPDATE library_files SET {', '.join(sets)} WHERE id = %s AND deleted_at IS NULL"
-            f" RETURNING {_FILE_COLUMNS}",
-            (*params, id),
-        )
-        return found[0] if found else None
+        with self._pool.connection() as conn, conn.transaction():
+            current = conn.execute(
+                "SELECT folder_id FROM library_files WHERE id = %s AND deleted_at IS NULL"
+                " FOR UPDATE",
+                (id,),
+            ).fetchone()
+            if current is None:
+                return None
+            if name is not None or not isinstance(folder_id, UnsetType):
+                target = current["folder_id"] if isinstance(folder_id, UnsetType) else folder_id
+                _lock_folder_names(conn, target)
+            return _update_file(conn, id, sets, params)
 
     def trash(self, ids: list[int]) -> list[NativeFile]:
         """The rows are locked by id first, as `delete_folder_tree` locks them: an UPDATE
@@ -327,6 +385,10 @@ class NativeLibraryStore:
             folder_id = _template_folder(conn, folder).id
             return _insert_file(conn, row.model_copy(update={"folder_id": folder_id})), True
 
+    def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
+        with self._pool.connection() as conn:
+            return _live_copy_in_folder(conn, output_id, folder_id)
+
     def put_for_output(self, row: NativeFile, folder_id: int, stem: str) -> tuple[NativeFile, bool]:
         """Insert ``row``, an output's copy, in ``folder_id`` under a name made from
         ``stem`` unique in the folder, unless a live row of the output is already there:
@@ -336,32 +398,21 @@ class NativeLibraryStore:
         since the caller's check is `FolderGoneError`; a delete waits for the commit and
         then trashes this copy with the folder's other files.
 
-        Only these puts are made unique among themselves and the names already there: the
-        per-folder ``folder-names`` lock is taken here alone, so an upload, move or rename
-        into the folder at the same moment can still repeat a name. Nothing relies on
-        unique names (no constraint; rows are found by id, and an upload or copy keeps the
-        name it is given), so the other writers take no such lock."""
+        The name is picked and inserted under the folder's names lock, which every writer
+        of a name into the folder takes (`_lock_folder_names`: an upload, a copy, a move, a
+        rename, another put), so no write running beside this one can take the name it
+        picks (#4512). An upload, copy, move or rename keeps the name it is given, so one
+        made after this put commits may repeat the name, as it may repeat any name already
+        there: nothing relies on unique names (no constraint; rows are found by id)."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
-            there = conn.execute(
-                f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
-                f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
-                (row.output_id, folder_id),
-            ).fetchone()
+            there = _live_copy_in_folder(conn, row.output_id or "", folder_id)
             if there is not None:
-                return NativeFile.model_validate(there), False
-            live = conn.execute(
-                "SELECT id FROM library_folders WHERE id = %s FOR KEY SHARE", (folder_id,)
-            ).fetchone()
-            if live is None:
-                raise FolderGoneError(folder_id)
+                return there, False
             # The name pick and the insert under the folder's lock too: the output's lock
             # alone lets two outputs of one stem both take `Sign.3mf`.
-            conn.execute(
-                "SELECT pg_advisory_xact_lock("
-                "hashtextextended('scadbuddy:library:folder-names:' || %s, 0))",
-                (folder_id,),
-            )
+            if not _lock_folder_names(conn, folder_id):
+                raise FolderGoneError(folder_id)
             taken = conn.execute(
                 "SELECT name FROM library_files WHERE folder_id = %s AND deleted_at IS NULL",
                 (folder_id,),

@@ -200,7 +200,8 @@ function ids(value: unknown): string[] {
 
 /**
  * ScadBuddy's own library ids start here (backend `print_library/ids.py` `NATIVE_ID_BASE`);
- * Bambuddy's are far below it.
+ * Bambuddy's are far below it. `test/nativeIdBase.test.ts` reads the Python constant and
+ * fails when the two differ.
  */
 export const NATIVE_ID_BASE = 1_000_000_000
 
