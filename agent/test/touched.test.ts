@@ -343,6 +343,15 @@ describe('extractors', () => {
     expect(
       touches('file_output_in_project_folder', { output_id: 'o1', project_id: 9 }, { library_file_id: 32, project_id: 9, created: true }, 'outward')[0],
     ).toEqual({ type: 'bambuddy_file', id: '32', action: 'created', before: 'o1' })
+    // #4507: a native folder's file is ScadBuddy's own library's, not Bambuddy's.
+    expect(
+      touches(
+        'file_output_in_project_folder',
+        { output_id: 'o1', folder_id: 1_000_000_001 },
+        { project_id: null, folder_id: 1_000_000_001, library_file_id: 1_000_000_002, created: true, bambuddy_url: null },
+        'outward',
+      ),
+    ).toEqual([{ type: 'library_file', id: '1000000002', action: 'created', before: 'o1' }])
     expect(
       touches('file_output_under_project', { output_id: 'o1' }, { project_id: 9, queue_item_ids: [12, 13], archive_ids: [7] }, 'outward'),
     ).toEqual([
@@ -370,6 +379,15 @@ describe('extractors', () => {
       { type: 'output', id: 'o9', action: 'created', model: 'box' },
       { type: 'bambuddy_file', id: '31', action: 'created', before: 'o9' },
       { type: 'project', id: '4', action: 'modified' },
+    ])
+    expect(
+      touches('browser_generate', {}, {
+        output: { id: 'o9', name: null, slug: 'box' },
+        filed: { project_id: null, folder_id: 1_000_000_001, library_file_id: 1_000_000_002, created: false },
+      }),
+    ).toEqual([
+      { type: 'output', id: 'o9', action: 'created', model: 'box' },
+      { type: 'library_file', id: '1000000002', action: 'modified', before: 'o9' },
     ])
     expect(touches('browser_generate', {}, null)).toEqual([])
     for (const name of [

@@ -1130,7 +1130,7 @@ def test_generate_files_into_a_native_folder_with_no_bambuddy(
         (body["library_file_id"], body["filename"], saved["id"])
     ]
     row = _native(native_client).rows.file(body["library_file_id"])
-    assert row is not None and row.filed is True
+    assert row is not None and row.filed is False
     assert again.status_code == 200, again.text
     assert again.json() == {**body, "created": False}
 
@@ -1157,3 +1157,25 @@ def test_generate_into_a_project_on_native_still_needs_bambuddy(
     response = _file_into(native_client, saved["id"], project_id=7)
 
     assert response.status_code == 409, response.text
+
+
+@pytest.mark.requires_git
+def test_a_chosen_folder_copy_outlives_its_output(native_client: TestClient, widget: str) -> None:
+    """#4507: as a file in a Bambuddy folder does; the template folder's filed copy is
+    trashed with the output."""
+    folder = mkdir(native_client, "Gifts")["id"]
+    saved = _save(native_client, widget, "First").json()
+    chosen = _file_into(native_client, saved["id"], folder_id=folder).json()
+    (template_copy,) = [
+        f for f in _all_files(native_client) if f["id"] != chosen["library_file_id"]
+    ]
+
+    deleted = native_client.delete(
+        f"/api/v1/outputs/{saved['id']}?delete_inbox_copies=true", headers=press()
+    )
+
+    assert deleted.status_code == 204, deleted.text
+    assert _all_files(native_client) == [
+        {"id": chosen["library_file_id"], "output_id": None, "folder_id": folder}
+    ]
+    assert _native(native_client).rows.file(template_copy["id"]) is None

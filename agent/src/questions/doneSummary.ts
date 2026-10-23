@@ -89,13 +89,19 @@ function toolName(tool: string): string {
   return code(tool.replace(/^mcp__.+?__/, ''))
 }
 
+/** How a kind reads where its name alone would mislead: whose library a file is in (#4507). */
+const KIND_WORDS: Readonly<Record<string, string>> = {
+  bambuddy_file: 'Bambuddy file',
+  library_file: "ScadBuddy's library file",
+}
+
 function line(t: DoneTouch): string {
   if (t.resourceType === 'unclassified' || t.resourceId === null) {
     return `- ${toolName(t.tool)}: a change ScadBuddy does not classify`
   }
   const id = t.resourceId.length > 40 ? `${cutBetweenCodePoints(t.resourceId, SHORT_ID)}…` : t.resourceId
   const of = t.model && !(t.resourceType === 'model' && t.model === t.resourceId) ? ` of ${code(t.model)}` : ''
-  return `- ${plain(t.action)} ${plain(t.resourceType.replace(/_/g, ' '))} ${code(id)}${of} (${toolName(t.tool)})`
+  return `- ${plain(t.action)} ${plain(KIND_WORDS[t.resourceType] ?? t.resourceType.replace(/_/g, ' '))} ${code(id)}${of} (${toolName(t.tool)})`
 }
 
 function section(title: string, touches: readonly DoneTouch[]): string {

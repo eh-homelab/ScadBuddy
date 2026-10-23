@@ -34,6 +34,8 @@ describe('SessionTouched', () => {
       row({ type: 'setting', id: 'print_options:global', action: 'modified', tool: 'set_print_options' }),
       row({ type: 'project', id: '9', tool: 'create_print_project' }),
       row({ type: 'bambuddy_file', id: '31', before: 'out-7', tool: 'send_to_bambuddy' }),
+      // #4507 — a file in ScadBuddy's own library, apart from Bambuddy's.
+      row({ type: 'library_file', id: '1000000002', before: 'out-7', tool: 'file_output_in_project_folder' }),
       row({ type: 'print_archive', id: '7', action: 'modified', tool: 'pull_print_timelapse' }),
     ])
     renderPage(<SessionTouched sessionId="sess-k" />)
@@ -47,6 +49,10 @@ describe('SessionTouched', () => {
     expect(within(group('Settings')).getByRole('link', { name: 'print_options:global' })).toHaveAttribute('href', '/settings')
     expect(within(group('Bambuddy projects')).getByText('project 9')).toBeInTheDocument()
     expect(within(group('Bambuddy files')).getByText('library file 31')).toBeInTheDocument()
+    expect(within(group('Library files')).getByRole('link', { name: 'library file 1000000002' })).toHaveAttribute(
+      'href',
+      '/library',
+    )
     expect(within(group('Print archives')).getByRole('link', { name: 'print 7' })).toHaveAttribute('href', '/prints/7')
   })
 

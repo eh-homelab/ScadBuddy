@@ -234,6 +234,7 @@ export function ActionBar({
   const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
     null,
   )
+  const filedUrl = filed?.file.bambuddy_url ?? null
   const [fileError, setFileError] = useState<string | null>(null)
   /**
    * #665 — a "Create project" in flight on either picker. Its completion switches the
@@ -657,12 +658,12 @@ export function ActionBar({
             <span className="flex min-w-0 items-center gap-1.5 text-xs" data-testid="project-filed">
               <span className="truncate text-ok">Saved to {filed.name}</span>
               {/* #4507 — a native folder's file has no Bambuddy page. */}
-              {filed.file.bambuddy_url && (
+              {filedUrl && (
                 <Button
                   type="button"
                   variant="link"
                   size="xs"
-                  onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url as string))}
+                  onClick={() => openExternal(bambuddyLink(filedUrl))}
                   className="h-auto shrink-0 px-0"
                 >
                   Open in Bambuddy

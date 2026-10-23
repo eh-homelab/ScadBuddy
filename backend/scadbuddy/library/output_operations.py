@@ -34,7 +34,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import trash_copies
-from scadbuddy.print_library.filing import file_output, trash_filed
+from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.store.cache import materialize_result
@@ -315,8 +315,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
 
     async def native_file_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """Generate's filing into a native folder (#4507): the output's 3MF uploaded there
-        once, with no Bambuddy at all. A copy of this output already in the folder (filed
-        or moved there) is the answer, ``created: false``."""
+        once, with no Bambuddy at all (`put_in_folder`). A copy of this output already in
+        the folder is the answer, ``created: false``."""
         native = await components.get(PRINT_LIBRARY).serving_native()
         if native is None:
             raise ApiError(
@@ -324,17 +324,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             )
         meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
         folder_id: int = request["folder_id"]
-        rows = await asyncio.to_thread(native.rows.rows_for_output, meta.id)
-        there = [f for f in rows if f.folder_id == folder_id and f.deleted_at is None]
-        if there:
-            row, created = there[0], False
-        else:
-            listed = await asyncio.to_thread(native.rows.files, folder_id)
-            name = unique_name(checked["stem"], {f.name.casefold() for f in listed})
-            model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
-            with model_3mf.open("rb") as data:
-                row = await native.upload(name, data, folder_id, output_id=meta.id, filed=True)
-            created = True
+        model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
+        row, created = await put_in_folder(native, meta, model_3mf, folder_id, checked["stem"])
         # The destination picker's "last touched" order (#3651), best effort as on Bambuddy.
         try:
             await state.uploads.touch_destination("folder", folder_id)
@@ -375,12 +366,3 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             needs_prelude=lambda request: bool(request["delete_inbox_copies"]),
         ),
     ]
-
-
-def unique_name(stem: str, taken: set[str]) -> str:
-    """``<stem>.3mf``, or ``<stem> (2).3mf`` and on, unlike every casefolded name in
-    ``taken``."""
-    name, number = f"{stem}.3mf", 2
-    while name.casefold() in taken:
-        name, number = f"{stem} ({number}).3mf", number + 1
-    return name

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from psycopg import Connection
@@ -14,9 +15,9 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.print_library.component import CONNECT_TIMEOUT, ROW_POOL_SIZE
-from scadbuddy.print_library.filing import file_output, trash_filed
+from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.print_library.store import NativeLibraryStore
+from scadbuddy.print_library.store import NativeFile, NativeLibraryStore
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
@@ -40,18 +41,69 @@ async def test_filing_twice_files_once(native: NativeLibrary, three_mf: Path) ->
     assert (a.name, a.output_id, a.filed) == ("demo-sign.3mf", meta.id, True)
 
 
-async def test_a_retried_filing_after_the_copy_moved_files_nothing(
+async def test_a_copy_the_user_moved_does_not_stand_in_for_the_filed_one(
     native: NativeLibrary, three_mf: Path
 ) -> None:
-    """A moved copy (`filed` cleared) keeps its `output_id`: the retry finds it."""
+    """A moved copy (`filed` cleared) is the user's, as one put in a chosen folder is
+    (#4507): only a filed copy counts, so a later filing files the template's again."""
     meta = _meta("d" * 32)
     first = await file_output(native, meta, three_mf, "Name Sign")
     await native.update_file(first.id, folder_id=None, filed=False)
-    keys = native.rows.live_file_keys()
     again = await file_output(native, meta, three_mf, "Name Sign")
-    assert again.id == first.id
-    assert [f.id for f in native.rows.files(None, every_folder=True)] == [first.id]
-    assert native.rows.live_file_keys() == keys
+    assert again.id != first.id and again.filed
+    assert native.rows.file(first.id) is not None
+
+
+async def test_a_chosen_folder_copy_never_suppresses_the_filing(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """#4507: the save's filing failed, Generate put a copy in a chosen folder, and a
+    later filing still files into the template's folder."""
+    meta = _meta("e" * 32)
+    gifts = native.rows.create_folder("Gifts", None).id
+    chosen, created = await put_in_folder(native, meta, three_mf, gifts, "Sign")
+    assert created and not chosen.filed and chosen.folder_id == gifts
+    filed = await file_output(native, meta, three_mf, "Name Sign")
+    assert filed.id != chosen.id and filed.filed
+    folder = native.rows.folder(filed.folder_id or 0)
+    assert folder is not None and folder.name == "Name Sign"
+
+
+async def test_overlapping_puts_in_one_folder_put_one_copy(
+    native: NativeLibrary, three_mf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4507: a double Generate, or the agent and the page at once, with different keys."""
+    meta = _meta("f" * 32)
+    gifts = native.rows.create_folder("Gifts", None).id
+    staged: list[str] = []
+    stage = native.stage
+
+    async def recorded(*args: Any, **kwargs: Any) -> NativeFile:
+        row = await stage(*args, **kwargs)
+        staged.append(row.blob_key)
+        return row
+
+    monkeypatch.setattr(native, "stage", recorded)
+    placed = await asyncio.gather(
+        *(put_in_folder(native, meta, three_mf, gifts, "Sign") for _ in range(4))
+    )
+    assert len({row.id for row, _ in placed}) == 1
+    assert sorted(created for _, created in placed) == [False, False, False, True]
+    assert [f.name for f in native.rows.files(gifts)] == ["Sign.3mf"]
+    # Every upload but the kept one's was released.
+    kept = placed[0][0].blob_key
+    assert kept in staged
+    for key in staged:
+        assert (await native.content.stat(key) is None) == (key != kept)
+
+
+async def test_a_put_names_its_copy_unique_in_the_folder(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    gifts = native.rows.create_folder("Gifts", None).id
+    a, _ = await put_in_folder(native, _meta("1" * 32), three_mf, gifts, "Sign")
+    b, _ = await put_in_folder(native, _meta("2" * 32), three_mf, gifts, "Sign")
+    assert (a.name, b.name) == ("Sign.3mf", "Sign (2).3mf")
 
 
 async def test_two_outputs_of_one_template_share_a_folder_under_a_race(
