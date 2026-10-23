@@ -1,4 +1,4 @@
-import { api, type Slicer } from '../api/client'
+import { api, type FilamentsQuery, type Slicer } from '../api/client'
 import type { Within } from './traceAction'
 import type {
   AttachResult,
@@ -29,14 +29,7 @@ export type PrintSource =
     }
   | { kind: 'library'; file: Pick<LibraryEntry, 'id' | 'filename'> }
 
-export type FilamentQuery = {
-  printerId?: number | null
-  /** #3818 — the registry printer, the one way to name a printer only the LAN reaches. */
-  printer?: string | null
-  plateId?: number
-  allPlates?: boolean
-  plateIds?: readonly number[]
-}
+export type FilamentQuery = FilamentsQuery
 
 /** The dialog's reads and writes for one source. */
 export interface SourceApi {

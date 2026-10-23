@@ -865,18 +865,10 @@ async function followOperation<T>(
   return (op.result ?? undefined) as T
 }
 
-/**
- * A print run to its end (#470, #742): POST `path` (an output's or a library file's
- * `/run`), then follow `GET /print/runs/{id}`. The server answers 202 with a run and
- * slices and queues in the background, since that takes longer than the proxies in
- * front wait. A repeat of the same request (the same `request_id`) is the same run, so
- * re-sending it after an answer that never arrived re-attaches to that run and never
- * queues a second print. `signal` stops following; the run itself goes on. `within`
- * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
- */
 /** The filament step's read: a Bambuddy printer, and (#3818) the registry printer beside it. */
 export type FilamentsQuery = {
   printerId?: number | null
+  /** #3818 — the registry printer, the one way to name a printer only the LAN reaches. */
   printer?: string | null
   plateId?: number
   allPlates?: boolean
@@ -902,6 +894,15 @@ function choicesSearch(printerId?: number | null, printer?: string | null): URLS
   return search
 }
 
+/**
+ * A print run to its end (#470, #742): POST `path` (an output's or a library file's
+ * `/run`), then follow `GET /print/runs/{id}`. The server answers 202 with a run and
+ * slices and queues in the background, since that takes longer than the proxies in
+ * front wait. A repeat of the same request (the same `request_id`) is the same run, so
+ * re-sending it after an answer that never arrived re-attaches to that run and never
+ * queues a second print. `signal` stops following; the run itself goes on. `within`
+ * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
+ */
 async function followPrintRun(
   path: string,
   body: PrintRunRequest,

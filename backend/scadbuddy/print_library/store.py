@@ -124,6 +124,18 @@ def _filed_rows_of_output(conn: Connection[DictRow], output_id: str) -> list[Nat
     return [NativeFile.model_validate(r) for r in rows]
 
 
+def _live_copy_in_folder(
+    conn: Connection[DictRow], output_id: str, folder_id: int
+) -> NativeFile | None:
+    """The output's first live row in ``folder_id``, whoever put it there."""
+    row = conn.execute(
+        f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
+        f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
+        (output_id, folder_id),
+    ).fetchone()
+    return None if row is None else NativeFile.model_validate(row)
+
+
 def _lock_output(conn: Connection[DictRow], output_id: str) -> None:
     """In a transaction of ``conn``'s: one writer of an output's copies at a time."""
     conn.execute(
@@ -313,6 +325,11 @@ class NativeLibraryStore:
         with self._pool.connection() as conn:
             return _filed_rows_of_output(conn, output_id)
 
+    def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
+        """The output's live copy in ``folder_id``, if any; no lock, so a hint only."""
+        with self._pool.connection() as conn:
+            return _live_copy_in_folder(conn, output_id, folder_id)
+
     def file_for_output(self, row: NativeFile, folder: str) -> tuple[NativeFile, bool]:
         """Insert ``row``, an output's filed copy, in the top-level folder ``folder``
         (found or made), unless the output already has a filed copy, trashed or not: that
@@ -337,19 +354,16 @@ class NativeLibraryStore:
         then trashes this copy with the folder's other files.
 
         Only these puts are made unique among themselves and the names already there: the
-        per-folder ``folder-names`` lock is taken here alone, so an upload, move or rename
-        into the folder at the same moment can still repeat a name. Nothing relies on
-        unique names (no constraint; rows are found by id, and an upload or copy keeps the
-        name it is given), so the other writers take no such lock."""
+        per-folder ``folder-names`` lock is taken here alone (not by `insert_file`'s uploads
+        or `update_file`'s moves and renames), so one of them into the folder at the same
+        moment can still repeat a name. Nothing relies on unique names (no constraint;
+        rows are found by id, and an upload or copy keeps the name it is given), so the
+        other writers take no such lock."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
-            there = conn.execute(
-                f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
-                f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
-                (row.output_id, folder_id),
-            ).fetchone()
+            there = _live_copy_in_folder(conn, row.output_id or "", folder_id)
             if there is not None:
-                return NativeFile.model_validate(there), False
+                return there, False
             live = conn.execute(
                 "SELECT id FROM library_folders WHERE id = %s FOR KEY SHARE", (folder_id,)
             ).fetchone()

@@ -5,7 +5,8 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { markUntrusted } from '../src/safety/untrusted.js'
-import { EXTRACTORS, RECORDED_WHEN_FAILED, resultJson, TOUCHES_NOTHING, type TouchedCall, touchesOf } from '../src/sessions/touched.js'
+import { readFileSync } from 'node:fs'
+import { EXTRACTORS, NATIVE_ID_BASE, RECORDED_WHEN_FAILED, resultJson, TOUCHES_NOTHING, type TouchedCall, touchesOf } from '../src/sessions/touched.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -31,6 +32,15 @@ function result(data: unknown, tool = 'x') {
 function touches(name: string, input: Record<string, unknown>, data: unknown, risk: Risk = 'write') {
   return touchesOf({ name, risk }, input, result(data, name))
 }
+
+describe('NATIVE_ID_BASE', () => {
+  it('is the backend print library\'s', () => {
+    const ids = readFileSync(new URL('../../backend/scadbuddy/print_library/ids.py', import.meta.url), 'utf8')
+    const found = /^NATIVE_ID_BASE = ([\d_]+)$/m.exec(ids)
+    expect(found).not.toBeNull()
+    expect(NATIVE_ID_BASE).toBe(Number((found?.[1] ?? '').replaceAll('_', '')))
+  })
+})
 
 describe('the extractor registry', () => {
   it('names only registered tools', () => {

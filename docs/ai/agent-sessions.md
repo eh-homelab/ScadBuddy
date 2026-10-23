@@ -225,7 +225,8 @@ model; removing the shared checkout is a `library` row with none), installed fon
 stored settings and remembered choices (`setting`, by what they are for:
 `print_options:<scope>[:<key>]`, `print_choices:<slug>`, `last_project`,
 `bed_type:<printer>`), and Bambuddy's projects, library files (`bambuddy_file`, with the
-output sent as `before`; `created` only when the answer says Bambuddy made one, since a
+output sent as `before`, and `library_file` for ScadBuddy's own library's, whose ids are
+at or above `NATIVE_ID_BASE`, `agent/src/sessions/touched.ts`; `created` only when the answer says Bambuddy made one, since a
 send reuses a copy already in the inbox) and print archives (`print_archive`, an archive
 id, not a queue item; filing an output under a project also records the queue items and
 archives it filed). A `font` row means "asked to install": an installed family is
