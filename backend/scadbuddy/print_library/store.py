@@ -318,6 +318,7 @@ class NativeLibraryStore:
             return _filed_for_output(conn, output_id)
 
     def rows_for_output(self, output_id: str) -> list[NativeFile]:
+        """Every row the output has, live or not; only the tests read it."""
         with self._pool.connection() as conn:
             return _rows_of_output(conn, output_id)
 
