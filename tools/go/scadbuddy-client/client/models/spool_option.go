@@ -18,6 +18,8 @@ type SpoolOption struct {
 	color_name SpoolOption_SpoolOption_color_nameable
 	// The colour property
 	colour SpoolOption_SpoolOption_colourable
+	// The colour_word property
+	colour_word SpoolOption_SpoolOption_colour_wordable
 	// The extruder property
 	extruder SpoolOption_SpoolOption_extruderable
 	// The label property
@@ -307,6 +309,92 @@ func (m *SpoolOption_SpoolOption_colour) SetSpoolOptionColourMember1(value Spool
 
 // SetString sets the string property value. Composed type representation for type string
 func (m *SpoolOption_SpoolOption_colour) SetString(value *string) {
+	m.string = value
+}
+
+// SpoolOption_SpoolOption_colour_word composed type wrapper for classes SpoolOption_colour_wordMember1able, string
+type SpoolOption_SpoolOption_colour_word struct {
+	// Composed type representation for type SpoolOption_colour_wordMember1able
+	spoolOption_colour_wordMember1 SpoolOption_colour_wordMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewSpoolOption_SpoolOption_colour_word instantiates a new SpoolOption_SpoolOption_colour_word and sets the default values.
+func NewSpoolOption_SpoolOption_colour_word() *SpoolOption_SpoolOption_colour_word {
+	m := &SpoolOption_SpoolOption_colour_word{}
+	return m
+}
+
+// CreateSpoolOption_SpoolOption_colour_wordFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSpoolOption_SpoolOption_colour_wordFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSpoolOption_SpoolOption_colour_word()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSpoolOption_colour_wordMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SpoolOption_colour_wordMember1able); ok {
+				result.SetSpoolOptionColourWordMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SpoolOption_SpoolOption_colour_word) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SpoolOption_SpoolOption_colour_word) GetIsComposedType() bool {
+	return true
+}
+
+// GetSpoolOptionColourWordMember1 gets the SpoolOption_colour_wordMember1 property value. Composed type representation for type SpoolOption_colour_wordMember1able
+// returns a SpoolOption_colour_wordMember1able when successful
+func (m *SpoolOption_SpoolOption_colour_word) GetSpoolOptionColourWordMember1() SpoolOption_colour_wordMember1able {
+	return m.spoolOption_colour_wordMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *SpoolOption_SpoolOption_colour_word) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *SpoolOption_SpoolOption_colour_word) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSpoolOptionColourWordMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSpoolOptionColourWordMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetSpoolOptionColourWordMember1 sets the SpoolOption_colour_wordMember1 property value. Composed type representation for type SpoolOption_colour_wordMember1able
+func (m *SpoolOption_SpoolOption_colour_word) SetSpoolOptionColourWordMember1(value SpoolOption_colour_wordMember1able) {
+	m.spoolOption_colour_wordMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *SpoolOption_SpoolOption_colour_word) SetString(value *string) {
 	m.string = value
 }
 
@@ -1358,6 +1446,14 @@ type SpoolOption_SpoolOption_color_nameable interface {
 	SetString(value *string)
 }
 
+type SpoolOption_SpoolOption_colour_wordable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetSpoolOptionColourWordMember1() SpoolOption_colour_wordMember1able
+	GetString() *string
+	SetSpoolOptionColourWordMember1(value SpoolOption_colour_wordMember1able)
+	SetString(value *string)
+}
+
 type SpoolOption_SpoolOption_colourable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetSpoolOptionColourMember1() SpoolOption_colourMember1able
@@ -1499,6 +1595,12 @@ func (m *SpoolOption) GetColour() SpoolOption_SpoolOption_colourable {
 	return m.colour
 }
 
+// GetColourWord gets the colour_word property value. The colour_word property
+// returns a SpoolOption_SpoolOption_colour_wordable when successful
+func (m *SpoolOption) GetColourWord() SpoolOption_SpoolOption_colour_wordable {
+	return m.colour_word
+}
+
 // GetExtruder gets the extruder property value. The extruder property
 // returns a SpoolOption_SpoolOption_extruderable when successful
 func (m *SpoolOption) GetExtruder() SpoolOption_SpoolOption_extruderable {
@@ -1536,6 +1638,16 @@ func (m *SpoolOption) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		if val != nil {
 			m.SetColour(val.(SpoolOption_SpoolOption_colourable))
+		}
+		return nil
+	}
+	res["colour_word"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSpoolOption_SpoolOption_colour_wordFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetColourWord(val.(SpoolOption_SpoolOption_colour_wordable))
 		}
 		return nil
 	}
@@ -1813,6 +1925,12 @@ func (m *SpoolOption) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 		}
 	}
 	{
+		err := writer.WriteObjectValue("colour_word", m.GetColourWord())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("extruder", m.GetExtruder())
 		if err != nil {
 			return err
@@ -1937,6 +2055,11 @@ func (m *SpoolOption) SetColour(value SpoolOption_SpoolOption_colourable) {
 	m.colour = value
 }
 
+// SetColourWord sets the colour_word property value. The colour_word property
+func (m *SpoolOption) SetColourWord(value SpoolOption_SpoolOption_colour_wordable) {
+	m.colour_word = value
+}
+
 // SetExtruder sets the extruder property value. The extruder property
 func (m *SpoolOption) SetExtruder(value SpoolOption_SpoolOption_extruderable) {
 	m.extruder = value
@@ -2023,6 +2146,7 @@ type SpoolOptionable interface {
 	GetBrand() SpoolOption_SpoolOption_brandable
 	GetColorName() SpoolOption_SpoolOption_color_nameable
 	GetColour() SpoolOption_SpoolOption_colourable
+	GetColourWord() SpoolOption_SpoolOption_colour_wordable
 	GetExtruder() SpoolOption_SpoolOption_extruderable
 	GetLabel() SpoolOption_SpoolOption_labelable
 	GetLabelWeightG() SpoolOption_SpoolOption_label_weight_gable
@@ -2042,6 +2166,7 @@ type SpoolOptionable interface {
 	SetBrand(value SpoolOption_SpoolOption_brandable)
 	SetColorName(value SpoolOption_SpoolOption_color_nameable)
 	SetColour(value SpoolOption_SpoolOption_colourable)
+	SetColourWord(value SpoolOption_SpoolOption_colour_wordable)
 	SetExtruder(value SpoolOption_SpoolOption_extruderable)
 	SetLabel(value SpoolOption_SpoolOption_labelable)
 	SetLabelWeightG(value SpoolOption_SpoolOption_label_weight_gable)
