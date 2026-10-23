@@ -42,17 +42,22 @@ async def test_filing_twice_files_once(native: NativeLibrary, three_mf: Path) ->
     assert (a.name, a.output_id, a.filed) == ("demo-sign.3mf", meta.id, True)
 
 
-async def test_a_copy_the_user_moved_does_not_stand_in_for_the_filed_one(
+async def test_a_retried_filing_after_the_copy_moved_files_a_second_copy(
     native: NativeLibrary, three_mf: Path
 ) -> None:
-    """A moved copy (`filed` cleared) is the user's, as one put in a chosen folder is
-    (#4507): only a filed copy counts, so a later filing files the template's again."""
+    """The trade-off #4507 made: a moved copy (`filed` cleared) cannot be told from one
+    put in a chosen folder, and only a filed copy counts, so an `output_create` retried
+    after the user moved its copy files a second one into the template folder."""
     meta = _meta("d" * 32)
     first = await file_output(native, meta, three_mf, "Name Sign")
+    template_folder = first.folder_id
     await native.update_file(first.id, folder_id=None, filed=False)
-    again = await file_output(native, meta, three_mf, "Name Sign")
+    again = await file_output(native, meta, three_mf, "Name Sign")  # the retry
     assert again.id != first.id and again.filed
-    assert native.rows.file(first.id) is not None
+    assert again.folder_id == template_folder
+    assert [f.id for f in native.rows.files(template_folder)] == [again.id]
+    moved = native.rows.file(first.id)
+    assert moved is not None and moved.folder_id is None and not moved.filed
 
 
 async def test_a_chosen_folder_copy_never_suppresses_the_filing(

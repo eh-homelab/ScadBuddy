@@ -51,6 +51,8 @@ async def put_in_folder(
     transaction under the output's lock (`NativeLibraryStore.put_for_output`), and a call
     that finds a copy already there releases its own upload. A folder deleted meanwhile is
     the 404."""
+    # Lock-free, so it only saves an upload in the common case; `put_for_output`'s locked
+    # check is the one that counts.
     there = [
         f
         for f in await asyncio.to_thread(native.rows.rows_for_output, meta.id)

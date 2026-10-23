@@ -49,6 +49,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: A native-library kind run while `library_backend` is ``bambuddy`` (#4507).
+NATIVE_LIBRARY_OFF_PROBLEM = "https://scadbuddy.dev/problems/native-library-not-in-use"
+
 
 def output_kinds(state: AppState, components: Components) -> list[OperationKind]:
     """The output kinds, bound to this process's state; ``library/operations.py``
@@ -307,7 +310,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         native = await components.get(PRINT_LIBRARY).serving_native()
         if native is None:
             raise ApiError(
-                status.HTTP_409_CONFLICT, "ScadBuddy's own library is not the one in use"
+                status.HTTP_409_CONFLICT,
+                "ScadBuddy's own library is not the one in use",
+                type_=NATIVE_LIBRARY_OFF_PROBLEM,
             )
         return native
 

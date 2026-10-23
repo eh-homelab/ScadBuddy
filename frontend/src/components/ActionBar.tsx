@@ -54,7 +54,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react'
 import { bambuddyLink } from '../lib/bambuddyLinks'
-import { LIBRARY_ROOT } from '../lib/libraryPath'
+import { libraryPath } from '../lib/libraryPath'
 
 /** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
 const MAX_BREAKDOWN_COLOURS = 16
@@ -664,7 +664,10 @@ export function ActionBar({
                 // #4507 — a native folder's file is in ScadBuddy's own Library, not Bambuddy.
                 <span className="truncate text-ok">
                   Saved to{' '}
-                  <Link to={LIBRARY_ROOT} className="underline underline-offset-2">
+                  <Link
+                    to={libraryPath(projects.choices?.folders ?? [], filed.file.folder_id)}
+                    className="underline underline-offset-2"
+                  >
                     {filed.name}
                   </Link>
                 </span>

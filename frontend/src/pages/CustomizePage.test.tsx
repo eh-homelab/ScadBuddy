@@ -1868,10 +1868,20 @@ describe('CustomizePage, project file (#317)', () => {
     // #4507 — a native folder's answer has no Bambuddy page.
     withLastProject(1)
     server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({
+          projects: projectViews,
+          folders: [
+            { id: 3, name: 'Supplies', path: 'Supplies', parent_id: null },
+            { id: 4, name: 'Storage', path: 'Supplies › Storage', parent_id: 3 },
+          ],
+          last_project_id: 1,
+        }),
+      ),
       http.post('/api/v1/outputs/:id/project-file', () =>
         HttpResponse.json({
           project_id: null,
-          folder_id: 1_000_000_001,
+          folder_id: 4,
           library_file_id: 1_000_000_002,
           filename: 'Keychain.3mf',
           created: true,
@@ -1887,7 +1897,11 @@ describe('CustomizePage, project file (#317)', () => {
     const status = await screen.findByTestId('project-filed')
     expect(within(status).queryByRole('button', { name: 'Open in Bambuddy' })).not.toBeInTheDocument()
     expect(status).toHaveTextContent('Saved to Reagan Keychain')
-    expect(within(status).getByRole('link', { name: 'Reagan Keychain' })).toHaveAttribute('href', '/library')
+    // The folder it went into, deep-linked.
+    expect(within(status).getByRole('link', { name: 'Reagan Keychain' })).toHaveAttribute(
+      'href',
+      '/library/Supplies/Storage',
+    )
   })
 
   it('uploads nothing on Generate with "No project", and leaves the default project alone', async () => {
