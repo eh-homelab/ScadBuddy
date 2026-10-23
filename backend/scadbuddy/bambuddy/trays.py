@@ -19,7 +19,7 @@ provider records of the spool in it, and :func:`seen_trays` is what that overlay
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from scadbuddy.bambuddy.extruders import extruder_of, side_of, two_nozzles
@@ -36,6 +36,7 @@ from scadbuddy.bambuddy.models import AmsTray, PrinterStatus
 from scadbuddy.spools.models import (
     Overlay,
     SeenTray,
+    ShelfSpool,
     SpoolSnapshot,
     clean_tag_uid,
     clean_tray_uuid,
@@ -149,6 +150,23 @@ def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
     return found
 
 
+def close_spools(
+    spools: Iterable[SpoolOption], material: str, colour: str | None
+) -> list[SpoolOption]:
+    """The spools an untagged tray of ``material`` and ``colour`` may hold: the same
+    material family, a colour within :data:`CLOSE_COLOUR`, most filament first and empty
+    ones last."""
+    found = [
+        spool
+        for spool in spools
+        if family(spool.material) == family(material)
+        and (distance := colour_distance(spool.colour, colour)) is not None
+        and distance <= CLOSE_COLOUR
+    ]
+    found.sort(key=lambda spool: (not spool.remaining_g, -(spool.remaining_g or 0), spool.spool_id))
+    return found
+
+
 def unknown_trays(
     status: PrinterStatus | None, printer_id: int, spools: list[SpoolOption]
 ) -> list[UnknownTray]:
@@ -166,21 +184,10 @@ def unknown_trays(
             continue
         material = (tray.tray_type or "").strip()
         colour = normalise_colour(tray.tray_color)
-        candidates = [
-            spool
-            for spool in spools
-            if spool.loaded is None
-            and spool.spool_id > 0
-            and family(spool.material) == family(material)
-            and (distance := colour_distance(spool.colour, colour)) is not None
-            and distance <= CLOSE_COLOUR
-        ]
-        candidates.sort(
-            key=lambda spool: (
-                not spool.remaining_g,
-                -(spool.remaining_g or 0),
-                spool.spool_id,
-            )
+        candidates = close_spools(
+            (spool for spool in spools if spool.loaded is None and spool.spool_id > 0),
+            material,
+            colour,
         )
         found.append(
             UnknownTray(
@@ -262,6 +269,14 @@ def _external_label(side: str | None, status: PrinterStatus) -> str:
     return f"External {side}" if side is not None and two_nozzles(status) else "External"
 
 
+def _native_label(ams_id: int, tray_id: int, status: PrinterStatus) -> str:
+    """A native run's tray as a person reads it: :func:`tray_label`, an external holder
+    by its side (:func:`_external_label`)."""
+    if ams_id == EXTERNAL:
+        return _external_label(side_of(extruder_of(ams_id, tray_id, status)), status)
+    return tray_label(ams_id, tray_id)
+
+
 def _sorted_trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
     """The filled trays in AMS order, the external holders last: units arrive unsorted."""
     return sorted(
@@ -324,11 +339,7 @@ def loaded_trays(
                 extruder=extruder,
                 side=side_of(extruder),
                 tray_only=True,
-                label=(
-                    _external_label(side_of(extruder), status)
-                    if ams_id == EXTERNAL
-                    else tray_label(ams_id, tray.id)
-                ),
+                label=_native_label(ams_id, tray.id, status),
                 colour_word=colour_word(tray.tray_color),
                 remain_percent=tray.remain if tray.remain >= 0 else None,
                 physical_spool_id=spool.physical_spool_id if spool is not None else None,
@@ -336,6 +347,68 @@ def loaded_trays(
             )
         )
     return options
+
+
+def shelf_options(shelf: Sequence[ShelfSpool]) -> list[SpoolOption]:
+    """The overlay's shelf (`Overlay.shelf`) as picker rows, numbered from 1 in this
+    answer only: for an untagged tray's question to name, never a print choice. The link
+    a person makes names the row's ``physical_spool_id``, else one of its ``records``
+    (``PUT /printers/{id}/trays/{ams}/{tray}/spool``)."""
+    return [
+        SpoolOption(
+            spool_id=index,
+            material=_first(spool.records, "material") or "",
+            colour=normalise_colour(_first(spool.records, "colour")),
+            brand=_first(spool.records, "brand"),
+            color_name=_first(spool.records, "name"),
+            remaining_g=_first(spool.records, "remaining_g"),
+            label_weight_g=_first(spool.records, "label_weight_g"),
+            physical_spool_id=spool.physical_spool_id,
+            records=spool.records,
+        )
+        for index, spool in enumerate(shelf, start=1)
+    ]
+
+
+def tray_questions(
+    status: PrinterStatus, overlay: Overlay | None
+) -> tuple[list[UnknownTray], list[SpoolOption]]:
+    """A native run's questions (#4504): each filled untagged tray the overlay finds no
+    spool for, with the shelf's records it may hold (:func:`close_spools`), and the shelf
+    rows those questions name. A tray with no close record is not asked about: it is a
+    choice of its own already, and there is nothing to link it to."""
+    if overlay is None:
+        return [], []
+    shelf = shelf_options(overlay.shelf)
+    held = {
+        (tray.ams_id, tray.tray_id)
+        for tray in overlay.trays
+        if tray.physical_spool_id is not None or tray.records
+    }
+    questions: list[UnknownTray] = []
+    offered: set[int] = set()
+    for seen in seen_trays(status):
+        if seen.tray_uuid or seen.tag_uid or (seen.ams_id, seen.tray_id) in held:
+            continue
+        material = seen.material or ""
+        candidates = close_spools(shelf, material, seen.colour)
+        if not candidates:
+            continue
+        offered.update(spool.spool_id for spool in candidates)
+        questions.append(
+            UnknownTray(
+                ams_id=seen.ams_id,
+                tray_id=seen.tray_id,
+                label=_native_label(seen.ams_id, seen.tray_id, status),
+                material=material,
+                colour=seen.colour,
+                colour_word=colour_word(seen.colour),
+                fingerprint=seen.fingerprint,
+                spool_id=tray_spool_id(seen.ams_id, seen.tray_id),
+                candidates=[spool.spool_id for spool in candidates],
+            )
+        )
+    return questions, [spool for spool in shelf if spool.spool_id in offered]
 
 
 def _first(records: Mapping[str, SpoolSnapshot], field: str) -> Any:

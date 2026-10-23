@@ -16,6 +16,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.filaments import (
     FilamentPlan,
+    every_plate,
     gather_plate_options,
     seed_plan,
 )
@@ -42,7 +43,7 @@ from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.slicing.catalogue import native_catalogue
 from scadbuddy.slicing.profiles import Profiles
-from scadbuddy.spools.models import Overlay, SpoolSnapshot, TraySpool
+from scadbuddy.spools.models import Overlay, ShelfSpool, SpoolSnapshot, TraySpool
 from tests.bambuddy.conftest import recording
 from tests.slicing.conftest import PROFILES
 from tests.support.no_bambuddy import forbid_bambuddy
@@ -378,6 +379,146 @@ async def test_a_remembered_spool_is_dropped_on_a_native_run() -> None:
     options = await _gather(h2c_status(), _overlay(), "#FFFFFF")
     plan = seed_plan(options, [SlotChoice(slot_id=1, spool_id=16)])
     assert plan.slots == [SlotChoice(slot_id=1, spool_id=tray_spool_id(0, 1))]
+
+
+# --- an untagged tray's question (#4504) ---------------------------------------------
+
+
+def _shelf(record: SpoolSnapshot) -> ShelfSpool:
+    """A Bambuddy record linked to no physical spool."""
+    return ShelfSpool(records={"bambuddy": record})
+
+
+def _white_shelf() -> Overlay:
+    """Tray (0,1) is untagged white PLA with no spool linked; the shelf has a full and an
+    empty white PLA, a black PLA and a white PETG."""
+    return Overlay(
+        trays=[TraySpool(ams_id=0, tray_id=1)],
+        shelf=[
+            _shelf(_record("empty", colour="#FFFFFF", remaining_g=0.0)),
+            _shelf(_record("black", colour="#000000")),
+            _shelf(_record("full", colour="#FAFAFA", remaining_g=800.0, name="Jade White")),
+            _shelf(_record("petg", material="PETG", colour="#FFFFFF")),
+        ],
+    )
+
+
+async def test_an_untagged_tray_asks_with_the_shelfs_close_records(
+    spans: InMemorySpanExporter,
+) -> None:
+    """Same material, close colour, most filament first and empty last, as the Bambuddy
+    path's question; each candidate a shelf entry carrying its records. No Bambuddy read."""
+    with forbid_bambuddy(spans, API):
+        options = await _gather(h2c_status(), _white_shelf(), "#FFFFFF")
+    (question,) = options.trays
+    assert (question.ams_id, question.tray_id, question.label) == (0, 1, "AMS-A slot 2")
+    assert (question.material, question.colour, question.colour_word) == (
+        "PLA",
+        "#FFFFFF",
+        "white",
+    )
+    assert question.spool_id == tray_spool_id(0, 1)
+    assert question.fingerprint == "PLA|FFFFFF"
+    by_id = {entry.spool_id: entry for entry in options.shelf}
+    assert [by_id[c].records["bambuddy"].record_id for c in question.candidates] == [
+        "full",
+        "empty",
+    ]
+    full = by_id[question.candidates[0]]
+    assert full.spool_id > 0 and full.loaded is None and not full.tray_only
+    assert (full.material, full.colour, full.color_name, full.remaining_g) == (
+        "PLA",
+        "#FAFAFA",
+        "Jade White",
+        800.0,
+    )
+    # Only what some tray's question offers is sent, and none of it is a print choice.
+    assert len(options.shelf) == 2
+    assert all(spool.tray_only for spool in options.spools)
+    assert {c.spool_id for c in options.suggested} <= {s.spool_id for s in options.spools}
+
+
+async def test_a_shelf_spool_is_offered_under_its_physical_spool() -> None:
+    spool = uuid4()
+    overlay = Overlay(
+        trays=[TraySpool(ams_id=0, tray_id=1)],
+        shelf=[
+            ShelfSpool(
+                physical_spool_id=spool,
+                records={
+                    "native": _record("n1", colour="#FFFFFF", remaining_g=None, brand=None),
+                    "bambuddy": _record("b1", colour="#FFFFFF", remaining_g=300.0),
+                },
+            )
+        ],
+    )
+    options = await _gather(h2c_status(), overlay, "#FFFFFF")
+    (question,) = options.trays
+    (entry,) = options.shelf
+    assert question.candidates == [entry.spool_id]
+    assert entry.physical_spool_id == spool
+    assert list(entry.records) == ["native", "bambuddy"]
+    assert (entry.remaining_g, entry.brand) == (300.0, "Bambu Lab")
+
+
+async def test_a_linked_or_tagged_tray_is_not_asked_about() -> None:
+    """Tray (0,1) holds a person's link; (0,0) is RFID-tagged black PLA, and a black PLA
+    record on the shelf is close to it: neither is asked about."""
+    overlay = Overlay(
+        trays=[
+            TraySpool(ams_id=0, tray_id=0),
+            TraySpool(
+                ams_id=0,
+                tray_id=1,
+                physical_spool_id=uuid4(),
+                linked_by="manual",
+                records={"bambuddy": _record("w", colour="#FFFFFF")},
+            ),
+        ],
+        shelf=[
+            _shelf(_record("black", colour="#000000")),
+            _shelf(_record("white", colour="#FFFFFF")),
+        ],
+    )
+    options = await _gather(h2c_status(), overlay, "#FFFFFF")
+    assert options.trays == [] and options.shelf == []
+
+
+async def test_a_tray_with_no_close_record_is_not_asked_about() -> None:
+    """On a native run the tray is a choice already; a question with nothing to link
+    would only be noise."""
+    overlay = Overlay(
+        trays=[TraySpool(ams_id=0, tray_id=1)],
+        shelf=[_shelf(_record("black", colour="#000000"))],
+    )
+    options = await _gather(h2c_status(), overlay, "#FFFFFF")
+    assert options.trays == [] and options.shelf == []
+
+
+async def test_without_an_overlay_nothing_is_asked() -> None:
+    options = await _gather(h2c_status(), None, "#FFFFFF")
+    assert options.trays == [] and options.shelf == []
+
+
+async def test_every_plate_keeps_the_question_and_suggests_only_trays() -> None:
+    plates = await gather_plate_options(
+        None,
+        library_file_id=None,
+        printer_id=None,
+        plate_ids=[1, 2],
+        known=lambda plate: _requirements("#FFFFFF" if plate == 1 else "#FAFAFA"),
+        trays_from=h2c_status(),
+        overlay=_white_shelf(),
+        now=NOW,
+    )
+    # Each plate's rows are its own: one plate's edit never reaches another's.
+    first, second = plates
+    assert first.shelf[0].records is not second.shelf[0].records
+    assert first.trays[0].candidates is not second.trays[0].candidates
+    merged = every_plate(plates)
+    assert [tray.tray_id for tray in merged.trays] == [1]
+    assert len(merged.shelf) == 2
+    assert {c.spool_id for c in merged.suggested} <= {s.spool_id for s in merged.spools}
 
 
 # --- the resolver ------------------------------------------------------------------

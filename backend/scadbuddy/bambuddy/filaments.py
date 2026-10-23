@@ -265,8 +265,18 @@ class FilamentOptions(BaseModel):
     #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
     track_switch: bool = False
     #: The chosen printer's filled trays with no spool assigned (#2164): the dialog
-    #: asks which spool each holds. Each is also offered in ``spools`` as itself.
+    #: asks which spool each holds. On the Bambuddy path each is also offered in
+    #: ``spools`` as itself, and its ``candidates`` are inventory spools there; on a
+    #: native run (#4504) every tray is in ``spools`` already, and the candidates are
+    #: rows of ``shelf``.
     trays: list[UnknownTray] = Field(default_factory=list)
+    #: A native run's spools no tray holds (#4504, `trays.shelf_options`): what its
+    #: ``trays`` questions' ``candidates`` name, each with its providers' ``records``.
+    #: Never a print choice, so never in ``spools``; empty on the Bambuddy path. Their
+    #: ``spool_id`` is positional, numbered from 1 in this one answer only: a client
+    #: links a row by its ``physical_spool_id``, else one of its ``records``
+    #: (``PUT /printers/{id}/trays/{ams}/{tray}/spool``), and never stores the id.
+    shelf: list[SpoolOption] = Field(default_factory=list)
     #: Where ``spools`` came from: Bambuddy's inventory, or (a native run, #3818) the
     #: printer's loaded trays with the spool providers' records over them.
     source: Literal["inventory", "trays"] = "inventory"
@@ -497,9 +507,12 @@ def _options(
     printer_name: str | None,
     source: Literal["inventory", "trays"] = "inventory",
     notes: list[str] | None = None,
+    trays: list[UnknownTray] | None = None,
+    shelf: list[SpoolOption] | None = None,
 ) -> FilamentOptions:
     """The dialog's answer over ``options``, already in display order: each slot's
-    colour matches, the opening selection and its warnings."""
+    colour matches, the opening selection and its warnings. ``trays`` and ``shelf`` are
+    a native run's questions and the rows they name (`trays.tray_questions`)."""
     suggested = suggest(requirements, options, printer_id=printer_id)
     built = FilamentOptions(
         library_file_id=library_file_id,
@@ -507,6 +520,8 @@ def _options(
         printer_name=printer_name,
         source=source,
         overlay_notes=notes or [],
+        trays=trays or [],
+        shelf=shelf or [],
         slots=[
             slot.model_copy(
                 update={
@@ -1067,7 +1082,7 @@ async def _tray_plate_options(
     now: datetime | None,
 ) -> list[FilamentOptions]:
     # Here, not at the top: `trays` builds its choices from this module's models.
-    from scadbuddy.bambuddy.trays import loaded_trays
+    from scadbuddy.bambuddy.trays import loaded_trays, tray_questions
 
     answers = await asyncio.gather(
         *(
@@ -1084,6 +1099,9 @@ async def _tray_plate_options(
     here = printer_id if printer_id is not None else status.id
     options = loaded_trays(status, here, status.name, overlay)
     notes = overlay_notes(overlay, labels, now=now) if overlay is not None else []
+    # Shelf ids are positional: they agree across the plates only because every plate
+    # shares this one overlay and so this one numbering.
+    questions, shelf = tray_questions(status, overlay)
     return [
         _options(
             library_file_id=library_file_id,
@@ -1093,6 +1111,8 @@ async def _tray_plate_options(
             printer_name=status.name,
             source="trays",
             notes=notes,
+            trays=[question.model_copy(deep=True) for question in questions],
+            shelf=[spool.model_copy(deep=True) for spool in shelf],
         )
         for requirements in per_plate
     ]

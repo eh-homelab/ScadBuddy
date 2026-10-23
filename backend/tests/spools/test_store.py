@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.spools.models import SeenTray, SpoolLocation, SpoolSnapshot, tray_fingerprint
 from scadbuddy.spools.store import _LOCK, SPOOL_OVERLAY_STALE, SpoolStore, repoint_tray_links
@@ -542,3 +543,176 @@ def test_repointing_waits_for_the_stores_writers(pg_pool: PgPool) -> None:
             conn.execute("SET LOCAL lock_timeout = '200ms'")
             with pytest.raises(psycopg.errors.LockNotAvailable):
                 repoint_tray_links(conn, uuid.uuid4(), uuid.uuid4())
+
+
+# -- the shelf (#4504) ------------------------------------------------------------------
+
+
+async def test_the_shelf_is_every_fresh_record_no_tray_holds(store: SpoolStore) -> None:
+    """#4504: what an untagged tray's question offers. A record a tray holds (a person's
+    link, the provider's own assignment), one the provider places in any tray, one of a
+    tagged spool and a stale provider's are not on it."""
+    await store.replace_records(
+        "bambuddy",
+        [
+            record("free", colour="#FFFFFF", remaining_g=500.0),
+            record("linked", colour="#FFFFFF"),
+            located("placed", 1, 2),
+            record("tagged", tray_uuid=UUID_A),
+        ],
+        NOW,
+    )
+    await store.replace_records("old", [record("o1")], NOW - SPOOL_OVERLAY_STALE * 2)
+    await store.link(PRINTER, tray(0, 1, colour="#FFFFFF"), provider="bambuddy", record_id="linked")
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(0, 1, colour="#FFFFFF"), tray(1, 2)],
+        now=NOW,
+        providers=["bambuddy", "old"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    (only,) = overlay.shelf
+    assert only.physical_spool_id is None
+    assert list(only.records) == ["bambuddy"]
+    assert only.records["bambuddy"].record_id == "free"
+    assert only.records["bambuddy"].remaining_g == 500.0
+
+
+async def test_one_spools_records_are_one_shelf_entry(store: SpoolStore) -> None:
+    """Two providers' records of one physical spool no tray holds: one entry, its records
+    in the providers' order, under the spool a link names."""
+    await store.replace_records("bambuddy", [record("b1")], NOW)
+    await store.replace_records("native", [record("n1")], NOW)
+    first = await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="b1")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    overlay = await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["native", "bambuddy"])
+    (only,) = overlay.shelf
+    assert only.physical_spool_id == first.physical_spool_id
+    assert list(only.records) == ["native", "bambuddy"]
+
+
+async def test_a_spool_whose_tray_changed_is_back_on_the_shelf(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """A person's link this printer's tray no longer matches holds nothing: the spool
+    came out, so it may be linked again. A link on another printer still holds it."""
+    other = uuid.UUID("6e1d9f2a-0000-4000-8000-000000000002")
+    registered(pg_pool, other)
+    await store.replace_records("bambuddy", [record("13"), record("14")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(other, tray(0, 1), provider="bambuddy", record_id="14")
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 1, colour="#00FF00")], now=NOW, providers=["bambuddy"]
+    )
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_a_tagged_record_with_no_spool_is_not_on_the_shelf(store: SpoolStore) -> None:
+    """Review N1: two records naming one tag link neither, so neither has a physical
+    spool; their tag still says they are a tagged spool, which is wherever the tag is
+    read, never in an untagged tray."""
+    await store.replace_records(
+        "bambuddy",
+        [record("a", tag_uid=TAG_A), record("b", tag_uid=TAG_A), record("free")],
+        NOW,
+    )
+    overlay = await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["bambuddy"])
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["free"]
+
+
+async def test_a_spool_linked_on_another_printer_is_not_on_the_shelf(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """Review N4: a person's link on another printer holds its spool, whatever this
+    printer's trays show."""
+    other = uuid.UUID("7f2e0a3b-0000-4000-8000-000000000003")
+    registered(pg_pool, other)
+    await store.replace_records("bambuddy", [record("13"), record("free")], NOW)
+    await store.link(other, tray(0, 1), provider="bambuddy", record_id="13")
+    overlay = await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["bambuddy"])
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["free"]
+
+
+async def test_no_untagged_tray_reads_no_shelf(store: SpoolStore) -> None:
+    """Review N2: only an untagged tray is asked about, so with none the records are not
+    scanned."""
+    await store.replace_records("bambuddy", [record("free")], NOW)
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 0, tray_uuid=UUID_A)], now=NOW, providers=["bambuddy"]
+    )
+    assert overlay.shelf == []
+
+
+async def test_a_spool_its_provider_places_in_a_tray_is_not_on_the_shelf(
+    store: SpoolStore,
+) -> None:
+    """Review 2 N1: one spool, Bambuddy's record placing it in tray (1,2) and another
+    provider's with no location. The spool is that tray's, so neither record is offered
+    for another tray."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("bambuddy", [located("13", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2), tray(0, 3)],
+        now=NOW,
+        providers=["native", "bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert overlay.trays[0].linked_by == "provider"
+    assert overlay.shelf == []
+
+
+async def test_a_link_to_a_tray_now_tagged_holds_nothing(store: SpoolStore) -> None:
+    """Review 2 N2: a person's link to a tray that now reads a tag is not that tray's
+    spool (`_tray_spool`), even with the same material and colour: it is on the shelf."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 1, tray_uuid=UUID_A), tray(0, 2)], now=NOW, providers=["bambuddy"]
+    )
+    assert overlay.trays[0].records == {}
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_the_shelf_read_is_traced_by_its_counts_only(
+    store: SpoolStore, spans: InMemorySpanExporter
+) -> None:
+    """Review 3 N1: a large inventory's cost shows in a trace as counts, never a record's
+    values."""
+    await store.replace_records(
+        "bambuddy", [record("free", colour="#FFFFFF"), record("other")], NOW
+    )
+    spans.clear()
+    await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["bambuddy"])
+    (shelf,) = (s for s in spans.get_finished_spans() if s.name == "spools.shelf")
+    assert dict(shelf.attributes or {}) == {
+        "scadbuddy.spools.shelf_records": 2,
+        "scadbuddy.spools.shelf_spools": 2,
+    }
+
+
+async def test_a_stale_providers_placement_does_not_hold_a_spool_off_the_shelf(
+    store: SpoolStore,
+) -> None:
+    """Review 4 N1: a stale provider's records are left out everywhere, its placement
+    of a spool too."""
+    await store.replace_records("old", [record("o1", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="old", record_id="o1")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("old", [located("o1", 1, 2)], NOW - SPOOL_OVERLAY_STALE * 2)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2), tray(0, 3)],
+        now=NOW,
+        providers=["native", "old"],
+        located={"old": "bambuddy:1"},
+    )
+    assert "old" in overlay.stale
+    assert [list(entry.records) for entry in overlay.shelf] == [["native"]]

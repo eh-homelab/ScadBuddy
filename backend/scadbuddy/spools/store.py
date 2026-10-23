@@ -38,17 +38,20 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from opentelemetry.trace import Span
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.core.tracing import span
 from scadbuddy.spools.models import (
     FoundBy,
     LinkedBy,
     Overlay,
     ProviderRefresh,
     SeenTray,
+    ShelfSpool,
     SpoolSnapshot,
     TraySpool,
     clean_tag_uid,
@@ -288,7 +291,9 @@ class SpoolStore:
             }
             fresh = [name for name in providers if name not in stale]
             found = [_tray_spool(conn, printer_id, tray, fresh, located) for tray in trays]
-        return Overlay(trays=found, stale=stale)
+            with span("spools.shelf") as current:
+                shelf = _shelf(conn, printer_id, trays, fresh, current)
+        return Overlay(trays=found, shelf=shelf, stale=stale)
 
     def _link(
         self,
@@ -582,6 +587,83 @@ def _tray_spool(
         linked_by=found_by,
         records=records,
     )
+
+
+def _shelf(
+    conn: Conn, printer_id: UUID, trays: list[SeenTray], fresh: list[str], traced: Span
+) -> list[ShelfSpool]:
+    """``fresh``'s records no tray holds (`Overlay.shelf`), one entry per physical spool
+    (or per record linked to none), in the providers' order, then by record id. A record
+    with a key of its own is a tagged spool even when no spool is linked to it (two
+    records naming one tag link neither): it is wherever its tag is read. A spool any
+    of whose records a provider places in a tray is left out whole.
+
+    Only an untagged tray is asked about, so with none nothing is read. Otherwise every
+    fresh record is read, not only those of the trays' materials: which materials may
+    share a tray is `bambuddy.filaments.family`'s rule, applied once by the question
+    (`trays.close_spools`), and spelling it again in SQL would let the two drift."""
+    if not fresh or all(_keys_of(tray.tray_uuid, tray.tag_uid) != (None, None) for tray in trays):
+        traced.set_attribute("scadbuddy.spools.shelf_records", 0)
+        traced.set_attribute("scadbuddy.spools.shelf_spools", 0)
+        return []
+    found: list[tuple[str, SpoolSnapshot, UUID | None]] = []
+    read = 0
+    for row in conn.execute(
+        "SELECT r.provider, r.snapshot, l.physical_spool_id FROM spool_provider_records r"
+        " LEFT JOIN spool_record_links l USING (provider, record_id)"
+        " LEFT JOIN physical_spools p ON p.id = l.physical_spool_id"
+        " WHERE r.provider = ANY(%s::text[]) AND r.snapshot->>'location' IS NULL"
+        " AND p.tray_uuid IS NULL AND p.tag_uid IS NULL"
+        # A spool one of its fresh records places in a tray is that tray's, whichever
+        # record says so; a stale provider's placement counts no more than its records.
+        # Both lookups are indexed (`20261018T1744Z_physical_spools.sql`): `ol` by
+        # `UNIQUE (physical_spool_id, provider)`, `orr` by its `(provider, record_id)` key.
+        " AND NOT EXISTS (SELECT 1 FROM spool_record_links ol"
+        "   JOIN spool_provider_records orr USING (provider, record_id)"
+        "   WHERE ol.physical_spool_id = l.physical_spool_id"
+        "   AND ol.provider = ANY(%s::text[])"
+        "   AND orr.snapshot->>'location' IS NOT NULL)",
+        (fresh, fresh),
+    ):
+        read += 1
+        snapshot = SpoolSnapshot.model_validate(row["snapshot"])
+        if _keys_of(snapshot.tray_uuid, snapshot.tag_uid) == (None, None):
+            found.append((row["provider"], snapshot, row["physical_spool_id"]))
+    # A tagged tray is its tag's spool, never a person's link (`_tray_spool`).
+    shown = {
+        (tray.ams_id, tray.tray_id): tray.fingerprint
+        for tray in trays
+        if _keys_of(tray.tray_uuid, tray.tag_uid) == (None, None)
+    }
+    spools = list({spool for _, _, spool in found if spool is not None})
+    held = {
+        row["physical_spool_id"]
+        for row in conn.execute(
+            "SELECT physical_spool_id, printer_id, ams_id, tray_id, fingerprint"
+            " FROM tray_spool_links WHERE physical_spool_id = ANY(%s::uuid[])",
+            (spools,),
+        )
+        if row["printer_id"] != printer_id
+        or shown.get((row["ams_id"], row["tray_id"])) == row["fingerprint"]
+    }
+    rank = {name: index for index, name in enumerate(fresh)}
+    found.sort(key=lambda hit: (rank[hit[0]], hit[1].record_id))
+    shelf: list[ShelfSpool] = []
+    by_spool: dict[UUID, ShelfSpool] = {}
+    for provider, snapshot, spool in found:
+        if spool in held:
+            continue
+        entry = by_spool.get(spool) if spool is not None else None
+        if entry is None:
+            entry = ShelfSpool(physical_spool_id=spool)
+            shelf.append(entry)
+            if spool is not None:
+                by_spool[spool] = entry
+        entry.records[provider] = snapshot
+    # Counts only, never a record's values (`core/tracing.py`).
+    traced.set_attribute("scadbuddy.spools.shelf_records", read)
+    traced.set_attribute("scadbuddy.spools.shelf_spools", len(shelf))
+    return shelf
 
 
 def _records(conn: Conn, spool: UUID, providers: list[str] | None) -> dict[str, SpoolSnapshot]:

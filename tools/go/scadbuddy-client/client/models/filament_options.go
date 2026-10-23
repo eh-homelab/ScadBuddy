@@ -21,6 +21,8 @@ type FilamentOptions struct {
 	printer_id FilamentOptions_FilamentOptions_printer_idable
 	// The printer_name property
 	printer_name FilamentOptions_FilamentOptions_printer_nameable
+	// The shelf property
+	shelf []SpoolOptionable
 	// The slots property
 	slots []SlotNeedable
 	// The source property
@@ -408,6 +410,22 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["shelf"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfObjectValues(CreateSpoolOptionFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]SpoolOptionable, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = v.(SpoolOptionable)
+				}
+			}
+			m.SetShelf(res)
+		}
+		return nil
+	}
 	res["slots"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfObjectValues(CreateSlotNeedFromDiscriminatorValue)
 		if err != nil {
@@ -541,6 +559,12 @@ func (m *FilamentOptions) GetPrinterName() FilamentOptions_FilamentOptions_print
 	return m.printer_name
 }
 
+// GetShelf gets the shelf property value. The shelf property
+// returns a []SpoolOptionable when successful
+func (m *FilamentOptions) GetShelf() []SpoolOptionable {
+	return m.shelf
+}
+
 // GetSlots gets the slots property value. The slots property
 // returns a []SlotNeedable when successful
 func (m *FilamentOptions) GetSlots() []SlotNeedable {
@@ -617,6 +641,18 @@ func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("printer_name", m.GetPrinterName())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetShelf() != nil {
+		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetShelf()))
+		for i, v := range m.GetShelf() {
+			if v != nil {
+				cast[i] = v.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable)
+			}
+		}
+		err := writer.WriteCollectionOfObjectValues("shelf", cast)
 		if err != nil {
 			return err
 		}
@@ -733,6 +769,11 @@ func (m *FilamentOptions) SetPrinterName(value FilamentOptions_FilamentOptions_p
 	m.printer_name = value
 }
 
+// SetShelf sets the shelf property value. The shelf property
+func (m *FilamentOptions) SetShelf(value []SpoolOptionable) {
+	m.shelf = value
+}
+
 // SetSlots sets the slots property value. The slots property
 func (m *FilamentOptions) SetSlots(value []SlotNeedable) {
 	m.slots = value
@@ -776,6 +817,7 @@ type FilamentOptionsable interface {
 	GetOverlayNotes() []string
 	GetPrinterId() FilamentOptions_FilamentOptions_printer_idable
 	GetPrinterName() FilamentOptions_FilamentOptions_printer_nameable
+	GetShelf() []SpoolOptionable
 	GetSlots() []SlotNeedable
 	GetSource() *FilamentOptions_source
 	GetSpools() []SpoolOptionable
@@ -788,6 +830,7 @@ type FilamentOptionsable interface {
 	SetOverlayNotes(value []string)
 	SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable)
 	SetPrinterName(value FilamentOptions_FilamentOptions_printer_nameable)
+	SetShelf(value []SpoolOptionable)
 	SetSlots(value []SlotNeedable)
 	SetSource(value *FilamentOptions_source)
 	SetSpools(value []SpoolOptionable)
