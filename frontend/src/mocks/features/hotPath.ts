@@ -126,7 +126,14 @@ function problem(status: number, detail: string) {
   )
 }
 
-const noBambuddy = () => problem(409, NO_BAMBUDDY)
+/** Marks the scenario's own refusals, so a spec tells them from any other 409. */
+export const NO_BAMBUDDY_HEADER = 'X-Mock-No-Bambuddy'
+
+const noBambuddy = () =>
+  HttpResponse.json(
+    { title: 'Conflict', status: 409, detail: NO_BAMBUDDY },
+    { status: 409, headers: { 'Content-Type': 'application/problem+json', [NO_BAMBUDDY_HEADER]: '1' } },
+  )
 
 function bambuddyRecord(): NonNullable<SpoolOption['records']> {
   return {

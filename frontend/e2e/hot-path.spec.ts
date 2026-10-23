@@ -13,10 +13,14 @@ test.describe('native hot path (msw)', () => {
     await page.addInitScript(() => localStorage.setItem('sb-mock-hot-path', '1'))
   })
 
+  /**
+   * The mock's own refusals of a Bambuddy-only route: a 409 it marked
+   * (`hotPath.ts` `NO_BAMBUDDY_HEADER`), so a 409 of any other kind is not counted as one.
+   */
   function bambuddyCalls(page: Page): string[] {
     const calls: string[] = []
     page.on('response', (response) => {
-      if (response.status() === 409) calls.push(response.url())
+      if (response.status() === 409 && response.headers()['x-mock-no-bambuddy'] === '1') calls.push(response.url())
     })
     return calls
   }
@@ -78,6 +82,26 @@ test.describe('native hot path (msw)', () => {
     await expect(now).toContainText('80%')
     await expect(now).toContainText(/finished/i, { timeout: 15_000 })
     expect(bambuddy).toEqual([])
+  })
+
+  test("counts the mock's refusals, and only those", async ({ page }) => {
+    const bambuddy = bambuddyCalls(page)
+    await page.goto('/prints')
+    // The worker is serving once the page has drawn the H2C's card from it.
+    await expect(page.getByTestId('now-printing').getByText('H2C', { exact: true })).toBeVisible()
+    // One Bambuddy-only route asked on purpose, and one 409 of another kind.
+    const statuses = await page.evaluate(async () => {
+      const refused = await fetch('/api/v1/farm/inventory')
+      // A name already taken: the duplicate route's own 409, nothing to do with Bambuddy.
+      const other = await fetch('/api/v1/models/name-keychain/duplicate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'name-keychain' }),
+      })
+      return [refused.status, other.status]
+    })
+    expect(statuses).toEqual([409, 409])
+    await expect.poll(() => bambuddy).toEqual([expect.stringMatching(/\/api\/v1\/farm\/inventory$/)])
   })
 
   test('a stale overlay shows the trays with a note, and still prints', async ({ page }) => {

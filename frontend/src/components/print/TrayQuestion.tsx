@@ -85,19 +85,22 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
     }
   }
 
-  const spoolRow = (spool: (typeof candidates)[number]) => (
+  const spoolRow = (spool: (typeof candidates)[number]) => {
+    const providers = native ? providersOf(spool) : ''
+    return (
     <>
       <Swatch colour={spool.colour} size="sm" />
       <span>{candidateName(spool)}</span>
       {howFull(spool) && <span className="text-muted-foreground">{howFull(spool)}</span>}
       {spool.storage_location && <span className="text-muted-foreground">· kept in {spool.storage_location}</span>}
       {native ? (
-        providersOf(spool) && <span className="text-muted-foreground">· {providersOf(spool)}</span>
+        providers && <span className="text-muted-foreground">· {providers}</span>
       ) : (
         <span className="text-muted-foreground">· spool #{spool.spool_id}</span>
       )}
     </>
-  )
+    )
+  }
 
   return (
     <Card

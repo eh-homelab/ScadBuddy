@@ -8,6 +8,7 @@ import {
   HOT_PATH_STALE_KEY,
   HOT_PRINTER,
   NO_BAMBUDDY,
+  NO_BAMBUDDY_HEADER,
   TAGGED_TRAY,
   UNLINKED_RECORD,
   UNTAGGED_TRAY,
@@ -98,6 +99,7 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
     ] as const) {
       const response = await at(path, { method, body: method === 'POST' ? '{}' : undefined })
       expect(response.status, `${method} ${path}`).toBe(409)
+      expect(response.headers.get(NO_BAMBUDDY_HEADER), `${method} ${path}`).toBe('1')
       expect(((await response.json()) as { detail: string }).detail).toBe(NO_BAMBUDDY)
     }
   })

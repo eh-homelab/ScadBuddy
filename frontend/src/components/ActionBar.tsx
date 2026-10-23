@@ -186,6 +186,11 @@ export function ActionBar({
     [pageSettings === undefined],
   )
   const backends = pageSettings ?? ownSettings
+  // Deliberate: the list waits for Settings, since listing first would ask Bambuddy for
+  // projects on a page with no Bambuddy (a 409 the picker would show). A failed Settings
+  // read counts as settled and lists Bambuddy's projects, as before #3818: an unknown
+  // setup is treated as today's, and the picker's own error and Retry cover a Bambuddy
+  // that is not there, where holding the list forever would hide the picker.
   const settled = backends.data !== undefined || backends.error !== undefined
   // The one rule for a page with no printer (`listsNativeFolders`); the dialog's is per printer.
   const nativeLibrary = listsNativeFolders(backends.data)

@@ -5088,6 +5088,19 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
 })
 
 describe('PrintPicker · the registry printer it names', () => {
+  it('names the row linking the Bambuddy printer in view on the check and the run, beside its id', async () => {
+    const linked = printersState().find((row) => row.bambuddy_printer_id === choicesView.printer_id)!
+    const checks = watch('POST', '/check')
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    // One physical printer, by both of its names: the registry row and its Bambuddy id.
+    const pair = { printer: linked.id, printer_id: choicesView.printer_id }
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(pair))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies[0]).toMatchObject(pair))
+  })
+
   it('sends no `printer` on the check when no printer is in view, though a LAN-only row exists', async () => {
     printersState()[1]!.lan_host = '10.0.0.9'
     server.use(
