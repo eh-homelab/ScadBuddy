@@ -35,3 +35,17 @@ export function printsNatively(row: PrinterRow): boolean {
   if (row.lan_host == null || !row.has_access_code) return false
   return row.preferred_path === 'native' || (row.preferred_path === 'auto' && row.bambuddy_printer_id == null)
 }
+
+/**
+ * #3818 (plan 2026-10-18 D6) — whether a page with no printer chosen (the Customize page's
+ * picker) lists ScadBuddy's own folders rather than Bambuddy's projects: the hot path's
+ * backends (`nativeBackends`, the same rule the print dialog applies) and no Bambuddy to
+ * hold projects at all. The print dialog decides per printer instead: the backends, and
+ * the chosen printer's path (`printsNatively`). With a Bambuddy URL set the page keeps
+ * listing projects, and a dialog on a native printer still lists folders of its own.
+ */
+export function listsNativeFolders(
+  settings: Pick<Settings, 'slicer_backend' | 'library_backend' | 'store_backend' | 'bambuddy_url'> | null | undefined,
+): boolean {
+  return nativeBackends(settings) && !settings?.bambuddy_url
+}

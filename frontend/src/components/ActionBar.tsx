@@ -30,6 +30,7 @@ import { PrintPicker } from './PrintPicker'
 import { breadcrumbs, useProjectList } from '../lib/projects'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
+import { listsNativeFolders } from '../lib/printerRegistry'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Hint } from './Hint'
@@ -175,7 +176,8 @@ export function ActionBar({
    */
   const backends = useAsync(() => api.getSettings(), [])
   const settled = backends.data !== undefined || backends.error !== undefined
-  const nativeLibrary = !backends.data?.bambuddy_url && backends.data?.library_backend === 'native'
+  // The one rule for a page with no printer (`listsNativeFolders`); the dialog's is per printer.
+  const nativeLibrary = listsNativeFolders(backends.data)
   /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
   const list = useProjectList(undefined, settled, nativeLibrary)
   // Loading until it is read, settings first: a list not yet asked for is not an empty one.

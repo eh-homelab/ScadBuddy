@@ -388,11 +388,33 @@ export function PrintPicker({
   /** #3818 — of those, the ones the hot path prints to: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   const { askRegistry } = picker
-  // No Bambuddy printer to open on, and one the LAN prints to: open on that one.
-  const nativeFirst = choices !== null && printerId === null && picker.registryAsked === null ? (lanChoosable[0]?.id ?? null) : null
+  /**
+   * No Bambuddy printer to open on, and one the LAN prints to: open on that one, once
+   * per open and only while the server's own opening stands. A printer chosen since
+   * (either kind) is the person's: a read for it still in flight shows the old view,
+   * whose `printer_id` null must not snap the choice back to the LAN row.
+   */
+  const openedOnLan = useRef(false)
   useEffect(() => {
-    if (open && nativeFirst !== null) askRegistry(nativeFirst)
+    if (!open) openedOnLan.current = false
+  }, [open])
+  const nativeFirst =
+    choices !== null && printerId === null && picker.registryAsked === null && picker.printerAsked === null
+      ? (lanChoosable[0]?.id ?? null)
+      : null
+  useEffect(() => {
+    if (!open || nativeFirst === null || openedOnLan.current) return
+    openedOnLan.current = true
+    askRegistry(nativeFirst)
   }, [open, nativeFirst, askRegistry])
+  /**
+   * Whether the dialog knows its path yet: the registry read, and Settings when a row
+   * could print natively. Until then nothing that differs by path (the destinations and
+   * their default) is read, so a hot-path dialog never asks Bambuddy first.
+   */
+  const pathKnown =
+    (registry.data !== undefined || registry.error !== undefined) &&
+    (!lanCapable || backends.data !== undefined || backends.error !== undefined)
   /** #3818 (D6) — projects are Bambuddy's: a native print is filed in a native folder. */
   const project = native ? undefined : pageProjectGiven
   const { nozzles, tier, processName, bedType, overrides } = selection
@@ -606,7 +628,7 @@ export function PrintPicker({
    * Advanced step. Read on each open, as the picker was, and never when the page passes
    * its project.
    */
-  const ownProjects = useProjectList(undefined, open && !project, native)
+  const ownProjects = useProjectList(undefined, open && !project && pathKnown, native)
   /**
    * #3651 — where the dialog opens: the one project all of the content is in already,
    * else the Settings default, else none. Asked on each open of a new source;
@@ -625,7 +647,7 @@ export function PrintPicker({
   const contentKey = `${contentOutputs.join(',')}|${contentFiles.join(',')}`
   const pageProject = project !== undefined
   useEffect(() => {
-    if (!open || pageProject) return
+    if (!open || pageProject || !pathKnown) return
     ownChosen.current = false
     setOwnDefaultKnown(false)
     setOwnDefaultFor(null)
@@ -647,7 +669,7 @@ export function PrintPicker({
     return () => {
       live = false
     }
-  }, [open, pageProject, contentKey, native])
+  }, [open, pageProject, contentKey, native, pathKnown])
   /** #3651 — Print waits for the default, so a Simple-mode print goes where it says. */
   const ownDefaultPending = open && !pageProject && ownDefaultFor !== contentKey
   function chooseOwnProject(next: number | null) {
@@ -1055,6 +1077,12 @@ export function PrintPicker({
     (previewPlate !== single && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(nativeRow?.id ?? printerId, filaments?.trays ?? [])
+  /** Who a tray question's answer is recorded for: the registry row natively, else Bambuddy's printer. */
+  const trayTarget = nativeRow
+    ? { native: { printer: nativeRow.id } }
+    : printerId !== null
+      ? { printerId }
+      : null
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
   // position gone from its options) would be sent unseen, so it goes back to Automatic.
   // Only a current verdict decides: one still on its way keeps the pick.
@@ -1513,15 +1541,14 @@ export function PrintPicker({
                   {!picker.advanced && !sliced && (
                     <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
                   )}
-                  {(printerId !== null || nativeRow) &&
+                  {trayTarget &&
                     trays.open
                       // A native run's tray is a choice already: asked only with a record to link.
                       .filter((tray) => !nativeRow || (tray.candidates ?? []).length > 0)
                       .map((tray) => (
                       <TrayQuestion
                         key={`${tray.ams_id}:${tray.tray_id}`}
-                        printerId={printerId ?? filaments?.printer_id ?? 0}
-                        native={nativeRow ? { printer: nativeRow.id } : undefined}
+                        {...trayTarget}
                         tray={tray}
                         spools={filaments?.spools ?? []}
                         onAssigned={picker.reload}

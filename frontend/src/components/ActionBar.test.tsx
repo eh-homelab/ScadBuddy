@@ -14,6 +14,9 @@ import { chooseProject, pickerValue } from '../test/projectPicker'
 import { CURSOR_HEADER, trackRequest } from '../lib/readCursor'
 import { getRealtime } from '../lib/realtime'
 import { fakeRealtime } from '../lib/realtime.fake'
+import { http } from 'msw'
+import { server } from '../mocks/server'
+import { setHotPath } from '../mocks/features/hotPath'
 
 const job: Job = {
   id: 'a'.repeat(32),
@@ -465,5 +468,43 @@ describe("the remembered project across a model change (#1660, #2142's review)",
       await waitFor(() => expect(reads()).toBe(2))
       expect(check).toHaveBeenCalledWith(['e5'], ['settings'])
     })
+  })
+})
+
+// #3818 — the page's destinations are read once Settings say whose they are.
+describe('ActionBar destinations on the hot path', () => {
+  it('asks for no projects before Settings answer, then lists the native folders', async () => {
+    setHotPath(true)
+    const order: string[] = []
+    let answer: (() => void) | undefined
+    const settled = new Promise<void>((resolve) => (answer = resolve))
+    const listener = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/settings' || url.pathname === '/api/v1/print/projects') {
+        order.push(`${url.pathname}${url.search}`)
+      }
+    }
+    server.events.on('request:start', listener)
+    // Held until the test lets Settings answer; the hot path's own answer follows.
+    server.use(
+      http.get('/api/v1/settings', async () => {
+        await settled
+        return undefined
+      }),
+    )
+    try {
+      setup()
+      await waitFor(() => expect(order).toContain('/api/v1/settings'))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(order.filter((entry) => entry.startsWith('/api/v1/print/projects'))).toEqual([])
+      answer?.()
+      const trigger = await screen.findByRole('combobox', { name: 'Folder' })
+      expect(trigger).toHaveTextContent('The template’s folder')
+      expect(order.filter((entry) => entry.startsWith('/api/v1/print/projects'))).toEqual([
+        '/api/v1/print/projects?native=true',
+      ])
+    } finally {
+      server.events.removeListener('request:start', listener)
+    }
   })
 })

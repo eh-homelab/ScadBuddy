@@ -84,7 +84,6 @@ describe('TrayQuestion on the native path', () => {
     const onAssigned = vi.fn()
     render(
       <TrayQuestion
-        printerId={0}
         native={{ printer }}
         tray={{ ...tray, candidates: [16] }}
         spools={[record]}
@@ -105,7 +104,7 @@ describe('TrayQuestion on the native path', () => {
     const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
     const spool = { ...record, physical_spool_id: '7a2c1f0e-0000-4000-8000-000000000009' }
     render(
-      <TrayQuestion printerId={0} native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[spool]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
+      <TrayQuestion native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[spool]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Yes, that one' }))
     await waitFor(() =>
@@ -115,7 +114,7 @@ describe('TrayQuestion on the native path', () => {
 
   it('offers no candidate it could not link', () => {
     render(
-      <TrayQuestion printerId={0} native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[black]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
+      <TrayQuestion native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[black]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
     )
     expect(screen.queryByRole('button', { name: /^Yes/ })).not.toBeInTheDocument()
   })

@@ -59,19 +59,24 @@ export function useProjectList(
    * project was created (`add`) and chosen. Either way a later read must not seed it.
    */
   const seeded = useRef(false)
+  /** The newest read: an older one (say, before `native` flipped) lands as nothing. */
+  const reads = useRef(0)
   const fetchList = useCallback(async (seed: boolean) => {
+    const mine = ++reads.current
     if (seed) setLoading(true)
     setError(null)
     try {
       const next = native ? await api.getProjects({ native: true }) : await api.getProjects()
+      if (mine !== reads.current) return
       setChoices(next)
       // A create while this read was in flight already chose the value (#1045 review).
       if (seed && !seeded.current) report.current?.(next.last_project_id ?? null)
       seeded.current = true
     } catch (cause) {
+      if (mine !== reads.current) return
       setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
     } finally {
-      setLoading(false)
+      if (mine === reads.current) setLoading(false)
     }
   }, [native])
 

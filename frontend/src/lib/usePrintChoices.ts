@@ -284,6 +284,8 @@ export function usePrintChoices(
     printerId,
     printer,
     askPrinter,
+    /** The Bambuddy printer asked for, or `null` (the server's remembered one). */
+    printerAsked: askedPrinter,
     /** #3818 — the registry printer asked for, or `null`. */
     registryAsked: askedRegistry,
     askRegistry,

@@ -23,15 +23,16 @@ function providersOf(spool: SpoolOption): string {
   return `${names.join(' and ')}${names.length === 1 ? "'s record" : "'s records"}`
 }
 
-type Props = {
-  printerId: number
-  /**
-   * #3818 — a native run's tray (plan 2026-10-18 D1): its candidates are the spool
-   * providers' records no tray holds, and "yes" links one through ScadBuddy's own
-   * `PUT /printers/{printer}/trays/{ams}/{tray}/spool` on this registry printer, never
-   * Bambuddy's assignment.
-   */
-  native?: { printer: string }
+/**
+ * The printer the answer is recorded for: a Bambuddy printer, whose assignment it writes,
+ * or (#3818, plan 2026-10-18 D1) a native run's registry printer, which has no Bambuddy
+ * id. There its candidates are the spool providers' records no tray holds, and "yes"
+ * links one through ScadBuddy's own `PUT /printers/{printer}/trays/{ams}/{tray}/spool`,
+ * never Bambuddy's assignment.
+ */
+type Target = { printerId: number; native?: undefined } | { native: { printer: string }; printerId?: undefined }
+
+type Props = Target & {
   tray: UnknownTray
   spools: readonly SpoolOption[]
   /** Bambuddy now knows the spool: re-read the dialog's choices. */
@@ -45,7 +46,8 @@ type Props = {
  * scope); "No / not sure" records nothing, offers the tray itself as a choice and is not
  * asked again until the tray changes.
  */
-export function TrayQuestion({ printerId, native, tray, spools, onAssigned, onDecline }: Props) {
+export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }: Props) {
+  const native = target.native
   useLoadBambuddyLinks()
   const candidates = (tray.candidates ?? [])
     .map((id) => spools.find((spool) => spool.spool_id === id))
@@ -62,12 +64,12 @@ export function TrayQuestion({ printerId, native, tray, spools, onAssigned, onDe
     setSaving(true)
     setError(null)
     try {
-      if (native) {
+      if (target.native) {
         const spool = candidates.find((entry) => entry.spool_id === picked)
         const link = spool ? linkOf(spool) : null
-        if (link) await api.linkTraySpool(native.printer, tray.ams_id, tray.tray_id, link)
+        if (link) await api.linkTraySpool(target.native.printer, tray.ams_id, tray.tray_id, link)
       } else {
-        await api.assignTraySpool(printerId, tray.ams_id, tray.tray_id, picked)
+        await api.assignTraySpool(target.printerId, tray.ams_id, tray.tray_id, picked)
       }
       onAssigned()
     } catch (cause) {
