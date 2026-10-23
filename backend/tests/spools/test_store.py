@@ -782,3 +782,15 @@ async def test_a_spool_placed_here_is_off_the_shelf_with_all_its_records(
     assert overlay.trays[0].linked_by == "provider"
     assert list(overlay.trays[0].records) == ["bambuddy", "native"]
     assert overlay.shelf == []
+
+
+async def test_a_second_placement_in_one_tray_is_on_the_shelf(store: SpoolStore) -> None:
+    """#4513 review: two records both place themselves in one matching tray. The tray
+    shows the first (`_located`, by record id); the other is not in the tray, so it is on
+    the shelf for a person to link."""
+    await store.replace_records("bambuddy", [located("13", 1, 2), located("14", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
+    )
+    assert overlay.trays[0].records["bambuddy"].record_id == "13"
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["14"]
