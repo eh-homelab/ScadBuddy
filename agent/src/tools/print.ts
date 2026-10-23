@@ -1215,7 +1215,9 @@ export const printTools: Tool[] = [
       "Upload an output's editable 3MF into a Bambuddy project's library folder, as Generate does with a " +
       'project chosen, or into a library folder of no project (`folder_id`, from list_print_projects\' ' +
       '`folders`) in its place: name one. Idempotent: the same destination again reuses the file already ' +
-      'there (`created: false`), and a later print on the same printer reuses it too.',
+      'there (`created: false`), and a later print on the same printer reuses it too. On ScadBuddy\'s own ' +
+      'library (`library_backend` native) a `folder_id` is one of its folders and the file is filed there with ' +
+      'no Bambuddy: the answer\'s `bambuddy_url` is null, so offer no Bambuddy link; the file is in ScadBuddy\'s Library.',
     input: z
       .object({ output_id: outputId, project_id: z.number().int().optional(), folder_id: z.number().int().optional() })
       .refine((o) => (o.project_id === undefined) !== (o.folder_id === undefined), {

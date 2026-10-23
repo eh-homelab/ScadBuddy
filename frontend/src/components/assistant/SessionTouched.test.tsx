@@ -51,7 +51,7 @@ describe('SessionTouched', () => {
     expect(within(group('Bambuddy files')).getByText('library file 31')).toBeInTheDocument()
     expect(within(group('Library files')).getByRole('link', { name: 'library file 1000000002' })).toHaveAttribute(
       'href',
-      '/library',
+      '/library?file=1000000002',
     )
     expect(within(group('Print archives')).getByRole('link', { name: 'print 7' })).toHaveAttribute('href', '/prints/7')
   })

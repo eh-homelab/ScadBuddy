@@ -321,6 +321,10 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         written; the file's name, as a Bambuddy project file's is (#317)."""
         native = await serving_native()
         meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
+        # Any live native folder: unlike Bambuddy's (`require_destination_folder`), the
+        # native library has no inbox, project or external folders to leave out, and no
+        # root setting (`library_folder_id` is Bambuddy's inbox), as `require_native_folder`
+        # says for a print's destination.
         await native.folder(request["folder_id"])
         return {"stem": await output_stem(meta, state.outputs, state.catalogue)}
 

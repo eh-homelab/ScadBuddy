@@ -337,13 +337,13 @@ class NativeLibraryStore:
         then trashes this copy with the folder's other files."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
-            there = [
-                f
-                for f in _rows_of_output(conn, row.output_id or "")
-                if f.folder_id == folder_id and f.deleted_at is None
-            ]
-            if there:
-                return there[0], False
+            there = conn.execute(
+                f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
+                f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
+                (row.output_id, folder_id),
+            ).fetchone()
+            if there is not None:
+                return NativeFile.model_validate(there), False
             live = conn.execute(
                 "SELECT id FROM library_folders WHERE id = %s FOR KEY SHARE", (folder_id,)
             ).fetchone()
