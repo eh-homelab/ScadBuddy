@@ -2740,8 +2740,10 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await loaded()
     if (!screen.queryByLabelText('Print sequence')) await showAdvanced()
     expect(screen.getByLabelText('Print sequence')).toHaveTextContent('Default (template or process)')
+    // The reopened dialog reads its choices again; Print waits for them.
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled(), { timeout: 5000 })
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
+    await waitFor(() => expect(bodies).toHaveLength(1), { timeout: 5000 })
     expect(bodies[0]).not.toHaveProperty('print_sequence')
   })
 })

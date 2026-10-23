@@ -55,13 +55,9 @@ async def put_in_folder(
     the 404."""
     # Lock-free, so it only saves an upload in the common case; `put_for_output`'s locked
     # check is the one that counts.
-    there = [
-        f
-        for f in await asyncio.to_thread(native.rows.rows_for_output, meta.id)
-        if f.folder_id == folder_id and f.deleted_at is None
-    ]
-    if there:
-        return there[0], False
+    there = await asyncio.to_thread(native.rows.live_copy_in_folder, meta.id, folder_id)
+    if there is not None:
+        return there, False
     with model_3mf.open("rb") as data:
         row = await native.stage(f"{stem}.3mf", data, folder_id, output_id=meta.id)
     try:
