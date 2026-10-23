@@ -1863,6 +1863,30 @@ describe('CustomizePage, project file (#317)', () => {
     expect(await filed[0]).toEqual({ project_id: 1 })
   })
 
+  it('offers no Bambuddy link for a file in ScadBuddy’s own library', async () => {
+    // #4507 — a native folder's answer has no Bambuddy page.
+    withLastProject(1)
+    server.use(
+      http.post('/api/v1/outputs/:id/project-file', () =>
+        HttpResponse.json({
+          project_id: null,
+          folder_id: 1_000_000_001,
+          library_file_id: 1_000_000_002,
+          filename: 'Keychain.3mf',
+          created: true,
+          bambuddy_url: null,
+          edit_url: null,
+        }),
+      ),
+    )
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await generate(user)
+
+    const status = await screen.findByTestId('project-filed')
+    expect(within(status).queryByRole('button', { name: 'Open in Bambuddy' })).not.toBeInTheDocument()
+  })
+
   it('uploads nothing on Generate with "No project", and leaves the default project alone', async () => {
     withLastProject(1)
     const filed = watchBodies('POST', '/project-file')

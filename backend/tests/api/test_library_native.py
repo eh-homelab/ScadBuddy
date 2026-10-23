@@ -20,6 +20,7 @@ import pytest
 import respx
 import trimesh
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api.deps import STATE_ATTR, get_render
 from scadbuddy.api.library_print import start_library_run
@@ -51,6 +52,7 @@ from tests.api.test_print_run_choices import body as run_body
 from tests.api.test_print_run_choices import run_routes
 from tests.api.test_send import configure
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.support.no_bambuddy import forbid_bambuddy
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -1093,3 +1095,65 @@ def test_a_failed_filing_does_not_fail_the_save(
     assert _all_files(native_client) == []
     (record,) = [r for r in caplog.records if "could not file a saved output" in r.getMessage()]
     assert record.id == saved.json()["id"]  # type: ignore[attr-defined]
+
+
+def _file_into(client: TestClient, output_id: str, **body: int) -> httpx.Response:
+    response: httpx.Response = client.post(
+        f"/api/v1/outputs/{output_id}/project-file", json=body, headers=press()
+    )
+    return response
+
+
+@pytest.mark.requires_git
+def test_generate_files_into_a_native_folder_with_no_bambuddy(
+    native_client: TestClient, widget: str, spans: InMemorySpanExporter
+) -> None:
+    """#4507: no `bambuddy_url`, a native folder chosen: the 3MF is filed there by
+    ScadBuddy alone, and the same folder again answers the file already there."""
+    folder = mkdir(native_client, "Gifts")["id"]
+    saved = _save(native_client, widget, "First").json()
+
+    with forbid_bambuddy(spans, "http://bambuddy.test"):
+        first = _file_into(native_client, saved["id"], folder_id=folder)
+        again = _file_into(native_client, saved["id"], folder_id=folder)
+
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["project_id"] is None
+    assert body["folder_id"] == folder
+    assert body["created"] is True
+    assert body["bambuddy_url"] is None
+    assert body["edit_url"] is None
+    assert body["filename"].endswith(".3mf")
+    files = native_client.get("/api/v1/print/library", params={"folder_id": folder}).json()["files"]
+    assert [(f["id"], f["filename"], f["output_id"]) for f in files] == [
+        (body["library_file_id"], body["filename"], saved["id"])
+    ]
+    row = _native(native_client).rows.file(body["library_file_id"])
+    assert row is not None and row.filed is True
+    assert again.status_code == 200, again.text
+    assert again.json() == {**body, "created": False}
+
+
+@pytest.mark.requires_git
+def test_generate_into_an_unknown_native_folder_is_404(
+    native_client: TestClient, widget: str, spans: InMemorySpanExporter
+) -> None:
+    saved = _save(native_client, widget, "First").json()
+
+    with forbid_bambuddy(spans, "http://bambuddy.test"):
+        response = _file_into(native_client, saved["id"], folder_id=1_999_999_999)
+
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.requires_git
+def test_generate_into_a_project_on_native_still_needs_bambuddy(
+    native_client: TestClient, widget: str
+) -> None:
+    """A project is Bambuddy's: with no `bambuddy_url` it is the 409 it always was."""
+    saved = _save(native_client, widget, "First").json()
+
+    response = _file_into(native_client, saved["id"], project_id=7)
+
+    assert response.status_code == 409, response.text

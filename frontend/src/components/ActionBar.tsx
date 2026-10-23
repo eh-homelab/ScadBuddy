@@ -656,15 +656,18 @@ export function ActionBar({
           {!error && output && !stale && filed?.outputId === output.id && (
             <span className="flex min-w-0 items-center gap-1.5 text-xs" data-testid="project-filed">
               <span className="truncate text-ok">Saved to {filed.name}</span>
-              <Button
-                type="button"
-                variant="link"
-                size="xs"
-                onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url))}
-                className="h-auto shrink-0 px-0"
-              >
-                Open in Bambuddy
-              </Button>
+              {/* #4507 — a native folder's file has no Bambuddy page. */}
+              {filed.file.bambuddy_url && (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="xs"
+                  onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url as string))}
+                  className="h-auto shrink-0 px-0"
+                >
+                  Open in Bambuddy
+                </Button>
+              )}
             </span>
           )}
           {!error && output && !stale && fileError && (

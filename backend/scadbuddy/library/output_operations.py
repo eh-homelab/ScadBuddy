@@ -23,6 +23,7 @@ from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.jobs import require_job
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.project_file import ProjectFile, output_stem
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
@@ -300,6 +301,56 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         emit(state.events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
         return {}
 
+    async def native_file_check(request: dict[str, Any]) -> dict[str, Any]:
+        """The folder must be the native library's (404 otherwise), before anything is
+        written; the file's name, as a Bambuddy project file's is (#317)."""
+        native = await components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, "ScadBuddy's own library is not the one in use"
+            )
+        meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
+        await native.folder(request["folder_id"])
+        return {"stem": await output_stem(meta, state.outputs, state.catalogue)}
+
+    async def native_file_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """Generate's filing into a native folder (#4507): the output's 3MF uploaded there
+        once, with no Bambuddy at all. A copy of this output already in the folder (filed
+        or moved there) is the answer, ``created: false``."""
+        native = await components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, "ScadBuddy's own library is not the one in use"
+            )
+        meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
+        folder_id: int = request["folder_id"]
+        rows = await asyncio.to_thread(native.rows.rows_for_output, meta.id)
+        there = [f for f in rows if f.folder_id == folder_id and f.deleted_at is None]
+        if there:
+            row, created = there[0], False
+        else:
+            listed = await asyncio.to_thread(native.rows.files, folder_id)
+            name = unique_name(checked["stem"], {f.name.casefold() for f in listed})
+            model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
+            with model_3mf.open("rb") as data:
+                row = await native.upload(name, data, folder_id, output_id=meta.id, filed=True)
+            created = True
+        # The destination picker's "last touched" order (#3651), best effort as on Bambuddy.
+        try:
+            await state.uploads.touch_destination("folder", folder_id)
+        except psycopg.Error:
+            logger.warning("could not touch the destination of %s", meta.id, exc_info=True)
+        filed = ProjectFile(
+            project_id=None,
+            folder_id=folder_id,
+            library_file_id=row.id,
+            filename=row.name,
+            created=created,
+            bambuddy_url=None,
+        )
+        dumped: dict[str, Any] = filed.model_dump(mode="json")
+        return dumped
+
     def kind(name: str, check: Any, run: Any, where: str, **extra: Any) -> OperationKind:
         return OperationKind(
             name,
@@ -314,6 +365,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         kind("output_create", create_check, create_run, "the template's outputs"),
         kind("output_thumbnail", output_check, thumbnail_run, "the output"),
         kind("output_rename", output_check, rename_run, "the output"),
+        kind("output_native_file", native_file_check, native_file_run, "ScadBuddy's library"),
         kind(
             "output_delete",
             delete_check,
@@ -323,3 +375,12 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             needs_prelude=lambda request: bool(request["delete_inbox_copies"]),
         ),
     ]
+
+
+def unique_name(stem: str, taken: set[str]) -> str:
+    """``<stem>.3mf``, or ``<stem> (2).3mf`` and on, unlike every casefolded name in
+    ``taken``."""
+    name, number = f"{stem}.3mf", 2
+    while name.casefold() in taken:
+        name, number = f"{stem} ({number}).3mf", number + 1
+    return name
