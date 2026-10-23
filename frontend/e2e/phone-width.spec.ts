@@ -218,17 +218,26 @@ test.describe('History cards at phone widths (#4491)', () => {
 
       expect(await sidewaysScrollers(page)).toEqual([])
       expect(await cardOverlaps(page)).toEqual([])
-      // The long name truncates to one line, its whole text in the title.
-      expect((await page.getByTitle(long).boundingBox())!.height).toBeLessThan(24)
-      // The age and the library copy each on one line.
-      for (const line of [page.getByTestId('output-age').last(), page.getByText(/^in library #/).first()]) {
-        expect((await line.boundingBox())!.height).toBeLessThan(20)
+      // The long name truncates to one line, its whole text in the title; the age and the
+      // library copy each stay on one line. One line is under two of the element's own
+      // line-heights, so a theme's type scale moves the limit with it.
+      for (const line of [
+        page.getByTitle(long),
+        page.getByTestId('output-age').last(),
+        page.getByText(/^in library #/).first(),
+      ]) {
+        // Typed by hand: this file is checked without the DOM lib.
+        type Styled = { ownerDocument: { defaultView: { getComputedStyle(el: unknown): { lineHeight: string } } } }
+        const lineHeight = await line.evaluate((el: Styled) => parseFloat(el.ownerDocument.defaultView.getComputedStyle(el).lineHeight))
+        expect(lineHeight).toBeGreaterThan(0)
+        expect((await line.boundingBox())!.height).toBeLessThan(2 * lineHeight)
       }
       // Every action a finger has to hit is 40 px tall, on every card: an arranged one has
       // "Arranged from …" where the others have Edit.
       const rows = await page.getByTestId('output-actions').all()
       expect(rows.length).toBeGreaterThanOrEqual(2)
       for (const row of rows) {
+        // Buttons and links only: "Arranged from …" is a plain span, not a target.
         for (const action of await row.locator('button, a').all()) {
           expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(40)
         }
