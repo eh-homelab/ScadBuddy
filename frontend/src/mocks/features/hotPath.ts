@@ -51,15 +51,20 @@ export const HOT_PATH_KEY = 'sb-mock-hot-path'
 export const HOT_PATH_STALE_KEY = 'sb-mock-hot-path-stale'
 export const NO_BAMBUDDY = 'no Bambuddy URL is configured'
 
-/** The one printer: an H2C only the LAN reaches, asked to print natively. */
+/**
+ * The one printer: an H2C linked over the LAN and asked to print natively. It is also
+ * linked to Bambuddy printer 1, since the backend refuses a run on a row with none
+ * (`_not_on_bambuddy`) until plan 3a Task 9; nothing on the native path asks Bambuddy
+ * about it, so the walk still makes no Bambuddy call.
+ */
 export const HOT_PRINTER: PrinterRow = {
   id: '00000000-0000-4000-8000-0000000000c2',
   serial: '31B8BP000000C2',
   name: 'H2C',
   model: 'H2C',
-  bambuddy_printer_id: null,
+  bambuddy_printer_id: 1,
   bambuddy_unlinked_id: null,
-  bambuddy_active: false,
+  bambuddy_active: true,
   lan_host: '192.168.1.62',
   lan_cert_sha256: null,
   has_access_code: true,
@@ -68,8 +73,8 @@ export const HOT_PRINTER: PrinterRow = {
   updated_at: '2026-10-18T12:00:00Z',
 }
 
-/** The report's own id for a printer with no Bambuddy id (`status_from_report`): 0. */
-const HERE = 0
+/** The report's own id, the Bambuddy printer the row links (`status_from_report`). */
+const HERE = 1
 /** `tray_spool_id(0, 0)` and `tray_spool_id(0, 1)` (`bambuddy/trays.py`). */
 export const TAGGED_TRAY = -1
 export const UNTAGGED_TRAY = -2
@@ -263,8 +268,8 @@ export function hotFilaments(): FilamentOptions {
 function hotChoices(): ChoicesView {
   return {
     ...choicesView,
-    printer_id: null,
-    printers: [],
+    printer_id: HERE,
+    printers: [{ ...(choicesView.printers ?? [])[0]!, id: HERE, name: HOT_PRINTER.name, model: 'H2C' }],
     filaments: hotFilaments(),
     model_choices: { printer_id: null, filament_plan: [] },
   }
@@ -309,7 +314,8 @@ function startRun(subject: string, outputId: string, body: PrintRunRequest): Htt
   const result: PrintRunResult = {
     route: 'slice_queue',
     library_file_id: 9900 + state.seq,
-    printer_id: null,
+    printer_id: HERE,
+    path: 'native',
     slice_job_id: null,
     sliced_library_file_id: null,
     queue_item_ids: [],
@@ -341,7 +347,7 @@ function printerNow(): PrinterNow {
   const idle: PrinterNow = {
     id: HOT_PRINTER.id,
     path: 'native',
-    printer_id: null,
+    printer_id: HERE,
     name: HOT_PRINTER.name,
     activity: 'idle',
     state: 'IDLE',

@@ -32,7 +32,7 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
     expect((await api.getSettings()).bambuddy_url).toBeNull()
   })
 
-  it('answers the settings with no Bambuddy and the native backends, and one LAN-linked H2C', async () => {
+  it('answers the settings with no Bambuddy and the native backends, and one H2C linked to Bambuddy that prints over the LAN', async () => {
     setHotPath(true)
     expect(await api.getSettings()).toMatchObject({
       bambuddy_url: null,
@@ -41,7 +41,7 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
       store_backend: 's3',
     })
     expect(await api.listPrinters()).toEqual([
-      expect.objectContaining({ model: 'H2C', preferred_path: 'native', bambuddy_printer_id: null, has_access_code: true }),
+      expect.objectContaining({ model: 'H2C', preferred_path: 'native', bambuddy_printer_id: 1, has_access_code: true }),
     ])
   })
 

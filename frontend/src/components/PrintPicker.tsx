@@ -38,7 +38,7 @@ import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
-import { PRINTER_TOPICS, nativeBackends, printsNatively, registryNews } from '../lib/printerRegistry'
+import { PRINTER_TOPICS, acceptsRuns, nativeBackends, printsNatively, registryNews } from '../lib/printerRegistry'
 import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, singlePlate, withPlate } from '../lib/plateChoice'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
@@ -391,7 +391,8 @@ export function PrintPicker({
   // neither, and one linked to a Bambuddy printer is that printer's entry (#4340 review M3).
   const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
   /** #3818 — of those, the ones the hot path prints to: choosable. */
-  const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
+  // None until plan 3a Task 9: the backend refuses a row with no Bambuddy printer (`acceptsRuns`).
+  const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row) && acceptsRuns(row))
   const { askRegistry } = picker
   /**
    * No Bambuddy printer to open on, and one the LAN prints to: open on that one, once
@@ -421,7 +422,9 @@ export function PrintPicker({
     (registry.data !== undefined || registry.error !== undefined) &&
     (!lanCapable || backends.data !== undefined || backends.error !== undefined) &&
     // Opening on the LAN row is still to come: until it lands the printer is not known.
-    (lanChoosable.length === 0 || (choices !== null && nativeFirst === null))
+    // A native row may be the Bambuddy printer the choices open on: known once they are
+    // read, or once that read failed (as ActionBar counts a failed Settings read settled).
+    (nativeRows.length === 0 || ((choices !== null || loadError !== null) && nativeFirst === null))
   /** #3818 (D6) — projects are Bambuddy's: a native print is filed in a native folder. */
   const project = native ? undefined : pageProjectGiven
   const { nozzles, tier, processName, bedType, overrides } = selection
@@ -1468,7 +1471,6 @@ export function PrintPicker({
         <QueuedPanel
           result={{ ...result, warnings: shown(result.warnings) }}
           printerName={printerName}
-          native={native}
           progress={progress}
           polling={polling}
           plates={plates}
@@ -1592,7 +1594,10 @@ export function PrintPicker({
                       )
                       .map((tray) => (
                       <TrayQuestion
-                        key={`${tray.ams_id}:${tray.tray_id}`}
+                        // Keyed by its target too: a Bambuddy printer's view whose registry
+                        // row prints natively asks Bambuddy's question until the registry
+                        // read lands, and the native one must start over on the shelf.
+                        key={`${nativeRow ? 'native' : 'bambuddy'}:${tray.ams_id}:${tray.tray_id}`}
                         {...trayTarget}
                         tray={tray}
                         // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.

@@ -342,6 +342,10 @@ class RackPickView(BaseModel):
     options: list[RackOption] = Field(default_factory=list)
 
 
+#: How a run reaches its printer (#3823, plan Task 8).
+RunPath = Literal["bambuddy", "native"]
+
+
 class PrintRunResult(BaseModel):
     """What a run queued. ``route`` is always ``"slice_queue"`` now; it stays so a
     reader of the result need not change until the dialog does (following it to
@@ -371,6 +375,11 @@ class PrintRunResult(BaseModel):
     #: rack (#836). A pick can go stale before the print starts; that shows in progress,
     #: not here (spec §10).
     rack_picks: list[RackSentPick] = Field(default_factory=list)
+    #: How the run reached its printer (#3818): ``bambuddy`` through Bambuddy's queue, as
+    #: every run queued today does (`_queued`); ``native`` over the LAN once plan 3a
+    #: Task 9's LAN branch reports its own. The dialog's "sent over the LAN" reads this,
+    #: never its own guess at the path.
+    path: RunPath = "bambuddy"
 
 
 def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
@@ -1422,9 +1431,6 @@ class PreparedRun:
     #: printers, or a run accepted before it).
     printer: str = ""
     path: RunPath = "bambuddy"
-
-
-RunPath = Literal["bambuddy", "native"]
 
 
 def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> RunPath:

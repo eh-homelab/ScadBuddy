@@ -11,12 +11,12 @@ type Props = {
   polling: boolean
   /** #986 — the source's plates, so a plate is named by what it holds. */
   plates?: readonly OutputPlate[]
-  /** #3818 — sent to the printer over the LAN: there is no queue to name (§6.3). */
-  native?: boolean
 }
 
 /** What a started print shows in place of the steps: what was queued, and its progress (#89). */
-export function QueuedPanel({ result, printerName, progress, polling, plates = [], native = false }: Props) {
+export function QueuedPanel({ result, printerName, progress, polling, plates = [] }: Props) {
+  // #3818 — the path the run reports it took: over the LAN there is no queue to name (§6.3).
+  const native = result.path === 'native'
   const items = result.queue_item_ids ?? []
   /** #836 — the rack position each sliced group went out with; positions only, never a serial. */
   const picks = result.rack_picks ?? []

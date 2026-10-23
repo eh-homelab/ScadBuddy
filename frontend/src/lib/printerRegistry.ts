@@ -26,10 +26,11 @@ export function nativeBackends(
 }
 
 /**
- * #3818 — a row whose path is the LAN (plan 2026-10-16 Task 8's resolution, as far as the
- * row tells it): linked over the LAN with its access code, and either asked to print
- * natively or with no Bambuddy printer to print through. `auto` with both links is the
- * backend's call on the report's age, so it is left to the Bambuddy path here.
+ * #3818 — a row whose path is the LAN, as far as the row tells it: the backend's
+ * `print_run.py` `run_path` (plan 2026-10-16 Task 8), so change the two together. Linked
+ * over the LAN with its access code, and either asked to print natively or with no
+ * Bambuddy printer to print through. `auto` with both links is `run_path`'s call on the
+ * report's age, so it is left to the Bambuddy path here.
  */
 export function printsNatively(row: PrinterRow): boolean {
   if (row.lan_host == null || !row.has_access_code) return false
@@ -48,4 +49,14 @@ export function listsNativeFolders(
   settings: Pick<Settings, 'slicer_backend' | 'library_backend' | 'store_backend' | 'bambuddy_url'> | null | undefined,
 ): boolean {
   return nativeBackends(settings) && !settings?.bambuddy_url
+}
+
+/**
+ * #3818 — whether a run on `row` is accepted today. `prepare_run` refuses a row with no
+ * Bambuddy printer (`print_run.py` `_not_on_bambuddy`) until plan 3a Task 9's LAN print
+ * lands, so a LAN-only row is listed but not printable, and the dialog never opens on it.
+ * This goes away with Task 9.
+ */
+export function acceptsRuns(row: PrinterRow): boolean {
+  return row.bambuddy_printer_id != null
 }
