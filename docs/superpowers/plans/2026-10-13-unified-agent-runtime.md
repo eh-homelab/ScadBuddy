@@ -46,7 +46,7 @@
 
 ## Review Focus
 
-1. **A warm process recycled while a Playwright page is open.** Its upstream MCP session must be deleted, not leaked; this includes a dead pod's sessions after a `Recreate` deploy. Test: Task 2.4.
+1. **A warm process recycled while a Playwright page is open.** Its upstream MCP session must be deleted, not leaked; this includes a dead pod's sessions after a deploy. Test: Task 2.4.
 2. **A warm process after a credential is disabled.** The next turn must spawn with the next credential and never reuse the old env. Test: Task 2.2, `recycles when the credential row changes`.
 3. **A turn that ran on another replica while this one stayed warm** (a fallback and back). The stale process must not answer from an old transcript. Test: Task 2.2, `recycles when the transcript tail moved`.
 4. **An approval granted after the hold released the process.** The call runs exactly once, with the request id as its Idempotency-Key, even if the continuing activity is retried. Test: Task 5.4, `an approved released call runs once across an activity retry`.
@@ -615,12 +615,15 @@ async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
 
   `movesWorker(err)` is true for a `TimeoutFailure` of any type, and for an `ApplicationFailure` of type `ShuttingDown` or `NoCapacity`.
 
+  As built (#3443, spec §5.2 "Arrival re-reserves"): `home` outlives its reservation (`warm_idle_seconds`), so `TurnHost.run` first calls `warm.reserve(sessionId)`, before it claims the turn or spawns, and throws `ApplicationFailure` `NoCapacity` when every slot there runs a turn (`WarmSessions.acquire` alone would spawn past `warm_max_per_replica`: its trim evicts only idle entries). The workflow moves the turn; a refusal from a home kept from an earlier turn adds one placement (`FULL_HOME_PATCH`), once per loop, since only the first cycle's home is kept.
+
 - [ ] **Step 1: Write the tests.** Use two host workers (A, B), the shared worker and the fake Anthropic:
   - `the first turn acquires and later turns stay on home`: `acquire_worker` runs once for two turns, and the second is warm (span `warm.outcome=hit`).
   - `a dead home is re-acquired after schedule-to-start`: stop A between turns. The next turn ends `done` on B within 5 s plus its run, and `acquire_worker` ran a second time.
   - `a worker killed mid-turn resumes on another`: kill A's Claude Code during a turn. The heartbeat times out at about 20 s, the turn resumes on B with the restart message, and the tool that was in flight ran once.
   - `release_worker frees the slot on end`: after `end`, A's `warm.size()` is 0.
   - `a full replica evicts its LRU idle slot, never a running one`.
+  - `a kept home full of running turns as the next turn arrives refuses NoCapacity, and the turn moves`: A (one slot) runs another session's held turn; the kept session's next turn is refused on A as it arrives, nothing is spawned there past the cap, and B runs it with the message itself (`sessionAffinity.temporal.test.ts`). The workflow side, with stub activities (`agentSession.temporal.test.ts`): a kept home's refusal costs no placement (four placements, then `failed`), a home acquired for the turn costs one (three), and `full_home.json` replays the patch. The cap itself: `warmReserve.test.ts`.
   - `events match a classic turn`: the `type` lists in `ai_session_events` match `sessions.e2e.test.ts`'s for the same script.
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement.** `TurnHost.run` does the following:
@@ -905,8 +908,14 @@ DELETE FROM ai_settings WHERE key = 'session_mode';
 
 ## Phase 11: Versioned queues, then `RollingUpdate` (D6) (PR 11 plus a backend PR, then a clusters PR)
 
-The ScadBuddy pod uses `Recreate` because the API polls the backend's `library` queue
-unversioned. The manifest says moving to RollingUpdate needs that queue versioned first
+When this plan was written the ScadBuddy pod used `Recreate`, because the API polled the
+backend's `library` queue unversioned. Measured on 2026-10-23 (read-only, `kubectl --context
+primary -n bambuddy get deploy scadbuddy -o jsonpath='{.spec.strategy}'`) it is
+`{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}`, so the gap
+between the old pods stopping and the new ones polling, which a moved turn's 60 s acquire
+could not span (spec §5.5), is gone; Task 11.4's `maxUnavailable: 1, maxSurge: 0` was not
+what landed, and `terminationGracePeriodSeconds` is still the default 30 (the same read).
+The manifest said moving to RollingUpdate needed that queue versioned first
 (`eh-homelab/clusters` `applications/scadbuddy/scadbuddy.yaml:125-131`). After Phase 8,
 the agent polls `agent-tools`, `agent-tools.<hostname>` and `agent-sessions`; only the last
 is versioned (Task 5.1).

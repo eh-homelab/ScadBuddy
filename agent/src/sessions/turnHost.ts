@@ -10,7 +10,7 @@ import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { QuestionGate, QuestionVerdict, UserQuestion } from '../harness/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
-import { SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
+import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, type TurnOutcome } from './manager.js'
@@ -260,6 +260,13 @@ export class TurnHost {
   async run(input: SessionTurnInput, control: TurnControl): Promise<SessionTurnResult> {
     const id = input.sessionId
     const attempt = input.attempt ?? randomUUID()
+    // Its place here again (§5.2): a home kept across turns may have let its reservation lapse
+    // (`warm_idle_seconds`), and the cache filled since. Refused, before anything is claimed or
+    // spawned, when every process here runs a turn: the workflow moves the turn (`movesWorker`),
+    // and the replica never goes past `warm_max_per_replica`.
+    if (this.#deps.core.warm.reserve(id) === 'full') {
+      throw ApplicationFailure.retryable(`every warm session on ${this.#deps.hostQueue} is running a turn`, NO_CAPACITY)
+    }
     // An older placement of the session still here (cut at its time cap, its activity not yet told): it goes first.
     const before = this.#running.get(id)
     if (before) {

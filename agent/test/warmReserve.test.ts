@@ -3,6 +3,7 @@ import type { Sql } from 'postgres'
 import { describe, expect, it, vi } from 'vitest'
 import type { HarnessRun } from '../src/harness/run.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
+import { TurnHost, type TurnHostDeps } from '../src/sessions/turnHost.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { RESERVATION_HOLD_MS, type WarmQuery, WarmSessions } from '../src/sessions/warm.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
@@ -207,6 +208,30 @@ describe('WarmSessions.reserve and release', () => {
     await expect(acquire({ sessionId: 'three' })).rejects.toMatchObject({ type: NO_CAPACITY, nonRetryable: false })
     two.left()
     await expect(acquire({ sessionId: 'three' })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })
+    one.left()
+  })
+
+  it('a kept home whose reservation lapsed re-reserves as its turn arrives: full of running turns, session_turn refuses NoCapacity and spawns nothing past the cap (#3443)', async () => {
+    const { warm, spawned, running, tick } = cache(2)
+    expect(warm.reserve('kept')).toBe('reserved')
+    // The session's place lapses (`warm_idle_seconds`) while the workflow keeps it as home, and
+    // other sessions' turns fill the cache.
+    tick(600_000)
+    const one = await running('one')
+    const two = await running('two')
+    // Nothing of the turn is read or written before the refusal: no database is reached.
+    const sql = (() => Promise.reject(new Error('the refused turn touched the database'))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
+    await expect(host.run({ sessionId: 'kept', turnId: 't1', attempt: 'run:0' }, control)).rejects.toMatchObject({ type: NO_CAPACITY })
+    expect(spawned.has('kept')).toBe(false)
+    expect(warm.size()).toBe(2)
+    expect(host.active).toBe(0)
+    // A slot that is idle again is given up for it: the next arrival takes its place.
+    two.left()
+    expect(warm.reserve('kept')).toBe('reserved')
+    await vi.waitFor(() => expect(spawned.get('two')?.closed()).toBe(true), { timeout: 5_000 })
+    expect(spawned.get('one')?.closed()).toBe(false)
     one.left()
   })
 

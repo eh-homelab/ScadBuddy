@@ -174,9 +174,15 @@ permission layer. Durability is about *where* and *when* that turn runs:
 - The pod runs 3 replicas (`:107`), with the `agent` and `agent-durable` sidecars
   (`:479`, `:644`).
 - The `agent` container requests 512Mi of memory, with a 2Gi limit (`:620-624`).
-- The rollout strategy is **`Recreate`** (`:131`): every deploy stops all three pods
-  together.
-- `terminationGracePeriodSeconds` is not set, so it is Kubernetes' 30 s default.
+- The rollout strategy was **`Recreate`** (`:131`) when this was written: every deploy
+  stopped all three pods together. It is **`RollingUpdate`** now. Measured on 2026-10-23,
+  read-only: `kubectl --context primary -n bambuddy get deploy scadbuddy -o
+  jsonpath='{.spec.strategy}'` returns
+  `{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}`. A deploy
+  starts one new pod and stops an old one only once the new one is ready, so some replica
+  always polls `agent-tools` (D6, §5.5).
+- `terminationGracePeriodSeconds` is not set, so it is Kubernetes' 30 s default (the same
+  read: `.spec.template.spec.terminationGracePeriodSeconds` is `30`).
 
 ## 3. Goals and non-goals
 
@@ -271,7 +277,8 @@ calls of one turn park side by side"), so a call the CLI does check in parallel 
 - **Versioning.** The `agent-sessions` worker is a Worker Deployment, `scadbuddy-agent`,
   with the build id taken from the image. The workflow is **`AUTO_UPGRADE`**:
   - A session lives for days. Pinning would keep every old build polling until its last
-    session ended, and `Recreate` (§2.4) gives no old build to poll anyway.
+    session ended. Under `Recreate` (§2.4, the strategy when this was written) no old build
+    was left to poll; under `RollingUpdate` an old build polls only while the rollout runs.
   - Changes to the workflow therefore go behind `patched()`, and replay fixtures live in
     `agent/test/fixtures/agent_session_histories/`, as `AgentOperation` does
     (`workflows.ts:45`).
@@ -336,6 +343,15 @@ lack them (§2.3).
   `home` across turns and across continue-as-new (`SessionStart.home`), so it acquires
   only for a session's first turn and after a failure. Acquire is the session's creation,
   not a per-turn cost.
+- **Arrival re-reserves.** Because `home` outlives its reservation, the cache may have
+  filled since: the session's idle process evicted for another session, or its
+  reservation lapsed. `session_turn` therefore reserves again as it arrives
+  (`TurnHost.run`, before it claims the turn or spawns anything), as `acquire_worker`
+  does: a session with a process there keeps it, and a full cache gives up its
+  least-recently-used idle process or lapsed reservation. When every slot runs a turn,
+  `session_turn` fails `NoCapacity` and the workflow moves the turn (Recovery, below), so
+  a replica never runs more warm processes than `warm_max_per_replica`. `WarmSessions.acquire`
+  alone would spawn past the cap, since its trim evicts only idle entries.
 - **The turn.** `session_turn(input)` is scheduled on `home` with these options:
   - `scheduleToStartTimeout: 5s`. It is non-retryable; this is how a dead home is
     detected (§2.3).
@@ -353,6 +369,12 @@ lack them (§2.3).
     `continuation: {kind: 'restarted'}`. That resumes from the checkpoint, the sealed
     transcript (§5.5, §6.2). The acquire is inside the cycle: one that fails past its own
     retries costs a cycle, as a lost home does.
+  - **A kept home that is full costs no cycle.** When the home kept from an earlier turn
+    refuses `NoCapacity` as the turn arrives (above), nothing ran there and the place was
+    never this turn's, so the move adds one placement (`FULL_HOME_PATCH`): the turn still
+    gets three placements on homes acquired for it. Only the first cycle's home is a kept
+    one (every later cycle acquires), so this happens at most once per placement loop and
+    cannot loop. A home acquired in this turn that refuses costs its cycle as before.
   - **Exclusion is a preference, not a ban.** A replica in `exclude` that is asked answers a
     referral: itself as home, and `elsewhere`, the other live replicas that could take the
     turn (the session host queues whose replica's `agent-tools` worker and own
@@ -394,7 +416,8 @@ lack them (§2.3).
     without a result).
   - **A non-retryable application failure** (`BudgetExhausted`, `CredentialRefused`,
     `SessionGone`) ends the turn with that outcome.
-  - **After 3 cycles** the turn ends `failed` with the last reason.
+  - **After 3 cycles** (4 when a kept home was full) the turn ends `failed` with the last
+    reason.
 - **The cost of a dead home.** It is detected only when the next activity is scheduled.
   Between turns nothing runs on `home`, much as a Go session's heartbeat only matters
   while its activities run. The first turn after a pod death therefore pays the 5 s
@@ -514,7 +537,8 @@ type WarmEntry = {
     Evicting it calls `terminate()` on each and then `q.close()`. A turn-scoped run (the
     credential test) releases as today.
   - **A dead pod's sessions are swept.** On SIGKILL or pod death the forwarder dies with
-    the pod, and that is every pod at every `Recreate` deploy (§2.4). So each id is also
+    the pod, and that was every pod at every `Recreate` deploy (§2.4; each old pod in turn
+    under today's `RollingUpdate`). So each id is also
     recorded in `ai_plugin_sessions(plugin_id, upstream_session_id, replica, created_at)`.
     At start, and every 5 minutes, a replica sends `DELETE` for rows whose `replica` is
     not a live agent worker (Temporal `DescribeTaskQueue` on `agent-tools` lists the
@@ -614,10 +638,18 @@ never did (`questions/service.ts:34-38`).
   (`TurnHost.stop` `graceMs`, beside `stopTurns`), and is then closed with `q.close()`, which
   gives E3's graceful synthetic result. Only such a cut turn fails with `ShuttingDown`,
   which is retryable, and the new pods resume it as above. A turn that ends on its own in
-  the grace, a refusal included, keeps its end. The warm processes are closed only after. `Recreate` means every turn of every
-  session takes this path at each deploy. Under D6 (decided), the pod moves to
-  `RollingUpdate` once its queues are versioned (Phase 11). Then a deploy drains one
-  replica at a time and only that replica's turns move.
+  the grace, a refusal included, keeps its end. The warm processes are closed only after.
+- **The rollout gap.** A moved turn re-acquires through `acquire_worker`, whose
+  `scheduleToCloseTimeout` is 60 s, inside a loop of three placements. A gap with no
+  replica polling `agent-tools` longer than that acquire window (three acquires of 60 s
+  each), which `Recreate` could make (every pod stopped before any new one polled), would
+  spend every placement and end the turn `failed`.
+  The pod is no longer `Recreate`: measured on 2026-10-23 (§2.4) it is `RollingUpdate`
+  with `maxSurge: 1` and `maxUnavailable: 0`, so a new pod is ready before an old one
+  stops, there is always a replica polling `agent-tools`, a deploy drains one replica at a
+  time, and only that replica's turns move. The acquire is therefore not sized to a
+  rollout; a return to `Recreate`, or `maxUnavailable` equal to the replica count, would
+  bring the gap back (D6).
 
 ### 5.6 Interrupt
 
@@ -784,7 +816,9 @@ All of these are classic's, because the turn is classic's:
   sessions across 3 replicas with the default of 8.
   - When every replica is full, `acquire_worker` evicts its least-recently-used *idle*
     slot, never one with a turn running, rather than refusing.
-  - `NoCapacity` arises only when every slot on a replica is running a turn.
+  - `NoCapacity` arises only when every slot on a replica is running a turn, from
+    `acquire_worker` or from `session_turn` arriving at a kept home (§5.2 "Arrival
+    re-reserves"), which moves the turn.
   - Idle sessions cost nothing beyond their reservation, which lapses after
     `warm_idle_seconds`.
 
@@ -957,8 +991,9 @@ done. Their conversation exists only in workflow state.
   held leaves an `is_error` tool result for the parked call in its transcript
   (`agent/test/sessionRelease.temporal.test.ts`). The continuation message settles it
   either way.
-- **The `Recreate` deploy restarts every turn** (§5.5) until Phase 11 versions the queues
-  and moves the pod to `RollingUpdate` (D6).
+- **A deploy restarts a stopping replica's turns** (§5.5). Under `Recreate` it was every
+  turn, with a gap the 60 s acquire might not span; the pod is `RollingUpdate` with
+  `maxUnavailable: 0` now (measured 2026-10-23, §2.4), which leaves no such gap.
 - **Warm memory.** 8 × about 206 MiB, plus remote MCP connections and the service itself,
   against the 8Gi limit (D3). The memory request rises to 2Gi, which covers 8 warm
   processes, but a node's scheduler sees only the request. The clusters PR checks the
@@ -983,7 +1018,8 @@ done. Their conversation exists only in workflow state.
   the agent's `agent-tools` and both host queues (`agent-tools.<hostname>`,
   `agent-sessions.<hostname>`), and the backend's `library` queue, which the
   clusters manifest names as what blocks it (`scadbuddy.yaml:125-131`). The clusters PR
-  then lands.
+  then lands. State on 2026-10-23 (§2.4): the deployment is `RollingUpdate`
+  (`maxSurge: 1`, `maxUnavailable: 0`), so the `Recreate` gap §5.5 describes is closed.
 - **D7. `ai_session_entries` is sealed** (§6.2).
 
 Settings: `park_hold_seconds`, `warm_max_per_replica`, `warm_idle_seconds` and
