@@ -598,7 +598,9 @@ function OutputRow({
           </div>
         )}
         {/* #4491 — at least 10rem beside the picture, so on a phone the actions wrap below
-            instead of squeezing this column to one word wide. */}
+            instead of squeezing this column to one word wide. Rename's form takes its own
+            line and wraps Save and Cancel below the field when 10rem is all there is
+            (320 px); e2e/phone-width.spec.ts opens it at each width. */}
         <div className="min-w-40 flex-1" data-testid="output-summary">
           {/* #4491 — wraps: the chips keep a row, the name truncates, the age stays one line. */}
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -614,7 +616,7 @@ function OutputRow({
               </span>
             ) : (
               <form
-                className="flex items-center gap-1.5"
+                className="flex w-full flex-wrap items-center gap-1.5"
                 onSubmit={(event) => {
                   event.preventDefault()
                   void rename(naming)
@@ -627,7 +629,7 @@ function OutputRow({
                   onChange={(event) => setNaming(event.target.value)}
                   maxLength={200}
                   autoFocus
-                  className="h-7"
+                  className="h-7 min-w-32 flex-1"
                 />
                 <Button size="sm" type="submit" disabled={renaming}>
                   {renaming ? <Spinner /> : 'Save'}

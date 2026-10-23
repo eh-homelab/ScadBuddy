@@ -138,13 +138,18 @@ async function cardOverlaps(page: Page): Promise<string[]> {
     const out = []
     for (const card of document.querySelectorAll('li:has([data-testid="output-actions"])')) {
       const summary = card.querySelector('[data-testid="output-summary"]')
-      const head = summary.firstElementChild
+      const facts = summary && summary.querySelector('p.sb-num')
+      // A renamed hook would otherwise surface as a TypeError on null from inside evaluate.
+      if (!summary || !summary.firstElementChild || !facts) {
+        out.push('a card without ' + (summary ? 'its size line (p.sb-num)' : 'output-summary'))
+        continue
+      }
       const parts = [
         ...card.querySelectorAll('[aria-label^="Preview "], [aria-label^="No preview of "]'),
-        ...head.querySelectorAll(
-          'button[role="checkbox"], [role="img"], [data-testid="output-name"], [data-testid="output-age"]',
+        ...summary.firstElementChild.querySelectorAll(
+          'button[role="checkbox"], [role="img"], [data-testid="output-name"], [data-testid="output-age"], form > *',
         ),
-        ...summary.querySelector('p.sb-num').children,
+        ...facts.children,
         ...card.querySelector('[data-testid="output-actions"]').children,
       ]
       const name = (el) => el.getAttribute('aria-label') || el.textContent.trim().slice(0, 24) || el.tagName
@@ -219,10 +224,24 @@ test.describe('History cards at phone widths (#4491)', () => {
       for (const line of [page.getByTestId('output-age').last(), page.getByText(/^in library #/).first()]) {
         expect((await line.boundingBox())!.height).toBeLessThan(20)
       }
-      // Every action a finger has to hit is 40 px tall.
-      for (const action of await page.getByTestId('output-actions').first().locator('button, a').all()) {
-        expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(40)
+      // Every action a finger has to hit is 40 px tall, on every card: an arranged one has
+      // "Arranged from …" where the others have Edit.
+      const rows = await page.getByTestId('output-actions').all()
+      expect(rows.length).toBeGreaterThanOrEqual(2)
+      for (const row of rows) {
+        for (const action of await row.locator('button, a').all()) {
+          expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(40)
+        }
       }
+
+      // Rename's field and its two buttons fit the summary's 10rem: nothing overlaps or
+      // leaves the card, and the field is wide enough to type in.
+      await page.getByRole('button', { name: `More for ${long}` }).click()
+      await page.getByRole('menuitem', { name: `Rename ${long}` }).click()
+      const field = page.getByRole('textbox', { name: `Name for ${long}` })
+      await expect(field).toBeVisible()
+      expect(await cardOverlaps(page)).toEqual([])
+      expect((await field.boundingBox())!.width).toBeGreaterThanOrEqual(64)
     })
   }
 })
