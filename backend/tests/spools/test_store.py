@@ -694,3 +694,25 @@ async def test_the_shelf_read_is_traced_by_its_counts_only(
         "scadbuddy.spools.shelf_records": 2,
         "scadbuddy.spools.shelf_spools": 2,
     }
+
+
+async def test_a_stale_providers_placement_does_not_hold_a_spool_off_the_shelf(
+    store: SpoolStore,
+) -> None:
+    """Review 4 N1: a stale provider's records are left out everywhere, its placement
+    of a spool too."""
+    await store.replace_records("old", [record("o1", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="old", record_id="o1")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("old", [located("o1", 1, 2)], NOW - SPOOL_OVERLAY_STALE * 2)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2), tray(0, 3)],
+        now=NOW,
+        providers=["native", "old"],
+        located={"old": "bambuddy:1"},
+    )
+    assert "old" in overlay.stale
+    assert [list(entry.records) for entry in overlay.shelf] == [["native"]]

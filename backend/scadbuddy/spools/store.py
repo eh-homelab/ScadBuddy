@@ -614,13 +614,14 @@ def _shelf(
         " LEFT JOIN physical_spools p ON p.id = l.physical_spool_id"
         " WHERE r.provider = ANY(%s::text[]) AND r.snapshot->>'location' IS NULL"
         " AND p.tray_uuid IS NULL AND p.tag_uid IS NULL"
-        # A spool one of its records places in a tray is that tray's, whichever
-        # record says so.
+        # A spool one of its fresh records places in a tray is that tray's, whichever
+        # record says so; a stale provider's placement counts no more than its records.
         " AND NOT EXISTS (SELECT 1 FROM spool_record_links ol"
         "   JOIN spool_provider_records orr USING (provider, record_id)"
         "   WHERE ol.physical_spool_id = l.physical_spool_id"
+        "   AND ol.provider = ANY(%s::text[])"
         "   AND orr.snapshot->>'location' IS NOT NULL)",
-        (fresh,),
+        (fresh, fresh),
     ):
         read += 1
         snapshot = SpoolSnapshot.model_validate(row["snapshot"])
@@ -643,7 +644,8 @@ def _shelf(
         if row["printer_id"] != printer_id
         or shown.get((row["ams_id"], row["tray_id"])) == row["fingerprint"]
     }
-    found.sort(key=lambda hit: (fresh.index(hit[0]), hit[1].record_id))
+    rank = {name: index for index, name in enumerate(fresh)}
+    found.sort(key=lambda hit: (rank[hit[0]], hit[1].record_id))
     shelf: list[ShelfSpool] = []
     by_spool: dict[UUID, ShelfSpool] = {}
     for provider, snapshot, spool in found:
