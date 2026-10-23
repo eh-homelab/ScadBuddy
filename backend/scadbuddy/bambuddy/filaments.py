@@ -269,7 +269,10 @@ class FilamentOptions(BaseModel):
     trays: list[UnknownTray] = Field(default_factory=list)
     #: A native run's spools no tray holds (#4504, `trays.shelf_options`): what its
     #: ``trays`` questions' ``candidates`` name, each with its providers' ``records``.
-    #: Never a print choice, so never in ``spools``; empty on the Bambuddy path.
+    #: Never a print choice, so never in ``spools``; empty on the Bambuddy path. Their
+    #: ``spool_id`` is positional, numbered from 1 in this one answer only: a client
+    #: links a row by its ``physical_spool_id``, else one of its ``records``
+    #: (``PUT /printers/{id}/trays/{ams}/{tray}/spool``), and never stores the id.
     shelf: list[SpoolOption] = Field(default_factory=list)
     #: Where ``spools`` came from: Bambuddy's inventory, or (a native run, #3818) the
     #: printer's loaded trays with the spool providers' records over them.

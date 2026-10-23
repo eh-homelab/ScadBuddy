@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.spools.models import SeenTray, SpoolLocation, SpoolSnapshot, tray_fingerprint
 from scadbuddy.spools.store import _LOCK, SPOOL_OVERLAY_STALE, SpoolStore, repoint_tray_links
@@ -676,3 +677,20 @@ async def test_a_link_to_a_tray_now_tagged_holds_nothing(store: SpoolStore) -> N
     )
     assert overlay.trays[0].records == {}
     assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_the_shelf_read_is_traced_by_its_counts_only(
+    store: SpoolStore, spans: InMemorySpanExporter
+) -> None:
+    """Review 3 N1: a large inventory's cost shows in a trace as counts, never a record's
+    values."""
+    await store.replace_records(
+        "bambuddy", [record("free", colour="#FFFFFF"), record("other")], NOW
+    )
+    spans.clear()
+    await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["bambuddy"])
+    (shelf,) = (s for s in spans.get_finished_spans() if s.name == "spools.shelf")
+    assert dict(shelf.attributes or {}) == {
+        "scadbuddy.spools.shelf_records": 2,
+        "scadbuddy.spools.shelf_spools": 2,
+    }

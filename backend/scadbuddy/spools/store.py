@@ -38,11 +38,13 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from opentelemetry.trace import Span
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.core.tracing import span
 from scadbuddy.spools.models import (
     FoundBy,
     LinkedBy,
@@ -289,7 +291,8 @@ class SpoolStore:
             }
             fresh = [name for name in providers if name not in stale]
             found = [_tray_spool(conn, printer_id, tray, fresh, located) for tray in trays]
-            shelf = _shelf(conn, printer_id, trays, fresh)
+            with span("spools.shelf") as current:
+                shelf = _shelf(conn, printer_id, trays, fresh, current)
         return Overlay(trays=found, shelf=shelf, stale=stale)
 
     def _link(
@@ -587,7 +590,7 @@ def _tray_spool(
 
 
 def _shelf(
-    conn: Conn, printer_id: UUID, trays: list[SeenTray], fresh: list[str]
+    conn: Conn, printer_id: UUID, trays: list[SeenTray], fresh: list[str], traced: Span
 ) -> list[ShelfSpool]:
     """``fresh``'s records no tray holds (`Overlay.shelf`), one entry per physical spool
     (or per record linked to none), in the providers' order, then by record id. A record
@@ -600,8 +603,11 @@ def _shelf(
     share a tray is `bambuddy.filaments.family`'s rule, applied once by the question
     (`trays.close_spools`), and spelling it again in SQL would let the two drift."""
     if not fresh or all(_keys_of(tray.tray_uuid, tray.tag_uid) != (None, None) for tray in trays):
+        traced.set_attribute("scadbuddy.spools.shelf_records", 0)
+        traced.set_attribute("scadbuddy.spools.shelf_spools", 0)
         return []
     found: list[tuple[str, SpoolSnapshot, UUID | None]] = []
+    read = 0
     for row in conn.execute(
         "SELECT r.provider, r.snapshot, l.physical_spool_id FROM spool_provider_records r"
         " LEFT JOIN spool_record_links l USING (provider, record_id)"
@@ -616,6 +622,7 @@ def _shelf(
         "   AND orr.snapshot->>'location' IS NOT NULL)",
         (fresh,),
     ):
+        read += 1
         snapshot = SpoolSnapshot.model_validate(row["snapshot"])
         if _keys_of(snapshot.tray_uuid, snapshot.tag_uid) == (None, None):
             found.append((row["provider"], snapshot, row["physical_spool_id"]))
@@ -649,6 +656,9 @@ def _shelf(
             if spool is not None:
                 by_spool[spool] = entry
         entry.records[provider] = snapshot
+    # Counts only, never a record's values (`core/tracing.py`).
+    traced.set_attribute("scadbuddy.spools.shelf_records", read)
+    traced.set_attribute("scadbuddy.spools.shelf_spools", len(shelf))
     return shelf
 
 
