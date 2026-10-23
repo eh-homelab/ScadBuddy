@@ -431,7 +431,9 @@ describe('FilamentPicker on the native path (source: trays)', () => {
   })
 
   it('offers only the loaded trays: a shelf record is for linking, never a print choice', async () => {
-    const { user } = open(hotFilaments())
+    // The backend keeps it in `shelf` (#4506); one in `spools` too would still not be offered.
+    const options = hotFilaments()
+    const { user } = open({ ...options, spools: [...(options.spools ?? []), ...(options.shelf ?? [])] })
     await expand(user, 1)
     expect(within(slot(1)).getByTestId(`spool-${TAGGED_TRAY}`)).toBeInTheDocument()
     expect(within(slot(1)).getByTestId(`spool-${UNTAGGED_TRAY}`)).toBeInTheDocument()

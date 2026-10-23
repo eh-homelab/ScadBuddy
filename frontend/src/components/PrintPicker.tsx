@@ -1550,7 +1550,8 @@ export function PrintPicker({
                         key={`${tray.ams_id}:${tray.tray_id}`}
                         {...trayTarget}
                         tray={tray}
-                        spools={filaments?.spools ?? []}
+                        // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.
+                        spools={nativeRow ? (filaments?.shelf ?? []) : (filaments?.spools ?? [])}
                         onAssigned={picker.reload}
                         onDecline={() => trays.decline(tray)}
                       />

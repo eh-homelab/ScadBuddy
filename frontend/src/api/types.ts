@@ -212,7 +212,13 @@ export type PrintOptionsUpdate = Schemas['PrintOptionsUpdate']
 export type OptionScope = PrintOptionsUpdate['scope']
 
 /** #87 — the filament picker's wire types. */
-export type FilamentOptions = Schemas['FilamentOptions']
+/**
+ * `shelf` (#4506, the backend's `FilamentOptions.shelf`): a native run's spools no tray
+ * holds, the rows its `trays` questions' `candidates` name; never a print choice, so
+ * never in `spools`. Typed here until #4506's schema is the generated one; the same
+ * optional field there, so this keeps typechecking after it lands.
+ */
+export type FilamentOptions = Schemas['FilamentOptions'] & { shelf?: Schemas['SpoolOption'][] }
 export type SpoolOption = Schemas['SpoolOption']
 export type SlotNeed = Schemas['SlotNeed']
 export type SlotChoice = Schemas['SlotChoice']

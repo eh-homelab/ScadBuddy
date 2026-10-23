@@ -49,10 +49,12 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
     const options = await api.getFilaments('out-1', { printer: HOT_PRINTER.id })
     expect(options.source).toBe('trays')
     expect(options.overlay_notes).toEqual([])
-    const [tagged, untagged, shelf] = options.spools ?? []
+    const [tagged, untagged, ...rest] = options.spools ?? []
     expect(tagged).toMatchObject({ spool_id: TAGGED_TRAY, label: 'AMS-A slot 1', records: { bambuddy: { brand: 'Bambu Lab' } } })
     expect(untagged).toMatchObject({ spool_id: UNTAGGED_TRAY, records: {} })
-    expect(shelf).toMatchObject({ spool_id: UNLINKED_RECORD, loaded: null })
+    // The record to link is on the shelf (#4506), never a print choice in `spools`.
+    expect(rest).toEqual([])
+    expect(options.shelf).toEqual([expect.objectContaining({ spool_id: UNLINKED_RECORD, loaded: null })])
     expect(options.trays).toEqual([expect.objectContaining({ ams_id: 0, tray_id: 1, candidates: [UNLINKED_RECORD] })])
   })
 
@@ -65,6 +67,7 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
     expect(options.overlay_notes?.[0]).toMatch(/Bambuddy/)
     expect((options.spools ?? []).every((spool) => Object.keys(spool.records ?? {}).length === 0)).toBe(true)
     expect(options.trays).toEqual([])
+    expect(options.shelf).toEqual([])
   })
 
   it('links the untagged tray, after which it carries the record', async () => {

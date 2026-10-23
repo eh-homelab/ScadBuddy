@@ -186,8 +186,12 @@ function trayOptions(): SpoolOption[] {
       records: linked,
     },
   ]
-  if (state.stale || state.linked) return trays
-  // The overlay's linking list: a Bambuddy record of a spool no tray holds (D1).
+  return trays
+}
+
+/** The overlay's linking list (D1, #4506's `shelf`): a Bambuddy record of a spool no tray holds. */
+function shelfOptions(): SpoolOption[] {
+  if (state.stale || state.linked) return []
   const shelf: SpoolOption = {
     spool_id: UNLINKED_RECORD,
     material: 'PLA',
@@ -201,7 +205,7 @@ function trayOptions(): SpoolOption[] {
       bambuddy: { record_id: '27', material: 'PLA', colour: '#FF1493', brand: 'Elegoo', name: 'Pink', remaining_g: 640 },
     },
   }
-  return [...trays, shelf]
+  return [shelf]
 }
 
 function unknownTrays(): UnknownTray[] {
@@ -214,7 +218,8 @@ function unknownTrays(): UnknownTray[] {
       material: 'PLA',
       colour: '#FF1493',
       colour_word: 'pink',
-      fingerprint: 'PLA|#FF1493|11',
+      // `material|RRGGBB`, the tray link's own format (#4506).
+      fingerprint: 'PLA|FF1493',
       spool_id: UNTAGGED_TRAY,
       candidates: [UNLINKED_RECORD],
     },
@@ -236,6 +241,7 @@ export function hotFilaments(): FilamentOptions {
       colour_matches: slot.slot_id === 1 ? [TAGGED_TRAY] : [UNTAGGED_TRAY],
     })),
     spools: trayOptions(),
+    shelf: shelfOptions(),
     suggested: [
       { slot_id: 1, spool_id: TAGGED_TRAY },
       { slot_id: 2, spool_id: UNTAGGED_TRAY },
