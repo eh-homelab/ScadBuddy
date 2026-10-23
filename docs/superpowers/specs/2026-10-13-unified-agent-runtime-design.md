@@ -351,7 +351,9 @@ lack them (§2.3).
   least-recently-used idle process or lapsed reservation. When every slot runs a turn,
   `session_turn` fails `NoCapacity` and the workflow moves the turn (Recovery, below), so
   a replica never runs more warm processes than `warm_max_per_replica`. `WarmSessions.acquire`
-  alone would spawn past the cap, since its trim evicts only idle entries.
+  alone would spawn past the cap, since its trim evicts only idle entries. A placement that
+  fails before its spawn (`SessionGone`, a refusal, a move) gives the place back
+  (`WarmSessions.unreserve`), so it is not held for `RESERVATION_HOLD_MS`.
 - **The turn.** `session_turn(input)` is scheduled on `home` with these options:
   - `scheduleToStartTimeout: 5s`. It is non-retryable; this is how a dead home is
     detected (§2.3).

@@ -263,7 +263,9 @@ export class TurnHost {
     // Its place here again (§5.2): a home kept across turns may have let its reservation lapse
     // (`warm_idle_seconds`), and the cache filled since. Refused, before anything is claimed or
     // spawned, when every process here runs a turn: the workflow moves the turn (`movesWorker`),
-    // and the replica never goes past `warm_max_per_replica`.
+    // and the replica never goes past `warm_max_per_replica`. Taking the place may evict another
+    // session's idle process, as acquire_worker's does; a turn that then ends before its spawn
+    // (SessionGone, a refusal, a move) gives the place back (`unreserve`, below).
     if (this.#deps.core.warm.reserve(id) === 'full') {
       throw ApplicationFailure.retryable(`every warm session on ${this.#deps.hostQueue} is running a turn`, NO_CAPACITY)
     }
@@ -305,6 +307,10 @@ export class TurnHost {
     this.#running.set(id, self)
     try {
       return await this.#run(input, attempt, control, controller, () => cut, cutOff, entries, holds)
+    } catch (err) {
+      // Its place, unless a spawn took it: the workflow places the turn again, elsewhere or here.
+      this.#deps.core.warm.unreserve(id)
+      throw err
     } finally {
       if (this.#running.get(id) === self) this.#running.delete(id)
       finished()

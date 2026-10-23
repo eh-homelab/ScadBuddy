@@ -235,6 +235,18 @@ describe('WarmSessions.reserve and release', () => {
     one.left()
   })
 
+  it('a placement that fails before its spawn gives back the place it reserved on arrival', async () => {
+    const { warm, spawned } = cache(1)
+    // The claim's read fails: the turn ends before anything is spawned.
+    const sql = (() => Promise.reject(new Error('the database is gone'))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
+    await expect(host.run({ sessionId: 'gone', turnId: 't1', attempt: 'run:0' }, control)).rejects.toThrow('the database is gone')
+    expect(spawned.has('gone')).toBe(false)
+    // Held for RESERVATION_HOLD_MS had it been kept: the one place is free at once.
+    expect(warm.reserve('next')).toBe('reserved')
+  })
+
   it('a session with a process here keeps it, without a second place', async () => {
     const { warm, running } = cache(1)
     const own = await running('own')

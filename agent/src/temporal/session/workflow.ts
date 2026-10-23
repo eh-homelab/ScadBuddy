@@ -141,19 +141,20 @@ function overTime(err: unknown): boolean {
   return cause instanceof TimeoutFailure && cause.timeoutType === 'START_TO_CLOSE'
 }
 
+/** The application failure's type behind an activity's failure, if it is one. */
+function failureType(err: unknown): string | null | undefined {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  return cause instanceof ApplicationFailure ? cause.type : undefined
+}
+
 /** A failure that says the turn's worker is gone or cannot take it: place the turn elsewhere (§5.2). */
 export function movesWorker(err: unknown): boolean {
   const cause = err instanceof ActivityFailure ? err.cause : err
   // A home that never started the turn, or stopped answering in it. A turn past its
   // `turn_max_seconds` (StartToClose) is over, not lost: placing it again could triple its spend.
   if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' || cause.timeoutType === 'HEARTBEAT'
-  return cause instanceof ApplicationFailure && (cause.type === SHUTTING_DOWN_FAILURE || cause.type === NO_CAPACITY)
-}
-
-/** `session_turn` (or `acquire_worker`) refused: every warm slot on that replica runs a turn. */
-function noCapacity(err: unknown): boolean {
-  const cause = err instanceof ActivityFailure ? err.cause : err
-  return cause instanceof ApplicationFailure && cause.type === NO_CAPACITY
+  const type = failureType(err)
+  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY
 }
 
 /**
@@ -337,7 +338,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         // A kept home whose slots all run turns refused this one as it arrived (session_turn
         // re-reserves there, TurnHost.run): nothing ran, and its place was never this turn's, so
         // the move costs no placement. Only the first cycle's home is kept, so this happens once.
-        if (kept && noCapacity(err) && patched(FULL_HOME_PATCH)) placements++
+        if (kept && failureType(err) === NO_CAPACITY && patched(FULL_HOME_PATCH)) placements++
         if (home && !lost.includes(home)) lost.push(home)
         home = undefined
         continuation = mergeRestarted(continuation)
