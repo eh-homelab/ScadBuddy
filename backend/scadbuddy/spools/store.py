@@ -603,7 +603,8 @@ def _shelf(
     with a key of its own is a tagged spool even when no spool is linked to it (two
     records naming one tag link neither): it is wherever its tag is read. A spool held
     anywhere is left out whole: one ``found`` shows in this printer's trays, or one a
-    person's link or any of its records' placements puts on another printer.
+    person's link or any of its records' placements puts on another printer (or a
+    provider with no name for this printer places at all).
 
     This printer's links and placements hold only through ``found``, so one whose tray
     no longer matches (the spool came out, #4511) holds nothing, as `_tray_spool` reads
@@ -613,9 +614,10 @@ def _shelf(
     fresh untagged record is read, not only those of the trays' materials: which
     materials may share a tray is `bambuddy.filaments.family`'s rule, applied once by
     the question (`trays.close_spools`), and spelling it again in SQL would let the two
-    drift. The size budget is the ``spools.shelf`` span's: ``shelf_records`` (the rows
-    read) against its duration. When that shows the cost, leave another printer's
-    placements out in SQL, with an index on the records' ``location`` printer."""
+    drift. A record placed on another printer is never read, only asked after by an
+    ``EXISTS`` for its spool's siblings, so the rows read are the unplaced records and
+    this printer's placements. The size budget is the ``spools.shelf`` span's:
+    ``shelf_records`` (the rows read) against its duration."""
     if not fresh or all(_keys_of(tray.tray_uuid, tray.tag_uid) != (None, None) for tray in trays):
         traced.set_attribute("scadbuddy.spools.shelf_records", 0)
         traced.set_attribute("scadbuddy.spools.shelf_spools", 0)
@@ -632,19 +634,27 @@ def _shelf(
         "SELECT r.provider, r.snapshot, l.physical_spool_id FROM spool_provider_records r"
         " LEFT JOIN spool_record_links l USING (provider, record_id)"
         " LEFT JOIN physical_spools p ON p.id = l.physical_spool_id"
-        " WHERE r.provider = ANY(%s::text[]) AND p.tray_uuid IS NULL AND p.tag_uid IS NULL",
-        (fresh,),
+        " WHERE r.provider = ANY(%s::text[]) AND p.tray_uuid IS NULL AND p.tag_uid IS NULL"
+        # A record placed elsewhere is not read: on another printer, or by a provider with
+        # no name for this one (`->>` of a missing key is NULL), it places nothing here.
+        " AND (r.snapshot->>'location' IS NULL"
+        "   OR r.snapshot->'location'->>'printer' = %s::jsonb->>r.provider)"
+        # A spool one of its fresh records places elsewhere is held there, whichever
+        # record says so; a stale provider's placement counts no more than its records.
+        # Both lookups are indexed (`20261018T1744Z_physical_spools.sql`): `ol` by
+        # `UNIQUE (physical_spool_id, provider)`, `orr` by its `(provider, record_id)` key.
+        " AND NOT EXISTS (SELECT 1 FROM spool_record_links ol"
+        "   JOIN spool_provider_records orr USING (provider, record_id)"
+        "   WHERE ol.physical_spool_id = l.physical_spool_id"
+        "   AND ol.provider = ANY(%s::text[])"
+        "   AND orr.snapshot->>'location' IS NOT NULL"
+        "   AND (orr.snapshot->'location'->>'printer')"
+        "     IS DISTINCT FROM (%s::jsonb->>orr.provider))",
+        (fresh, Jsonb(located), fresh, Jsonb(located)),
     ):
         read += 1
         provider, spool = row["provider"], row["physical_spool_id"]
         snapshot = SpoolSnapshot.model_validate(row["snapshot"])
-        # A spool one of its fresh records places on another printer is that printer's,
-        # whichever record says so; a stale provider's placement counts no more than its
-        # records. A provider with no name for this printer places nothing here.
-        if snapshot.location is not None and snapshot.location.printer != located.get(provider):
-            if spool is not None:
-                held.add(spool)
-            continue
         if (provider, snapshot.record_id) in shown:
             continue
         if _keys_of(snapshot.tray_uuid, snapshot.tag_uid) == (None, None):

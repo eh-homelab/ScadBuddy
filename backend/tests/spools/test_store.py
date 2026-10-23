@@ -742,3 +742,43 @@ async def test_a_stale_placement_leaves_its_spool_on_the_shelf(store: SpoolStore
     )
     assert overlay.trays[0].records == {}
     assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_a_placement_by_a_provider_with_no_name_here_holds_its_spool(
+    store: SpoolStore,
+) -> None:
+    """#4513 review: a provider ``located`` does not name has no way to place a spool on
+    this printer, so its placement is somewhere else, and holds the spool there."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("bambuddy", [located("13", 1, 2), record("free")], NOW)
+    overlay = await store.overlay(PRINTER, [tray(1, 2)], now=NOW, providers=["native", "bambuddy"])
+    assert overlay.trays[0].records == {}
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["free"]
+
+
+async def test_a_spool_placed_here_is_off_the_shelf_with_all_its_records(
+    store: SpoolStore,
+) -> None:
+    """#4513 review: one spool, Bambuddy's record placing it in this printer's matching
+    tray and another provider's unplaced: the tray shows it, so neither record is on the
+    shelf."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("bambuddy", [located("13", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2), tray(0, 3)],
+        now=NOW,
+        providers=["bambuddy", "native"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert overlay.trays[0].linked_by == "provider"
+    assert list(overlay.trays[0].records) == ["bambuddy", "native"]
+    assert overlay.shelf == []
