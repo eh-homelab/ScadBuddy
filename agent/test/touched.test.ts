@@ -433,6 +433,31 @@ describe('extractors', () => {
     ])
   })
 
+  it("records a native id as ScadBuddy's own library_file at every library file touch (#4507)", () => {
+    const n = 1_000_000_002
+    const file = { id: n, filename: 'a.3mf', folder_id: null }
+    const cases: [string, Record<string, unknown>, unknown, 'created' | 'modified' | 'deleted'][] = [
+      ['send_to_bambuddy', { output_id: 'o1' }, { library_file_id: n, created: true }, 'created'],
+      ['file_output_in_project_folder', { output_id: 'o1', folder_id: 1_000_000_001 }, { library_file_id: n, created: true }, 'created'],
+      ['delete_library_files', { file_ids: [n] }, { deleted: [{ id: n, trashed: true }], skipped: [] }, 'deleted'],
+      ['restore_library_files', { file_ids: [n] }, { restored: [n], skipped: [] }, 'created'],
+      ['upload_library_file', { filename: 'a.3mf' }, file, 'created'],
+      ['update_library_file', { file_id: n }, file, 'modified'],
+      ['update_library_file', { file_id: n }, null, 'modified'],
+      ['delete_library_folder', { folder_id: 1_000_000_001 }, { deleted: [{ id: n, trashed: true }], skipped: [] }, 'deleted'],
+      ['move_library_file', { file_ids: [n] }, { moved: [{ id: n }], skipped: [] }, 'modified'],
+      ['copy_library_file', { file_ids: [1] }, { copied: [{ id: n }], skipped: [] }, 'created'],
+      ['rename_library_file', { file_id: n }, file, 'modified'],
+    ]
+    for (const [tool, input, result, action] of cases) {
+      expect(touches(tool, input, result, 'outward')[0], tool).toMatchObject({ type: 'library_file', id: String(n), action })
+    }
+    // Just below the base is still Bambuddy's.
+    expect(touches('upload_library_file', {}, { id: 999_999_999 }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '999999999', action: 'created' },
+    ])
+  })
+
   it('records the library files moved, copied and renamed, never a skipped one (#2670)', () => {
     const moved = { folder_id: 4, moved: [{ id: 1, filename: 'a.3mf' }], skipped: [{ id: 2, reason: 'not owned' }] }
     expect(touches('move_library_file', { file_ids: [1, 2] }, moved, 'outward')).toEqual([

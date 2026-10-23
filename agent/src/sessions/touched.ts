@@ -102,6 +102,8 @@ export type ResourceAction = (typeof RESOURCE_ACTIONS)[number]
  * | `print`         | print_again                                   | the print archive printed again      |
  * | `bambuddy_file` | send_to_bambuddy, file_output_in_project_folder, browser_generate | the output it holds |
  * | `library_file`  | file_output_in_project_folder, browser_generate (a native folder) | the output it holds |
+ *
+ * Every library file touch is `library_file` for a native id (`NATIVE_ID_BASE` and up), else `bambuddy_file`.
  * | `project`, `print_archive` | file_output_under_project          | the output filed                     |
  *
  * Every other row leaves it null.
@@ -196,27 +198,30 @@ function ids(value: unknown): string[] {
   })
 }
 
-/** Each library file a list of them names by `id` (a skipped one is in another list, untouched). */
-function libraryFiles(files: unknown, action: ResourceAction): Touch[] {
-  return (Array.isArray(files) ? files : []).flatMap((file) => {
-    const id = bambuddyId(field(file, 'id'))
-    return id ? [{ type: 'bambuddy_file' as const, id, action }] : []
-  })
-}
-
 /**
  * ScadBuddy's own library ids start here (backend `print_library/ids.py` `NATIVE_ID_BASE`);
  * Bambuddy's are far below it.
  */
 export const NATIVE_ID_BASE = 1_000_000_000
 
+/** A library file's kind by its id: ScadBuddy's own library's (#4507) or Bambuddy's. */
+function libraryFileType(id: string): 'library_file' | 'bambuddy_file' {
+  return Number(id) >= NATIVE_ID_BASE ? 'library_file' : 'bambuddy_file'
+}
+
+/** Each library file a list of them names by `id` (a skipped one is in another list, untouched). */
+function libraryFiles(files: unknown, action: ResourceAction): Touch[] {
+  return (Array.isArray(files) ? files : []).flatMap((file) => {
+    const id = bambuddyId(field(file, 'id'))
+    return id ? [{ type: libraryFileType(id), id, action }] : []
+  })
+}
+
 /** A library file holding an output, Bambuddy's or ScadBuddy's own (#4507): new only when the answer says it was made. */
 function bambuddyFile(result: unknown, output: string | null): Touch[] {
-  const raw = field(result, 'library_file_id')
-  const id = bambuddyId(raw)
+  const id = bambuddyId(field(result, 'library_file_id'))
   if (!id) return []
-  const type = Number(raw) >= NATIVE_ID_BASE ? 'library_file' : 'bambuddy_file'
-  return [{ type, id, action: field(result, 'created') === true ? 'created' : 'modified', before: output }]
+  return [{ type: libraryFileType(id), id, action: field(result, 'created') === true ? 'created' : 'modified', before: output }]
 }
 
 /** A ProjectFile: the library file, and the project it was filed in. */
@@ -429,16 +434,16 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>
-    ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
+    ids(field(result, 'restored')).map((id) => ({ type: libraryFileType(id), id, action: 'created' as const })),
   // #2686: an upload makes a file, an update changes one. A folder delete records the files it
   // deleted (as delete_library_files does); the folders themselves are no recorded resource.
   upload_library_file: (_input, result) => {
     const id = bambuddyId(field(result, 'id'))
-    return id ? [{ type: 'bambuddy_file', id, action: 'created' }] : []
+    return id ? [{ type: libraryFileType(id), id, action: 'created' }] : []
   },
   update_library_file: (input, result) => {
     const id = bambuddyId(field(result, 'id')) ?? bambuddyId(input.file_id)
-    return id ? [{ type: 'bambuddy_file', id, action: 'modified' }] : []
+    return id ? [{ type: libraryFileType(id), id, action: 'modified' }] : []
   },
   delete_library_folder: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   // #2670: a move or rename changes the file under its id; a copy creates a new one.
