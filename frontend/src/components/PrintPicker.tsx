@@ -3,6 +3,8 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
+  TraySpoolLink,
+  UnknownTray,
   PrinterRow,
   AnalysisTarget,
   BatchSummary,
@@ -68,7 +70,7 @@ import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
 import { NozzleStep } from './print/NozzleStep'
 import { PreviewPane } from './print/PreviewPane'
 import { TrayQuestion } from './print/TrayQuestion'
-import { useDeclinedTrays } from '../lib/trays'
+import { linkKey, linkOf, useDeclinedTrays } from '../lib/trays'
 import { PrintVerdict } from './print/PrintVerdict'
 import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
@@ -1082,6 +1084,36 @@ export function PrintPicker({
     (previewPlate !== single && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(nativeRow?.id ?? printerId, filaments?.trays ?? [])
+  /**
+   * #3818 — what this answer's native questions have linked: the trays answered and the
+   * shelf rows they claimed, by link identity (`linkKey`, never the positional
+   * `spool_id`). A claimed row is offered to no other tray, and an answered tray asked
+   * nothing more, until the re-read the link starts replaces the answer.
+   */
+  const [claims, setClaims] = useState<{ answer: typeof filaments; links: string[]; trays: string[] }>({
+    answer: null,
+    links: [],
+    trays: [],
+  })
+  const claimed = claims.answer !== null && claims.answer === filaments ? claims : null
+  const openShelf = useMemo(
+    () => (filaments?.shelf ?? []).filter((spool) => !claimed?.links.includes(linkKey(linkOf(spool)) ?? '')),
+    [filaments, claimed],
+  )
+  function claim(tray: UnknownTray, link: TraySpoolLink | undefined) {
+    const key = linkKey(link ?? null)
+    if (key && filaments) {
+      setClaims((current) => {
+        const same = current.answer === filaments
+        return {
+          answer: filaments,
+          links: [...(same ? current.links : []), key],
+          trays: [...(same ? current.trays : []), `${tray.ams_id}:${tray.tray_id}`],
+        }
+      })
+    }
+    picker.reload()
+  }
   /** Who a tray question's answer is recorded for: the registry row natively, else Bambuddy's printer. */
   const trayTarget = nativeRow
     ? { native: { printer: nativeRow.id } }
@@ -1552,15 +1584,20 @@ export function PrintPicker({
                   {trayTarget &&
                     trays.open
                       // A native run's tray is a choice already: asked only with a record to link.
-                      .filter((tray) => !nativeRow || (tray.candidates ?? []).length > 0)
+                      .filter(
+                        (tray) =>
+                          !nativeRow ||
+                          (!claimed?.trays.includes(`${tray.ams_id}:${tray.tray_id}`) &&
+                            (tray.candidates ?? []).some((id) => openShelf.some((spool) => spool.spool_id === id))),
+                      )
                       .map((tray) => (
                       <TrayQuestion
                         key={`${tray.ams_id}:${tray.tray_id}`}
                         {...trayTarget}
                         tray={tray}
                         // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.
-                        spools={nativeRow ? (filaments?.shelf ?? []) : (filaments?.spools ?? [])}
-                        onAssigned={picker.reload}
+                        spools={nativeRow ? openShelf : (filaments?.spools ?? [])}
+                        onAssigned={(link) => claim(tray, link)}
                         onDecline={() => trays.decline(tray)}
                       />
                     ))}

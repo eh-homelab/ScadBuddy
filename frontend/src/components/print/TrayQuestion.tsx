@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { ApiError, api } from '../../api/client'
-import type { SpoolOption, UnknownTray } from '../../api/types'
+import type { SpoolOption, TraySpoolLink, UnknownTray } from '../../api/types'
 import { bambuddyBase, useLoadBambuddyLinks } from '../../lib/bambuddyLinks'
 import { openExternal } from '../../lib/embed'
 import { providerLabel } from '../../lib/filaments'
-import { howFull, linkOf } from '../../lib/trays'
+import { howFull, linkKey, linkOf } from '../../lib/trays'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -35,8 +35,11 @@ type Target = { printerId: number; native?: undefined } | { native: { printer: s
 type Props = Target & {
   tray: UnknownTray
   spools: readonly SpoolOption[]
-  /** Bambuddy now knows the spool: re-read the dialog's choices. */
-  onAssigned: () => void
+  /**
+   * The spool is recorded: re-read the dialog's choices. A native link says what it
+   * claimed, so the dialog can stop offering it to another tray until that read lands.
+   */
+  onAssigned: (link?: TraySpoolLink) => void
   onDecline: () => void
 }
 
@@ -52,7 +55,13 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
   const candidates = (tray.candidates ?? [])
     .map((id) => spools.find((spool) => spool.spool_id === id))
     .filter((spool): spool is SpoolOption => spool !== undefined && (!native || linkOf(spool) !== null))
-  const [picked, setPicked] = useState<number | null>(candidates[0]?.spool_id ?? null)
+  /**
+   * What a candidate is picked by: natively its link's identity (`linkKey`), since a
+   * shelf row's `spool_id` is positional and a re-read may move the record to another;
+   * on the Bambuddy path the spool's own id.
+   */
+  const keyOf = (spool: SpoolOption) => (native ? linkKey(linkOf(spool)) : String(spool.spool_id)) ?? ''
+  const [picked, setPicked] = useState<string | null>(candidates[0] ? keyOf(candidates[0]) : null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const what = [tray.colour_word, tray.material].filter(Boolean).join(' ')
@@ -64,8 +73,8 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
     setSaving(true)
     setError(null)
     try {
+      const spool = candidates.find((entry) => keyOf(entry) === picked)
       if (target.native) {
-        const spool = candidates.find((entry) => entry.spool_id === picked)
         const link = spool ? linkOf(spool) : null
         if (!link) {
           // Nothing to name: never report a link that was not made.
@@ -73,10 +82,12 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
           return
         }
         await api.linkTraySpool(target.native.printer, tray.ams_id, tray.tray_id, link)
+        onAssigned(link)
       } else {
-        await api.assignTraySpool(target.printerId, tray.ams_id, tray.tray_id, picked)
+        if (!spool) return
+        await api.assignTraySpool(target.printerId, tray.ams_id, tray.tray_id, spool.spool_id)
+        onAssigned()
       }
-      onAssigned()
     } catch (cause) {
       const fallback = native ? 'ScadBuddy could not link it.' : 'Bambuddy could not record it.'
       setError(cause instanceof ApiError ? cause.detail : fallback)
@@ -130,13 +141,13 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
           ) : (
             <RadioGroup
               aria-label={`Spool in ${tray.label}`}
-              value={picked === null ? '' : String(picked)}
-              onValueChange={(next) => setPicked(Number(next))}
+              value={picked ?? ''}
+              onValueChange={setPicked}
               className="gap-1.5"
             >
               {candidates.map((spool) => (
-                <Label key={spool.spool_id} className="cursor-pointer flex-wrap gap-x-2 gap-y-0.5 text-xs font-normal">
-                  <RadioGroupItem value={String(spool.spool_id)} />
+                <Label key={keyOf(spool)} className="cursor-pointer flex-wrap gap-x-2 gap-y-0.5 text-xs font-normal">
+                  <RadioGroupItem value={keyOf(spool)} />
                   {spoolRow(spool)}
                 </Label>
               ))}

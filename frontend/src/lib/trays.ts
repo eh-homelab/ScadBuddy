@@ -67,3 +67,14 @@ export function linkOf(spool: SpoolOption): TraySpoolLink | null {
   const [provider, record] = Object.entries(spool.records ?? {})[0] ?? []
   return provider && record ? { provider, record_id: record.record_id } : null
 }
+
+/**
+ * #3818 — a link's identity, the same across reads: the physical spool, else the
+ * provider's record. Never the shelf row's `spool_id`, which is only its place in one
+ * answer and may name another record after a re-read.
+ */
+export function linkKey(link: TraySpoolLink | null): string | null {
+  if (!link) return null
+  if (link.physical_spool_id) return `spool:${link.physical_spool_id}`
+  return link.provider && link.record_id ? `record:${link.provider}:${link.record_id}` : null
+}

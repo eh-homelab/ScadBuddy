@@ -2,7 +2,7 @@ import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-li
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { SpoolOption, UnknownTray } from '../../api/types'
-import { howFull, useDeclinedTrays } from '../../lib/trays'
+import { howFull, linkKey, linkOf, useDeclinedTrays } from '../../lib/trays'
 import { TrayQuestion } from './TrayQuestion'
 
 const tray: UnknownTray = {
@@ -124,6 +124,31 @@ describe('TrayQuestion on the native path', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('ScadBuddy has no record of that spool to link.')
     expect(link).not.toHaveBeenCalled()
     expect(onAssigned).not.toHaveBeenCalled()
+  })
+
+  // #4511 item 4 — a shelf row's `spool_id` is its place in one answer, not the spool.
+  it('keys a link on the record, never the positional shelf id, across a re-read', async () => {
+    const first = { ...record, spool_id: 16, records: { bambuddy: { record_id: '27' } } }
+    const second = { ...record, spool_id: 18, color_name: 'Grey', records: { bambuddy: { record_id: '28' } } }
+    expect(linkOf(first)).toEqual(linkOf({ ...first, spool_id: 41 }))
+    expect(linkKey(linkOf({ ...first, spool_id: 41 }))).toBe('record:bambuddy:27')
+    expect(linkKey(linkOf({ ...first, physical_spool_id: 'p-1' }))).toBe('spool:p-1')
+
+    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
+    const onAssigned = vi.fn()
+    const props = { native: { printer }, onAssigned, onDecline: vi.fn() }
+    const { rerender } = render(<TrayQuestion {...props} tray={{ ...tray, candidates: [16, 18] }} spools={[first, second]} />)
+    // The re-read numbers the same two records the other way round.
+    rerender(
+      <TrayQuestion
+        {...props}
+        tray={{ ...tray, candidates: [18, 16] }}
+        spools={[{ ...second, spool_id: 16 }, { ...first, spool_id: 18 }]}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, this one' }))
+    await waitFor(() => expect(onAssigned).toHaveBeenCalledWith({ provider: 'bambuddy', record_id: '27' }))
+    expect(link).toHaveBeenCalledWith(printer, 3, 3, { provider: 'bambuddy', record_id: '27' })
   })
 
   it('offers no candidate it could not link', () => {

@@ -9,7 +9,7 @@ import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { printersState } from '../mocks/features/printers'
-import { HOT_PRINTER, NO_BAMBUDDY, hotFilaments, setHotPath } from '../mocks/features/hotPath'
+import { HOT_PRINTER, NO_BAMBUDDY, UNLINKED_RECORD, hotFilaments, setHotPath } from '../mocks/features/hotPath'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
@@ -5074,6 +5074,44 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     for (const body of checks.bodies.slice(before)) {
       expect(body['printer']).not.toBe(HOT_PRINTER.id)
     }
+  })
+
+  it('offers a shelf row one tray claimed to no other tray, until the re-read lands', async () => {
+    setHotPath(true)
+    const answer = hotFilaments()
+    const untagged = answer.trays![0]!
+    // Two untagged trays, both asked about the one Bambuddy record on the shelf.
+    const twoTrays = {
+      ...answer,
+      trays: [untagged, { ...untagged, tray_id: 2, label: 'AMS-A slot 3', spool_id: -3, fingerprint: 'PLA|FF1493' }],
+    }
+    let reads = 0
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async () => {
+        reads += 1
+        if (reads > 1) await delay(800)
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: null,
+          printers: [],
+          filaments: twoTrays,
+          model_choices: { printer_id: null, filament_plan: [] },
+        })
+      }),
+    )
+    const choices = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    const first = await screen.findByTestId('tray-question-0-1')
+    expect(screen.getByTestId('tray-question-0-2')).toBeInTheDocument()
+    expect(twoTrays.shelf?.map((spool) => spool.spool_id)).toEqual([UNLINKED_RECORD])
+    const asked = choices.urls.length
+    await user.click(within(first).getByRole('button', { name: 'Yes, that one' }))
+    // The link is made and the re-read is out: neither tray is asked about the record now.
+    await waitFor(() => expect(choices.urls.length).toBeGreaterThan(asked))
+    expect(choices.answered).toBeLessThan(choices.urls.length)
+    expect(screen.queryByTestId('tray-question-0-1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('tray-question-0-2')).not.toBeInTheDocument()
   })
 
   it('offers the folders, not projects, in Advanced', async () => {
