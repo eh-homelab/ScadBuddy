@@ -501,9 +501,12 @@ def _options(
     printer_name: str | None,
     source: Literal["inventory", "trays"] = "inventory",
     notes: list[str] | None = None,
+    trays: list[UnknownTray] | None = None,
+    shelf: list[SpoolOption] | None = None,
 ) -> FilamentOptions:
     """The dialog's answer over ``options``, already in display order: each slot's
-    colour matches, the opening selection and its warnings."""
+    colour matches, the opening selection and its warnings. ``trays`` and ``shelf`` are
+    a native run's questions and the rows they name (`trays.tray_questions`)."""
     suggested = suggest(requirements, options, printer_id=printer_id)
     built = FilamentOptions(
         library_file_id=library_file_id,
@@ -511,6 +514,8 @@ def _options(
         printer_name=printer_name,
         source=source,
         overlay_notes=notes or [],
+        trays=trays or [],
+        shelf=shelf or [],
         slots=[
             slot.model_copy(
                 update={
@@ -1098,11 +1103,8 @@ async def _tray_plate_options(
             printer_name=status.name,
             source="trays",
             notes=notes,
-        ).model_copy(
-            update={
-                "trays": [question.model_copy() for question in questions],
-                "shelf": [spool.model_copy() for spool in shelf],
-            }
+            trays=[question.model_copy() for question in questions],
+            shelf=[spool.model_copy() for spool in shelf],
         )
         for requirements in per_plate
     ]

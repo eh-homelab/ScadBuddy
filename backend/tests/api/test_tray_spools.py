@@ -186,13 +186,36 @@ def test_an_untagged_trays_question_links_through_the_route(
     holds, and the link the dialog sends for it (#4505's ``linkOf``: the physical spool,
     else the first record) is one the route takes; answered, it is not asked again. The
     candidates are the store's, never a Bambuddy read."""
-    _bambuddy_record(client)
+    snapshots = [
+        SpoolSnapshot.model_validate(
+            {"record_id": record_id, "material": "PLA", "colour": "#FFFFFF", **fields}
+        )
+        for record_id, fields in (
+            ("16", {"brand": "Inland", "remaining_g": 515.0}),
+            ("17", {"brand": "Sunlu", "remaining_g": 200.0}),
+        )
+    ]
+    client.portal.call(  # type: ignore[union-attr]
+        _spools(client).store.replace_records, "bambuddy", snapshots, datetime.now(UTC)
+    )
+    # A second untagged white tray, asked about with the same record until it is linked.
+    report = _report()
+    report["ams"]["ams"][0]["tray"][2] = {
+        **report["ams"]["ams"][0]["tray"][1],
+        "id": "2",
+    }
+    _printers(client).reports.put(lan_printer, report, datetime.now(UTC))
     with forbid_bambuddy(spans, "https://bambuddy.test"):
         options = _filaments(client, lan_printer)
-        (question,) = options.trays
-        assert (question.ams_id, question.tray_id) == (0, 1)
-        (entry,) = (spool for spool in options.shelf if spool.spool_id in question.candidates)
-        assert entry.records["bambuddy"].brand == "Inland"
+        question, second = options.trays
+        assert (question.ams_id, question.tray_id, second.tray_id) == (0, 1, 2)
+        assert second.candidates == question.candidates
+        by_id = {spool.spool_id: spool for spool in options.shelf}
+        assert [by_id[c].records["bambuddy"].record_id for c in question.candidates] == [
+            "16",
+            "17",
+        ]
+        entry = by_id[question.candidates[0]]
         provider, record = next(iter(entry.records.items()))
         link: dict[str, str] = (
             {"physical_spool_id": str(entry.physical_spool_id)}
@@ -202,7 +225,11 @@ def test_an_untagged_trays_question_links_through_the_route(
         linked = client.put(_path(lan_printer, question.ams_id, question.tray_id), json=link)
         assert linked.status_code == 200, linked.text
         after = _filaments(client, lan_printer)
-    assert after.trays == [] and after.shelf == []
+    # Linked, record 16 is tray (0,1)'s: the other white tray is offered only 17.
+    (left,) = after.trays
+    assert (left.ams_id, left.tray_id) == (0, 2)
+    named = {spool.spool_id: spool for spool in after.shelf}
+    assert [named[c].records["bambuddy"].record_id for c in left.candidates] == ["17"]
     tray = next(spool for spool in after.spools if spool.spool_id == question.spool_id)
     assert tray.records["bambuddy"].record_id == "16"
 

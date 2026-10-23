@@ -641,3 +641,38 @@ async def test_no_untagged_tray_reads_no_shelf(store: SpoolStore) -> None:
         PRINTER, [tray(0, 0, tray_uuid=UUID_A)], now=NOW, providers=["bambuddy"]
     )
     assert overlay.shelf == []
+
+
+async def test_a_spool_its_provider_places_in_a_tray_is_not_on_the_shelf(
+    store: SpoolStore,
+) -> None:
+    """Review 2 N1: one spool, Bambuddy's record placing it in tray (1,2) and another
+    provider's with no location. The spool is that tray's, so neither record is offered
+    for another tray."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("bambuddy", [located("13", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2), tray(0, 3)],
+        now=NOW,
+        providers=["native", "bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert overlay.trays[0].linked_by == "provider"
+    assert overlay.shelf == []
+
+
+async def test_a_link_to_a_tray_now_tagged_holds_nothing(store: SpoolStore) -> None:
+    """Review 2 N2: a person's link to a tray that now reads a tag is not that tray's
+    spool (`_tray_spool`), even with the same material and colour: it is on the shelf."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 1, tray_uuid=UUID_A), tray(0, 2)], now=NOW, providers=["bambuddy"]
+    )
+    assert overlay.trays[0].records == {}
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
