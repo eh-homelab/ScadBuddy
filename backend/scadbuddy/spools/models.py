@@ -134,8 +134,9 @@ class ShelfSpool(BaseModel):
 class Overlay(BaseModel):
     trays: list[TraySpool]
     #: The fresh records no tray holds: not of a tagged spool (a tag is read where the
-    #: spool is), not placed in a tray by their provider, and not of a spool a person's
-    #: link holds (one this printer's tray no longer matches holds nothing).
+    #: spool is), not of a spool ``trays`` shows, and not of one a person's link or its
+    #: provider's placement puts on another printer (one this printer's tray no longer
+    #: matches holds nothing).
     shelf: list[ShelfSpool] = Field(default_factory=list)
     #: Each provider whose records are older than `SPOOL_OVERLAY_STALE`, with when they
     #: were last refreshed (``None``: never). Its records are left out of ``trays``.

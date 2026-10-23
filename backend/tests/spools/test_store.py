@@ -716,3 +716,29 @@ async def test_a_stale_providers_placement_does_not_hold_a_spool_off_the_shelf(
     )
     assert "old" in overlay.stale
     assert [list(entry.records) for entry in overlay.shelf] == [["native"]]
+
+
+async def test_a_stale_placement_leaves_its_spool_on_the_shelf(store: SpoolStore) -> None:
+    """#4511: a provider's placement this printer's tray no longer matches holds nothing,
+    as a person's link does not: the tray does not show the spool, so the shelf does. A
+    placement on another printer still holds it."""
+    await store.replace_records(
+        "bambuddy",
+        [
+            located("13", 1, 2),
+            record(
+                "14",
+                location=SpoolLocation(printer="bambuddy:2", ams_id=0, tray_id=0),
+            ),
+        ],
+        NOW,
+    )
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2, colour="#00FF00")],
+        now=NOW,
+        providers=["bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert overlay.trays[0].records == {}
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
