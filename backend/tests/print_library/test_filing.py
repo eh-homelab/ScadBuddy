@@ -13,6 +13,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.print_library.component import CONNECT_TIMEOUT, ROW_POOL_SIZE
 from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
@@ -95,6 +96,30 @@ async def test_overlapping_puts_in_one_folder_put_one_copy(
     assert kept in staged
     for key in staged:
         assert (await native.content.stat(key) is None) == (key != kept)
+
+
+async def test_a_put_into_a_folder_deleted_since_its_check_is_404(
+    native: NativeLibrary, three_mf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4507 review: the folder is checked live inside the locked insert; the staged
+    upload is released."""
+    meta = _meta("9" * 32)
+    gifts = native.rows.create_folder("Gifts", None).id
+    staged: list[str] = []
+    stage = native.stage
+
+    async def then_delete(*args: Any, **kwargs: Any) -> NativeFile:
+        row = await stage(*args, **kwargs)
+        staged.append(row.blob_key)
+        await native.delete_folder(gifts)  # between the check and the insert
+        return row
+
+    monkeypatch.setattr(native, "stage", then_delete)
+    with pytest.raises(ApiError) as gone:
+        await put_in_folder(native, meta, three_mf, gifts, "Sign")
+    assert gone.value.status == 404
+    assert native.rows.rows_for_output(meta.id) == []
+    assert [await native.content.stat(key) for key in staged] == [None]
 
 
 async def test_a_put_names_its_copy_unique_in_the_folder(

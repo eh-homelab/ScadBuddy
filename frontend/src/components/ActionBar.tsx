@@ -1,4 +1,5 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
+import { Link } from 'react-router'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -53,6 +54,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react'
 import { bambuddyLink } from '../lib/bambuddyLinks'
+import { LIBRARY_ROOT } from '../lib/libraryPath'
 
 /** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
 const MAX_BREAKDOWN_COLOURS = 16
@@ -656,8 +658,17 @@ export function ActionBar({
           )}
           {!error && output && !stale && filed?.outputId === output.id && (
             <span className="flex min-w-0 items-center gap-1.5 text-xs" data-testid="project-filed">
-              <span className="truncate text-ok">Saved to {filed.name}</span>
-              {/* #4507 — a native folder's file has no Bambuddy page. */}
+              {filedUrl ? (
+                <span className="truncate text-ok">Saved to {filed.name}</span>
+              ) : (
+                // #4507 — a native folder's file is in ScadBuddy's own Library, not Bambuddy.
+                <span className="truncate text-ok">
+                  Saved to{' '}
+                  <Link to={LIBRARY_ROOT} className="underline underline-offset-2">
+                    {filed.name}
+                  </Link>
+                </span>
+              )}
               {filedUrl && (
                 <Button
                   type="button"

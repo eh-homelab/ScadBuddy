@@ -11,7 +11,7 @@ from psycopg.errors import ForeignKeyViolation
 
 from scadbuddy.library.outputs import OutputMeta, download_filename
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.print_library.store import NativeFile
+from scadbuddy.print_library.store import FolderGoneError, NativeFile
 from scadbuddy.store.bambuddy import folder_name
 
 
@@ -62,7 +62,7 @@ async def put_in_folder(
         row = await native.stage(f"{stem}.3mf", data, folder_id, output_id=meta.id)
     try:
         placed, inserted = await asyncio.to_thread(native.rows.put_for_output, row, folder_id, stem)
-    except ForeignKeyViolation:
+    except (FolderGoneError, ForeignKeyViolation):
         await native.content.delete(row.blob_key)
         await native.folder(folder_id)  # the 404 naming it
         raise

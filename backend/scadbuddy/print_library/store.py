@@ -29,6 +29,10 @@ class FolderCycleError(Exception):
     """A folder cannot move under itself or one of its descendants."""
 
 
+class FolderGoneError(LookupError):
+    """The folder a file was to go in is gone (deleted since its check)."""
+
+
 class NativeFolder(BaseModel):
     id: int
     name: str
@@ -327,8 +331,10 @@ class NativeLibraryStore:
         """Insert ``row``, an output's copy, in ``folder_id`` under a name made from
         ``stem`` unique in the folder, unless a live row of the output is already there:
         that row and False, or ``row`` as inserted and True. Under the same per-output lock
-        as `file_for_output`, so overlapping calls put one copy (#4507). A folder that is
-        gone is the FK's `ForeignKeyViolation`."""
+        as `file_for_output`, so overlapping calls put one copy (#4507). The folder is
+        locked ``FOR KEY SHARE`` first, so it is live until the commit, and one deleted
+        since the caller's check is `FolderGoneError`; a delete waits for the commit and
+        then trashes this copy with the folder's other files."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
             there = [
@@ -338,6 +344,11 @@ class NativeLibraryStore:
             ]
             if there:
                 return there[0], False
+            live = conn.execute(
+                "SELECT id FROM library_folders WHERE id = %s FOR KEY SHARE", (folder_id,)
+            ).fetchone()
+            if live is None:
+                raise FolderGoneError(folder_id)
             taken = conn.execute(
                 "SELECT name FROM library_files WHERE folder_id = %s AND deleted_at IS NULL",
                 (folder_id,),

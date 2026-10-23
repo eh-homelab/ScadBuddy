@@ -1859,11 +1859,12 @@ describe('CustomizePage, project file (#317)', () => {
     const status = await screen.findByTestId('project-filed')
     expect(status).toHaveTextContent('Saved to Reagan Keychain')
     expect(within(status).getByRole('button', { name: 'Open in Bambuddy' })).toBeInTheDocument()
+    expect(within(status).queryByRole('link')).not.toBeInTheDocument()
     expect(filed).toHaveLength(1)
     expect(await filed[0]).toEqual({ project_id: 1 })
   })
 
-  it('offers no Bambuddy link for a file in ScadBuddy’s own library', async () => {
+  it('links a file in ScadBuddy’s own library to the Library, not Bambuddy', async () => {
     // #4507 — a native folder's answer has no Bambuddy page.
     withLastProject(1)
     server.use(
@@ -1885,6 +1886,8 @@ describe('CustomizePage, project file (#317)', () => {
 
     const status = await screen.findByTestId('project-filed')
     expect(within(status).queryByRole('button', { name: 'Open in Bambuddy' })).not.toBeInTheDocument()
+    expect(status).toHaveTextContent('Saved to Reagan Keychain')
+    expect(within(status).getByRole('link', { name: 'Reagan Keychain' })).toHaveAttribute('href', '/library')
   })
 
   it('uploads nothing on Generate with "No project", and leaves the default project alone', async () => {

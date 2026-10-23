@@ -35,6 +35,7 @@ from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import trash_copies
 from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
+from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.store.cache import materialize_result
@@ -301,14 +302,19 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         emit(state.events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
         return {}
 
-    async def native_file_check(request: dict[str, Any]) -> dict[str, Any]:
-        """The folder must be the native library's (404 otherwise), before anything is
-        written; the file's name, as a Bambuddy project file's is (#317)."""
+    async def serving_native() -> NativeLibrary:
+        """The native library, or the 409 when the Bambuddy one is in use."""
         native = await components.get(PRINT_LIBRARY).serving_native()
         if native is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT, "ScadBuddy's own library is not the one in use"
             )
+        return native
+
+    async def native_file_check(request: dict[str, Any]) -> dict[str, Any]:
+        """The folder must be the native library's (404 otherwise), before anything is
+        written; the file's name, as a Bambuddy project file's is (#317)."""
+        native = await serving_native()
         meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
         await native.folder(request["folder_id"])
         return {"stem": await output_stem(meta, state.outputs, state.catalogue)}
@@ -317,11 +323,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         """Generate's filing into a native folder (#4507): the output's 3MF uploaded there
         once, with no Bambuddy at all (`put_in_folder`). A copy of this output already in
         the folder is the answer, ``created: false``."""
-        native = await components.get(PRINT_LIBRARY).serving_native()
-        if native is None:
-            raise ApiError(
-                status.HTTP_409_CONFLICT, "ScadBuddy's own library is not the one in use"
-            )
+        native = await serving_native()
         meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
         folder_id: int = request["folder_id"]
         model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
