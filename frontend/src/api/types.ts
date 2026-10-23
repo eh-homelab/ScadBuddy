@@ -769,6 +769,7 @@ export interface SessionResource {
     | 'project'
     | 'bambuddy_file'
     | 'print_archive'
+    | 'library_file'
     | 'unclassified'
   /** Null only for `unclassified`. */
   id: string | null

@@ -151,6 +151,7 @@ const LOOKUP: Record<ResourceRef['type'], true> = {
   setting: true,
   project: true,
   bambuddy_file: true,
+  library_file: true,
   print_archive: true,
 }
 const VALID_TYPES: readonly string[] = Object.keys(LOOKUP)

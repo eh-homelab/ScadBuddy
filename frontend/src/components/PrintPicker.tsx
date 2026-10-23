@@ -807,6 +807,7 @@ export function PrintPicker({
     onRan,
   })
   const { run, running, runError, refused, result, unanswered } = runPrint
+  const queueUrl = result?.bambuddy_url ?? null
   /** #4250 — quote mode: the price book's filaments, and the one chosen per slot. */
   const quoting = quote !== undefined
   const priceBook = useAsync(() => (open && quoting ? api.priceBook() : Promise.resolve(null)), [open, quoting])
@@ -1397,8 +1398,8 @@ export function PrintPicker({
             <Button type="button" variant="outline" onClick={close}>
               Done
             </Button>
-            {result.bambuddy_url && (
-              <Button type="button" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+            {queueUrl && (
+              <Button type="button" onClick={() => openExternal(bambuddyLink(queueUrl))}>
                 Open in queue
               </Button>
             )}

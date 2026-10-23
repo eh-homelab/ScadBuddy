@@ -4,6 +4,7 @@ import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { SessionResource } from '../../api/types'
 import { editPath, modelPath } from '../../lib/deeplink'
+import { LIBRARY_ROOT } from '../../lib/libraryPath'
 import { useAsync } from '../../lib/useAsync'
 import { Undo2Icon } from 'lucide-react'
 import {
@@ -40,6 +41,7 @@ const GROUPS: ReadonlyArray<{ type: Kind; label: string }> = [
   { type: 'setting', label: 'Settings' },
   { type: 'project', label: 'Bambuddy projects' },
   { type: 'bambuddy_file', label: 'Bambuddy files' },
+  { type: 'library_file', label: 'Library files' },
   { type: 'unclassified', label: 'Other changes' },
 ]
 
@@ -135,6 +137,10 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
       return { name: `project ${id}`, to: null }
     case 'bambuddy_file':
       return { name: `library file ${id}`, to: null }
+    case 'library_file':
+      // #4507 — a file in ScadBuddy's own library: `?file=` opens the folder it is in now
+      // (LibraryPage moves the link to that folder's path), wherever it was moved since.
+      return { name: `library file ${id}`, to: page(`${LIBRARY_ROOT}?file=${encodeURIComponent(id)}`) }
     case 'unclassified':
       return { name: e.tools.join(', '), to: null }
   }

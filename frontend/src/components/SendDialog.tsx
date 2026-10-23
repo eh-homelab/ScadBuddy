@@ -46,6 +46,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SendResult | null>(null)
+  const libraryUrl = result?.bambuddy_url ?? null
 
   function close() {
     setError(null)
@@ -130,8 +131,8 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
           {result ? (
             <>
               <Button type="button" variant="outline" onClick={close}>Done</Button>
-              {result.bambuddy_url && (
-                <Button type="button" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+              {libraryUrl && (
+                <Button type="button" onClick={() => openExternal(bambuddyLink(libraryUrl))}>
                   Open in library
                 </Button>
               )}

@@ -32,10 +32,13 @@ export function folderIdOf(folders: LibraryFolderView[], segments: string[]): nu
   return parent
 }
 
+/** What a path needs of a folder: the Library's own, or a destination picker's (#4507). */
+type FolderLink = Pick<LibraryFolderView, 'id' | 'name' | 'parent_id'>
+
 /** The folder and its ancestors, the top first. */
-export function ancestry(folders: LibraryFolderView[], id: number | null): LibraryFolderView[] {
+export function ancestry<F extends FolderLink>(folders: F[], id: number | null): F[] {
   const byId = new Map(folders.map((folder) => [folder.id, folder]))
-  const chain: LibraryFolderView[] = []
+  const chain: F[] = []
   let at = id === null ? undefined : byId.get(id)
   while (at && !chain.includes(at)) {
     chain.unshift(at)
@@ -45,7 +48,7 @@ export function ancestry(folders: LibraryFolderView[], id: number | null): Libra
 }
 
 /** The page's path for folder `id` (the top level for `null`). */
-export function libraryPath(folders: LibraryFolderView[], id: number | null): string {
+export function libraryPath(folders: FolderLink[], id: number | null): string {
   return libraryPathOf(ancestry(folders, id).map((folder) => folder.name))
 }
 

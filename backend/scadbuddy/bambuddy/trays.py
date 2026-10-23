@@ -390,7 +390,10 @@ def tray_questions(
     for seen in seen_trays(status):
         if seen.tray_uuid or seen.tag_uid or (seen.ams_id, seen.tray_id) in held:
             continue
-        material = seen.material or ""
+        # A tray reporting no material says nothing to match on: an empty material
+        # would match a shelf record with none (#4511).
+        if not (material := seen.material or ""):
+            continue
         candidates = close_spools(shelf, material, seen.colour)
         if not candidates:
             continue
