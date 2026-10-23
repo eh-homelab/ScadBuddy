@@ -716,3 +716,81 @@ async def test_a_stale_providers_placement_does_not_hold_a_spool_off_the_shelf(
     )
     assert "old" in overlay.stale
     assert [list(entry.records) for entry in overlay.shelf] == [["native"]]
+
+
+async def test_a_stale_placement_leaves_its_spool_on_the_shelf(store: SpoolStore) -> None:
+    """#4511: a provider's placement this printer's tray no longer matches holds nothing,
+    as a person's link does not: the tray does not show the spool, so the shelf does. A
+    placement on another printer still holds it."""
+    await store.replace_records(
+        "bambuddy",
+        [
+            located("13", 1, 2),
+            record(
+                "14",
+                location=SpoolLocation(printer="bambuddy:2", ams_id=0, tray_id=0),
+            ),
+        ],
+        NOW,
+    )
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2, colour="#00FF00")],
+        now=NOW,
+        providers=["bambuddy"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert overlay.trays[0].records == {}
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_a_placement_by_a_provider_with_no_name_here_holds_its_spool(
+    store: SpoolStore,
+) -> None:
+    """#4513 review: a provider ``located`` does not name has no way to place a spool on
+    this printer, so its placement is somewhere else, and holds the spool there."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("bambuddy", [located("13", 1, 2), record("free")], NOW)
+    overlay = await store.overlay(PRINTER, [tray(1, 2)], now=NOW, providers=["native", "bambuddy"])
+    assert overlay.trays[0].records == {}
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["free"]
+
+
+async def test_a_spool_placed_here_is_off_the_shelf_with_all_its_records(
+    store: SpoolStore,
+) -> None:
+    """#4513 review: one spool, Bambuddy's record placing it in this printer's matching
+    tray and another provider's unplaced: the tray shows it, so neither record is on the
+    shelf."""
+    await store.replace_records("bambuddy", [record("13", colour="#FF0000")], NOW)
+    await store.replace_records("native", [record("n1", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(0, 1), provider="bambuddy", record_id="13")
+    await store.link(PRINTER, tray(0, 1), provider="native", record_id="n1")
+    await store.unlink(PRINTER, 0, 1)
+    await store.replace_records("bambuddy", [located("13", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER,
+        [tray(1, 2), tray(0, 3)],
+        now=NOW,
+        providers=["bambuddy", "native"],
+        located={"bambuddy": "bambuddy:1"},
+    )
+    assert overlay.trays[0].linked_by == "provider"
+    assert list(overlay.trays[0].records) == ["bambuddy", "native"]
+    assert overlay.shelf == []
+
+
+async def test_a_second_placement_in_one_tray_is_on_the_shelf(store: SpoolStore) -> None:
+    """#4513 review: two records both place themselves in one matching tray. The tray
+    shows the first (`_located`, by record id); the other is not in the tray, so it is on
+    the shelf for a person to link."""
+    await store.replace_records("bambuddy", [located("13", 1, 2), located("14", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
+    )
+    assert overlay.trays[0].records["bambuddy"].record_id == "13"
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["14"]

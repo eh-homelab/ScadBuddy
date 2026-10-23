@@ -13,6 +13,7 @@ import pytest
 import respx
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.bambuddy import trays
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.filaments import (
     FilamentPlan,
@@ -43,7 +44,7 @@ from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.slicing.catalogue import native_catalogue
 from scadbuddy.slicing.profiles import Profiles
-from scadbuddy.spools.models import Overlay, ShelfSpool, SpoolSnapshot, TraySpool
+from scadbuddy.spools.models import Overlay, SeenTray, ShelfSpool, SpoolSnapshot, TraySpool
 from tests.bambuddy.conftest import recording
 from tests.slicing.conftest import PROFILES
 from tests.support.no_bambuddy import forbid_bambuddy
@@ -517,6 +518,47 @@ async def test_every_plate_keeps_the_question_and_suggests_only_trays() -> None:
     assert [tray.tray_id for tray in merged.trays] == [1]
     assert len(merged.shelf) == 2
     assert {c.spool_id for c in merged.suggested} <= {s.spool_id for s in merged.spools}
+
+
+async def test_one_overlay_numbers_the_shelf_alike_on_every_plate() -> None:
+    """#4511: shelf ids are positional, and `every_plate` keeps only the first plate's
+    rows, so every plate's questions must name the same rows by the same ids."""
+    plates = await gather_plate_options(
+        None,
+        library_file_id=None,
+        printer_id=None,
+        plate_ids=[1, 2, 3],
+        known=lambda plate: _requirements("#FFFFFF"),
+        trays_from=h2c_status(),
+        overlay=_white_shelf(),
+        now=NOW,
+    )
+    first, *rest = (
+        (
+            [(entry.spool_id, entry.records["bambuddy"].record_id) for entry in plate.shelf],
+            [tray.candidates for tray in plate.trays],
+        )
+        for plate in plates
+    )
+    assert first[0] and all(other == first for other in rest)
+    merged = every_plate(plates)
+    assert [(entry.spool_id, entry.records["bambuddy"].record_id) for entry in merged.shelf] == (
+        first[0]
+    )
+
+
+def test_a_tray_with_no_material_is_not_asked_about(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#4511: a tray reporting no material has nothing to match on, so a shelf record
+    with none is not close to it. `_filled` drops such a tray before `seen_trays` today;
+    the question does not lean on that."""
+    monkeypatch.setattr(
+        trays, "seen_trays", lambda status: [SeenTray(ams_id=0, tray_id=2, colour="#FFFFFF")]
+    )
+    overlay = Overlay(
+        trays=[TraySpool(ams_id=0, tray_id=2)],
+        shelf=[_shelf(_record("bare", material=None, colour="#FFFFFF"))],
+    )
+    assert trays.tray_questions(h2c_status(), overlay) == ([], [])
 
 
 # --- the resolver ------------------------------------------------------------------
