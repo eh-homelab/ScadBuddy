@@ -265,6 +265,8 @@ export class TurnHost {
   async run(input: SessionTurnInput, control: TurnControl): Promise<SessionTurnResult> {
     const id = input.sessionId
     const attempt = input.attempt ?? randomUUID()
+    // A replica shutting down takes no new placement, and evicts nothing for one: the turn moves.
+    if (this.#stopping) throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: false })
     // Its place here again (§5.2): a home kept across turns may have let its reservation lapse
     // (`warm_idle_seconds`), and the cache filled since. Refused, before anything is claimed or
     // spawned, when every process here runs a turn: the workflow moves the turn (`movesWorker`),

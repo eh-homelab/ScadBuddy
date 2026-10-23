@@ -342,6 +342,8 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         if (kept && failureType(err) === NO_CAPACITY && patched(FULL_HOME_PATCH)) placements++
         if (home && !lost.includes(home)) lost.push(home)
         home = undefined
+        // `restarted` after a refusal too (a full home, NoCapacity): it only asks the next worker to
+        // read the transcript, and the turn's message, not landed there, is sent as itself (§5.5).
         continuation = mergeRestarted(continuation)
       }
     }

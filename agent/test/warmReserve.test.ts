@@ -7,7 +7,7 @@ import { TurnHost, type TurnHostDeps } from '../src/sessions/turnHost.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { RESERVATION_HOLD_MS, type WarmQuery, WarmSessions } from '../src/sessions/warm.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
-import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY } from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY, SHUTTING_DOWN_FAILURE } from '../src/temporal/session/names.js'
 
 // WarmSessions' places for AgentSession (spec 2026-10-13 §5.2): `reserve` is acquire_worker's,
 // `release` release_worker's. A full replica gives up its least recently used idle process or
@@ -266,6 +266,19 @@ describe('WarmSessions.reserve and release', () => {
     claims[1]!(new Error('the newer claim failed'))
     await expect(newer).rejects.toThrow('the newer claim failed')
     expect(warm.reserve('other')).toBe('reserved')
+  })
+
+  it('a draining replica refuses an arriving placement ShuttingDown, before it reserves or evicts anything', async () => {
+    const { warm, spawned, running } = cache(1)
+    const idle = await running('idle')
+    idle.left()
+    const sql = (() => Promise.reject(new Error('the refused turn touched the database'))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    host.drain()
+    const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
+    await expect(host.run({ sessionId: 'late', turnId: 't1', attempt: 'run:0' }, control)).rejects.toMatchObject({ type: SHUTTING_DOWN_FAILURE })
+    expect(spawned.get('idle')?.closed()).toBe(false)
+    expect(warm.size()).toBe(1)
   })
 
   it('unreserve gives back only a reservation: a session`s process stays', async () => {

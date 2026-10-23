@@ -343,7 +343,8 @@ lack them (§2.3).
   `home` across turns and across continue-as-new (`SessionStart.home`), so it acquires
   only for a session's first turn and after a failure. Acquire is the session's creation,
   not a per-turn cost.
-- **Arrival re-reserves.** Because `home` outlives its reservation, the cache may have
+- **Arrival re-reserves.** A replica that is shutting down refuses an arriving turn
+  `ShuttingDown` first, before it reserves or evicts anything. Because `home` outlives its reservation, the cache may have
   filled since: the session's idle process evicted for another session, or its
   reservation lapsed. `session_turn` therefore reserves again as it arrives
   (`TurnHost.run`, before it claims the turn or spawns anything), as `acquire_worker`
