@@ -6,7 +6,10 @@ import {
   checkPlan,
   facets,
   filterSpools,
+  colourWord,
   fromTrays,
+  providerLabel,
+  trayChoiceLabel,
   loadedLabel,
   seedPlan,
   slicedPlateSlots,
@@ -415,3 +418,46 @@ describe('slicedPlateSlots (#2702 review)', () => {
   })
 })
 
+// #3818 — the backend's own words: each pair is `trays.colour_word` on this tree, run
+// with `uv run python -c "from scadbuddy.bambuddy.trays import colour_word; …"` (2026-10-22).
+describe('colourWord', () => {
+  it.each([
+    ['#FF1493', 'pink'],
+    ['#0047BB', 'blue'],
+    ['#F5547C', 'pink'],
+    ['#688197', 'grey'],
+    ['#27272C', 'black'],
+    ['#E8532F', 'red'],
+    ['#FFFFFF', 'white'],
+    ['#808000', 'green'],
+    ['#C0C0C0', 'white'],
+    ['#FFD700', 'yellow'],
+    ['#8B4513', 'brown'],
+    ['#800080', 'purple'],
+    ['#FFA500', 'orange'],
+  ])('names %s %s, as the backend does', (colour, word) => {
+    expect(colourWord(colour)).toBe(word)
+  })
+
+  it('takes an alpha byte and refuses what is not a colour', () => {
+    expect(colourWord('FF149300')).toBe('pink')
+    expect(colourWord(null)).toBeNull()
+    expect(colourWord('#12')).toBeNull()
+  })
+})
+
+describe('trayChoiceLabel and providerLabel', () => {
+  it('says what is in a tray and where', () => {
+    expect(trayChoiceLabel({ spool_id: -1, material: 'PLA', colour: '#0047BB', label: 'AMS-A slot 1' })).toBe(
+      'PLA blue in AMS-A slot 1',
+    )
+    expect(
+      trayChoiceLabel({ spool_id: -1, material: 'PETG', colour: null, loaded: { printer_id: 0, ams_id: 1, tray_id: 2 } }),
+    ).toMatch(/^PETG in AMS-B/)
+  })
+
+  it('names the providers', () => {
+    expect(providerLabel('bambuddy')).toBe('Bambuddy')
+    expect(providerLabel('spoolman')).toBe('Spoolman')
+  })
+})

@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import type { SpoolOption, UnknownTray } from '../api/types'
+import type { SpoolOption, TraySpoolLink, UnknownTray } from '../api/types'
 
 const DECLINED_KEY = 'scadbuddy.tray-declined'
 
-function trayKey(printerId: number, tray: UnknownTray): string {
+function trayKey(printerId: number | string, tray: UnknownTray): string {
   return `${printerId}:${tray.ams_id}:${tray.tray_id}`
 }
 
@@ -20,7 +20,8 @@ function readDeclined(): Record<string, string> {
  * tray changes: the fingerprint (material, colour, state) is kept beside the "no", so a
  * tray reloaded with something else is asked about again.
  */
-export function useDeclinedTrays(printerId: number | null | undefined, trays: readonly UnknownTray[]) {
+/** `printerId` is the Bambuddy printer, or (#3818) a native run's registry row. */
+export function useDeclinedTrays(printerId: number | string | null | undefined, trays: readonly UnknownTray[]) {
   const [declined, setDeclined] = useState(readDeclined)
   const isDeclined = (tray: UnknownTray) =>
     printerId != null && declined[trayKey(printerId, tray)] === tray.fingerprint
@@ -55,4 +56,14 @@ export function howFull(spool: SpoolOption): string | null {
   const word =
     share > 0.85 ? 'about full' : share > 0.6 ? 'about three-quarters full' : share > 0.35 ? 'about half full' : share > 0.15 ? 'about a quarter full' : 'nearly empty'
   return `${word}, ${grams}`
+}
+
+/**
+ * #3818 — what the native link names for a candidate: its physical spool, else its first
+ * provider record (the overlay's priority order). `null` for a candidate with neither.
+ */
+export function linkOf(spool: SpoolOption): TraySpoolLink | null {
+  if (spool.physical_spool_id) return { physical_spool_id: spool.physical_spool_id }
+  const [provider, record] = Object.entries(spool.records ?? {})[0] ?? []
+  return provider && record ? { provider, record_id: record.record_id } : null
 }

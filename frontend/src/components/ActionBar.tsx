@@ -168,8 +168,18 @@ export function ActionBar({
    * the 3MF there. Not remembered per model, as a project is: a folder holds no prints.
    */
   const [folderId, setFolderId] = useState<number | null>(null)
+  /**
+   * #3818 — with no Bambuddy and the native library, the destinations are ScadBuddy's own
+   * folders (plan 2026-10-18 D6): Bambuddy has no projects to list. Read once the
+   * settings say which, so a page with no Bambuddy never asks it.
+   */
+  const backends = useAsync(() => api.getSettings(), [])
+  const settled = backends.data !== undefined || backends.error !== undefined
+  const nativeLibrary = !backends.data?.bambuddy_url && backends.data?.library_backend === 'native'
   /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
-  const projects = useProjectList()
+  const list = useProjectList(undefined, settled, nativeLibrary)
+  // Loading until it is read, settings first: a list not yet asked for is not an empty one.
+  const projects = useMemo(() => (settled ? list : { ...list, loading: true }), [settled, list])
   const listed = projects.choices?.projects
   const paths = useMemo(() => breadcrumbs(listed ?? []), [listed])
   const projectPath = (id: number) => paths.get(id) ?? `project ${id}`
@@ -537,6 +547,7 @@ export function ActionBar({
       folder={folderChoice}
       list={projects}
       onProject={setProject}
+      native={nativeLibrary}
       // #666 — locked while Generate files, so the project on screen is where it went.
       disabled={generating || confirming !== null}
       onCreating={setPageCreating}

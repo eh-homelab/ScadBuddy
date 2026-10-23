@@ -3,7 +3,8 @@ import { ApiError, api } from '../../api/client'
 import type { SpoolOption, UnknownTray } from '../../api/types'
 import { bambuddyBase, useLoadBambuddyLinks } from '../../lib/bambuddyLinks'
 import { openExternal } from '../../lib/embed'
-import { howFull } from '../../lib/trays'
+import { providerLabel } from '../../lib/filaments'
+import { howFull, linkOf } from '../../lib/trays'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -15,8 +16,22 @@ function candidateName(spool: SpoolOption): string {
   return [spool.brand, spool.color_name].filter(Boolean).join(' ') || `${spool.material} spool`
 }
 
+/** "Bambuddy's record", or "ScadBuddy's and Bambuddy's records", for the candidate's line. */
+function providersOf(spool: SpoolOption): string {
+  const names = Object.keys(spool.records ?? {}).map(providerLabel)
+  if (names.length === 0) return ''
+  return `${names.join(' and ')}${names.length === 1 ? "'s record" : "'s records"}`
+}
+
 type Props = {
   printerId: number
+  /**
+   * #3818 — a native run's tray (plan 2026-10-18 D1): its candidates are the spool
+   * providers' records no tray holds, and "yes" links one through ScadBuddy's own
+   * `PUT /printers/{printer}/trays/{ams}/{tray}/spool` on this registry printer, never
+   * Bambuddy's assignment.
+   */
+  native?: { printer: string }
   tray: UnknownTray
   spools: readonly SpoolOption[]
   /** Bambuddy now knows the spool: re-read the dialog's choices. */
@@ -30,27 +45,34 @@ type Props = {
  * scope); "No / not sure" records nothing, offers the tray itself as a choice and is not
  * asked again until the tray changes.
  */
-export function TrayQuestion({ printerId, tray, spools, onAssigned, onDecline }: Props) {
+export function TrayQuestion({ printerId, native, tray, spools, onAssigned, onDecline }: Props) {
   useLoadBambuddyLinks()
   const candidates = (tray.candidates ?? [])
     .map((id) => spools.find((spool) => spool.spool_id === id))
-    .filter((spool): spool is SpoolOption => spool !== undefined)
+    .filter((spool): spool is SpoolOption => spool !== undefined && (!native || linkOf(spool) !== null))
   const [picked, setPicked] = useState<number | null>(candidates[0]?.spool_id ?? null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const what = [tray.colour_word, tray.material].filter(Boolean).join(' ')
   const one = candidates.length === 1 ? candidates[0] : undefined
-  const base = bambuddyBase()
+  const base = native ? null : bambuddyBase()
 
   async function confirm() {
     if (picked === null) return
     setSaving(true)
     setError(null)
     try {
-      await api.assignTraySpool(printerId, tray.ams_id, tray.tray_id, picked)
+      if (native) {
+        const spool = candidates.find((entry) => entry.spool_id === picked)
+        const link = spool ? linkOf(spool) : null
+        if (link) await api.linkTraySpool(native.printer, tray.ams_id, tray.tray_id, link)
+      } else {
+        await api.assignTraySpool(printerId, tray.ams_id, tray.tray_id, picked)
+      }
       onAssigned()
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Bambuddy could not record it.')
+      const fallback = native ? 'ScadBuddy could not link it.' : 'Bambuddy could not record it.'
+      setError(cause instanceof ApiError ? cause.detail : fallback)
     } finally {
       setSaving(false)
     }
@@ -62,7 +84,11 @@ export function TrayQuestion({ printerId, tray, spools, onAssigned, onDecline }:
       <span>{candidateName(spool)}</span>
       {howFull(spool) && <span className="text-muted-foreground">{howFull(spool)}</span>}
       {spool.storage_location && <span className="text-muted-foreground">· kept in {spool.storage_location}</span>}
-      <span className="text-muted-foreground">· spool #{spool.spool_id}</span>
+      {native ? (
+        providersOf(spool) && <span className="text-muted-foreground">· {providersOf(spool)}</span>
+      ) : (
+        <span className="text-muted-foreground">· spool #{spool.spool_id}</span>
+      )}
     </>
   )
 
@@ -78,7 +104,9 @@ export function TrayQuestion({ printerId, tray, spools, onAssigned, onDecline }:
         <span className="mr-1.5 inline-flex align-[-3px]">
           <Swatch colour={tray.colour} size="sm" />
         </span>
-        {tray.label} has {what}, but Bambuddy doesn&apos;t know which spool it is.
+        {native
+          ? `${tray.label} has ${what}, but no spool record is linked to it.`
+          : <>{tray.label} has {what}, but Bambuddy doesn&apos;t know which spool it is.</>}
       </p>
       {candidates.length > 0 && (
         <>

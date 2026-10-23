@@ -159,9 +159,110 @@ interface Props {
    * the create's completion moves `value`, which must not happen under a Generate.
    */
   onCreating?: (creating: boolean) => void
+  /**
+   * #3818 (plan 2026-10-18 D6) — a print on the native path: ScadBuddy's own library
+   * folders (`/print/projects?native=true`), no projects, and nothing asked of Bambuddy.
+   * The choice is `folder`'s; none is the folder the filing picks (the template's).
+   */
+  native?: boolean
 }
 
-export function ProjectPicker({
+/** The native picker's value for "the folder the filing picks": Radix keeps '' for none. */
+const FILING_FOLDER = 'filing'
+
+/**
+ * #3818 — the native path's destination: a folder of ScadBuddy's own library, or the one
+ * the filing picks (`<Template title>/` for an output, the top level for a library file).
+ * Projects are Bambuddy's (D6), so none is offered or named.
+ */
+function NativeFolderPicker({
+  folder,
+  list,
+  id,
+  testId,
+  inline,
+  disabled,
+}: {
+  folder?: Props['folder']
+  list: ProjectList
+  id: string
+  testId: string
+  inline: boolean
+  disabled: boolean
+}) {
+  const { choices, loading, error, retry } = list
+  const folders = choices?.folders ?? []
+  const value = folder?.value ?? null
+  if (loading) {
+    return (
+      <div role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground">
+        <span className="sr-only">Loading folders</span>
+        <Skeleton className={cn('h-8', inline ? 'w-40' : 'w-full')} />
+      </div>
+    )
+  }
+  return (
+    <div className={inline ? 'flex flex-wrap items-center gap-2' : 'grid gap-1.5'}>
+      <Label htmlFor={id} className={inline ? 'text-xs font-normal text-muted-foreground' : undefined}>
+        Folder
+      </Label>
+      <Select
+        value={value === null ? FILING_FOLDER : String(value)}
+        onValueChange={(next) => folder?.onChange(next === FILING_FOLDER ? null : Number(next))}
+        disabled={disabled || !folder}
+      >
+        <SelectTrigger
+          id={id}
+          data-testid={testId}
+          data-value={value === null ? '' : `folder-${value}`}
+          size={inline ? 'sm' : 'default'}
+          className={inline ? 'w-auto max-w-64' : 'w-full'}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={FILING_FOLDER} data-testid="folder-option-filing">
+            The template&rsquo;s folder
+          </SelectItem>
+          {folders.map((entry) => (
+            <SelectItem key={entry.id} value={String(entry.id)} data-testid={`folder-option-${entry.id}`}>
+              {entry.path} · {folderDetail(entry)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {error && (
+        <p role="alert" className="basis-full text-[13px] text-destructive">
+          {error}{' '}
+          <Button size="sm" variant="outline" onClick={retry}>
+            Retry
+          </Button>
+        </p>
+      )}
+    </div>
+  )
+}
+
+export function ProjectPicker(props: Props) {
+  if (props.native) return <NativePicker {...props} />
+  return <BambuddyProjectPicker {...props} />
+}
+
+function NativePicker({ folder, onLoaded, list, id = 'print-project', testId = 'project-select', inline = false, disabled = false }: Props) {
+  const own = useProjectList(onLoaded, list === undefined, true)
+  return (
+    <NativeFolderPicker
+      folder={folder}
+      list={list ?? own}
+      id={id}
+      testId={testId}
+      inline={inline}
+      disabled={disabled}
+    />
+  )
+}
+
+function BambuddyProjectPicker({
   value,
   onChange,
   folder,

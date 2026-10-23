@@ -30,6 +30,120 @@ export function fromTrays(options: Pick<FilamentOptions, 'source'> | { source?: 
 }
 
 /**
+ * Basic colour words, for "PLA blue in AMS-A slot 1": the backend's own table
+ * (`backend/scadbuddy/bambuddy/trays.py` `_WORDS`), so a tray reads here as the
+ * backend's tray question names it.
+ */
+const COLOUR_WORDS: [string, [number, number, number]][] = [
+  ['black', [25, 25, 25]],
+  ['white', [245, 245, 245]],
+  ['grey', [128, 128, 128]],
+  ['red', [200, 30, 30]],
+  ['orange', [240, 130, 30]],
+  ['yellow', [240, 220, 40]],
+  ['green', [40, 160, 60]],
+  ['blue', [30, 90, 200]],
+  ['purple', [130, 50, 170]],
+  ['pink', [240, 120, 180]],
+  ['brown', [110, 70, 40]],
+]
+
+type Lab = [number, number, number]
+
+/** `#RRGGBB` sRGB in CIE L*a*b* against the D65 white: `filaments.py` `_lab`, ported. */
+function lab(red: number, green: number, blue: number): Lab {
+  const [r, g, b] = [red, green, blue].map((value) => {
+    const c = value / 255
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+  }) as Lab
+  const x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047
+  const y = 0.2126729 * r + 0.7151522 * g + 0.072175 * b
+  const z = (0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883
+  const f = (t: number) => (t > 216 / 24389 ? Math.cbrt(t) : ((24389 / 27) * t + 16) / 116)
+  const [fx, fy, fz] = [f(x), f(y), f(z)]
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]
+}
+
+const rad = (degrees: number) => (degrees * Math.PI) / 180
+
+/**
+ * The CIEDE2000 difference (Sharma, Wu and Dalal, 2005; kL = kC = kH = 1): the backend's
+ * `filaments.py` `ciede2000`, ported line for line so a word here is the backend's word.
+ */
+function ciede2000([l1, a1, b1]: Lab, [l2, a2, b2]: Lab): number {
+  const cMean = (Math.hypot(a1, b1) + Math.hypot(a2, b2)) / 2
+  const g = 0.5 * (1 - Math.sqrt(cMean ** 7 / (cMean ** 7 + 25 ** 7)))
+  const [a1p, a2p] = [a1 * (1 + g), a2 * (1 + g)]
+  const [c1p, c2p] = [Math.hypot(a1p, b1), Math.hypot(a2p, b2)]
+  const hue = (b: number, a: number, c: number) => (c ? (((Math.atan2(b, a) * 180) / Math.PI) % 360 + 360) % 360 : 0)
+  const [h1p, h2p] = [hue(b1, a1p, c1p), hue(b2, a2p, c2p)]
+  const deltaL = l2 - l1
+  const deltaC = c2p - c1p
+  const deltaH =
+    c1p * c2p === 0 ? 0 : Math.abs(h2p - h1p) <= 180 ? h2p - h1p : h2p - h1p > 180 ? h2p - h1p - 360 : h2p - h1p + 360
+  const deltaBigH = 2 * Math.sqrt(c1p * c2p) * Math.sin(rad(deltaH / 2))
+  const lMean = (l1 + l2) / 2
+  const cpMean = (c1p + c2p) / 2
+  const hMean =
+    c1p * c2p === 0
+      ? h1p + h2p
+      : Math.abs(h1p - h2p) <= 180
+        ? (h1p + h2p) / 2
+        : h1p + h2p < 360
+          ? (h1p + h2p + 360) / 2
+          : (h1p + h2p - 360) / 2
+  const t =
+    1 -
+    0.17 * Math.cos(rad(hMean - 30)) +
+    0.24 * Math.cos(rad(2 * hMean)) +
+    0.32 * Math.cos(rad(3 * hMean + 6)) -
+    0.2 * Math.cos(rad(4 * hMean - 63))
+  const deltaTheta = 30 * Math.exp(-(((hMean - 275) / 25) ** 2))
+  const rC = 2 * Math.sqrt(cpMean ** 7 / (cpMean ** 7 + 25 ** 7))
+  const sL = 1 + (0.015 * (lMean - 50) ** 2) / Math.sqrt(20 + (lMean - 50) ** 2)
+  const sC = 1 + 0.045 * cpMean
+  const sH = 1 + 0.015 * cpMean * t
+  const rT = -Math.sin(rad(2 * deltaTheta)) * rC
+  const [lightness, chroma, hueTerm] = [deltaL / sL, deltaC / sC, deltaBigH / sH]
+  return Math.sqrt(lightness ** 2 + chroma ** 2 + hueTerm ** 2 + rT * chroma * hueTerm)
+}
+
+/** The nearest basic colour word for `#RRGGBB` by CIEDE2000, as `trays.py` `colour_word`; else `null`. */
+export function colourWord(colour: string | null | undefined): string | null {
+  const hex = /^#?([0-9a-f]{6})(?:[0-9a-f]{2})?$/i.exec((colour ?? '').trim())?.[1]
+  if (!hex) return null
+  const [r, g, b] = [0, 2, 4].map((at) => parseInt(hex.slice(at, at + 2), 16)) as Lab
+  const here = lab(r, g, b)
+  let best: string | null = null
+  let nearest = Infinity
+  for (const [word, rgb] of COLOUR_WORDS) {
+    const distance = ciede2000(here, lab(...rgb))
+    if (distance < nearest) {
+      nearest = distance
+      best = word
+    }
+  }
+  return best
+}
+
+/**
+ * #3818 — a loaded tray as a native run's choice: `"PLA blue in AMS-A slot 1"`, from the
+ * tray's own material and colour and its `label` (the backend's `tray_label`).
+ */
+export function trayChoiceLabel(spool: SpoolOption): string {
+  const where = spool.label ?? (spool.loaded ? trayPlace(spool.loaded) : null)
+  const what = [spool.material, colourWord(spool.colour)].filter(Boolean).join(' ')
+  return where ? `${what} in ${where}` : what
+}
+
+/** A spool provider as a person reads it: Bambuddy's inventory, or another's name. */
+export function providerLabel(provider: string): string {
+  if (provider === 'bambuddy') return 'Bambuddy'
+  if (provider === 'native') return 'ScadBuddy'
+  return provider.charAt(0).toUpperCase() + provider.slice(1)
+}
+
+/**
  * `"Bambu Lab PLA Silk — Blue"`.
  *
  * Brand, subtype and colour name are each nullable on the wire — a spool added by hand

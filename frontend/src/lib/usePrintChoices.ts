@@ -65,6 +65,19 @@ export function usePrintChoices(
   const choices = read && (read.key === key || carry?.get()) ? read.view : null
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
+  /**
+   * #3818 — a registry printer asked for by its row: the one way to choose a printer only
+   * the LAN reaches, which has no Bambuddy id. Sent as `printer` beside `printer_id`.
+   */
+  const [askedRegistry, setAskedRegistry] = useState<string | null>(null)
+  const askPrinter = useCallback((next: number | null) => {
+    setAskedRegistry(null)
+    setAskedPrinter(next)
+  }, [])
+  const askRegistry = useCallback((next: string | null) => {
+    setAskedPrinter(null)
+    setAskedRegistry(next)
+  }, [])
   const [nozzles, setNozzles] = useState<NozzleChoice[]>(DEFAULT_NOZZLES)
   const [tier, setTier] = useState<Tier | null>('standard')
   const [processName, setProcessName] = useState<string | null>(null)
@@ -121,7 +134,7 @@ export function usePrintChoices(
     setLoading(true)
     setLoadError(null)
     sourceApi(current)
-      .getChoices(askedPrinter)
+      .getChoices(askedPrinter, askedRegistry)
       .then((next) => {
         if (token !== attempt.current) return
         setRead({ key: sourceKey(current), view: next })
@@ -151,7 +164,7 @@ export function usePrintChoices(
       .finally(() => {
         if (token === attempt.current) setLoading(false)
       })
-  }, [open, key, askedPrinter, latest, carry])
+  }, [open, key, askedPrinter, askedRegistry, latest, carry])
   useEffect(() => {
     reload()
   }, [reload])
@@ -189,6 +202,7 @@ export function usePrintChoices(
 
   function reset() {
     setAskedPrinter(null)
+    setAskedRegistry(null)
     setNozzles(DEFAULT_NOZZLES)
     setTier('standard')
     setProcessName(null)
@@ -269,7 +283,10 @@ export function usePrintChoices(
     printers,
     printerId,
     printer,
-    askPrinter: setAskedPrinter,
+    askPrinter,
+    /** #3818 — the registry printer asked for, or `null`. */
+    registryAsked: askedRegistry,
+    askRegistry,
     plates,
     selection,
     size,

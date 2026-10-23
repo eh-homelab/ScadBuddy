@@ -32,11 +32,13 @@ export interface ProjectList {
 /**
  * Fetches the project list once and reports the Settings default project through
  * `onLoaded`, so the parent can seed its value. `enabled` false fetches nothing, for a
- * picker handed a list by its parent.
+ * picker handed a list by its parent. `native` (#3818, plan 2026-10-18 D6) reads
+ * ScadBuddy's own library folders instead, with no projects, and asks Bambuddy nothing.
  */
 export function useProjectList(
   onLoaded?: (projectId: number | null) => void,
   enabled = true,
+  native = false,
 ): ProjectList {
   const [choices, setChoices] = useState<ProjectChoices | null>(null)
   const [loading, setLoading] = useState(enabled)
@@ -61,7 +63,7 @@ export function useProjectList(
     if (seed) setLoading(true)
     setError(null)
     try {
-      const next = await api.getProjects()
+      const next = native ? await api.getProjects({ native: true }) : await api.getProjects()
       setChoices(next)
       // A create while this read was in flight already chose the value (#1045 review).
       if (seed && !seeded.current) report.current?.(next.last_project_id ?? null)
@@ -71,7 +73,7 @@ export function useProjectList(
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [native])
 
   useEffect(() => {
     if (enabled) void fetchList(true)

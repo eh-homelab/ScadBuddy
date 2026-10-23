@@ -9,6 +9,11 @@ import type { RequestHandler, WebSocketHandler } from 'msw'
 export type MockFeature = {
   handlers: readonly (RequestHandler | WebSocketHandler)[]
   reset?: () => void
+  /**
+   * A scenario that answers ahead of every other module while it is on (#3818's hot
+   * path), passing through what it does not own. Off, it must answer nothing.
+   */
+  first?: boolean
 }
 
 /**
@@ -16,7 +21,7 @@ export type MockFeature = {
  * here, naming the file, instead of its mocks silently going missing.
  */
 export function toFeatures(modules: Record<string, unknown>): MockFeature[] {
-  return Object.keys(modules)
+  const loaded = Object.keys(modules)
     .sort()
     .map((path) => {
       const module = modules[path] as Partial<MockFeature> | undefined
@@ -25,6 +30,7 @@ export function toFeatures(modules: Record<string, unknown>): MockFeature[] {
       }
       return module as MockFeature
     })
+  return [...loaded.filter((feature) => feature.first), ...loaded.filter((feature) => !feature.first)]
 }
 
 // Every `.ts` file under `features/`, at any depth, is a module and must export
@@ -34,7 +40,8 @@ const modules = import.meta.glob(['./features/**/*.ts', '!./features/**/*.test.t
 })
 
 /**
- * Every feature module, in file-path order. That order is not meant to decide which
- * mock answers: `features.test.ts` fails if two modules declare the same route.
+ * Every feature module, in file-path order, a `first` scenario ahead of the rest. That
+ * order is not meant to decide which mock answers: `features.test.ts` fails if two
+ * modules declare the same route.
  */
 export const features: MockFeature[] = toFeatures(modules)

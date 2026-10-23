@@ -67,3 +67,56 @@ describe('TrayQuestion (#2164)', () => {
     expect(howFull({ ...black, remaining_g: null })).toBeNull()
   })
 })
+
+// #3818 (plan 2026-10-18 D1) — on a native run the question links a provider's record
+// through ScadBuddy's own tray route, never Bambuddy's assignment.
+describe('TrayQuestion on the native path', () => {
+  const printer = '00000000-0000-4000-8000-0000000000c2'
+  const record: SpoolOption = {
+    ...black,
+    storage_location: null,
+    records: { bambuddy: { record_id: '27', brand: 'Inland', name: 'Black', remaining_g: 515 } },
+  }
+
+  it('links the record through PUT …/trays/{ams}/{tray}/spool and re-reads', async () => {
+    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
+    const assign = vi.spyOn(api, 'assignTraySpool')
+    const onAssigned = vi.fn()
+    render(
+      <TrayQuestion
+        printerId={0}
+        native={{ printer }}
+        tray={{ ...tray, candidates: [16] }}
+        spools={[record]}
+        onAssigned={onAssigned}
+        onDecline={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('AMS-D slot 4 has black PLA, but no spool record is linked to it.')).toBeInTheDocument()
+    expect(screen.getByText(/Bambuddy's record/)).toBeInTheDocument()
+    expect(screen.queryByText(/Bambuddy's inventory/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, that one' }))
+    await waitFor(() => expect(onAssigned).toHaveBeenCalled())
+    expect(link).toHaveBeenCalledWith(printer, 3, 3, { provider: 'bambuddy', record_id: '27' })
+    expect(assign).not.toHaveBeenCalled()
+  })
+
+  it('names the physical spool when the candidate has one', async () => {
+    const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
+    const spool = { ...record, physical_spool_id: '7a2c1f0e-0000-4000-8000-000000000009' }
+    render(
+      <TrayQuestion printerId={0} native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[spool]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, that one' }))
+    await waitFor(() =>
+      expect(link).toHaveBeenCalledWith(printer, 3, 3, { physical_spool_id: '7a2c1f0e-0000-4000-8000-000000000009' }),
+    )
+  })
+
+  it('offers no candidate it could not link', () => {
+    render(
+      <TrayQuestion printerId={0} native={{ printer }} tray={{ ...tray, candidates: [16] }} spools={[black]} onAssigned={vi.fn()} onDecline={vi.fn()} />,
+    )
+    expect(screen.queryByRole('button', { name: /^Yes/ })).not.toBeInTheDocument()
+  })
+})

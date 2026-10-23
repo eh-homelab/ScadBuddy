@@ -9,6 +9,7 @@ import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { printersState } from '../mocks/features/printers'
+import { HOT_PRINTER, NO_BAMBUDDY, setHotPath } from '../mocks/features/hotPath'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
@@ -4930,5 +4931,39 @@ describe('PrintPicker · Queue (#2288)', () => {
     await user.click(screen.getByTestId('run-print'))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).not.toHaveProperty('options.manual_start')
+  })
+})
+
+// #3818 (plan 2026-10-18 D2, D6) — with no Bambuddy and the native backends, the dialog
+// opens on the LAN printer, names it on every read, and files in a native folder.
+describe('PrintPicker · the hot path without Bambuddy', () => {
+  it('reads the choices, the slice and the run for the registry printer, with no project', async () => {
+    setHotPath(true)
+    const choices = watch('GET', '/choices')
+    const checks = watch('POST', '/check')
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(choices.urls.some((url) => new URL(url).searchParams.get('printer') === HOT_PRINTER.id)).toBe(true))
+    expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument()
+    expect(within(screen.getByTestId('filament-slot-1')).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
+    expect(screen.getByText('Filed under:')).toHaveTextContent('the template’s folder')
+    expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ printer: HOT_PRINTER.id }))
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByTestId('queued-items')).toHaveTextContent('Sliced and sent to H2C over the LAN')
+    expect(runs.bodies[0]).toMatchObject({ printer: HOT_PRINTER.id, printer_id: null })
+    expect(runs.bodies[0]).not.toHaveProperty('project_id')
+  })
+
+  it('offers the folders, not projects, in Advanced', async () => {
+    setHotPath(true)
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByText(/over the LAN/)).toBeInTheDocument())
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    expect(await screen.findByRole('combobox', { name: 'Folder' })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: /Project/ })).not.toBeInTheDocument()
   })
 })
