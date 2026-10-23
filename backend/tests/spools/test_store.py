@@ -605,3 +605,39 @@ async def test_a_spool_whose_tray_changed_is_back_on_the_shelf(
         PRINTER, [tray(0, 1, colour="#00FF00")], now=NOW, providers=["bambuddy"]
     )
     assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_a_tagged_record_with_no_spool_is_not_on_the_shelf(store: SpoolStore) -> None:
+    """Review N1: two records naming one tag link neither, so neither has a physical
+    spool; their tag still says they are a tagged spool, which is wherever the tag is
+    read, never in an untagged tray."""
+    await store.replace_records(
+        "bambuddy",
+        [record("a", tag_uid=TAG_A), record("b", tag_uid=TAG_A), record("free")],
+        NOW,
+    )
+    overlay = await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["bambuddy"])
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["free"]
+
+
+async def test_a_spool_linked_on_another_printer_is_not_on_the_shelf(
+    store: SpoolStore, pg_pool: PgPool
+) -> None:
+    """Review N4: a person's link on another printer holds its spool, whatever this
+    printer's trays show."""
+    other = uuid.UUID("7f2e0a3b-0000-4000-8000-000000000003")
+    registered(pg_pool, other)
+    await store.replace_records("bambuddy", [record("13"), record("free")], NOW)
+    await store.link(other, tray(0, 1), provider="bambuddy", record_id="13")
+    overlay = await store.overlay(PRINTER, [tray(0, 1)], now=NOW, providers=["bambuddy"])
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["free"]
+
+
+async def test_no_untagged_tray_reads_no_shelf(store: SpoolStore) -> None:
+    """Review N2: only an untagged tray is asked about, so with none the records are not
+    scanned."""
+    await store.replace_records("bambuddy", [record("free")], NOW)
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 0, tray_uuid=UUID_A)], now=NOW, providers=["bambuddy"]
+    )
+    assert overlay.shelf == []

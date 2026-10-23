@@ -262,7 +262,10 @@ class FilamentOptions(BaseModel):
     #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
     track_switch: bool = False
     #: The chosen printer's filled trays with no spool assigned (#2164): the dialog
-    #: asks which spool each holds. Each is also offered in ``spools`` as itself.
+    #: asks which spool each holds. On the Bambuddy path each is also offered in
+    #: ``spools`` as itself, and its ``candidates`` are inventory spools there; on a
+    #: native run (#4504) every tray is in ``spools`` already, and the candidates are
+    #: rows of ``shelf``.
     trays: list[UnknownTray] = Field(default_factory=list)
     #: A native run's spools no tray holds (#4504, `trays.shelf_options`): what its
     #: ``trays`` questions' ``candidates`` name, each with its providers' ``records``.

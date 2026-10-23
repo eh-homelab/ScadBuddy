@@ -590,18 +590,28 @@ def _shelf(
     conn: Conn, printer_id: UUID, trays: list[SeenTray], fresh: list[str]
 ) -> list[ShelfSpool]:
     """``fresh``'s records no tray holds (`Overlay.shelf`), one entry per physical spool
-    (or per record linked to none), in the providers' order, then by record id."""
-    found = [
-        (row["provider"], SpoolSnapshot.model_validate(row["snapshot"]), row["physical_spool_id"])
-        for row in conn.execute(
-            "SELECT r.provider, r.snapshot, l.physical_spool_id FROM spool_provider_records r"
-            " LEFT JOIN spool_record_links l USING (provider, record_id)"
-            " LEFT JOIN physical_spools p ON p.id = l.physical_spool_id"
-            " WHERE r.provider = ANY(%s::text[]) AND r.snapshot->>'location' IS NULL"
-            " AND p.tray_uuid IS NULL AND p.tag_uid IS NULL",
-            (fresh,),
-        )
-    ]
+    (or per record linked to none), in the providers' order, then by record id. A record
+    with a key of its own is a tagged spool even when no spool is linked to it (two
+    records naming one tag link neither): it is wherever its tag is read.
+
+    Only an untagged tray is asked about, so with none nothing is read. Otherwise every
+    fresh record is read, not only those of the trays' materials: which materials may
+    share a tray is `bambuddy.filaments.family`'s rule, applied once by the question
+    (`trays.close_spools`), and spelling it again in SQL would let the two drift."""
+    if not fresh or all(_keys_of(tray.tray_uuid, tray.tag_uid) != (None, None) for tray in trays):
+        return []
+    found: list[tuple[str, SpoolSnapshot, UUID | None]] = []
+    for row in conn.execute(
+        "SELECT r.provider, r.snapshot, l.physical_spool_id FROM spool_provider_records r"
+        " LEFT JOIN spool_record_links l USING (provider, record_id)"
+        " LEFT JOIN physical_spools p ON p.id = l.physical_spool_id"
+        " WHERE r.provider = ANY(%s::text[]) AND r.snapshot->>'location' IS NULL"
+        " AND p.tray_uuid IS NULL AND p.tag_uid IS NULL",
+        (fresh,),
+    ):
+        snapshot = SpoolSnapshot.model_validate(row["snapshot"])
+        if _keys_of(snapshot.tray_uuid, snapshot.tag_uid) == (None, None):
+            found.append((row["provider"], snapshot, row["physical_spool_id"]))
     shown = {(tray.ams_id, tray.tray_id): tray.fingerprint for tray in trays}
     spools = list({spool for _, _, spool in found if spool is not None})
     held = {
