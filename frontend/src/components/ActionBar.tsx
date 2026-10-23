@@ -1,9 +1,11 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
+import { Link } from 'react-router'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type {
+  FolderView,
   Job,
   ModelSummary,
   Output,
@@ -53,6 +55,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react'
 import { bambuddyLink } from '../lib/bambuddyLinks'
+import { LIBRARY_ROOT, libraryPath } from '../lib/libraryPath'
 
 /** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
 const MAX_BREAKDOWN_COLOURS = 16
@@ -234,6 +237,7 @@ export function ActionBar({
   const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
     null,
   )
+  const filedUrl = filed?.file.bambuddy_url ?? null
   const [fileError, setFileError] = useState<string | null>(null)
   /**
    * #665 — a "Create project" in flight on either picker. Its completion switches the
@@ -655,16 +659,31 @@ export function ActionBar({
           )}
           {!error && output && !stale && filed?.outputId === output.id && (
             <span className="flex min-w-0 items-center gap-1.5 text-xs" data-testid="project-filed">
-              <span className="truncate text-ok">Saved to {filed.name}</span>
-              <Button
-                type="button"
-                variant="link"
-                size="xs"
-                onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url))}
-                className="h-auto shrink-0 px-0"
-              >
-                Open in Bambuddy
-              </Button>
+              {filedUrl ? (
+                <span className="truncate text-ok">Saved to {filed.name}</span>
+              ) : (
+                // #4507 — a native folder's file is in ScadBuddy's own Library, not Bambuddy.
+                <span className="truncate text-ok">
+                  Saved to{' '}
+                  <Link
+                    to={nativeFiledLink(projects.choices?.folders ?? [], filed.file)}
+                    className="underline underline-offset-2"
+                  >
+                    {filed.name}
+                  </Link>
+                </span>
+              )}
+              {filedUrl && (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="xs"
+                  onClick={() => openExternal(bambuddyLink(filedUrl))}
+                  className="h-auto shrink-0 px-0"
+                >
+                  Open in Bambuddy
+                </Button>
+              )}
             </span>
           )}
           {!error && output && !stale && fileError && (
@@ -814,6 +833,17 @@ export function ActionBar({
  * the render broken down by colour. #968, #3672 — Radix's menu button: the arrows, Home,
  * End and Escape, focus back on the button as it closes.
  */
+/**
+ * #4507 — where a native filing's "Saved to" goes: its folder's Library page, or, when the
+ * picker's list lacks that folder, the file itself (`?file=`, which the Library page
+ * resolves to its folder), as the session panel links one.
+ */
+function nativeFiledLink(folders: FolderView[], file: ProjectFile): string {
+  return folders.some((folder) => folder.id === file.folder_id)
+    ? libraryPath(folders, file.folder_id)
+    : `${LIBRARY_ROOT}?file=${encodeURIComponent(String(file.library_file_id))}`
+}
+
 function GenerateMenu({
   disabled,
   onImage,

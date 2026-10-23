@@ -14,12 +14,15 @@ type Row = { kind: OrderCharge['kind']; label: string; amount: string }
 export function ChargesEditor({
   orderId,
   currency,
+  exponent,
   charges,
   editable,
   onChanged,
 }: {
   orderId: string
   currency: string
+  /** The order's `minor_exponent`: its minor unit's decimal places. */
+  exponent: number
   charges: OrderCharge[]
   editable: boolean
   onChanged: () => void
@@ -29,8 +32,8 @@ export function ChargesEditor({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
-    if (!dirty) setRows(charges.map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, currency) })))
-  }, [charges, currency, dirty])
+    if (!dirty) setRows(charges.map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent) })))
+  }, [charges, exponent, dirty])
 
   if (!editable) {
     return (
@@ -45,7 +48,7 @@ export function ChargesEditor({
                 <span>
                   {c.label} <span className="text-muted-foreground">({c.kind})</span>
                 </span>
-                <span className="sb-num">{formatMoney(c.amount_minor, currency)}</span>
+                <span className="sb-num">{formatMoney(c.amount_minor, currency, exponent)}</span>
               </li>
             ))}
           </ul>
@@ -68,7 +71,7 @@ export function ChargesEditor({
           event.preventDefault()
           const body = []
           for (const row of rows) {
-            const minor = toMinor(row.amount, currency)
+            const minor = toMinor(row.amount, exponent)
             if (minor === null || !row.label.trim()) {
               setError('Each charge needs a label and an amount; a discount is negative.')
               return

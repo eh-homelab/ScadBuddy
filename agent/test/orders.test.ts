@@ -253,3 +253,145 @@ describe('order tools (#4249)', () => {
     await expect(refused).rejects.toThrow('close order')
   })
 })
+
+// Orders phase 2 (#4250, spec 2026-10-18 §7.3, plan Ruling 11): the price book, the quote in
+// both modes and the rough estimate.
+describe('pricing tools (#4250)', () => {
+  const OPERATION = '5d4c3b2a-1111-4222-8333-944455556666'
+  const FILAMENT = 'f11a0000-1111-4222-8333-944455556666'
+  const QUOTE = { id: 'q1', source: 'slice', unit_price_minor: 234, lines: [{ kind: 'filament' }, { kind: 'filament' }] }
+  const SLICE = {
+    printer_id: 1,
+    filament_plan: { slots: [{ slot_id: 1, spool_id: 9 }, { slot_id: 2, spool_id: 5 }] },
+    choices: { nozzles: [{ size: '0.4' }] },
+    filaments: { '0': FILAMENT, '1': FILAMENT },
+  }
+
+  it('tiers the book, the quote and the estimate as Ruling 11 does', () => {
+    expect(['price_book_get', 'price_book_set', 'order_estimate', 'order_item_quote'].map((n) => tool(n).risk)).toEqual([
+      'read',
+      'write',
+      'read',
+      'write',
+    ])
+  })
+
+  it('quotes from a slice: sends a key, follows the 202 to the quote', async () => {
+    const keys: (string | null)[] = []
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quote`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        body = await request.json()
+        return HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'succeeded', result: QUOTE }),
+      ),
+    )
+    const answer = await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: SLICE }, ctx())
+    expect(firstText(answer)).toEqual(QUOTE)
+    expect(keys).toHaveLength(1)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(body).toEqual({
+      ...SLICE,
+      filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
+      choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
+    })
+  })
+
+  it('answers a slice quote still running past the follow window', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quote`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 }),
+      ),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () => HttpResponse.json({ id: OPERATION, status: 'running' })),
+    )
+    const answer = await tool('order_item_quote').execute(
+      { order_id: ORDER, item_id: ITEM, slice: SLICE },
+      { ...ctx(), commandFollowMs: 0 },
+    )
+    expect(firstText(answer)).toMatchObject({ status: 'running', operation_id: OPERATION })
+  })
+
+  it('records a typed price in manual mode, and takes exactly one mode', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/quotes`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: 'q2', source: 'manual' }, { status: 201 })
+      }),
+    )
+    const answer = await tool('order_item_quote').execute(
+      { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 1500, label: 'Typed' } },
+      ctx(),
+    )
+    expect(firstText(answer)).toEqual({ id: 'q2', source: 'manual' })
+    expect(body).toEqual({ unit_price_minor: 1500, label: 'Typed' })
+    await expect(tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM }, ctx())).rejects.toThrow(ToolError)
+    await expect(
+      tool('order_item_quote').execute(
+        { order_id: ORDER, item_id: ITEM, manual: { unit_price_minor: 1 }, slice: SLICE },
+        ctx(),
+      ),
+    ).rejects.toThrow('exactly one')
+  })
+
+  it('reads the book, and sets the policy over what it was', async () => {
+    const policy = { machine_rate_per_hour: '1.5', setup_fee: '0', labour_per_item: '2', markup_percent: '0', rounding: 'to_minor_unit' }
+    const book = { currency: 'USD', minor_exponent: 2, policy, rough_estimate_factor: '1.15', filaments: [] }
+    let put: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/price-book`, () => HttpResponse.json(book)),
+      http.put(`${BACKEND}/api/v1/orders/price-book`, async ({ request }) => {
+        put = await request.json()
+        return HttpResponse.json(book)
+      }),
+    )
+    expect(firstText(await tool('price_book_get').execute({}, ctx()))).toEqual(book)
+    await tool('price_book_set').execute({ policy: { markup_percent: '15' } }, ctx())
+    expect(put).toEqual({ ...policy, markup_percent: '15' })
+  })
+
+  it('patches, adds and archives a filament', async () => {
+    const sent: { method: string; body: unknown }[] = []
+    server.use(
+      http.patch(`${BACKEND}/api/v1/orders/price-book/filaments/${FILAMENT}`, async ({ request }) => {
+        sent.push({ method: 'PATCH', body: await request.json() })
+        return HttpResponse.json({ id: FILAMENT, cost_per_kg: '30' })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/price-book/filaments`, async ({ request }) => {
+        sent.push({ method: 'POST', body: await request.json() })
+        return HttpResponse.json({ id: 'new' }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/price-book/filaments/${FILAMENT}/archive`, () => {
+        sent.push({ method: 'ARCHIVE', body: null })
+        return HttpResponse.json({ id: FILAMENT, archived_at: '2026-10-22T00:00:00Z' })
+      }),
+    )
+    const patched = await tool('price_book_set').execute({ filament: { filament_id: FILAMENT, cost_per_kg: '30' } }, ctx())
+    expect(firstText(patched)).toEqual({ filament: { id: FILAMENT, cost_per_kg: '30' } })
+    await tool('price_book_set').execute({ filament: { material: 'PLA', colour: '#FFFFFF', cost_per_kg: '20' } }, ctx())
+    await tool('price_book_set').execute({ filament: { filament_id: FILAMENT, archive: true } }, ctx())
+    expect(sent).toEqual([
+      { method: 'PATCH', body: { cost_per_kg: '30' } },
+      { method: 'POST', body: { material: 'PLA', colour: '#FFFFFF', cost_per_kg: '20' } },
+      { method: 'ARCHIVE', body: null },
+    ])
+    await expect(tool('price_book_set').execute({}, ctx())).rejects.toThrow(ToolError)
+  })
+
+  it('reads the rough estimate', async () => {
+    let url = ''
+    const estimate = { estimate: true, grams: '24.24', filament_minor: 62, currency: 'USD', minor_exponent: 2, factor: '1.15', parts: [], unknown_parts: 0 }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/estimate`, ({ request }) => {
+        url = request.url
+        return HttpResponse.json(estimate)
+      }),
+    )
+    const answer = await tool('order_estimate').execute({ output_id: 'a'.repeat(32), filament_id: FILAMENT }, ctx())
+    expect(firstText(answer)).toEqual(estimate)
+    expect(new URL(url).searchParams.get('filament_id')).toBe(FILAMENT)
+  })
+})

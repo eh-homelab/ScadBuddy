@@ -1,27 +1,32 @@
 """`/api/v1/orders` (#4249, spec 2026-10-18 §3.2-3.5, §4, §6.1 by hand, §6.3; plan
 Rulings 1-3, 8-12): orders, their line items, manual quotes, fulfilment attempts,
-shipments, payments and the audit line.
+shipments, payments and the audit line; the price book, the slice quote and the rough
+estimate (#4250, §5).
 
-Plain reads and writes: nothing here does work an operation kind would run (the slice
-quote is phase 2). Every write goes through the lifecycle (``orders/lifecycle.py``),
-which locks the order, derives its status and publishes ``order.changed`` /
-``order_item.changed`` after commit; a refusal arrives as a `LifecycleError` and leaves
-as a 409 problem typed ``https://scadbuddy.dev/problems/orders/<slug>`` with the ids in
-the way (``items``, ``shipments``), or a 404 for a row that is not there. A reference
-that cannot be made is 422 naming the field (``orders/reference.py``). ``created_by`` and
-every audit row's ``by`` come from the author header, never a body (Ruling 12).
+Plain reads and writes, but for the slice quote, which is the ``order_item_quote``
+operation (``orders/operations.py``) through ``run_operation``. Every write goes through
+the lifecycle (``orders/lifecycle.py``), which locks the order, derives its status and
+publishes ``order.changed`` / ``order_item.changed`` after commit; a refusal arrives as a
+`LifecycleError` and leaves as a 409 problem typed
+``https://scadbuddy.dev/problems/orders/<slug>`` with the ids in the way (``items``,
+``shipments``), or a 404 for a row that is not there. A reference that cannot be made is
+422 naming the field (``orders/reference.py``). ``created_by`` and every audit row's
+``by`` come from the author header, never a body (Ruling 12).
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
 """
 
 import asyncio
+import zipfile
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -32,10 +37,22 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
     SettingsStoreDep,
+    StateDep,
 )
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
+from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import require_output
+from scadbuddy.library.settings_store import SettingsPatch
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
     LifecycleError,
@@ -47,6 +64,9 @@ from scadbuddy.orders.lifecycle import (
 from scadbuddy.orders.models import (
     Charge,
     ChargeInput,
+    Filament,
+    FilamentInput,
+    FilamentPatch,
     Fulfilment,
     Money,
     Order,
@@ -55,16 +75,20 @@ from scadbuddy.orders.models import (
     OrderItem,
     OrderStatus,
     Payment,
+    PriceBook,
+    PricingPolicy,
     Quote,
     Shipment,
 )
+from scadbuddy.orders.operations import ORDER_ITEM_QUOTE
+from scadbuddy.orders.pricing import estimate_grams, to_minor
+from scadbuddy.orders.problems import PROBLEMS, refused
+from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
-from scadbuddy.orders.store import UNSET, UnsetType
+from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
-#: The lifecycle's refusals, typed by their slug.
-PROBLEMS = "https://scadbuddy.dev/problems/orders/"
 #: Ruling 9: cursor-paged, as the Activity page is.
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
@@ -138,6 +162,10 @@ class ItemPatch(BaseModel):
     quantity: int | None = Field(default=None, ge=1)
     title: str | None = Field(default=None, max_length=200)
     notes: str | None = None
+    #: ``{slot: filament_id | null}`` over the item's ``colours`` (#4250 Ruling 6): the
+    #: price-book filament each slot is priced with. A change drops the accepted quote,
+    #: as a reference change does; the item's own filaments sent again change nothing.
+    filaments: dict[int, str | None] | None = None
 
 
 class PaymentCreate(BaseModel):
@@ -191,20 +219,6 @@ class OrderPage(BaseModel):
 # -- errors ------------------------------------------------------------------------------------
 
 
-def _refused(error: LifecycleError) -> ApiError:
-    extensions: dict[str, Any] = {}
-    if error.items:
-        extensions["items"] = error.items
-    if error.shipments:
-        extensions["shipments"] = error.shipments
-    return ApiError(
-        status.HTTP_404_NOT_FOUND if error.not_found else status.HTTP_409_CONFLICT,
-        str(error),
-        type_=PROBLEMS + error.slug,
-        **extensions,
-    )
-
-
 def _bad_reference(error: ReferenceError) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -218,7 +232,7 @@ async def _run[T](call: Callable[[], T]) -> T:
     try:
         return await asyncio.to_thread(call)
     except LifecycleError as error:
-        raise _refused(error) from None
+        raise refused(error) from None
 
 
 def _path(*values: str) -> None:
@@ -263,6 +277,216 @@ async def create_order(body: OrderCreate, orders: OrdersDep, settings: SettingsS
         lambda: orders.lifecycle.create_order(
             body.customer_id, by, currency=currency, notes=body.notes, due_at=body.due_at
         )
+    )
+
+
+# -- the price book (§5.1, #4250 Ruling 4) ---------------------------------------------------
+# Before ``/{order_id}``: a path is matched in the order its routes were declared.
+
+
+class PolicyUpdate(PricingPolicy):
+    """`PUT /orders/price-book`: the policy, whole; the estimate's factor when sent."""
+
+    rough_estimate_factor: str | None = None
+
+
+def _filament_exists(error: FilamentExistsError) -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        f"{error}: {error.existing_id}",
+        type_=PROBLEMS + "filament_exists",
+        filament_id=error.existing_id,
+    )
+
+
+@router.get("/price-book", response_model=PriceBook, summary="The price book")
+async def get_price_book(orders: OrdersDep) -> PriceBook:
+    """The currency the next order copies, the pricing policy, the rough estimate's
+    factor and the filament records not archived, in one read (§5.1)."""
+    return await asyncio.to_thread(orders.price_book.snapshot)
+
+
+@router.put("/price-book", response_model=PriceBook, summary="Set the pricing policy")
+async def put_price_book(
+    body: PolicyUpdate, orders: OrdersDep, store: SettingsStoreDep, state: StateDep
+) -> PriceBook:
+    """The policy, saved as the stored settings it is (``pricing_*``, and
+    ``rough_estimate_factor`` when sent): the next quote is priced with it, and a
+    recorded quote keeps the rates its lines carry."""
+    fields: dict[str, Any] = {
+        "pricing_machine_rate_per_hour": body.machine_rate_per_hour,
+        "pricing_setup_fee": body.setup_fee,
+        "pricing_labour_per_item": body.labour_per_item,
+        "pricing_markup_percent": body.markup_percent,
+        "pricing_rounding": body.rounding,
+    }
+    if body.rough_estimate_factor is not None:
+        fields["rough_estimate_factor"] = body.rough_estimate_factor
+    try:
+        patch = SettingsPatch.model_validate(fields)
+    except ValidationError as error:
+        # Every bad field at once, so the Settings form can flag them all.
+        # A model-level error has no field in its `loc`: it is the body's.
+        problems = [
+            {
+                "loc": ["body", str(p["loc"][0]).removeprefix("pricing_") if p["loc"] else "body"],
+                "msg": p["msg"],
+            }
+            for p in error.errors()
+        ]
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "; ".join(f"{p['loc'][1]}: {p['msg']}" for p in problems),
+            errors=problems,
+        ) from None
+    await asyncio.to_thread(store.save, patch)
+    snapshot = await asyncio.to_thread(store.snapshot)
+    apply_runtime(state, snapshot.runtime)
+    return await asyncio.to_thread(orders.price_book.snapshot)
+
+
+@router.post(
+    "/price-book/filaments",
+    response_model=Filament,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a filament to the price book",
+)
+async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
+    """409 ``filament_exists`` naming the record of the same material, subtype, brand
+    and colour (in any case)."""
+    try:
+        return await asyncio.to_thread(orders.store.insert_filament, body)
+    except FilamentExistsError as error:
+        raise _filament_exists(error) from None
+
+
+@router.patch(
+    "/price-book/filaments/{filament_id}",
+    response_model=Filament,
+    summary="Edit a filament of the price book",
+)
+async def patch_filament(filament_id: str, body: FilamentPatch, orders: OrdersDep) -> Filament:
+    """Only what is sent changes. A quote already priced keeps the rate its lines carry."""
+    _path(filament_id)
+    try:
+        found = await asyncio.to_thread(orders.store.update_filament, filament_id, body)
+    except FilamentExistsError as error:
+        raise _filament_exists(error) from None
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    return found
+
+
+@router.post(
+    "/price-book/filaments/{filament_id}/archive",
+    response_model=Filament,
+    summary="Archive a filament of the price book",
+)
+async def archive_filament(filament_id: str, orders: OrdersDep) -> Filament:
+    """Hidden from the book and refused by a new quote; never deleted, since an item may
+    name it."""
+    _path(filament_id)
+    found = await asyncio.to_thread(orders.store.archive_filament, filament_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    return found
+
+
+# -- the rough estimate (§5.3, #4250 Ruling 9) ---------------------------------------------------
+
+
+class EstimatedPart(BaseModel):
+    """One part of one plate: its enclosed volume, or ``None`` when it is not checked
+    and closed (``render/geometry.py`` measures only those), and so not counted."""
+
+    plate: int
+    part: int
+    name: str
+    colour: str
+    volume_mm3: float | None
+
+
+class OrderEstimate(BaseModel):
+    """A rough estimate (§5.3): never a quote, never stored, never accepted."""
+
+    #: Always true: this is an estimate.
+    estimate: bool = True
+    #: Decimal string, to the hundredth of a gram.
+    grams: str
+    #: The grams at the filament's cost per kilogram, rounded as a quote line is.
+    filament_minor: Money
+    currency: str
+    minor_exponent: int
+    #: ``rough_estimate_factor`` as it stood.
+    factor: str
+    parts: list[EstimatedPart]
+    #: How many parts have no volume and are left out of ``grams``.
+    unknown_parts: int
+
+
+@router.get("/estimate", response_model=OrderEstimate, summary="A rough estimate of an output")
+async def estimate(
+    output_id: str, filament_id: str, orders: OrdersDep, outputs: OutputsDep
+) -> OrderEstimate:
+    """The output's parts' enclosed volumes over every plate, times the filament's
+    density and the ``rough_estimate_factor`` for walls, infill and purge (§5.3). A
+    read: nothing is recorded. 404 for an unknown output or filament, 422
+    ``filament_density`` for a filament with no density."""
+    _path(output_id, filament_id)
+    record = await asyncio.to_thread(orders.store.filament, filament_id)
+    if record is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    if record.density_g_cm3 is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"filament {filament_id} has no density, so there is no estimate",
+            type_=PROBLEMS + "filament_density",
+            errors=[{"loc": ["query", "filament_id"], "msg": "the filament has no density"}],
+        )
+    await asyncio.to_thread(require_output, outputs, output_id)
+
+    def measured() -> list[EstimatedPart]:
+        parts: list[EstimatedPart] = []
+        plate, plates = 1, 1
+        while plate <= plates:
+            analysis = outputs.geometry(output_id, plate)
+            plates = analysis.plates
+            parts += [
+                EstimatedPart(
+                    plate=plate,
+                    part=part.part,
+                    name=part.name,
+                    colour=part.colour,
+                    volume_mm3=part.volume_mm3,
+                )
+                for part in analysis.parts
+            ]
+            plate += 1
+        return parts
+
+    try:
+        parts = await asyncio.to_thread(measured)
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
+    except (ValueError, zipfile.BadZipFile) as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the 3MF of output {output_id!r} cannot be analysed: {error}",
+        ) from None
+    currency, _, factor = await asyncio.to_thread(orders.price_book.policy)
+    grams = estimate_grams(
+        [part.volume_mm3 for part in parts if part.volume_mm3 is not None],
+        record.density_g_cm3,
+        factor,
+    )
+    return OrderEstimate(
+        grams=format(grams, "f"),
+        filament_minor=to_minor(grams * Decimal(record.cost_per_kg) / 1000, currency),
+        currency=currency,
+        minor_exponent=minor_exponent(currency),
+        factor=factor,
+        parts=parts,
+        unknown_parts=sum(1 for part in parts if part.volume_mm3 is None),
     )
 
 
@@ -528,6 +752,7 @@ async def patch_item(
             quantity=body.quantity,
             title=body.title,
             notes=body.notes,
+            filaments=body.filaments,
         )
     )
 
@@ -570,6 +795,45 @@ async def record_quote(
     _path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.record_manual_quote(order_id, item_id, body, by))
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/quote",
+    response_model=Quote,
+    summary="Quote an item from its slice",
+    responses=OPERATION_RESPONSES,
+)
+async def quote_item(
+    order_id: str,
+    item_id: str,
+    body: SliceQuoteRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Quote | JSONResponse:
+    """The ``order_item_quote`` operation (#4250, §5.2): render the item if it has no
+    matching output, slice every plate with the print dialog's choices, read each
+    plate's grams and seconds, price them with the book in force and record a `slice`
+    quote. Answered 202 once recorded; follow ``GET /operations/{id}`` to the quote.
+    Refused before anything is written: 404 for an unknown order or item, 409
+    ``order_not_open`` and ``item_not_open``, 422 ``filaments`` (a slot with no
+    filament, or one archived) and ``price_book`` (a book that prices nothing)."""
+    _path(order_id, item_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_QUOTE],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "request": body.model_dump(mode="json"),
+            # Ruling 12: who it is for comes from the author header, never the body.
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Quote)
 
 
 @router.post(

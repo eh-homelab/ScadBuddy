@@ -22,9 +22,10 @@ go through, so a person can fix what the hold was for.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Sequence
+import logging
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -34,6 +35,7 @@ from scadbuddy.orders.models import (
     Actor,
     AddressSnapshot,
     ChargeInput,
+    ColourSlot,
     Fulfilment,
     ItemStatus,
     Money,
@@ -47,8 +49,12 @@ from scadbuddy.orders.models import (
     Shipment,
     ShipmentItem,
 )
+from scadbuddy.orders.pricing import Plate, Priced
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import UNSET, Conn, OrderNotFoundError, OrderStore, UnsetType
+from scadbuddy.store.refs import BlobRefs
+
+logger = logging.getLogger(__name__)
 
 #: The states an order's items and price may still change in (§4's `PATCH` rows).
 OPEN_FOR_EDITS: frozenset[OrderStatus] = frozenset({"draft", "quoted"})
@@ -60,6 +66,14 @@ DERIVED: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready
 SETTLED: frozenset[ItemStatus] = frozenset({"fulfilled", "cancelled"})
 #: The item states a fulfilment attempt may be recorded in (phase 1, Ruling 4).
 FULFILLABLE: frozenset[ItemStatus] = frozenset({"approved", "failed"})
+
+#: The ``blob_refs`` holder kind of a slice quote's sliced files (#4250 Ruling 3, §3.4's
+#: ``order_item_quote:<id>``); the holder id is the quote's id.
+QUOTE_HOLDER = "order_item_quote"
+#: How long one ``order_item_quote`` run may take (the kind's ``run_timeout``), and so
+#: the reaper's grace: a ref younger than this may belong to a run about to insert its
+#: row (Ruling 3).
+QUOTE_TIMEOUT = timedelta(minutes=30)
 
 
 class LifecycleError(Exception):
@@ -74,6 +88,7 @@ class LifecycleError(Exception):
         items: Sequence[str] = (),
         shipments: Sequence[str] = (),
         not_found: bool = False,
+        unprocessable: bool = False,
     ) -> None:
         super().__init__(message)
         self.slug = slug
@@ -81,6 +96,9 @@ class LifecycleError(Exception):
         self.shipments = list(shipments)
         #: The row the call names is not there: a 404 rather than a 409.
         self.not_found = not_found
+        #: The body names something that cannot be (a slot the item lacks, a filament
+        #: not in the book): a 422 on the field ``slug`` names, rather than a 409.
+        self.unprocessable = unprocessable
 
 
 # -- what a person sends (the routes' bodies, Ruling 12: no author, no status) ------------
@@ -178,6 +196,8 @@ class _Change:
 
     order: Order
     items: list[tuple[OrderItem, int | None]] = field(default_factory=list)
+    #: The quotes whose sliced-file holder §3.4 releases, dropped once committed.
+    released: list[str] = field(default_factory=list)
 
 
 def _covered(items: Iterable[OrderItem], shipments: Iterable[Shipment]) -> list[str]:
@@ -227,13 +247,31 @@ def _settle_open(items: Sequence[OrderItem]) -> OrderStatus:
 
 
 class Lifecycle:
-    def __init__(self, store: OrderStore, bus: EventBus | None) -> None:
+    def __init__(self, store: OrderStore, bus: EventBus | None, refs: BlobRefs | None = None):
         self.store = store
         self.bus = bus
+        #: The slice quotes' holds (#4250 Ruling 3); None where nothing holds a file.
+        self.refs = refs
 
     # -- the frame every transition runs in -------------------------------------------
 
+    def _release(self, quote_ids: Iterable[str]) -> None:
+        """Drop the holders §3.4 releases, after the commit that released them (a drop
+        before a rollback would lose bytes a quote still names). A drop that fails is
+        logged: `reap_quote_holds` drops it within a prune interval."""
+        if self.refs is None:
+            return
+        for quote_id in quote_ids:
+            try:
+                self.refs.drop_holder(QUOTE_HOLDER, quote_id)
+            except Exception:
+                logger.exception("could not release a quote's sliced file", extra={"id": quote_id})
+
+    def _quote_ids(self, conn: Conn, item_ids: Iterable[str]) -> list[str]:
+        return [quote.id for item_id in item_ids for quote in self.store.quotes(item_id, conn=conn)]
+
     def _told(self, change: _Change) -> None:
+        self._release(change.released)
         emit(self.bus, OrderChanged(order_id=change.order.id, status=change.order.status))
         for item, attempt in change.items:
             emit(
@@ -475,10 +513,13 @@ class Lifecycle:
                     "order_not_cancellable", f"order {order.number} is {order.status}"
                 )
             change = _Change(order)
-            for item in self.store.items(order.id, conn=conn):
+            every = self.store.items(order.id, conn=conn)
+            for item in every:
                 if item.status not in SETTLED:
                     moved = self.store.update_item(conn, item.id, status="cancelled")
                     change.items.append((moved, None))
+            # §3.4: cancelling the order releases every quote's sliced file.
+            change.released = self._quote_ids(conn, (item.id for item in every))
             cancelled = self.store.set_order_status(conn, order.id, "cancelled")
             self._event(
                 conn,
@@ -516,7 +557,9 @@ class Lifecycle:
                 )
             closed = self.store.set_order_status(conn, order.id, "closed")
             self._event(conn, order, by, "order.status", from_status=order.status, to="closed")
-        self._told(_Change(closed))
+            # §3.4: closing the order releases every quote's sliced file.
+            released = self._quote_ids(conn, (item.id for item in items))
+        self._told(_Change(closed, released=released))
         return closed
 
     # -- items (§3.3) ---------------------------------------------------------------------
@@ -569,25 +612,46 @@ class Lifecycle:
         quantity: int | None = None,
         title: str | None = None,
         notes: str | None = None,
+        filaments: Mapping[int, str | None] | None = None,
+        colours: Sequence[ColourSlot] | None = None,
     ) -> OrderItem:
-        """The reference (replaced whole) and the quantity while `draft` or `quoted`,
-        each dropping the accepted quote (Ruling 1); title and notes in any open state.
-        A reference replaced without an ``output_id`` clears the item's: the output it
-        pointed at no longer matches what the item says."""
+        """The reference (replaced whole), the quantity and the slots' filaments while
+        `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
+        §5.2's "changing the colours makes the next quote a new row"); title and notes in
+        any open state. A reference replaced without an ``output_id`` clears the item's:
+        the output it pointed at no longer matches what the item says.
+
+        ``filaments`` (``{slot: filament_id | None}``) repins only when it changes a
+        slot: the same filaments sent again write nothing and drop nothing. A slot the
+        item lacks, or a filament not in the book or archived, is refused (422).
+        ``colours`` gives an item made by hand, which has none, the slots its first
+        render made (the quote's run, #4250); it repins nothing, as it changes no slot
+        the item had."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
-            repins = reference is not None or quantity is not None
+            base = list(reference.colours if reference is not None else item.colours)
+            slots = base if base or colours is None else list(colours)
+            if filaments is not None:
+                slots = self._with_filaments(conn, slots, filaments)
+            # Only a slot the item had can change; one the fill brings had no filament.
+            before = {slot.slot: slot.filament_id for slot in base}
+            refiled = any(
+                slot.slot in before and before[slot.slot] != slot.filament_id for slot in slots
+            )
+            repins = reference is not None or quantity is not None or refiled
             if repins:
-                self._open_for_items(order, "an item's reference and quantity")
+                self._open_for_items(order, "an item's reference, quantity and filaments")
             fields: dict[str, Any] = {}
             if reference is not None:
-                fields.update(reference=reference.reference, colours=reference.colours)
+                fields.update(reference=reference.reference, colours=slots)
                 if isinstance(output_id, UnsetType):
                     output_id = None
+            elif slots != item.colours:
+                fields["colours"] = slots
             if not isinstance(output_id, UnsetType):
                 fields["output_id"] = output_id
             if quantity is not None:
@@ -596,6 +660,9 @@ class Lifecycle:
                 fields["title"] = title
             if notes is not None:
                 fields["notes"] = notes
+            if not fields:
+                # Nothing changes (the item's own filaments sent again): nothing written.
+                return item
             if repins:
                 self.store.unaccept_quotes(conn, item.id)
                 fields["status"] = "draft"
@@ -604,6 +671,41 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
+
+    def _with_filaments(
+        self, conn: Conn, slots: list[ColourSlot], filaments: Mapping[int, str | None]
+    ) -> list[ColourSlot]:
+        """``slots`` with ``filaments`` applied, each named record one of the book's."""
+        known = {slot.slot for slot in slots}
+        unknown = sorted(set(filaments) - known)
+        if unknown:
+            raise LifecycleError(
+                "filaments",
+                f"the item has no colour slot {', '.join(map(str, unknown))}",
+                unprocessable=True,
+            )
+        for slot, filament_id in filaments.items():
+            if filament_id is None:
+                continue
+            record = self.store.filament(filament_id, conn=conn)
+            if record is None:
+                raise LifecycleError(
+                    "filaments",
+                    f"slot {slot}: no filament {filament_id} in the price book",
+                    unprocessable=True,
+                )
+            if record.archived_at is not None:
+                raise LifecycleError(
+                    "filaments",
+                    f"slot {slot}: filament {filament_id} is archived",
+                    unprocessable=True,
+                )
+        return [
+            slot.model_copy(update={"filament_id": filaments[slot.slot]})
+            if slot.slot in filaments
+            else slot
+            for slot in slots
+        ]
 
     def delete_item(self, order_id: str, item_id: str, by: Actor) -> None:
         """Only a `draft` item deletes (Ruling 6, 10); else `item_not_draft`, and the
@@ -633,7 +735,9 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="cancelled")
             self._event(conn, order, by, "item.cancelled", item_id=item.id)
             order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+            # §3.4: cancelling the item releases every quote's sliced file.
+            released = self._quote_ids(conn, [item.id])
+        self._told(_Change(order, [(item, None)], released))
         return item
 
     # -- quotes (§3.4) --------------------------------------------------------------------
@@ -667,13 +771,68 @@ class Lifecycle:
                 quantity=item.quantity,
                 created_by=by,
             )
-            changed: list[tuple[OrderItem, int | None]] = []
-            if item.status == "draft":
-                item = self.store.update_item(conn, item.id, status="quoted")
-                changed.append((item, None))
-            self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, changed))
+            change = self._recorded(conn, order, item, quote, by)
+        self._told(change)
+        return quote
+
+    def _recorded(
+        self, conn: Conn, order: Order, item: OrderItem, quote: Quote, by: Actor
+    ) -> _Change:
+        """What recording ``quote`` does past its row: the item `quoted` from `draft`,
+        the audit row, the order rederived, and §3.4's release of the item's older
+        unaccepted quotes' sliced files (the newest unaccepted one is this)."""
+        changed: list[tuple[OrderItem, int | None]] = []
+        if item.status == "draft":
+            item = self.store.update_item(conn, item.id, status="quoted")
+            changed.append((item, None))
+        self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+        order = self._rederive(conn, order, by)
+        released = [
+            other.id
+            for other in self.store.quotes(item.id, conn=conn)
+            if not other.accepted and other.id != quote.id
+        ]
+        return _Change(order, changed, released)
+
+    def record_slice_quote(
+        self,
+        order_id: str,
+        item_id: str,
+        priced: Priced,
+        plates: Sequence[Plate],
+        *,
+        sliced_sha256: str,
+        sliced_blob_key: str,
+        by: Actor,
+        quote_id: str | None = None,
+    ) -> Quote:
+        """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
+        it, with the plates it read and the sliced file it read them from, under the id
+        its ref was taken with (``quote_id``, Ruling 3). As a manual quote: the order
+        open for items, the item not settled, allowed on hold (it advances nothing)."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            self._open_for_items(order, "an item's price")
+            item = self._item_of(conn, order, item_id)
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            quote = self.store.insert_quote(
+                conn,
+                item.id,
+                source="slice",
+                lines=priced.lines,
+                unit_cost_minor=priced.unit_cost_minor,
+                unit_price_minor=priced.unit_price_minor,
+                quantity=item.quantity,
+                created_by=by,
+                plates=[plate.model_dump(mode="json") for plate in plates],
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+                quote_id=quote_id,
+            )
+            change = self._recorded(conn, order, item, quote, by)
+        self._told(change)
         return quote
 
     def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
@@ -701,7 +860,9 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="approved")
             self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
             order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None)]))
+            # §3.4: accepting a quote releases every other quote's sliced file.
+            released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
+        self._told(_Change(order, [(item, None)], released))
         return item
 
     # -- fulfilment (§6.1 by hand) ---------------------------------------------------------
@@ -980,3 +1141,14 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
         return shipment
+
+
+def reap_quote_holds(refs: BlobRefs, store: OrderStore, *, grace: timedelta = QUOTE_TIMEOUT) -> int:
+    """#4250 Ruling 3's reaper, the ``housekeeping_reap_quote_holds`` sweep: drop every
+    ``order_item_quote`` holder §3.4 says should be gone, older than ``grace``. One
+    whose quote has no row (a run that crashed between its ref and its row), and one
+    whose quote is unaccepted and not its item's newest, or whose item is cancelled, or
+    whose order is closed or cancelled (a release lost between a commit and its drop).
+    The grace is every row's, so a quote recorded a moment ago is never caught between
+    its ref and its row. How many holders went; the blob sweep frees the bytes."""
+    return refs.drop_unlisted(QUOTE_HOLDER, store.standing_quote_ids(), older_than=grace)

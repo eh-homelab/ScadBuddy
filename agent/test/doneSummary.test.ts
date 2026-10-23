@@ -50,6 +50,21 @@ describe('doneSummary', () => {
     )
   })
 
+  it("names whose library a file is in: Bambuddy's or ScadBuddy's own (#4507)", () => {
+    const tool = 'mcp__scadbuddy__file_output_in_project_folder'
+    const text = doneSummary(
+      [
+        touch(1, { tool, resourceType: 'bambuddy_file', resourceId: '31', model: null }),
+        touch(2, { tool, resourceType: 'library_file', resourceId: '1000000002', model: null }),
+      ],
+      [],
+    )
+    expect(text.split('\n').slice(1)).toEqual([
+      '- created Bambuddy file `31` (`file_output_in_project_folder`)',
+      "- created ScadBuddy's library file `1000000002` (`file_output_in_project_folder`)",
+    ])
+  })
+
   it('puts what was done while nobody answered first, then after the reply, then before the request', () => {
     const text = doneSummary([touch(1), touch(5), touch(9)], [{ requestId: '0123456789abcdef', from: at(3), until: at(7) }])
     expect(text.split('\n\n')).toEqual([

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
@@ -9,6 +10,24 @@ import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
 import { PrintersPanel } from './Printers'
+
+/** `LanLink.access_code`'s `maxLength` in the spec `pnpm gen:api` (run before `pnpm test`)
+ * exported: the backend's bound, read rather than restated (#4497 review). */
+function specAccessCodeMax(): number {
+  const path = process.env.SCADBUDDY_OPENAPI_JSON ?? `${import.meta.dirname}/../../../../backend/openapi.json`
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (cause) {
+    throw new Error(`no API spec at ${path}: run \`pnpm gen:api\` first (pnpm test does)`, { cause })
+  }
+  const spec = JSON.parse(text) as {
+    components?: { schemas?: { LanLink?: { properties?: { access_code?: { maxLength?: unknown } } } } }
+  }
+  const max = spec.components?.schemas?.LanLink?.properties?.access_code?.maxLength
+  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength not in the spec at ${path}`)
+  return max
+}
 
 const H2C = 'Printer 3DP-31B-598'
 const GARAGE = 'Printer Garage'
@@ -128,7 +147,8 @@ describe('PrintersPanel (#3823)', () => {
     const form = within(garage).getByRole('form', { name: 'LAN link for Garage' })
     const code = within(form).getByLabelText('Access code')
     expect(code).not.toHaveAttribute('pattern')
-    expect(code).not.toHaveAttribute('maxlength')
+    // LanLink's bound only (#4483), never a format.
+    expect(code).toHaveAttribute('maxlength', String(specAccessCodeMax()))
     expect(code).not.toHaveAttribute('inputmode')
 
     await user.type(within(form).getByLabelText('Host or IP address'), '10.0.0.9')

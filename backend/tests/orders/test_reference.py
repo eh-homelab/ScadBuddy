@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from scadbuddy.core.gitrepo import RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
@@ -186,6 +187,56 @@ async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> No
     assert refused.value.field == "commit"
     assert "0" * 40 in refused.value.problem
     assert "no longer has" in refused.value.problem
+    # The same words when the output's commit stands in for one left out, or is
+    # given back, whole or short (#4484).
+    for given in (None, "0" * 40, "0" * 7):
+        with pytest.raises(ReferenceError) as refused:
+            await library.resolve(slug=None, commit=given, inputs=None, output_id="out3")
+        assert refused.value.field == "commit", given
+        assert "out3" in refused.value.problem, given
+        assert "no longer has" in refused.value.problem, given
+
+
+async def test_an_ambiguous_short_id_of_a_live_output_revision_is_not_gone(
+    library: Library, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short id `rev-parse` refuses as ambiguous: the output's revision is still there.
+
+    The stub stands in for git's ambiguity, which a small test repository cannot
+    produce: `rev-parse --verify --quiet` exits non-zero for a short id naming more
+    than one object (https://git-scm.com/docs/git-rev-parse#Documentation/git-rev-parse.txt---verify),
+    so `GitRepo.resolve` raises `RevisionNotFoundError` for it as for a missing one."""
+    commit = library.create("demo")
+    library.write_output("demo", "out5", commit)
+    resolve = library.history.resolve
+
+    def ambiguous(given: str) -> str:
+        if len(given) < 40:
+            raise RevisionNotFoundError(given)
+        return resolve(given)
+
+    monkeypatch.setattr(library.history, "resolve", ambiguous)
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=commit[:7], inputs=None, output_id="out5")
+    assert refused.value.field == "commit"
+    assert "no longer has" not in refused.value.problem
+
+
+async def test_an_outputs_unreadable_inputs_are_named_as_its_own(
+    library: Library, paths: DataPaths
+) -> None:
+    """#4484: the fault is the output's stored inputs, not a mismatch with the caller's."""
+    commit = library.create("demo")
+    library.write_output("demo", "out4", commit)
+    (paths.output_dir("demo", "out4") / INPUTS_NAME).write_text(
+        json.dumps({"params": 3}), encoding="utf-8"
+    )
+    for given in (None, {"params": {"width": 12}, "v": 1}):
+        with pytest.raises(ReferenceError) as refused:
+            await library.resolve(slug=None, commit=None, inputs=given, output_id="out4")
+        assert refused.value.field == "inputs", given
+        assert "stored inputs" in refused.value.problem, given
+        assert "out4" in refused.value.problem, given
 
 
 async def test_a_commit_of_another_model_is_refused(library: Library) -> None:

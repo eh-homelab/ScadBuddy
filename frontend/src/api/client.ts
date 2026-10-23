@@ -175,12 +175,16 @@ import type {
   Customer,
   CustomerCreate,
   CustomerPatch,
+  Filament,
+  FilamentInput,
+  FilamentPatch,
   Fulfilment,
   FulfilmentInput,
   ManualQuoteInput,
   Order,
   OrderCreate,
   OrderDetail,
+  OrderEstimate,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -189,7 +193,10 @@ import type {
   OrderPatch,
   Payment,
   PaymentCreate,
+  PolicyUpdate,
+  PriceBook,
   Quote,
+  SliceQuoteRequest,
   Shipment,
   ShipmentEdit,
   ShipmentInput,
@@ -2015,6 +2022,21 @@ export const api = {
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
   quoteOrderItem: (orderId: string, itemId: string, body: ManualQuoteInput) =>
     request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
+  /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the
+   * dialog's choices, price with the book; followed to the quote as every command is. */
+  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest) =>
+    command<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quote`, { method: 'POST', body: JSON.stringify(body) }),
+  // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------
+  priceBook: () => request<PriceBook>('/orders/price-book'),
+  setPriceBook: (body: PolicyUpdate) => request<PriceBook>('/orders/price-book', { method: 'PUT', body: JSON.stringify(body) }),
+  createFilament: (body: FilamentInput) =>
+    request<Filament>('/orders/price-book/filaments', { method: 'POST', body: JSON.stringify(body) }),
+  updateFilament: (id: string, body: FilamentPatch) =>
+    request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
+  /** A rough estimate (§5.3), never a quote: nothing is recorded. */
+  orderEstimate: (outputId: string, filamentId: string) =>
+    request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>

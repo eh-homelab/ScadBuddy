@@ -29,6 +29,10 @@ class FolderCycleError(Exception):
     """A folder cannot move under itself or one of its descendants."""
 
 
+class FolderGoneError(LookupError):
+    """The folder a file was to go in is gone (deleted since its check)."""
+
+
 class NativeFolder(BaseModel):
     id: int
     name: str
@@ -107,6 +111,34 @@ def _filed_for_output(conn: Connection[DictRow], output_id: str) -> list[NativeF
         (output_id,),
     ).fetchall()
     return [NativeFile.model_validate(r) for r in rows]
+
+
+def _filed_rows_of_output(conn: Connection[DictRow], output_id: str) -> list[NativeFile]:
+    """The output's filed copies, trashed ones too; a moved copy or one put in a folder
+    of the user's choosing (#4507) is not one."""
+    rows = conn.execute(
+        f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s AND filed"
+        f" ORDER BY id".encode(),
+        (output_id,),
+    ).fetchall()
+    return [NativeFile.model_validate(r) for r in rows]
+
+
+def _lock_output(conn: Connection[DictRow], output_id: str) -> None:
+    """In a transaction of ``conn``'s: one writer of an output's copies at a time."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:library:output:' || %s, 0))",
+        (output_id,),
+    )
+
+
+def unique_name(stem: str, taken: set[str]) -> str:
+    """``<stem>.3mf``, or ``<stem> (2).3mf`` and on, unlike every casefolded name in
+    ``taken``."""
+    name, number = f"{stem}.3mf", 2
+    while name.casefold() in taken:
+        name, number = f"{stem} ({number}).3mf", number + 1
+    return name
 
 
 def _rows_of_output(conn: Connection[DictRow], output_id: str) -> list[NativeFile]:
@@ -277,23 +309,66 @@ class NativeLibraryStore:
         with self._pool.connection() as conn:
             return _rows_of_output(conn, output_id)
 
+    def filed_rows_for_output(self, output_id: str) -> list[NativeFile]:
+        with self._pool.connection() as conn:
+            return _filed_rows_of_output(conn, output_id)
+
     def file_for_output(self, row: NativeFile, folder: str) -> tuple[NativeFile, bool]:
         """Insert ``row``, an output's filed copy, in the top-level folder ``folder``
-        (found or made), unless a row already names the output, moved or not: that row and False, or
-        ``row`` as inserted and True. One short transaction on one connection, under an
-        advisory lock per output, so overlapping attempts file one and a filing never
-        holds a connection while it waits on the pool for another."""
+        (found or made), unless the output already has a filed copy, trashed or not: that
+        row and False, or ``row`` as inserted and True. One short transaction on one
+        connection, under an advisory lock per output, so overlapping attempts file one
+        and a filing never holds a connection while it waits on the pool for another."""
         with self._pool.connection() as conn, conn.transaction():
-            conn.execute(
-                "SELECT pg_advisory_xact_lock("
-                "hashtextextended('scadbuddy:library:output:' || %s, 0))",
-                (row.output_id,),
-            )
-            existing = _rows_of_output(conn, row.output_id or "")
+            _lock_output(conn, row.output_id or "")
+            existing = _filed_rows_of_output(conn, row.output_id or "")
             if existing:
                 return existing[0], False
             folder_id = _template_folder(conn, folder).id
             return _insert_file(conn, row.model_copy(update={"folder_id": folder_id})), True
+
+    def put_for_output(self, row: NativeFile, folder_id: int, stem: str) -> tuple[NativeFile, bool]:
+        """Insert ``row``, an output's copy, in ``folder_id`` under a name made from
+        ``stem`` unique in the folder, unless a live row of the output is already there:
+        that row and False, or ``row`` as inserted and True. Under the same per-output lock
+        as `file_for_output`, so overlapping calls put one copy (#4507). The folder is
+        locked ``FOR KEY SHARE`` first, so it is live until the commit, and one deleted
+        since the caller's check is `FolderGoneError`; a delete waits for the commit and
+        then trashes this copy with the folder's other files.
+
+        Only these puts are made unique among themselves and the names already there: the
+        per-folder ``folder-names`` lock is taken here alone, so an upload, move or rename
+        into the folder at the same moment can still repeat a name. Nothing relies on
+        unique names (no constraint; rows are found by id, and an upload or copy keeps the
+        name it is given), so the other writers take no such lock."""
+        with self._pool.connection() as conn, conn.transaction():
+            _lock_output(conn, row.output_id or "")
+            there = conn.execute(
+                f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
+                f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
+                (row.output_id, folder_id),
+            ).fetchone()
+            if there is not None:
+                return NativeFile.model_validate(there), False
+            live = conn.execute(
+                "SELECT id FROM library_folders WHERE id = %s FOR KEY SHARE", (folder_id,)
+            ).fetchone()
+            if live is None:
+                raise FolderGoneError(folder_id)
+            # The name pick and the insert under the folder's lock too: the output's lock
+            # alone lets two outputs of one stem both take `Sign.3mf`.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('scadbuddy:library:folder-names:' || %s, 0))",
+                (folder_id,),
+            )
+            taken = conn.execute(
+                "SELECT name FROM library_files WHERE folder_id = %s AND deleted_at IS NULL",
+                (folder_id,),
+            ).fetchall()
+            name = unique_name(stem, {r["name"].casefold() for r in taken})
+            placed = row.model_copy(update={"folder_id": folder_id, "name": name})
+            return _insert_file(conn, placed), True
 
     def forget_output(self, output_id: str) -> None:
         """A deleted output is named by no row: a file moved out of its folder stays, with

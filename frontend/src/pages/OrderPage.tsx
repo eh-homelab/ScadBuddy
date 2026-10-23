@@ -157,7 +157,7 @@ export function OrderPage() {
           </p>
         )}
 
-        <OrderItemsTable items={items} currency={order.currency} onOpen={(item) => setOpenItem(item.id)} />
+        <OrderItemsTable items={items} currency={order.currency} exponent={order.minor_exponent} onOpen={(item) => setOpenItem(item.id)} />
 
         <div className="grid gap-4 md:grid-cols-2">
           <Card size="sm">
@@ -226,18 +226,18 @@ export function OrderPage() {
           <Card size="sm">
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-medium">Money</h2>
-              <ChargesEditor orderId={order.id} currency={order.currency} charges={charges} editable={editable} onChanged={reload} />
+              <ChargesEditor orderId={order.id} currency={order.currency} exponent={order.minor_exponent} charges={charges} editable={editable} onChanged={reload} />
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
                 <dt className="text-muted-foreground">Items</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency)}</dd>
+                <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="text-muted-foreground">Charges</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.charges_minor, order.currency)}</dd>
+                <dd className="sb-num text-right">{formatMoney(totals.charges_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="font-medium">Total</dt>
-                <dd className="sb-num text-right font-medium">{formatMoney(totals.total_minor, order.currency)}</dd>
+                <dd className="sb-num text-right font-medium">{formatMoney(totals.total_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="text-muted-foreground">Paid</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.paid_minor, order.currency)}</dd>
+                <dd className="sb-num text-right">{formatMoney(totals.paid_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="text-muted-foreground">Balance due</dt>
-                <dd className="sb-num text-right">{formatMoney(totals.balance_minor, order.currency)}</dd>
+                <dd className="sb-num text-right">{formatMoney(totals.balance_minor, order.currency, order.minor_exponent)}</dd>
               </dl>
               {payments.length > 0 && (
                 <ul className="flex flex-col gap-0.5 text-[13px]" aria-label="Payments">
@@ -246,7 +246,7 @@ export function OrderPage() {
                       <span>
                         {p.method ?? 'Payment'} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
                       </span>
-                      <span className="sb-num">{formatMoney(p.amount_minor, order.currency)}</span>
+                      <span className="sb-num">{formatMoney(p.amount_minor, order.currency, order.minor_exponent)}</span>
                     </li>
                   ))}
                 </ul>
@@ -256,7 +256,7 @@ export function OrderPage() {
                   className="flex flex-wrap items-end gap-2"
                   onSubmit={(event) => {
                     event.preventDefault()
-                    const minor = toMinor(payment.amount, order.currency)
+                    const minor = toMinor(payment.amount, order.minor_exponent)
                     if (minor === null) {
                       setRefusal({ text: 'Enter the amount received, such as 12.50.', items: [] })
                       return
@@ -283,7 +283,7 @@ export function OrderPage() {
 
         <Card size="sm">
           <CardContent>
-            <ShipmentForm orderId={order.id} currency={order.currency} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} onChanged={reload} />
+            <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} onChanged={reload} />
           </CardContent>
         </Card>
 
@@ -391,7 +391,7 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
       </form>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]">
         <dt className="text-muted-foreground">Price</dt>
-        <dd className="sb-num">{price === null ? 'Not priced' : formatMoney(price, order.currency)}</dd>
+        <dd className="sb-num">{price === null ? 'Not priced' : formatMoney(price, order.currency, order.minor_exponent)}</dd>
         <dt className="text-muted-foreground">Inputs</dt>
         <dd className="break-all font-mono text-xs">{JSON.stringify((item.reference.inputs as { params?: unknown }).params ?? {})}</dd>
         {item.colours.length > 0 && (
@@ -408,7 +408,7 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
           </>
         )}
       </dl>
-      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} />
+      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} />
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} />
       {error && (
         <p role="alert" className="text-[13px] text-warn">

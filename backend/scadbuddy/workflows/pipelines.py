@@ -286,9 +286,16 @@ def _failure_of(error: BaseException) -> Failure:
             if isinstance(detail, Failure):
                 return detail
             # A detail that is no `Failure` (a template's own raise of such a type):
-            # its message, not the validation error.
-            with contextlib.suppress(ValidationError):
+            # its message, not the validation error. Logged by its type only, so a
+            # template's author can tell their detail was ignored (#4480). The type is
+            # one of `FAILURE_TYPES` here, never the template's free text.
+            try:
                 return Failure.model_validate(detail)
+            except ValidationError:
+                workflow.logger.debug(
+                    "a detail of type %s is not a Failure; the job's error is its message",
+                    cause.type,
+                )
             return Failure(error=cause.message)
         if isinstance(cause, ActivityError) and cause.activity_type in _STAGES:
             stage = _STAGES[cause.activity_type]

@@ -209,11 +209,12 @@ def _probe_ok(calls: list[tuple[str, str, str]]) -> Any:
     return probe
 
 
-@pytest.mark.parametrize("code", [CODE, "aB3-xY9z12"])
+@pytest.mark.parametrize("code", [CODE, "aB3-xY9z12", " aB3-xY9z12 "])
 def test_lan_link_never_returns_code(
     client: TestClient, watches: RecordedWatches, code: str
 ) -> None:
-    """#4434: a code in any format reaches the probe as typed."""
+    """#4434: a code in any format reaches the probe as typed; #4482: spaces at either
+    end too, never stripped (a tab is a control character, refused)."""
     printers = registry(client)
     printers.store.kek = KEK
     calls: list[tuple[str, str, str]] = []

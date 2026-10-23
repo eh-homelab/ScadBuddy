@@ -522,6 +522,15 @@ class Ctx:
   output row. A pipeline may call `output` more than once (one 3MF per storey).
 - `bom` is structured, not a file: `[{piece, label, count, plates: [int], part: PartRef}]`,
   stored on the output and rendered by the host as a table; the agent reads it.
+- A pipeline's failure is the job's (`TemplatePipeline._run_pipeline`): a piece that
+  failed gives its own `Failure`, and an `ApplicationError` the template raises gives
+  its message as the job's `error`. One the template raises with a type of
+  `pipelines.FAILURE_TYPES` (`OpenSCADError`, …) and a detail that validates as a
+  `Failure` is taken as that failure, so the template's code sets the job's `error`,
+  `log_tail` and diagnostics (#4468, #4480). Past the default pipeline, the `error` is
+  still prefixed with the pipeline file and line. This is accepted, as §9 decides:
+  the template's code is trusted, so it may say what failed. A detail that does not
+  validate is logged by its type only (never its content) and read as the message.
 
 Template activities import what the worker image ships (`numpy`, `lxml`, `Pillow`,
 the stdlib, and `scadbuddy.render.*` as a public surface documented in the authoring

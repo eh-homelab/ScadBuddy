@@ -29,10 +29,12 @@ from scadbuddy.api import library_print
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.library_print import _kept_as_sent
 from scadbuddy.bambuddy import clearance, print_run
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
 from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest
+from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
@@ -1316,6 +1318,38 @@ def test_a_library_files_check_reads_the_dialogs_kept_catalogue(client: TestClie
 
     assert [check.status_code for check in checks] == [200, 200], checks[-1].text
     assert presets.call_count == 1
+
+
+@respx.mock
+def test_a_library_files_check_fetches_the_file_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4489: the check fetches the 3MF beside `prepare_run`, and `_fetch` keeps only a
+    finished fetch, so a `prepare_run` that fetched it as well would fetch it twice. (The
+    slot read spools the file apart from this fetch: #4495.)"""
+    configure(client)
+    download = library_file(89)
+    run_routes()
+    fetches: list[int] = []
+    fetch_3mf = LibrarySource.fetch_3mf
+
+    async def counted(self: LibrarySource, bambuddy: BambuddyClient | None) -> bytes | None:
+        fetches.append(self.file_id)
+        return await fetch_3mf(self, bambuddy)
+
+    monkeypatch.setattr(LibrarySource, "fetch_3mf", counted)
+    request = {
+        **body(),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]},
+    }
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert fetches == [89]
+    # The slot read's spool and this fetch: #4495 makes it one, and this then reads 1.
+    assert download.call_count == 2, "#4495: two downloads, the spool and the fetch"
 
 
 @respx.mock

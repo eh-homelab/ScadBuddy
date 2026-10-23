@@ -257,6 +257,8 @@ export function RuntimeInput({
       return <BytesInput id={id} value={value} onChange={onChange} />
     case 'bool':
       return <Switch id={id} checked={value === 'true'} onCheckedChange={(checked) => onChange(String(checked))} />
+    case 'select':
+      return <ChoiceSelect id={id} value={value} onValueChange={onChange} choices={[...(spec.choices ?? [])]} />
     case 'level':
       return (
         <ChoiceSelect

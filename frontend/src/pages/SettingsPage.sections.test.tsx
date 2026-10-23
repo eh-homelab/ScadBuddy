@@ -1286,6 +1286,40 @@ describe('SettingsPage Orders (#4249)', () => {
   })
 })
 
+describe('SettingsPage Orders, the price book (#4250)', () => {
+  it('shows the pricing policy and the filaments in the Orders section', async () => {
+    renderPage(<SettingsPage />)
+    await seeded()
+    const orders = region('Orders')
+    expect(within(orders).getByLabelText('Machine rate per hour')).toHaveValue('0')
+    expect(within(orders).getByLabelText('Setup fee per plate')).toHaveValue('0')
+    expect(within(orders).getByLabelText('Labour per item')).toHaveValue('0')
+    expect(within(orders).getByLabelText('Markup, percent')).toHaveValue('0')
+    expect(within(orders).getByRole('combobox', { name: 'Round the unit price' })).toHaveTextContent('Each line to the cent')
+    const filaments = await within(orders).findByRole('table', { name: 'Filaments' })
+    expect(await within(filaments).findByText(/Sunflower Yellow/)).toBeInTheDocument()
+  })
+
+  it('saves the policy, and shows the server refusing a negative rate', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const field = () => within(region('Orders')).getByLabelText('Markup, percent')
+    await user.clear(field())
+    await enter(user, field(), '-1')
+    await user.click(within(region('Orders')).getByRole('button', { name: 'Save Orders' }))
+    await within(region('Orders')).findByRole('alert')
+    expect(mockSettings().pricing_markup_percent).toBe('0')
+
+    await user.clear(field())
+    await enter(user, field(), '15')
+    await choose(user, within(region('Orders')).getByRole('combobox', { name: 'Round the unit price' }), 'Up to a whole unit')
+    await user.click(within(region('Orders')).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().pricing_markup_percent).toBe('15'))
+    expect(mockSettings().pricing_rounding).toBe('to_major')
+    expect((await api.priceBook()).policy.markup_percent).toBe('15')
+  })
+})
+
 describe('SettingsPage Administration (#668)', () => {
   it('shows no Temporal UI link while its URL is empty', async () => {
     renderPage(<SettingsPage />)

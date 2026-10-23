@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, _prelude
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.output_operations import NATIVE_LIBRARY_OFF_PROBLEM
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.operation_models import PreludeStep
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
@@ -175,3 +177,13 @@ def test_a_delete_started_without_a_prelude_still_takes_the_inbox_copies(
 
     assert response.status_code == 204, response.text
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
+
+
+def test_a_native_filing_on_the_bambuddy_library_is_its_own_409(client: TestClient) -> None:
+    """#4507: `output_native_file` with `library_backend=bambuddy` names its own problem."""
+    app_state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    kind = app_state.components.get(OPERATIONS).kinds["output_native_file"]
+    assert client.portal is not None
+    with pytest.raises(ApiError) as refused:
+        client.portal.call(kind.check, {"output_id": "a" * 32, "folder_id": 1_000_000_001})
+    assert (refused.value.status, refused.value.type) == (409, NATIVE_LIBRARY_OFF_PROBLEM)

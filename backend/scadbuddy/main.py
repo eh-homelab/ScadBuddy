@@ -99,6 +99,7 @@ from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.printers.component import PRINTERS
@@ -162,6 +163,7 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_WATCHES_SWEEP,
+    QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
@@ -636,6 +638,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def ensure_printer_watches() -> None:
         await _heartbeating(_ensure_printer_watches_logged(state))
 
+    @activity.defn(name=QUOTE_HOLDS_SWEEP)
+    async def reap_quote_holds() -> None:
+        await _heartbeating(_reap_quote_holds_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -655,6 +661,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         prune_transfer_puts,
         stop_lost_native_slice_rows,
         ensure_printer_watches,
+        reap_quote_holds,
     ]
 
 
@@ -908,6 +915,18 @@ async def _maintain_models_git_logged(state: AppState) -> None:
         raise
     if packed:
         logger.info("packed the models repository")
+
+
+async def _reap_quote_holds_logged(state: AppState) -> None:
+    """#4250 Ruling 3: the slice quotes' holders §3.4 says should be gone."""
+    orders = state.components.get(ORDERS)
+    try:
+        dropped = await asyncio.to_thread(reap_orphan_quote_holds, orders.refs, orders.store)
+    except Exception:
+        logger.exception("could not reap the quotes' sliced-file holds")
+        raise
+    if dropped:
+        logger.info("reaped quote holds", extra={"count": dropped})
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:

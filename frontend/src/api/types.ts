@@ -341,6 +341,21 @@ export type ShipmentInput = Partial<Schemas['ShipmentInput']>
 /** `PATCH …/shipments/{shipment}`: only what is sent changes. */
 export type ShipmentEdit = Schemas['ShipmentEdit']
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
+/** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
+ * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
+ * places, the backend's (ISO 4217) and never `Intl`'s. */
+export type QuoteLine = Schemas['QuoteLine']
+export type Filament = Schemas['Filament']
+export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
+export type FilamentPatch = Partial<Schemas['FilamentPatch']>
+export type PricingPolicy = Schemas['PricingPolicy']
+/** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
+export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
+export type PriceBook = Schemas['PriceBook']
+/** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
+ * colour slot (`colours[].slot`, from 0). */
+export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
+export type OrderEstimate = Schemas['OrderEstimate']
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
 export type Activity = Schemas['ActivityItem']
@@ -749,6 +764,7 @@ export interface SessionResource {
     | 'project'
     | 'bambuddy_file'
     | 'print_archive'
+    | 'library_file'
     | 'unclassified'
   /** Null only for `unclassified`. */
   id: string | null

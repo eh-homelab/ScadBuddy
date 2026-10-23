@@ -17,7 +17,12 @@ from pydantic import ValidationError
 
 from scadbuddy.core.secrets import SealError
 from scadbuddy.printers import store as store_module
-from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
+from scadbuddy.printers.models import (
+    ACCESS_CODE_MAX_LENGTH,
+    LanLink,
+    PrinterCreate,
+    PrinterPatch,
+)
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import (
     PRINTER_REFERENCES,
@@ -103,7 +108,14 @@ def test_a_lan_link_takes_the_code_as_typed(code: str) -> None:
     assert LanLink(host="h", access_code=code).access_code == code
 
 
-@pytest.mark.parametrize("code", ["", "x" * 129, "1234\r\n5678", "12\x0034", "12\x7f34"])
+def test_a_lan_link_takes_a_code_of_the_whole_bound() -> None:
+    assert LanLink(host="h", access_code="x" * ACCESS_CODE_MAX_LENGTH).access_code
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["", "x" * (ACCESS_CODE_MAX_LENGTH + 1), "1234\r\n5678", "12\x0034", "12\x7f34", "\taB3"],
+)
 def test_a_lan_link_refuses_an_empty_unbounded_or_control_code(code: str) -> None:
     with pytest.raises(ValidationError):
         LanLink(host="h", access_code=code)

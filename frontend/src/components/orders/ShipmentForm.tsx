@@ -18,6 +18,7 @@ function remaining(items: OrderItemDetail[], shipments: Shipment[]): { item: Ord
 export function ShipmentForm({
   orderId,
   currency,
+  exponent,
   items,
   shipments,
   enabled,
@@ -25,6 +26,8 @@ export function ShipmentForm({
 }: {
   orderId: string
   currency: string
+  /** The order's `minor_exponent`. */
+  exponent: number
   items: OrderItemDetail[]
   shipments: Shipment[]
   enabled: boolean
@@ -47,7 +50,7 @@ export function ShipmentForm({
           {shipments.map((s) => (
             <li key={s.id}>
               {[s.carrier, s.service, s.tracking].filter(Boolean).join(' · ') || 'Shipment'}
-              {s.cost_minor !== null && s.cost_minor !== undefined ? ` · ${formatMoney(s.cost_minor, currency)}` : ''}:{' '}
+              {s.cost_minor !== null && s.cost_minor !== undefined ? ` · ${formatMoney(s.cost_minor, currency, exponent)}` : ''}:{' '}
               {s.items.map((line) => `${line.quantity} × ${titles[line.order_item_id] ?? line.order_item_id}`).join(', ') || 'nothing listed'}
             </li>
           ))}
@@ -61,7 +64,7 @@ export function ShipmentForm({
             const lines = left
               .map(({ item }) => ({ order_item_id: item.id, quantity: Number(quantities[item.id] ?? left.find((l) => l.item.id === item.id)?.left ?? 0) }))
               .filter((line) => Number.isInteger(line.quantity) && line.quantity > 0)
-            const costMinor = cost.trim() ? toMinor(cost, currency) : null
+            const costMinor = cost.trim() ? toMinor(cost, exponent) : null
             if (cost.trim() && costMinor === null) {
               setError('Enter the shipping cost as an amount, such as 4.50.')
               return
