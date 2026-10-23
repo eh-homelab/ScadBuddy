@@ -509,6 +509,10 @@ async def test_every_plate_keeps_the_question_and_suggests_only_trays() -> None:
         overlay=_white_shelf(),
         now=NOW,
     )
+    # Each plate's rows are its own: one plate's edit never reaches another's.
+    first, second = plates
+    assert first.shelf[0].records is not second.shelf[0].records
+    assert first.trays[0].candidates is not second.trays[0].candidates
     merged = every_plate(plates)
     assert [tray.tray_id for tray in merged.trays] == [1]
     assert len(merged.shelf) == 2

@@ -1096,6 +1096,8 @@ async def _tray_plate_options(
     here = printer_id if printer_id is not None else status.id
     options = loaded_trays(status, here, status.name, overlay)
     notes = overlay_notes(overlay, labels, now=now) if overlay is not None else []
+    # Shelf ids are positional: they agree across the plates only because every plate
+    # shares this one overlay and so this one numbering.
     questions, shelf = tray_questions(status, overlay)
     return [
         _options(
@@ -1106,8 +1108,8 @@ async def _tray_plate_options(
             printer_name=status.name,
             source="trays",
             notes=notes,
-            trays=[question.model_copy() for question in questions],
-            shelf=[spool.model_copy() for spool in shelf],
+            trays=[question.model_copy(deep=True) for question in questions],
+            shelf=[spool.model_copy(deep=True) for spool in shelf],
         )
         for requirements in per_plate
     ]

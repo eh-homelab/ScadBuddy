@@ -616,6 +616,8 @@ def _shelf(
         " AND p.tray_uuid IS NULL AND p.tag_uid IS NULL"
         # A spool one of its fresh records places in a tray is that tray's, whichever
         # record says so; a stale provider's placement counts no more than its records.
+        # Both lookups are indexed (`20261018T1744Z_physical_spools.sql`): `ol` by
+        # `UNIQUE (physical_spool_id, provider)`, `orr` by its `(provider, record_id)` key.
         " AND NOT EXISTS (SELECT 1 FROM spool_record_links ol"
         "   JOIN spool_provider_records orr USING (provider, record_id)"
         "   WHERE ol.physical_spool_id = l.physical_spool_id"
