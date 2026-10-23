@@ -272,6 +272,8 @@ function hotChoices(): ChoicesView {
     printers: [{ ...(choicesView.printers ?? [])[0]!, id: HERE, name: HOT_PRINTER.name, model: 'H2C' }],
     filaments: hotFilaments(),
     model_choices: { printer_id: null, filament_plan: [] },
+    // The server's word that a run on the H2C goes over the LAN (`print_run.lan_printers`).
+    lan_printers: [HOT_PRINTER.id],
   }
 }
 

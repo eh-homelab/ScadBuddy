@@ -17,7 +17,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -46,6 +46,7 @@ from scadbuddy.bambuddy.print_run import (
     QueuedPlate,
     ResolvedProject,
     finish_run,
+    native_runs,
     plan_run,
     prepare_run,
     queue_plate,
@@ -150,12 +151,9 @@ class PrintDeps:
     #: The native slicer's starter (plan 2026-10-16 Task 13): ``print_plan`` keys a
     #: reprint's reuse by it. ``None`` outside the image, where a native run is a 503.
     native: NativeSliceStarter | None = None
-    #: Whether a run is on the native path (#3818 tier A, D2): there its project is
-    #: refused, none is resolved, and its folder is ScadBuddy's own (Task 5, D6). Task 9
-    #: sets it from ``hot_path_native``; until then every run is Bambuddy's.
-    native_run: Callable[[StoredSettings, PrintRunRequest], bool] = field(
-        default=lambda settings, request: False
-    )
+    #: Whether a run is on the native path (#3818 tier A, D2): `native_runs`, which the
+    #: dialog's `ChoicesView.lan_printers` is read from too; a test may set its own.
+    native_run: Callable[[StoredSettings, PrintRunRequest], bool] = native_runs
     #: The printer registry and its LAN reports (#3823, plan 2026-10-16 Task 8): the
     #: check names the run's row and chooses its path. ``None`` runs as before it.
     printers: PrinterStore | None = None

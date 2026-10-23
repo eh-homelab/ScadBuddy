@@ -1,4 +1,4 @@
-import type { PrinterRow, Settings } from '../api/types'
+import type { Settings } from '../api/types'
 import type { RealtimeSignal } from './realtime'
 
 /**
@@ -26,37 +26,15 @@ export function nativeBackends(
 }
 
 /**
- * #3818 — a row whose path is the LAN, as far as the row tells it: the backend's
- * `print_run.py` `run_path` (plan 2026-10-16 Task 8), so change the two together. Linked
- * over the LAN with its access code, and either asked to print natively or with no
- * Bambuddy printer to print through. `auto` with both links is `run_path`'s call on the
- * report's age, so it is left to the Bambuddy path here.
- */
-export function printsNatively(row: PrinterRow): boolean {
-  if (row.lan_host == null || !row.has_access_code) return false
-  return row.preferred_path === 'native' || (row.preferred_path === 'auto' && row.bambuddy_printer_id == null)
-}
-
-/**
  * #3818 (plan 2026-10-18 D6) — whether a page with no printer chosen (the Customize page's
  * picker) lists ScadBuddy's own folders rather than Bambuddy's projects: the hot path's
  * backends (`nativeBackends`, the same rule the print dialog applies) and no Bambuddy to
- * hold projects at all. The print dialog decides per printer instead: the backends, and
- * the chosen printer's path (`printsNatively`). With a Bambuddy URL set the page keeps
- * listing projects, and a dialog on a native printer still lists folders of its own.
+ * hold projects at all. The print dialog decides per printer instead, by the path the
+ * server reports for it (`ChoicesView.lan_printers`). With a Bambuddy URL set the page
+ * keeps listing projects, and a dialog on a native printer still lists folders of its own.
  */
 export function listsNativeFolders(
   settings: Pick<Settings, 'slicer_backend' | 'library_backend' | 'store_backend' | 'bambuddy_url'> | null | undefined,
 ): boolean {
   return nativeBackends(settings) && !settings?.bambuddy_url
-}
-
-/**
- * #3818 — whether a run on `row` is accepted today. `prepare_run` refuses a row with no
- * Bambuddy printer (`print_run.py` `_not_on_bambuddy`) until plan 3a Task 9's LAN print
- * lands, so a LAN-only row is listed but not printable, and the dialog never opens on it.
- * This goes away with Task 9.
- */
-export function acceptsRuns(row: PrinterRow): boolean {
-  return row.bambuddy_printer_id != null
 }

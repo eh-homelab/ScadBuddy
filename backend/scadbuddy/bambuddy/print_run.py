@@ -1443,6 +1443,36 @@ def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> Run
     return "native" if row.lan_host is not None and fresh else "bambuddy"
 
 
+def native_runs(settings: StoredSettings, request: PrintRunRequest | None = None) -> bool:
+    """Whether a run is on the native path at all (#3818 tier A, D2): there its project
+    is refused, none is resolved, and its folder is ScadBuddy's own (Task 5, D6).
+
+    Plan 3a Task 9 decides it from ``hot_path_native``; until then every run is
+    Bambuddy's. `PrintDeps.native_run` defaults to it and the dialog's
+    `ChoicesView.lan_printers` is read from it, so the two never disagree."""
+    return False
+
+
+async def lan_printers(
+    settings: StoredSettings,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+) -> list[str]:
+    """The registry rows a run would reach over the LAN (#3818): those `run_path` puts on
+    the native path, once `native_runs` puts runs there. None until plan 3a Task 9, so
+    the dialog keeps its project, Bambuddy's folders and "queued" for every printer."""
+    if printers is None or not native_runs(settings):
+        return []
+    rows = await asyncio.to_thread(printers.list)
+    now = datetime.now(UTC)
+    out: list[str] = []
+    for row in rows:
+        report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
+        if run_path(row, None if report is None else report[1], now=now) == "native":
+            out.append(row.id)
+    return out
+
+
 async def prepare_run(
     client: BambuddyClient,
     source: PrintSource,

@@ -40,11 +40,19 @@ export function trayChoiceLabel(spool: SpoolOption): string {
   return where ? `${what} in ${where}` : what
 }
 
-/** A spool provider as a person reads it: Bambuddy's inventory, or another's name. */
+/**
+ * A spool provider as a person reads it: Bambuddy's inventory, or another's name. A
+ * provider's own label (`SpoolProvider.label`) is not on the wire, so any other key is
+ * title-cased, its underscores read as spaces (`open_spool` is "Open Spool").
+ */
 export function providerLabel(provider: string): string {
   if (provider === 'bambuddy') return 'Bambuddy'
   if (provider === 'native') return 'ScadBuddy'
-  return provider.charAt(0).toUpperCase() + provider.slice(1)
+  return provider
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
 }
 
 /**

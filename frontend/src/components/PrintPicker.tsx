@@ -38,7 +38,7 @@ import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
-import { PRINTER_TOPICS, acceptsRuns, nativeBackends, printsNatively, registryNews } from '../lib/printerRegistry'
+import { PRINTER_TOPICS, registryNews } from '../lib/printerRegistry'
 import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, singlePlate, withPlate } from '../lib/plateChoice'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
@@ -252,6 +252,7 @@ interface Props {
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
 const NO_ROWS: PrinterRow[] = []
+const NO_IDS: string[] = []
 /** A closed dialog follows no topic. */
 const NO_TOPICS: readonly string[] = []
 
@@ -366,18 +367,15 @@ export function PrintPicker({
   // the dialog prints on Bambuddy ids alone.
   const registryRows = registry.data ?? NO_ROWS
   /**
-   * #3818 — the hot path (plan 2026-10-18 D2): with the native slicer and library, a
-   * printer the LAN prints to is printed to with no Bambuddy call. Its row is chosen by
-   * its id (`askRegistry`), the one way to name a printer only the LAN reaches, and every
-   * dialog read names it as `printer`.
+   * #3818 — the hot path (plan 2026-10-18 D2): a printer the server says a run reaches
+   * over the LAN (`ChoicesView.lan_printers`, from `print_run.py` `native_runs` and
+   * `run_path`) is printed to with no Bambuddy call. The dialog never works the path out
+   * itself: until plan 3a Task 9 the server lists none, and every run is Bambuddy's. A
+   * LAN-only row is chosen by its id (`askRegistry`), the one way to name a printer only
+   * the LAN reaches, and every dialog read names it as `printer`.
    */
-  // Read only with a row that could print so: no other dialog needs Settings on open.
-  const lanCapable = registryRows.some(printsNatively)
-  const backends = useAsync(async () => (open && lanCapable ? await api.getSettings() : null), [open, lanCapable])
-  const nativeRows = useMemo(
-    () => (nativeBackends(backends.data) ? registryRows.filter(printsNatively) : NO_ROWS),
-    [backends.data, registryRows],
-  )
+  const lanIds = choices?.lan_printers ?? NO_IDS
+  const nativeRows = useMemo(() => registryRows.filter((row) => lanIds.includes(row.id)), [registryRows, lanIds])
   // The row that links the Bambuddy printer in view, only when there is one: a LAN-only
   // row's `bambuddy_printer_id` is null too, so a null printer must match no row.
   const registryPrinter =
@@ -390,9 +388,8 @@ export function PrintPicker({
   // Only a row the LAN reaches and Bambuddy does not: one just created by serial reaches
   // neither, and one linked to a Bambuddy printer is that printer's entry (#4340 review M3).
   const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
-  /** #3818 — of those, the ones the hot path prints to: choosable. */
-  // None until plan 3a Task 9: the backend refuses a row with no Bambuddy printer (`acceptsRuns`).
-  const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row) && acceptsRuns(row))
+  /** #3818 — of those, the ones the server says a run reaches: choosable (none until Task 9). */
+  const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   const { askRegistry } = picker
   /**
    * No Bambuddy printer to open on, and one the LAN prints to: open on that one, once
@@ -414,17 +411,17 @@ export function PrintPicker({
     askRegistry(nativeFirst)
   }, [open, nativeFirst, askRegistry])
   /**
-   * Whether the dialog knows its path yet: the registry read, Settings when a row could
-   * print natively, and, with a LAN row to open on, the printer it opened on. Until then nothing that differs by path (the destinations and
-   * their default) is read, so a hot-path dialog never asks Bambuddy first.
+   * Whether the dialog knows its path yet: the registry read and, with a row the LAN
+   * reaches, the choices that say whether a run goes over it, and the printer the dialog
+   * opened on. Until then nothing that differs by path (the destinations and their
+   * default) is read, so a hot-path dialog never asks Bambuddy first.
    */
+  const lanLinked = registryRows.some((row) => row.lan_host != null)
   const pathKnown =
     (registry.data !== undefined || registry.error !== undefined) &&
-    (!lanCapable || backends.data !== undefined || backends.error !== undefined) &&
-    // Opening on the LAN row is still to come: until it lands the printer is not known.
-    // A native row may be the Bambuddy printer the choices open on: known once they are
-    // read, or once that read failed (as ActionBar counts a failed Settings read settled).
-    (nativeRows.length === 0 || ((choices !== null || loadError !== null) && nativeFirst === null))
+    // Known once the choices are read, or once that read failed (as ActionBar counts a
+    // failed Settings read settled); opening on a LAN row is still to come until it lands.
+    (!lanLinked || ((choices !== null || loadError !== null) && nativeFirst === null))
   /** #3818 (D6) — projects are Bambuddy's: a native print is filed in a native folder. */
   const project = native ? undefined : pageProjectGiven
   const { nozzles, tier, processName, bedType, overrides } = selection
@@ -1020,6 +1017,11 @@ export function PrintPicker({
   const checkRequest: PrintRunRequest | null =
     choices && printChoices && !noPlate
       ? {
+          // Task 9 note (#3818): `registryPrinter` is `registryAsked` first, so a LAN row
+          // asked for while the view still shows the Bambuddy printer's read pairs that
+          // row with the old `printer_id`, which `prepare_run` refuses as a mismatch until
+          // the read lands. Unreachable while the server lists no LAN printer; once a LAN-only
+          // row is choosable, send `printer_id: null` beside an asked row.
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },

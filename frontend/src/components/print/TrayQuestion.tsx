@@ -60,7 +60,9 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
    * shelf row's `spool_id` is positional and a re-read may move the record to another;
    * on the Bambuddy path the spool's own id.
    */
-  const keyOf = (spool: SpoolOption) => (native ? linkKey(linkOf(spool)) : String(spool.spool_id)) ?? ''
+  // Every candidate has a link natively (filtered above); the index only keeps keys apart.
+  const keyOf = (spool: SpoolOption) =>
+    (native ? linkKey(linkOf(spool)) : String(spool.spool_id)) ?? `unlinked:${candidates.indexOf(spool)}`
   const [picked, setPicked] = useState<string | null>(candidates[0] ? keyOf(candidates[0]) : null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)

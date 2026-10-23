@@ -56,7 +56,7 @@ from scadbuddy.api.outputs import (
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
-from scadbuddy.bambuddy.choices import ChoicesView, choices_for
+from scadbuddy.bambuddy.choices import ChoicesView, choices_for, with_lan_printers
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
@@ -1063,6 +1063,7 @@ async def get_library_choices(
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
+    printers: PrintersDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
@@ -1090,7 +1091,7 @@ async def get_library_choices(
             ),
             files=files,
         )
-        return await choices_for(
+        view = await choices_for(
             client,
             source,
             settings,
@@ -1100,6 +1101,7 @@ async def get_library_choices(
             catalogue_key=catalogue_name_key(store.kek),
             rack=rack,
         )
+    return await with_lan_printers(view, settings, printers)
 
 
 @router.put(

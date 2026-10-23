@@ -12,7 +12,7 @@ import { printersState } from '../mocks/features/printers'
 import { HOT_PRINTER, NO_BAMBUDDY, UNLINKED_RECORD, hotFilaments, setHotPath } from '../mocks/features/hotPath'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
-import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
+import { addMockOutput, lastArrangeRequest, problem, resetMockState, setMockSettings } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
@@ -4953,6 +4953,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
         printer_id: other ? Number(asked) : HOT_PRINTER.bambuddy_printer_id,
         filaments: other ? { ...fixtures.filamentOptions, printer_id: Number(asked) } : hotFilaments(),
         model_choices: { printer_id: null, filament_plan: [] },
+        lan_printers: [HOT_PRINTER.id],
       })
     })
   }
@@ -5018,7 +5019,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     }
   })
 
-  it('lists a LAN-only row as not yet printable and never opens on it (until plan 3a Task 9)', async () => {
+  it('lists a LAN-only row the server reaches no run on as not yet printable, and never opens on it', async () => {
     setHotPath(true)
     const lanOnly = { ...HOT_PRINTER, bambuddy_printer_id: null, bambuddy_active: false }
     server.use(
@@ -5118,6 +5119,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
           printer_id: HOT_PRINTER.bambuddy_printer_id,
           filaments: twoTrays,
           model_choices: { printer_id: null, filament_plan: [] },
+          lan_printers: [HOT_PRINTER.id],
         })
       }),
     )
@@ -5148,6 +5150,40 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
 })
 
 describe('PrintPicker · the registry printer it names', () => {
+  it("keeps the project and Bambuddy's projects for a row set to the LAN that the server routes through Bambuddy", async () => {
+    // Linked both ways and set to the LAN, but no run goes over it before plan 3a Task 9:
+    // the server lists no LAN printer, and the dialog takes its word over the row's.
+    const linked = printersState().find((row) => row.bambuddy_printer_id === choicesView.printer_id)!
+    Object.assign(linked, { lan_host: '10.0.0.9', has_access_code: true, preferred_path: 'native' })
+    // The hot path's backends, beside a Bambuddy: what the row alone would call native.
+    setMockSettings({ ...fixtures.settings, slicer_backend: 'native', library_backend: 'native', store_backend: 's3' })
+    server.use(http.get('/api/v1/print/projects/default', () => HttpResponse.json({ project_id: 2, reason: 'settings' })))
+    const asked: string[] = []
+    const listener = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      if (url.pathname.startsWith('/api/v1/print/projects')) asked.push(`${url.pathname}${url.search}`)
+    }
+    server.events.on('request:start', listener)
+    try {
+      const runs = watch('POST', '/run')
+      const { user } = renderPicker()
+      await loaded()
+      // Bambuddy's default project, never the native "template's folder".
+      await waitFor(() => expect(screen.getByTestId('print-filed-under')).toHaveTextContent('Filed under: Gridfinity Bins'))
+      expect(screen.queryByText(/over the LAN/)).not.toBeInTheDocument()
+      await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+      expect(await screen.findByRole('combobox', { name: /Project/ })).toBeInTheDocument()
+      expect(screen.queryByRole('combobox', { name: 'Folder' })).not.toBeInTheDocument()
+      expect(asked.length).toBeGreaterThan(0)
+      expect(asked.filter((entry) => new URL(entry, 'http://x').searchParams.has('native'))).toEqual([])
+      await user.click(screen.getByRole('button', { name: /^Print$/ }))
+      expect(await screen.findByTestId('queued-items')).toHaveTextContent('Sliced and queued for')
+      expect(runs.bodies[0]).toMatchObject({ project_id: 2, printer: linked.id })
+    } finally {
+      server.events.removeListener('request:start', listener)
+    }
+  })
+
   it('names the row linking the Bambuddy printer in view on the check and the run, beside its id', async () => {
     const linked = printersState().find((row) => row.bambuddy_printer_id === choicesView.printer_id)!
     const checks = watch('POST', '/check')

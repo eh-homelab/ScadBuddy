@@ -430,5 +430,6 @@ describe('trayChoiceLabel and providerLabel', () => {
   it('names the providers', () => {
     expect(providerLabel('bambuddy')).toBe('Bambuddy')
     expect(providerLabel('spoolman')).toBe('Spoolman')
+    expect(providerLabel('open_spool')).toBe('Open Spool')
   })
 })
