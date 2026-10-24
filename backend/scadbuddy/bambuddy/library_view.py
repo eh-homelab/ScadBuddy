@@ -125,7 +125,6 @@ async def spooled_3mf(
     read, in any process, downloaded the same bytes; else it is downloaded into it.
     An STL is not kept: what is read is its wrapped 3MF, not the file's bytes."""
     if downloads is not None and source.file_type == "3mf" and is_sha256(file_hash):
-        assert file_hash is not None
         spool = cache / SPOOL_DIRNAME
         # Read from a checked private copy, never the shared entry itself. A fault in
         # the cache reads as a miss.
@@ -273,7 +272,6 @@ async def library_filaments(
                 if downloads is not None and is_sha256(file.file_hash):
                     # As the spool keeps its download (#2788): a later preview of these
                     # bytes reads them here (#4562 review). Best effort, as there.
-                    assert file.file_hash is not None
                     try:
                         await asyncio.to_thread(downloads.put, file.file_hash, held)
                     except OSError:

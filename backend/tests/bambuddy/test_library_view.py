@@ -342,6 +342,36 @@ async def test_a_callers_fetch_is_kept_for_the_next_read_of_its_bytes(
 
 
 @respx.mock
+async def test_fetched_bytes_the_cache_cannot_keep_still_answer_the_slots(
+    bambuddy: BambuddyClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4576 review: keeping the fetched bytes is best effort, as the spool's keep is: a
+    cache that cannot be written is logged, and the slots are read all the same."""
+    content = two_colour_3mf(tmp_path)
+    download = library_file(7, content)
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    file = await bambuddy.library_file(7)
+
+    def unwritable(self: DownloadCache, sha256: str, data: bytes) -> None:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(DownloadCache, "put", unwritable)
+
+    async def fetched() -> bytes:
+        return content
+
+    with caplog.at_level("WARNING"):
+        assert await library_filaments(
+            bambuddy, tmp_path / "api", file, downloads=downloads, fetched=fetched
+        )
+    assert not download.called
+    assert "could not keep a library file" in caplog.text
+
+
+@respx.mock
 async def test_a_fetch_that_holds_nothing_reads_the_slots_from_disk(
     bambuddy: BambuddyClient, tmp_path: Path
 ) -> None:
