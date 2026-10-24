@@ -391,8 +391,9 @@ export function PrintPicker({
   /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   /**
-   * #3818 Task 9 — the `printer_id` every run, check and preview body sends: none beside a
-   * LAN-only row, which links no Bambuddy printer. `registryPrinter` is `registryAsked`
+   * #3818 Task 9 — the `printer_id` every body the dialog sends carries (run, check,
+   * preview and batch; analysis and quote too, #4551): none beside a LAN-only row, which
+   * links no Bambuddy printer. `registryPrinter` is `registryAsked`
    * first, so while the view still shows the Bambuddy printer's read the old id would ride
    * along with the asked row, and the server refuses that pair (422) rather than print on
    * the Bambuddy printer.
@@ -1013,7 +1014,7 @@ export function PrintPicker({
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices && planReady && !noPlate
       ? {
-          printer_id: printerId,
+          printer_id: sentPrinterId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
           ...plateFields(plate),
@@ -1307,7 +1308,7 @@ export function PrintPicker({
     setQuoteError(null)
     try {
       const made = await api.quoteItem(quote.orderId, quote.itemId, {
-        printer_id: printerId,
+        printer_id: sentPrinterId,
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         filaments: priced,
