@@ -42,6 +42,20 @@ async def test_filing_twice_files_once(native: NativeLibrary, three_mf: Path) ->
     assert (a.name, a.output_id, a.filed) == ("demo-sign.3mf", meta.id, True)
 
 
+async def test_a_retried_filing_after_the_copy_was_trashed_files_none(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """A trashed filed copy still counts as filed, so a retry after the user trashed it
+    does not file it again; the trashed copy is the answer (#4120)."""
+    meta = _meta("f" * 32)
+    first = await file_output(native, meta, three_mf, "Name Sign")
+    assert [f.id for f in await native.trash([first.id])] == [first.id]
+    again = await file_output(native, meta, three_mf, "Name Sign")  # the retry
+    assert again.id == first.id and again.deleted_at is not None
+    assert native.rows.filed_for_output(meta.id) == []
+    assert [f.id for f in native.rows.rows_for_output(meta.id)] == [first.id]
+
+
 async def test_a_retried_filing_after_the_copy_moved_files_a_second_copy(
     native: NativeLibrary, three_mf: Path
 ) -> None:
