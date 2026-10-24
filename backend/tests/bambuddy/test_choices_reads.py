@@ -7,6 +7,7 @@ on the one before it deadlocks and the test times out, rather than passing slowl
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import hmac
 import logging
@@ -393,7 +394,8 @@ def test_a_missing_kept_catalogue_says_its_errno(
 
     assert catalogue._load(tmp_path / "absent.json") is None
     (record,) = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
-    assert (record.__dict__["error"], record.__dict__["errno"]) == ("FileNotFoundError", 2)
+    assert record.__dict__["error"] == "FileNotFoundError"
+    assert record.__dict__["errno"] == errno.ENOENT
 
 
 @respx.mock
