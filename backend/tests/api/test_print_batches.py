@@ -366,6 +366,34 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
 
 
 @respx.mock
+async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4551: a stored step naming a row unlinked from Bambuddy since is refused (#4516);
+    its row says to edit that file's step and pick the printer there."""
+
+    async def answers(*_: Any, **__: Any) -> Any:
+        raise ApiError(
+            422,
+            "disagreeing printer: Garage is not linked to Bambuddy printer 1."
+            " Pick the printer again.",
+        )
+
+    monkeypatch.setattr(print_batches, "start_library_run", answers)
+    item = BatchItem(
+        position=2,
+        library_file_id=104,
+        filename="bracket.3mf",
+        request=PrintRunRequest.model_validate(SLICED_RUN),
+    )
+    result = await print_batches._queue_one("b1", item, 0, *([None] * 6))  # type: ignore[arg-type]
+    assert (result.status, result.detail) == (
+        "refused",
+        "disagreeing printer: Garage is not linked to Bambuddy printer 1."
+        " Edit bracket.3mf and pick its printer again.",
+    )
+
+
 def test_a_file_that_fails_to_start_twice_is_refused_so_it_can_be_left(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
