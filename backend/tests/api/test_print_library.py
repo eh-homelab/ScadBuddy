@@ -34,7 +34,7 @@ from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
 from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest
-from scadbuddy.bambuddy.print_source import LibrarySource
+from scadbuddy.bambuddy.print_source import LibrarySource, ReadOutOfMemoryError
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
@@ -1371,6 +1371,27 @@ def test_a_checks_slots_are_cached_so_a_check_refused_early_downloads_nothing(
     unprinted = client.post("/api/v1/print/library/89/check", json={**body(), "printer_id": None})
     assert unprinted.status_code == 200, unprinted.text
     assert download.call_count == 1
+
+
+@respx.mock
+def test_a_check_whose_fetch_runs_out_of_memory_is_refused_saying_how_to_bound_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4562 review: the check's own fetch (its layout read) running out of memory is the
+    check's refusal, as a library file's read is, never an unhandled 500."""
+    configure(client)
+    library_file(89)
+    run_routes()
+
+    async def out_of_memory(self: LibrarySource, bambuddy: BambuddyClient | None) -> bytes:
+        raise MemoryError
+
+    monkeypatch.setattr(LibrarySource, "fetch_3mf", out_of_memory)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
 
 
 @respx.mock

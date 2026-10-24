@@ -321,6 +321,43 @@ async def test_slots_are_read_from_a_callers_fetch_and_cached(
 
 
 @respx.mock
+async def test_a_callers_fetch_is_kept_for_the_next_read_of_its_bytes(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4562 review: the bytes a caller fetched are kept in the shared download cache, as
+    the spool keeps its own download (#2788), so the file's preview downloads nothing."""
+    content = two_colour_3mf(tmp_path)
+    download = library_file(7, content)
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    file = await bambuddy.library_file(7)
+
+    async def fetched() -> bytes:
+        return content
+
+    assert await library_filaments(
+        bambuddy, tmp_path / "api", file, downloads=downloads, fetched=fetched
+    )
+    await library_preview(bambuddy, tmp_path / "other", 7, 1, downloads=downloads)
+    assert not download.called
+
+
+@respx.mock
+async def test_a_fetch_that_holds_nothing_reads_the_slots_from_disk(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4562 review: a fetch that holds no bytes (one past MAX_DOWNLOAD_BYTES) leaves
+    the slots to the spooled download."""
+    download = library_file(7, two_colour_3mf(tmp_path))
+    file = await bambuddy.library_file(7)
+
+    async def nothing() -> None:
+        return None
+
+    assert await library_filaments(bambuddy, tmp_path / "cache", file, fetched=nothing)
+    assert download.call_count == 1
+
+
+@respx.mock
 async def test_a_fetch_out_of_memory_reads_the_slots_from_disk(
     bambuddy: BambuddyClient, tmp_path: Path
 ) -> None:
