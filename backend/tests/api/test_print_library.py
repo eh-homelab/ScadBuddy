@@ -28,7 +28,7 @@ from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api import library_print
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.library_print import _kept_as_sent
-from scadbuddy.bambuddy import clearance, print_run
+from scadbuddy.bambuddy import clearance, print_run, print_source
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
@@ -1326,7 +1326,7 @@ def test_a_library_files_check_fetches_the_file_once(
 ) -> None:
     """#4489: the check fetches the 3MF beside `prepare_run`, and `_fetch` keeps only a
     finished fetch, so a `prepare_run` that fetched it as well would fetch it twice. (The
-    slot read spools the file apart from this fetch: #4495.)"""
+    slot read shares this fetch too: #4495.)"""
     configure(client)
     download = library_file(89)
     run_routes()
@@ -1348,8 +1348,31 @@ def test_a_library_files_check_fetches_the_file_once(
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == []
     assert fetches == [89]
-    # The slot read's spool and this fetch: #4495 makes it one, and this then reads 1.
-    assert download.call_count == 2, "#4495: two downloads, the spool and the fetch"
+    # #4495: the slot read reads this fetch's bytes rather than spooling its own.
+    assert download.call_count == 1
+
+
+@respx.mock
+def test_a_check_of_a_file_too_large_to_fetch_still_reads_its_slots_from_the_file(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4495: the check reads the slots from the fetch it makes anyway, so a file the
+    fetch does not hold (past `MAX_DOWNLOAD_BYTES`) is read from disk as before, and
+    Bambuddy's filament-requirements, which a large 3MF outlasts (#2550), is not asked."""
+    configure(client)
+    download = library_file(89)
+    run_routes()
+    asked = respx.get(f"{API}/library/files/89/filament-requirements").mock(
+        return_value=httpx.Response(500)
+    )
+    monkeypatch.setattr(print_source, "MAX_DOWNLOAD_BYTES", 16)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert not asked.called
+    # The fetch, stopped at the limit, and the spool that read the slots.
+    assert download.call_count == 2
 
 
 @respx.mock
@@ -2666,9 +2689,9 @@ def test_a_by_object_check_warns_when_the_toolhead_would_hit_an_object(
     assert ("sequence-clearance" in kinds) is warned
     assert check.json()["objects"] == (2 if warned else None)
     assert not sliced.called
-    # #2976: by object or not, the file is downloaded as often: once for its slots, once
-    # for the nozzle check, whose read the objects come from.
-    assert download.call_count == 2
+    # #2976: by object or not, the file is downloaded as often: once, for the nozzle
+    # check, whose read the objects and (#4495) the slots come from.
+    assert download.call_count == 1
 
 
 @respx.mock

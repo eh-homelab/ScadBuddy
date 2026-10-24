@@ -1597,11 +1597,18 @@ async def check_for_library(
     catalogue: ReadCatalogue | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
-    slots read from the file itself (#2550); ``files`` reads a native one (#3827)."""
+    slots read from the file itself (#2550), from the download the check's layout reads
+    anyway (#4495); ``files`` reads a native one (#3827)."""
     return await check_print(
         client,
         await LibrarySource.load(
-            client, file_id, uploads=uploads, settings=settings, filaments=filaments, files=files
+            client,
+            file_id,
+            uploads=uploads,
+            settings=settings,
+            filaments=filaments,
+            share_fetch=True,
+            files=files,
         ),
         settings,
         request,

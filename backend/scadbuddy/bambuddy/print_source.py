@@ -900,6 +900,7 @@ class LibrarySource(PrintPipeline):
         sends: PrintLinkStore | None = None,
         filaments: FilamentReader | None = None,
         read_own: bool = False,
+        share_fetch: bool = False,
         files: LibraryReads | None = None,
         native: NativeCopies | None = None,
     ) -> LibrarySource:
@@ -909,8 +910,10 @@ class LibrarySource(PrintPipeline):
         are read from the file itself, and Bambuddy is asked only for one it cannot
         read (#2550). ``read_own`` reads them from the source's own download instead,
         the one its print uploads (:meth:`fetch_3mf`): where there is no cache to read,
-        as in the print worker, which mounts no volume. ``files`` is where the file itself
-        is read, when not from Bambuddy (#3827)."""
+        as in the print worker, which mounts no volume. ``share_fetch`` reads them from
+        that download too, for a caller that fetches the file anyway (the check, #4495),
+        and from ``filaments`` only for a file it does not fetch. ``files`` is where the
+        file itself is read, when not from Bambuddy (#3827)."""
         reads = reads_of(files, client)
         file = await reads.library_file(file_id)
         if not printable(file.file_type):
@@ -930,6 +933,8 @@ class LibrarySource(PrintPipeline):
         )
         if filaments is None and read_own:
             filaments = partial(source._own_filaments, client)
+        elif filaments is not None and share_fetch and source.file_type == "3mf":
+            filaments = partial(source._fetched_filaments, client, filaments)
         layout, read = await asyncio.gather(
             reads.library_plates(file_id),
             _requirements(reads, file, filaments),
@@ -950,6 +955,17 @@ class LibrarySource(PrintPipeline):
         # A sliced file prints only the plates it holds G-code for (#2671).
         source.plates = ([plate.index for plate in held.plates] if held else []) or plates or [1]
         return source
+
+    async def _fetched_filaments(
+        self, client: BambuddyClient | None, spooled: FilamentReader, file: LibraryFile
+    ) -> LocalFilaments | None:
+        """The slots read from the download the print and the check's layout read
+        (:meth:`PrintPipeline._fetch`), so a check downloads the file once, not once to
+        spool it and again to fetch it (#4495); ``spooled`` reads one that download does
+        not hold (past :data:`MAX_DOWNLOAD_BYTES`) from disk, as before."""
+        if (await PrintPipeline._fetch(self, client)).payload is None:
+            return await spooled(file)
+        return await self._own_filaments(client, file)
 
     async def _own_filaments(
         self, client: BambuddyClient | None, file: LibraryFile
