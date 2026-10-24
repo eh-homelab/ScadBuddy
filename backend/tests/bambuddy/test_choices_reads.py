@@ -402,6 +402,74 @@ def test_a_missing_kept_catalogue_says_its_errno(
     assert record.__dict__["errno"] == errno.ENOENT
 
 
+#: What a fresh read of /slicer/presets costs here: on prod it was 1.4-2.7 s, ~6 s when
+#: Bambuddy was quiet (#4528).
+_SLOW_PRESETS = 1.0
+
+
+def _slow_presets() -> respx.Route:
+    async def answer(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(_SLOW_PRESETS)
+        return _ok("slicer-presets-h2c.json")
+
+    return respx.get(f"{API}/slicer/presets").mock(side_effect=answer)
+
+
+async def _timed_open(bambuddy: BambuddyClient, cache: Path) -> tuple[float, catalogue.Catalogue]:
+    started = time.perf_counter()
+    async with asyncio.timeout(5):
+        read = await cached_catalogue(bambuddy, cache)
+    elapsed = time.perf_counter() - started
+    print(f"#4528: the open answered in {elapsed * 1000:.0f} ms")
+    return elapsed, read
+
+
+@respx.mock
+async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
+    bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4528: a check on prod waited on a fresh read with the kept file on the shared
+    volume (why its load missed is not known yet; two replicas had just renamed theirs in).
+    A process that has read the catalogue answers that at once, as it would an expired
+    copy, and reads again behind it; the miss is still logged."""
+    _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    kept.unlink()
+    # The same route, so its count goes on from the first read's.
+    presets = _slow_presets()
+    caplog.set_level(logging.INFO, logger=catalogue.__name__)
+
+    elapsed, read = await _timed_open(bambuddy, tmp_path)
+
+    assert read == first
+    assert elapsed < _SLOW_PRESETS / 2
+    assert presets.call_count == 1
+    assert any("no kept preset catalogue" in r.getMessage() for r in caplog.records)
+    # Read again behind it, and kept for the next open.
+    assert len(catalogue._refreshing) == 1
+    async with asyncio.timeout(5):
+        await asyncio.gather(*catalogue._refreshing.values())
+    assert presets.call_count == 2
+    assert kept.exists()
+
+
+@respx.mock
+async def test_a_process_that_has_read_nothing_still_waits_on_its_first_read(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4528's fallback is only what this process read: with nothing anywhere the open
+    waits on the read (#2906)."""
+    _preset_routes()
+    presets = _slow_presets()
+
+    elapsed, read = await _timed_open(bambuddy, tmp_path)
+
+    assert read.process
+    assert elapsed >= _SLOW_PRESETS
+    assert presets.call_count == 1
+
+
 @respx.mock
 async def test_a_malformed_refresh_keeps_the_old_catalogue_and_logs_only_its_type(
     bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture

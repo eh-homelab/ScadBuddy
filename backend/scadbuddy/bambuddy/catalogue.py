@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -284,7 +285,12 @@ def _path(cache: Path, config: BambuddyConfig, name_key: bytes | None = None) ->
 
 
 def _load(path: Path) -> tuple[float, Catalogue] | None:
-    """The kept catalogue and its age in seconds; ``None`` when there is none to read."""
+    """The kept catalogue and its age in seconds; ``None`` when there is none to read.
+
+    A file that cannot be read when this process holds what it last read of it (parsed
+    here, or read fresh and kept, :func:`_hold`) answers that, its age unknown and so
+    past :data:`CATALOGUE_TTL`, so the open reads again behind it (#4528): a check on
+    prod waited seconds on a fresh read with the file on the shared volume."""
     try:
         stat = path.stat()
         held = _parsed.get(path)
@@ -296,16 +302,25 @@ def _load(path: Path) -> tuple[float, Catalogue] | None:
         # Said by its type and errno only, never its text (#3446): a check on prod waited
         # on a fresh read with this file on the shared volume, and nothing said why (#4196).
         # The name is a digest with no key in it (#3313).
+        last = _parsed.get(path)
         logger.info(
             "no kept preset catalogue could be read",
             extra={
                 "error": type(error).__name__,
                 "errno": getattr(error, "errno", None),
                 "file": path.name,
+                "held": last is not None,
             },
         )
-        return None
+        return None if last is None else (math.inf, last[1])
     return time.time() - stat.st_mtime, held[1]
+
+
+def _hold(path: Path, catalogue: Catalogue) -> None:
+    """Hold ``catalogue``, just read fresh, as this process's last read of ``path``
+    (#4528). Under no file's mtime, so the next open that reads the file parses it."""
+    _parsed.clear()
+    _parsed[path] = (-1, catalogue)
 
 
 def _keep(path: Path, catalogue: Catalogue) -> None:
@@ -355,6 +370,7 @@ async def _first_read(config: BambuddyConfig, path: Path) -> Catalogue:
         return kept[1]
     async with BambuddyClient(config) as client:
         catalogue = await _catalogue(client)
+    _hold(path, catalogue)
     try:
         await asyncio.to_thread(_keep, path, catalogue)
     except OSError as error:
@@ -378,6 +394,7 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
     try:
         async with BambuddyClient(config) as client:
             catalogue = await _catalogue(client)
+        _hold(path, catalogue)
         await asyncio.to_thread(_keep, path, catalogue)
     except Exception as error:
         # Nothing awaits this task, so whatever fails ends here, and only by its type:
