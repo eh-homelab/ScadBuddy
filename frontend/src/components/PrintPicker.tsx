@@ -677,6 +677,11 @@ export function PrintPicker({
       live = false
     }
   }, [open, pageProject, contentKey, native, pathKnown])
+  // The dialog stays mounted when it closes: the last open's answer must not stand for
+  // the next one, or Print is enabled on it until this open's read has even started.
+  useEffect(() => {
+    if (!open) setOwnDefaultFor(null)
+  }, [open])
   /** #3651 — Print waits for the default, so a Simple-mode print goes where it says. */
   const ownDefaultPending = open && !pageProject && ownDefaultFor !== contentKey
   function chooseOwnProject(next: number | null) {
