@@ -73,6 +73,11 @@ def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _text(value: Any) -> str:
+    """``value`` when it is a string, else ``""``: a mistyped field reads as absent."""
+    return value if isinstance(value, str) else ""
+
+
 def _int(value: Any) -> int | None:
     try:
         return int(value)
@@ -211,8 +216,8 @@ def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackS
                     "serial_number": entry.get("sn"),
                     "wear": _int(entry.get("wear")),
                     "stat": _int(entry.get("stat")),
-                    "filament_id": str(entry.get("fila_id") or ""),
-                    "filament_color": str(entry.get("color_m") or ""),
+                    "filament_id": _text(entry.get("fila_id")),
+                    "filament_color": _text(entry.get("color_m")),
                 },
             )
             if slot is not None:
