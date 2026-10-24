@@ -1095,6 +1095,11 @@ def _plate_geometry(
     if not lows:
         raise ValueError("the 3MF has no object geometry to place")
     low = np.min(lows, axis=0)
+    # No floors means every file on the plate is a cut: the low Z of all of them, as
+    # before #4061. No writer makes such a plate: Arrange keeps an object only with a
+    # part that prints (`workflows/outputs.py`), and Bambu Studio refuses to delete or
+    # retype an object's last solid part (`GUI_ObjectList.cpp`, "Deleting the last solid
+    # part is not allowed."). The slicer would refuse one with nothing to print anyway.
     if floors:
         low[2] = min(floors)
     return np.array([low, np.max(highs, axis=0)]), frozenset(painted)
@@ -1113,8 +1118,9 @@ class LaidOutPlate:
     #: The extruders its parts print with, where ``model_settings.config`` states them;
     #: ``None`` when it does not. A painting's filaments are not among them.
     extruders: frozenset[int] | None = None
-    #: Its object files whose part prints nothing (a ``negative_part``, #4061), as
-    #: ``model_settings.config`` states each part's subtype.
+    #: Its object files that only parts printing nothing use (a ``negative_part``,
+    #: #4061), as ``model_settings.config`` states each part's subtype; a file a printed
+    #: part shares is not among them (#4525).
     unprinted: frozenset[str] = frozenset()
 
 
@@ -1145,15 +1151,14 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
 
     plates: list[tuple[int, tuple[str, ...]]] = []
     extruders: dict[str, set[int]] = {}
-    unprinted: set[str] = set()
+    cuts: set[tuple[str, str]] = set()
     if MODEL_SETTINGS_NAME in names:
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
         for obj in config.iter("object"):
-            unprinted.update(
-                cut
+            cuts.update(
+                (obj.get("id", ""), part.get("id", ""))
                 for part in obj.findall("part")
                 if part.get("subtype", "normal_part") != "normal_part"
-                and (cut := parts.get((obj.get("id", ""), part.get("id", "")))) is not None
             )
             stated = {
                 _metadata(part).get("extruder", "")
@@ -1165,6 +1170,12 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
             on_plate = tuple(object_id for object_id in each.object_ids if object_id in items)
             if on_plate:
                 plates.append((each.index, on_plate))
+    # A file is unprinted only if no part that prints uses it too: a Bambu Studio
+    # project keeps an object's parts, its cuts among them, in one object file (#4525),
+    # and a part `model_settings.config` states no subtype for prints.
+    unprinted = {path for key, path in parts.items() if key in cuts} - {
+        path for key, path in parts.items() if key not in cuts
+    }
     if sum(len(ids) for _, ids in plates) != len(items):
         # Not a layout this writer produced plate by plate: one plate, placed by its
         # first build item, holding every object file.
