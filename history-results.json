@@ -1,0 +1,167 @@
+[
+ {
+  "slug": "mia-style-3",
+  "width": 320,
+  "cards": 19,
+  "overlaps": [],
+  "targets": 90,
+  "factLinks": 5,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 320,
+  "shot": "history-mia-style-3-320.png",
+  "rename": {
+   "label": "Carly v9 + Wyatt DualSense v5 + Mia v8 – one plate",
+   "focused": "Name for Carly v9 + Wyatt DualSense v5 + Mia v8 – one plate",
+   "focusedIsField": true,
+   "renameOverlaps": [],
+   "openAfterEscape": true,
+   "shot": "rename-mia-style-3-320.png"
+  },
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "mia-style-3",
+  "width": 375,
+  "cards": 19,
+  "overlaps": [],
+  "targets": 90,
+  "factLinks": 5,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 375,
+  "shot": "history-mia-style-3-375.png",
+  "rename": null,
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "mia-style-3",
+  "width": 390,
+  "cards": 19,
+  "overlaps": [],
+  "targets": 90,
+  "factLinks": 5,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 390,
+  "shot": "history-mia-style-3-390.png",
+  "rename": {
+   "label": "Carly v9 + Wyatt DualSense v5 + Mia v8 – one plate",
+   "focused": "Name for Carly v9 + Wyatt DualSense v5 + Mia v8 – one plate",
+   "focusedIsField": true,
+   "renameOverlaps": [],
+   "openAfterEscape": true,
+   "shot": "rename-mia-style-3-390.png"
+  },
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "mia-style-3",
+  "width": 430,
+  "cards": 19,
+  "overlaps": [],
+  "targets": 90,
+  "factLinks": 5,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 430,
+  "shot": "history-mia-style-3-430.png",
+  "rename": null,
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "molly-rocket-sign",
+  "width": 320,
+  "cards": 62,
+  "overlaps": [],
+  "targets": 322,
+  "factLinks": 12,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 320,
+  "shot": "history-molly-rocket-sign-320.png",
+  "rename": {
+   "label": "c1c817c9",
+   "focused": "Name for c1c817c9",
+   "focusedIsField": true,
+   "renameOverlaps": [],
+   "openAfterEscape": true,
+   "shot": "rename-molly-rocket-sign-320.png"
+  },
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "molly-rocket-sign",
+  "width": 375,
+  "cards": 62,
+  "overlaps": [],
+  "targets": 322,
+  "factLinks": 12,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 375,
+  "shot": "history-molly-rocket-sign-375.png",
+  "rename": null,
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "molly-rocket-sign",
+  "width": 390,
+  "cards": 62,
+  "overlaps": [],
+  "targets": 322,
+  "factLinks": 12,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 390,
+  "shot": "history-molly-rocket-sign-390.png",
+  "rename": {
+   "label": "c1c817c9",
+   "focused": "Name for c1c817c9",
+   "focusedIsField": true,
+   "renameOverlaps": [],
+   "openAfterEscape": true,
+   "shot": "rename-molly-rocket-sign-390.png"
+  },
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ },
+ {
+  "slug": "molly-rocket-sign",
+  "width": 430,
+  "cards": 62,
+  "overlaps": [],
+  "targets": 322,
+  "factLinks": 12,
+  "small": [],
+  "sideways": 0,
+  "docWidth": 430,
+  "shot": "history-molly-rocket-sign-430.png",
+  "rename": null,
+  "blocked": [
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces",
+   "POST https://scadbuddy.internal.nullreference.io/telemetry/v1/traces"
+  ]
+ }
+]
