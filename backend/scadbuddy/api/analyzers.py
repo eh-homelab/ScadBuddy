@@ -63,9 +63,14 @@ from scadbuddy.api.deps import (
     UploadsDep,
     downloads_of,
 )
+from scadbuddy.api.library_print import native_library_source
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
+from scadbuddy.api.printing import native_filaments
+from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.options import library_options_scope
+from scadbuddy.bambuddy.print_run import dialog_route
+from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.paths import DataPaths
@@ -75,9 +80,11 @@ from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.print_library.component import PrintLibraryDep
-from scadbuddy.print_library.reads import LibraryReads
+from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache
 
 logger = logging.getLogger(__name__)
@@ -305,11 +312,71 @@ async def _context(
     paths: DataPaths,
     budget: ReadBudget,
     downloads: DownloadCache | None = None,
-    native: LibraryReads | None = None,
+    native: NativeLibrary | None = None,
+    printers: Printers | None = None,
+    spools: Spools | None = None,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     settings = store.load()
     remembered = _remembered(target, slug, settings)
+    route = (
+        await dialog_route(
+            settings,
+            printers.store,
+            printers.reports,
+            printer=request.printer,
+            printer_id=request.printer_id,
+        )
+        if request.printer is not None and printers is not None and spools is not None
+        else None
+    )
+    if route is not None:
+        assert spools is not None
+        # The dialog's own native reads (#4629): the trays from the LAN report, the spools
+        # from the overlay, the file from the native library; no Bambuddy call.
+        on_route, spool_records = route, spools
+
+        async def trays() -> FilamentOptions | None:
+            source: PrintSource
+            if target.library_file_id is not None:
+                source = await native_library_source(
+                    target.library_file_id,
+                    native,
+                    store,
+                    uploads,
+                    paths,
+                    budget=budget,
+                    downloads=downloads,
+                )
+            elif meta is not None:
+                source = OutputSource(store=outputs, meta=meta, uploads=uploads, settings=settings)
+            else:
+                return None
+            return await native_filaments(
+                source,
+                on_route,
+                spool_records,
+                plate_id=request.plate_id,
+                all_plates=request.all_plates,
+                plate_ids=request.plate_ids,
+            )
+
+        return await gather_context(
+            outputs=outputs,
+            settings=settings,
+            slug=slug,
+            params=params,
+            request=request,
+            meta=meta,
+            remembered=remembered,
+            library_subject=target.library_file_id,
+            cache=paths.cache,
+            budget=budget,
+            downloads=downloads,
+            native=native,
+            route=route,
+            trays=trays,
+        )
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
@@ -429,6 +496,8 @@ async def post_run(
     paths: PathsDep,
     state: StateDep,
     library: PrintLibraryDep,
+    printers: PrintersDep,
+    spools: SpoolsDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -458,6 +527,8 @@ async def post_run(
         budget,
         downloads_of(state),
         await library.serving_native(),
+        printers,
+        spools,
     )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -486,6 +557,8 @@ async def post_preview(
     paths: PathsDep,
     state: StateDep,
     library: PrintLibraryDep,
+    printers: PrintersDep,
+    spools: SpoolsDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
@@ -503,6 +576,8 @@ async def post_preview(
         budget,
         downloads_of(state),
         await library.serving_native(),
+        printers,
+        spools,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -533,6 +608,8 @@ async def post_apply(
     paths: PathsDep,
     state: StateDep,
     library: PrintLibraryDep,
+    printers: PrintersDep,
+    spools: SpoolsDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -561,6 +638,8 @@ async def post_apply(
         budget,
         downloads_of(state),
         await library.serving_native(),
+        printers,
+        spools,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import zipfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -28,9 +29,15 @@ from scadbuddy.analyzers.context import (
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.extruders import one_flow
-from scadbuddy.bambuddy.filaments import asked_plates, every_plate, gather_plate_options
+from scadbuddy.bambuddy.filaments import (
+    FilamentOptions,
+    asked_plates,
+    every_plate,
+    gather_plate_options,
+)
 from scadbuddy.bambuddy.library_view import NotViewableError, library_geometry
 from scadbuddy.bambuddy.models import Printer
+from scadbuddy.bambuddy.print_run import RunRoute
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
@@ -66,6 +73,8 @@ async def gather_context(
     budget: ReadBudget | None = None,
     downloads: DownloadCache | None = None,
     native: LibraryReads | None = None,
+    route: RunRoute | None = None,
+    trays: Callable[[], Awaitable[FilamentOptions | None]] | None = None,
 ) -> AnalysisContext:
     """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
@@ -75,7 +84,11 @@ async def gather_context(
     print is judged: its mesh is read from the 3MF the print path fetches (cached under
     ``cache``), and its slots off the file itself. It has no output, so the checks that
     read one (plate fit: the file prints where its author placed it) say so. A native
-    file (#3827) is read from ``native``, never asked of Bambuddy."""
+    file (#3827) is read from ``native``, never asked of Bambuddy.
+
+    ``route`` is the dialog's native route (#4629): the printer is its registry row, and
+    ``trays`` reads the filament step as the dialog's native read does (the LAN report's
+    trays under the spool overlay), so nothing is asked of Bambuddy, configured or not."""
     context = AnalysisContext(
         slug=slug, params=params, request=request, output=meta, library_file_id=library_subject
     )
@@ -89,7 +102,18 @@ async def gather_context(
         context.model_3mf = await asyncio.to_thread(_model_path, outputs, meta)
         await _read_geometry(context, outputs, meta)
 
-    if not settings.bambuddy_url:
+    if route is not None:
+        context.printer = route.printer
+        if library_subject is not None and native is not None:
+            assert cache is not None, "a library file's mesh is cached"
+            await _read_library_geometry(
+                context, None, cache, library_subject, budget, downloads, native
+            )
+        elif library_subject is not None:
+            context.unavailable["geometry"] = "the native library is not serving"
+        _read_choices(context, settings, remembered, route.printer_id)
+        await _read_trays(context, trays)
+    elif not settings.bambuddy_url:
         for name in BAMBUDDY_INPUTS:
             context.unavailable[name] = NO_BAMBUDDY
         if library_subject is not None and native is not None:
@@ -262,6 +286,46 @@ async def _read_bambuddy(
         context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:
         context.unavailable["inventory"] = error.detail
+
+
+async def _read_trays(
+    context: AnalysisContext, trays: Callable[[], Awaitable[FilamentOptions | None]] | None
+) -> None:
+    """A native run's filaments and inventory (#4629): each slot's spool as the printer's
+    trays and the spool overlay describe it, read as the dialog's filament step does."""
+    plan = context.request.filament_plan
+    if plan is None or not plan.slots:
+        context.unavailable["filaments"] = "no filament plan was chosen"
+        context.unavailable["inventory"] = "no filament plan was chosen"
+        return
+    try:
+        options = await trays() if trays is not None else None
+    except ApiError as error:
+        context.unavailable["filaments"] = error.detail
+        context.unavailable["inventory"] = error.detail
+        return
+    if options is None:
+        context.unavailable["filaments"] = "this configuration has not been rendered yet"
+        context.unavailable["inventory"] = "this configuration has not been rendered yet"
+        return
+    context.filament_options = options
+    spools = {spool.spool_id: spool for spool in options.spools}
+    for choice in sorted(plan.slots, key=lambda row: row.slot_id):
+        spool = spools.get(choice.spool_id)
+        if spool is None:
+            continue
+        context.filaments.append(
+            FilamentSlot(
+                slot_id=choice.slot_id,
+                spool_id=spool.spool_id,
+                material=spool.material,
+                subtype=spool.subtype,
+                brand=spool.brand,
+                preset_name=spool.slicer_filament_name,
+            )
+        )
+    if not context.filaments:
+        context.unavailable["filaments"] = "no spool of the plan is in the printer's trays"
 
 
 def _read_choices(

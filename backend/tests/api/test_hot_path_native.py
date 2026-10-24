@@ -406,6 +406,30 @@ def test_the_first_reads_open_on_the_native_row_with_bambuddy_configured(
     assert picked.json()["lan_printers"] == [row]
 
 
+def test_the_dialogs_analysis_on_the_native_row_asks_bambuddy_nothing(
+    native_app: TestClient, model: str, spans: InMemorySpanExporter, fake_lan: FakeLan
+) -> None:
+    """The dialog's analyzers are on AC1's path (#4629): with ``bambuddy_url`` set and
+    Bambuddy answering nothing, a run for the native row reads its printer from the
+    registry, its trays from the LAN report and its spools from the overlay."""
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    body = run_body(row, filaments.json())
+
+    with forbid_bambuddy(spans, BASE):
+        report = native_app.post(
+            "/api/v1/analyzers/run",
+            json={"target": {"output_id": output}, "request": body, "detail": "advanced"},
+        )
+    assert report.status_code == 200, report.text
+    inputs = {row["name"]: row for row in report.json()["inputs"]}
+    for name in ("printer", "filaments", "inventory"):
+        assert inputs[name]["available"], inputs[name]
+
+
 #: The app with no ``bambuddy_url`` (AC2), for `native_app`'s indirect parametrisation.
 NO_BAMBUDDY = pytest.mark.parametrize("native_app", [False], indirect=True, ids=["no-url"])
 

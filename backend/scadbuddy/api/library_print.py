@@ -1067,7 +1067,7 @@ async def get_library_plate_thumbnail(
     )
 
 
-async def _native_source(
+async def native_library_source(
     file_id: int,
     native: NativeLibrary | None,
     store: SettingsStore,
@@ -1127,7 +1127,7 @@ async def get_library_choices(
         printer_id=printer_id or (remembered.printer_id if remembered else None),
     )
     if route is not None:
-        own = await _native_source(
+        own = await native_library_source(
             file_id, native, store, uploads, paths, budget=budget, downloads=downloads
         )
         native_view = await native_choices(
@@ -1213,7 +1213,7 @@ async def get_library_filaments(
     native = await library.serving_native()
     route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
     if route is not None:
-        source = await _native_source(
+        source = await native_library_source(
             file_id, native, store, uploads, paths, budget=budget, downloads=downloads
         )
         return await native_filaments(

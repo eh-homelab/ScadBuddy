@@ -395,9 +395,10 @@ export function PrintPicker({
    * sends beside `printer`: none beside a LAN-only row, which links no Bambuddy printer.
    * `registryPrinter` is `registryAsked` first, so while the view still shows the Bambuddy
    * printer's read the old id would ride along with the asked row, and the server refuses
-   * that pair (422) rather than print on the Bambuddy printer. Arrange, analysis and quote
-   * send the view's `printerId` and no `printer` (#4551): their routes take no registry
-   * printer, and a null there would mean Settings' printer, not the LAN-only row.
+   * that pair (422) rather than print on the Bambuddy printer. The analysis sends both too
+   * (#4629). Arrange and quote send the view's `printerId` and no `printer` (#4551): their
+   * routes take no registry printer, and a null there would mean Settings' printer, not
+   * the LAN-only row.
    */
   const sentPrinterId = lanOnly.some((row) => row.id === registryPrinter) ? null : printerId
   const { askRegistry } = picker
@@ -1026,7 +1027,9 @@ export function PrintPicker({
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices && planReady && !noPlate
       ? {
-          printer_id: printerId,
+          // The registry printer, so a native dialog's analysis asks Bambuddy nothing (#4629).
+          ...(registryPrinter ? { printer: registryPrinter } : {}),
+          printer_id: sentPrinterId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
           ...plateFields(plate),
