@@ -586,6 +586,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
   (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
   `ItemPicture.tsx`; mocks `src/mocks/features/orders/attachments.ts`.
+  Undo (spec §3.5 "Undo"): `Lifecycle.reopen_order` (a closed order back to what
+  `derive` gives its rows) and `reopen_item` (a cancelled item back to what its quotes
+  and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
+  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel) and
+  `customer_upsert`'s `unarchive`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

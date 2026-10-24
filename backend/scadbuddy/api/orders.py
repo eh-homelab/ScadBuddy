@@ -611,6 +611,22 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
 
 
 @router.post(
+    "/{order_id}/reopen",
+    response_model=Order,
+    summary="Reopen a closed order",
+    description=(
+        "Undoes a close: the order takes the status its items and shipments give it "
+        "(`shipped`, as it closed, unless a row changed since). 409 `order_not_closed` "
+        "for any other order; a cancelled order stays cancelled."
+    ),
+)
+async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
+    _path(order_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.reopen_order(order_id, by))
+
+
+@router.post(
     "/{order_id}/payments",
     response_model=Payment,
     status_code=status.HTTP_201_CREATED,
@@ -773,6 +789,23 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     by = current_actor()
     await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/reopen",
+    response_model=OrderItem,
+    summary="Reopen a cancelled line item",
+    description=(
+        "Undoes a cancel: the item takes the state its quotes and attempts give it "
+        "(`approved`, `failed`, `quoted` or `draft`). 409 `item_not_cancelled`, "
+        "`item_not_priced` (an order past `quoted` takes back a priced item only), and "
+        "`order_closed`/`order_cancelled`."
+    ),
+)
+async def reopen_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
+    _path(order_id, item_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.reopen_item(order_id, item_id, by))
 
 
 @router.post(

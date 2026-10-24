@@ -104,6 +104,13 @@ export function OrderPage() {
           </span>
         </div>
 
+        {order.status === 'closed' && (
+          <div className="flex flex-wrap items-center gap-2" aria-label="Order actions">
+            <Button variant="outline" disabled={busy} onClick={() => void act(() => api.reopenOrder(order.id))}>
+              Reopen order
+            </Button>
+          </div>
+        )}
         {!ended && (
           <div className="flex flex-wrap items-center gap-2" aria-label="Order actions">
             {editable && (
@@ -358,7 +365,13 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
         </>
       }
       footer={
-        !settled && !ENDED.has(order.status) && (
+        item.status === 'cancelled' && !ENDED.has(order.status) ? (
+          <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
+            Reopen item
+          </Button>
+        ) : (
+          !settled &&
+          !ENDED.has(order.status) && (
           <>
             {item.status === 'draft' ? (
               <Button variant="ghost" onClick={() => void run(() => api.deleteOrderItem(order.id, item.id), true)}>
@@ -370,6 +383,7 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
               </Button>
             )}
           </>
+          )
         )
       }
     >

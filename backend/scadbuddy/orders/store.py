@@ -358,6 +358,17 @@ class OrderStore:
             ).fetchone()
             return None if row is None else self._customer_of(c, row)
 
+    def unarchive_customer(self, customer_id: str, *, conn: Conn | None = None) -> Customer | None:
+        """Back in the pickers: ``archived_at`` cleared (a customer never archived is
+        returned as is)."""
+        with self._write(conn) as c:
+            row = c.execute(
+                "UPDATE customers SET archived_at = NULL, updated_at = now()"
+                f" WHERE id = %s RETURNING {_CUSTOMER}",
+                (customer_id,),
+            ).fetchone()
+            return None if row is None else self._customer_of(c, row)
+
     def customer(
         self, customer_id: str, *, conn: Conn | None = None, share: bool = False
     ) -> Customer | None:
@@ -759,6 +770,17 @@ class OrderStore:
         )
         params: list[Any] = [status, *([at] if stamp else []), order_id]
         row = conn.execute(query, params).fetchone()
+        if row is None:
+            raise OrderNotFoundError(order_id)
+        return Order.model_validate(row)
+
+    def reopen_order_row(self, conn: Conn, order_id: str, status: OrderStatus) -> Order:
+        """A closed order back to ``status``, its ``closed_at`` cleared."""
+        row = conn.execute(
+            "UPDATE orders SET status = %s, closed_at = NULL, updated_at = now()"
+            f" WHERE id = %s RETURNING {_ORDER}",
+            (status, order_id),
+        ).fetchone()
         if row is None:
             raise OrderNotFoundError(order_id)
         return Order.model_validate(row)

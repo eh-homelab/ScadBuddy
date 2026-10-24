@@ -280,6 +280,30 @@ class Lifecycle:
             except Exception:
                 logger.exception("could not release a quote's sliced file", extra={"id": quote_id})
 
+    def _hold(self, quotes: Iterable[Quote]) -> None:
+        """Take the holders §3.4 keeps again for quotes that stand once more (a reopened
+        item or order), after the commit that reopened them. A sliced file the sweep took
+        meanwhile stays gone: the hold keeps nothing, and the item needs a new quote."""
+        if self.refs is None:
+            return
+        for quote in quotes:
+            keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
+            for key in sorted(k for k in keys if isinstance(k, str) and k):
+                try:
+                    self.refs.add(key, QUOTE_HOLDER, quote.id)
+                except Exception:
+                    logger.exception(
+                        "could not hold a reopened quote's file", extra={"id": quote.id}
+                    )
+
+    def _standing(self, conn: Conn, item_id: str) -> list[Quote]:
+        """The quotes §3.4 keeps a file for: the accepted one and the newest unaccepted."""
+        quotes = self.store.quotes(item_id, conn=conn)
+        accepted = [q for q in quotes if q.accepted]
+        pending = [q for q in quotes if not q.accepted]
+        newest = max(pending, key=lambda q: (q.created_at, q.id), default=None)
+        return accepted + ([newest] if newest is not None else [])
+
     def _quote_ids(self, conn: Conn, item_ids: Iterable[str]) -> list[str]:
         return [quote.id for item_id in item_ids for quote in self.store.quotes(item_id, conn=conn)]
 
@@ -574,6 +598,82 @@ class Lifecycle:
             released = self._quote_ids(conn, (item.id for item in items))
         self._told(_Change(closed, released=released))
         return closed
+
+    def reopen_order(self, order_id: str, by: Actor) -> Order:
+        """Undo a close: the order takes the status its rows give it again (`shipped`,
+        as when it closed, unless a row changed since), `closed_at` cleared, and its
+        quotes' sliced files are held again. Only a closed order reopens; a cancelled
+        one stays cancelled."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            if order.status != "closed":
+                raise LifecycleError(
+                    "order_not_closed",
+                    f"order {order.number} is {order.status}: only a closed order reopens",
+                )
+            items = self.store.items(order.id, conn=conn)
+            attempted = {item.id for item in items if self.store.fulfilments(item.id, conn=conn)}
+            status = derive(
+                order.model_copy(update={"status": "accepted"}),
+                items,
+                self.store.shipments(order.id, conn=conn),
+                attempted,
+            )
+            reopened = self.store.reopen_order_row(conn, order.id, status)
+            self._event(
+                conn, order, by, "order.status", from_status="closed", to=status, reopened=True
+            )
+            held = [
+                quote
+                for item in items
+                if item.status != "cancelled"
+                for quote in self._standing(conn, item.id)
+            ]
+        self._hold(held)
+        self._told(_Change(reopened))
+        return reopened
+
+    def reopen_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
+        """Undo a cancel: the item takes the state its quotes and attempts give it
+        (`approved` with an accepted quote, `failed` when its latest attempt failed,
+        `quoted` with a quote not accepted, else `draft`), and its quotes' sliced files
+        are held again. Refused once the order ended, and on an order past `quoted` for
+        an item with no accepted quote: an accepted order only holds priced items."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.status != "cancelled":
+                raise LifecycleError(
+                    "item_not_cancelled",
+                    f"item {item_id} is {item.status}: only a cancelled item reopens",
+                    items=[item.id],
+                )
+            quotes = self.store.quotes(item.id, conn=conn)
+            accepted = any(quote.accepted for quote in quotes)
+            if order.status not in OPEN_FOR_EDITS and not accepted:
+                raise LifecycleError(
+                    "item_not_priced",
+                    f"item {item_id} has no accepted quote, and order {order.number} is"
+                    f" {order.status}: an accepted order holds priced items only",
+                    items=[item.id],
+                )
+            attempts = self.store.fulfilments(item.id, conn=conn)
+            latest = max(attempts, key=lambda a: a.attempt, default=None)
+            status: ItemStatus
+            if accepted:
+                status = (
+                    "failed" if latest is not None and latest.outcome == "failed" else "approved"
+                )
+            else:
+                status = "quoted" if quotes else "draft"
+            item = self.store.update_item(conn, item.id, status=status)
+            self._event(conn, order, by, "item.reopened", item_id=item.id, to=status)
+            order = self._rederive(conn, order, by)
+            held = self._standing(conn, item.id)
+        self._hold(held)
+        self._told(_Change(order, [(item, None)]))
+        return item
 
     # -- items (§3.3) ---------------------------------------------------------------------
 

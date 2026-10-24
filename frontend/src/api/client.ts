@@ -2034,6 +2034,8 @@ export const api = {
   updateCustomer: (id: string, body: CustomerPatch) =>
     request<Customer>(`/customers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/archive`, { method: 'POST' }),
+  /** Back in the pickers, so a new order can name them again. */
+  unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
   orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number } = {}) => {
     const search = new URLSearchParams(ordersApiParams(query))
@@ -2053,6 +2055,8 @@ export const api = {
   holdOrder: (id: string) => request<Order>(`/orders/${seg(id)}/hold`, { method: 'POST' }),
   releaseOrder: (id: string) => request<Order>(`/orders/${seg(id)}/release`, { method: 'POST' }),
   closeOrder: (id: string) => request<Order>(`/orders/${seg(id)}/close`, { method: 'POST' }),
+  /** Undoes a close: the order takes the status its items and shipments give it again. */
+  reopenOrder: (id: string) => request<Order>(`/orders/${seg(id)}/reopen`, { method: 'POST' }),
   addPayment: (id: string, body: PaymentCreate) =>
     request<Payment>(`/orders/${seg(id)}/payments`, { method: 'POST', body: JSON.stringify(body) }),
   addOrderItem: (orderId: string, body: OrderItemCreate) =>
@@ -2061,6 +2065,9 @@ export const api = {
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderItem: (orderId: string, itemId: string) =>
     request<void>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'DELETE' }),
+  /** Undoes a cancel: the item takes the state its quotes and attempts give it again. */
+  reopenOrderItem: (orderId: string, itemId: string) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/reopen`, { method: 'POST' }),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
   // -- an order's files (#4251, spec 2026-10-18 §6.2) ---------------------------------------

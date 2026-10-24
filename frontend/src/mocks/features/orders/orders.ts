@@ -378,6 +378,19 @@ export const handlers = [
       return order
     }),
   ),
+  // `Lifecycle.reopen_order`: the status its rows give it, `closed_at` cleared.
+  http.post('/api/v1/orders/:id/reopen', ({ request, params }) =>
+    transition(request, () => {
+      const order = lock(String(params.id))
+      if (order.status !== 'closed') throw new Refused('order_not_closed', `order ${order.number} is ${order.status}: only a closed order reopens`)
+      event(order, 'order.status', { from_status: 'closed', to: 'accepted', reopened: true })
+      order.status = 'accepted'
+      order.closed_at = null
+      order.updated_at = now()
+      rederive(order)
+      return order
+    }),
+  ),
   http.post('/api/v1/orders/:id/close', ({ request, params }) =>
     transition(request, () => {
       const order = lock(String(params.id))
@@ -509,6 +522,26 @@ export const handlers = [
       return refused(request, error)
     }
   }),
+  // `Lifecycle.reopen_item`: the state its quotes and attempts give it.
+  http.post('/api/v1/orders/:id/items/:item/reopen', ({ request, params }) =>
+    transition(request, () => {
+      const order = lock(String(params.id))
+      notEnded(order)
+      const found = itemOf(order, String(params.item))
+      if (found.status !== 'cancelled') throw new Refused('item_not_cancelled', `item ${found.id} is ${found.status}: only a cancelled item reopens`, [found.id])
+      const quotes = quotesOf(found.id)
+      const accepted = quotes.some((q) => q.accepted)
+      if (!OPEN_FOR_EDITS.has(order.status) && !accepted) {
+        throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: an accepted order holds priced items only`, [found.id])
+      }
+      const latest = attemptsOf(found.id).at(-1)
+      found.status = accepted ? (latest?.outcome === 'failed' ? 'failed' : 'approved') : quotes.length > 0 ? 'quoted' : 'draft'
+      found.updated_at = now()
+      event(order, 'item.reopened', { item_id: found.id, to: found.status })
+      rederive(order)
+      return found
+    }),
+  ),
   http.post('/api/v1/orders/:id/items/:item/cancel', ({ request, params }) =>
     transition(request, () => {
       const order = lock(String(params.id))

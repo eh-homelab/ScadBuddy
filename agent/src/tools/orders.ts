@@ -163,7 +163,8 @@ export const orderTools: Tool[] = [
     description:
       'Make a customer (no `customer_id`), or edit one: each field given replaces theirs, and a `contacts` or ' +
       '`addresses` list replaces the rows whole, keeping any row it names by `id` (an address an open order ' +
-      'points at keeps its id that way). `archive: true` hides them from the pickers; their orders keep naming them.',
+      'points at keeps its id that way). `archive: true` hides them from the pickers; their orders keep naming them. ' +
+      '`unarchive: true` puts an archived customer back in the pickers.',
     input: z.object({
       customer_id: customerId.optional(),
       display_name: z.string().min(1).max(200).optional(),
@@ -173,15 +174,28 @@ export const orderTools: Tool[] = [
       contacts: z.array(contact).optional(),
       addresses: z.array(address).optional(),
       archive: z.boolean().default(false),
+      unarchive: z.boolean().default(false),
     }),
     risk: 'write',
-    routes: ['POST /api/v1/customers', 'PATCH /api/v1/customers/{customer_id}', 'POST /api/v1/customers/{customer_id}/archive'],
-    title: ({ customer_id, display_name, archive }) =>
-      archive ? `Archive customer ${customer_id}` : customer_id ? `Edit customer ${customer_id}` : `Add customer ${display_name ?? ''}`.trim(),
-    handler: async ({ customer_id, archive, ...fields }, { backend }) => {
+    routes: [
+      'POST /api/v1/customers',
+      'PATCH /api/v1/customers/{customer_id}',
+      'POST /api/v1/customers/{customer_id}/archive',
+      'POST /api/v1/customers/{customer_id}/unarchive',
+    ],
+    title: ({ customer_id, display_name, archive, unarchive }) =>
+      archive
+        ? `Archive customer ${customer_id}`
+        : unarchive
+          ? `Unarchive customer ${customer_id}`
+          : customer_id
+            ? `Edit customer ${customer_id}`
+            : `Add customer ${display_name ?? ''}`.trim(),
+    handler: async ({ customer_id, archive, unarchive, ...fields }, { backend }) => {
       const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      if (archive && unarchive) throw new ToolError('archive and unarchive cannot both be true')
       if (customer_id === undefined) {
-        if (archive) throw new ToolError('archive needs a customer_id')
+        if (archive || unarchive) throw new ToolError(`${archive ? 'archive' : 'unarchive'} needs a customer_id`)
         if (typeof body.display_name !== 'string') throw new ToolError('a new customer needs a display_name')
         return json(
           await ok(
@@ -202,6 +216,12 @@ export const orderTools: Tool[] = [
         customer = await ok(
           backend.POST('/api/v1/customers/{customer_id}/archive', { params: { path } }),
           `archive customer ${customer_id}`,
+        )
+      }
+      if (unarchive) {
+        customer = await ok(
+          backend.POST('/api/v1/customers/{customer_id}/unarchive', { params: { path } }),
+          `unarchive customer ${customer_id}`,
         )
       }
       if (customer === undefined) {
@@ -552,6 +572,27 @@ export const orderTools: Tool[] = [
     summarize: ({ order_id }) => `Close order ${order_id}`,
     handler: async ({ order_id }, { backend }) =>
       json(await ok(backend.POST('/api/v1/orders/{order_id}/close', { params: { path: { order_id } } }), `close order ${order_id}`)),
+  }),
+  defineTool({
+    name: 'order_reopen',
+    description:
+      'Undo a close or a cancel: reopen a closed order (it takes the status its items and shipments give it, ' +
+      '`shipped` as it closed), or one cancelled line item (`item_id`), which takes the state its quotes and ' +
+      'attempts give it. A cancelled order stays cancelled; an accepted order takes back a priced item only ' +
+      '(`item_not_priced`). Outward, as a cancel is: it changes what the shop told the customer.',
+    input: z.object({ order_id: orderId, item_id: itemId.optional() }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/reopen', 'POST /api/v1/orders/{order_id}/items/{item_id}/reopen'],
+    summarize: ({ order_id, item_id }) => `Reopen ${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
+    handler: async ({ order_id, item_id }, { backend }) =>
+      json(
+        item_id === undefined
+          ? await ok(backend.POST('/api/v1/orders/{order_id}/reopen', { params: { path: { order_id } } }), `reopen order ${order_id}`)
+          : await ok(
+              backend.POST('/api/v1/orders/{order_id}/items/{item_id}/reopen', { params: { path: { order_id, item_id } } }),
+              `reopen item ${item_id}`,
+            ),
+      ),
   }),
   defineTool({
     name: 'order_cancel',
