@@ -14,7 +14,7 @@ type V1PrintLibraryItemFilamentsRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters spools that can print this library file
+// V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the providers' records over them (D1), and no Bambuddy call.
 type V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters struct {
 	All_plates       *bool   "uriparametername:\"all_plates\""
 	Max_objects      *int32  "uriparametername:\"max_objects\""
@@ -23,7 +23,9 @@ type V1PrintLibraryItemFilamentsRequestBuilderGetQueryParameters struct {
 	Max_visits       *int32  "uriparametername:\"max_visits\""
 	Plate_id         *int32  "uriparametername:\"plate_id\""
 	Plate_ids        *string "uriparametername:\"plate_ids\""
-	Printer_id       *int32  "uriparametername:\"printer_id\""
+	// The registry printer (its id) the dialog is for
+	Printer    *string "uriparametername:\"printer\""
+	Printer_id *int32  "uriparametername:\"printer_id\""
 }
 
 // V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
@@ -39,7 +41,7 @@ type V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration struct {
 // NewV1PrintLibraryItemFilamentsRequestBuilderInternal instantiates a new V1PrintLibraryItemFilamentsRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemFilamentsRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemFilamentsRequestBuilder {
 	m := &V1PrintLibraryItemFilamentsRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/filaments{?all_plates*,max_objects*,max_paint_digits*,max_triangles*,max_visits*,plate_id*,plate_ids*,printer_id*}", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/filaments{?all_plates*,max_objects*,max_paint_digits*,max_triangles*,max_visits*,plate_id*,plate_ids*,printer*,printer_id*}", pathParameters),
 	}
 	return m
 }
@@ -51,7 +53,7 @@ func NewV1PrintLibraryItemFilamentsRequestBuilder(rawUrl string, requestAdapter 
 	return NewV1PrintLibraryItemFilamentsRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get spools that can print this library file
+// Get as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the providers' records over them (D1), and no Bambuddy call.
 // returns a FilamentOptionsable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemFilamentsRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.FilamentOptionsable, error) {
@@ -72,7 +74,7 @@ func (m *V1PrintLibraryItemFilamentsRequestBuilder) Get(ctx context.Context, req
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.FilamentOptionsable), nil
 }
 
-// ToGetRequestInformation spools that can print this library file
+// ToGetRequestInformation as “/print/outputs/{id}/filaments“: on a native run (“printer“, D2) the printer's trays with the providers' records over them (D1), and no Bambuddy call.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemFilamentsRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemFilamentsRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

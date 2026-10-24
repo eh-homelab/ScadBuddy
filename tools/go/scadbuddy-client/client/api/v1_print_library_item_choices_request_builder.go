@@ -14,13 +14,15 @@ type V1PrintLibraryItemChoicesRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryItemChoicesRequestBuilderGetQueryParameters as “/print/outputs/{id}/choices“; “model_choices“ is what this file last printed with, so the dialog reopens on it. The file's filament slots are read from the file itself, the fetch its preview shares, and from Bambuddy only for a file ScadBuddy cannot read them from (#2550).
+// V1PrintLibraryItemChoicesRequestBuilderGetQueryParameters as “/print/outputs/{id}/choices“; “model_choices“ is what this file last printed with, so the dialog reopens on it. The file's filament slots are read from the file itself, the fetch its preview shares, and from Bambuddy only for a file ScadBuddy cannot read them from (#2550). On a printer a run reaches natively (“printer“, plan 2026-10-18 D2) nothing is read of Bambuddy, as an output's.
 type V1PrintLibraryItemChoicesRequestBuilderGetQueryParameters struct {
 	Max_objects      *int32 "uriparametername:\"max_objects\""
 	Max_paint_digits *int32 "uriparametername:\"max_paint_digits\""
 	Max_triangles    *int32 "uriparametername:\"max_triangles\""
 	Max_visits       *int32 "uriparametername:\"max_visits\""
-	Printer_id       *int32 "uriparametername:\"printer_id\""
+	// The registry printer (its id) the dialog is for
+	Printer    *string "uriparametername:\"printer\""
+	Printer_id *int32  "uriparametername:\"printer_id\""
 }
 
 // V1PrintLibraryItemChoicesRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
@@ -44,7 +46,7 @@ type V1PrintLibraryItemChoicesRequestBuilderPutRequestConfiguration struct {
 // NewV1PrintLibraryItemChoicesRequestBuilderInternal instantiates a new V1PrintLibraryItemChoicesRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemChoicesRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemChoicesRequestBuilder {
 	m := &V1PrintLibraryItemChoicesRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/choices{?max_objects*,max_paint_digits*,max_triangles*,max_visits*,printer_id*}", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/choices{?max_objects*,max_paint_digits*,max_triangles*,max_visits*,printer*,printer_id*}", pathParameters),
 	}
 	return m
 }
@@ -56,7 +58,7 @@ func NewV1PrintLibraryItemChoicesRequestBuilder(rawUrl string, requestAdapter i2
 	return NewV1PrintLibraryItemChoicesRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get as “/print/outputs/{id}/choices“; “model_choices“ is what this file last printed with, so the dialog reopens on it. The file's filament slots are read from the file itself, the fetch its preview shares, and from Bambuddy only for a file ScadBuddy cannot read them from (#2550).
+// Get as “/print/outputs/{id}/choices“; “model_choices“ is what this file last printed with, so the dialog reopens on it. The file's filament slots are read from the file itself, the fetch its preview shares, and from Bambuddy only for a file ScadBuddy cannot read them from (#2550). On a printer a run reaches natively (“printer“, plan 2026-10-18 D2) nothing is read of Bambuddy, as an output's.
 // returns a ChoicesViewable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemChoicesRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemChoicesRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.ChoicesViewable, error) {
@@ -98,7 +100,7 @@ func (m *V1PrintLibraryItemChoicesRequestBuilder) Put(ctx context.Context, body 
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.ModelPrintChoicesable), nil
 }
 
-// ToGetRequestInformation as “/print/outputs/{id}/choices“; “model_choices“ is what this file last printed with, so the dialog reopens on it. The file's filament slots are read from the file itself, the fetch its preview shares, and from Bambuddy only for a file ScadBuddy cannot read them from (#2550).
+// ToGetRequestInformation as “/print/outputs/{id}/choices“; “model_choices“ is what this file last printed with, so the dialog reopens on it. The file's filament slots are read from the file itself, the fetch its preview shares, and from Bambuddy only for a file ScadBuddy cannot read them from (#2550). On a printer a run reaches natively (“printer“, plan 2026-10-18 D2) nothing is read of Bambuddy, as an output's.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemChoicesRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemChoicesRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
