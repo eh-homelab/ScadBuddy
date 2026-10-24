@@ -1,0 +1,145 @@
+# The hot-path stack (#3818 tier A, plan 2026-10-18 Task 13): ScadBuddy with its own
+# store, library and slicer, a fake LAN printer and a Bambuddy that fails every call.
+# `e2e-stack/run.sh` brings it up as project `sb-hotpath`, seeds it (`seed.sh`) and runs
+# `frontend/e2e/real-hot-path.spec.ts` against it; read run.sh before running this alone.
+#
+# Images: `app`, `slicer` and `tools` are this repo's Dockerfile, built by run.sh
+# (`--target runtime`, `--target slicer`, `--target test`), named by SB_HOTPATH_APP_IMAGE,
+# SB_HOTPATH_SLICER_IMAGE and SB_HOTPATH_TOOLS_IMAGE. The two fakes are built here from
+# their own folders. Postgres is pinned by digest, through Google's Docker Hub mirror as
+# CI's service containers are (#3370); the digest matched Docker Hub's on 2026-10-24
+# (`docker buildx imagetools inspect`).
+#
+# The S3 store is moto, run from the test image (`moto_server`, the version backend/uv.lock
+# pins), as `.github/scripts/bambuddy-fs-live.sh` runs it for the native library: no image
+# of its own to pin, anonymous bucket creation, and presigned URLs the slicer worker can
+# fetch. MinIO would be one more image and a credentialed bucket setup for nothing the
+# test needs.
+#
+# Host ports: the app on 18080, the printer's control port on 18081 and the recorder on
+# 18000, the three the spec reads. The printer's MQTT and FTPS ports are never published:
+# the app reaches them on this network, and through published ports on Docker Desktop the
+# FTPS data connection never arrives (e2e-stack/fake-printer/Dockerfile).
+name: sb-hotpath
+
+x-tools: &tools
+  image: ${SB_HOTPATH_TOOLS_IMAGE:-scadbuddy:hot-path-test}
+  pull_policy: never
+
+services:
+  postgres:
+    image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: scadbuddy
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "scadbuddy"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  temporal:
+    <<: *tools
+    entrypoint: ["temporal"]
+    command:
+      - server
+      - start-dev
+      - --headless
+      - --ip
+      - 0.0.0.0
+      - --port
+      - "7233"
+      - --namespace
+      - default
+      - --log-level
+      - warn
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  s3:
+    <<: *tools
+    working_dir: /app/backend
+    command: ["uv", "run", "--frozen", "--no-sync", "moto_server", "-H", "0.0.0.0", "-p", "5000"]
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--output", "/dev/null", "http://127.0.0.1:5000/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  app:
+    image: ${SB_HOTPATH_APP_IMAGE:-scadbuddy:hot-path-app}
+    pull_policy: never
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+    environment:
+      SCADBUDDY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/scadbuddy
+      SCADBUDDY_TEMPORAL_ADDRESS: temporal:7233
+      SCADBUDDY_TEMPORAL_NAMESPACE: default
+      # The render, library and print queues in the API process: one container.
+      SCADBUDDY_TEMPORAL_WORKER_INPROCESS: "true"
+      SCADBUDDY_SECRET_KEY_FILE: /run/secrets/kek
+      # The slicer worker's transfer URLs name the internal blob routes at this base.
+      SCADBUDDY_API_INTERNAL_URL: http://app:8080
+    secrets:
+      - kek
+    volumes:
+      - data:/data
+    ports:
+      - "127.0.0.1:18080:8080"
+    # The image's own probe, polled faster than its 30 s so `up --wait` and the seed's
+    # restart do not sit out an interval.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 5s
+      start_period: 120s
+      retries: 40
+
+  slicer:
+    image: ${SB_HOTPATH_SLICER_IMAGE:-scadbuddy-slicer:hot-path}
+    pull_policy: never
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      SCADBUDDY_TEMPORAL_ADDRESS: temporal:7233
+      SCADBUDDY_TEMPORAL_NAMESPACE: default
+    tmpfs:
+      - /tmp:exec,mode=1777
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9090/healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 40
+
+  printer:
+    build: ./fake-printer
+    image: scadbuddy-fake-printer:hot-path
+    environment:
+      FAKE_PRINTER_SERIAL: ${SB_HOTPATH_SERIAL:-01P00FAKE000001}
+      FAKE_PRINTER_ACCESS_CODE: ${SB_HOTPATH_ACCESS_CODE:-12345678}
+      FAKE_PRINT_SECONDS: "15"
+    ports:
+      - "127.0.0.1:18081:8081"
+
+  bambuddy:
+    build: ./bambuddy-recorder
+    image: scadbuddy-bambuddy-recorder:hot-path
+    ports:
+      - "127.0.0.1:18000:8000"
+
+secrets:
+  kek:
+    # 32 random bytes, base64, written by run.sh for each run.
+    file: ${SB_HOTPATH_KEK_FILE:?run.sh writes the key and sets SB_HOTPATH_KEK_FILE}
+
+volumes:
+  data:

@@ -233,8 +233,8 @@ jobs:
       # The templates' verify.sh scripts too (#229): they are what the `models`
       # job runs, and a word-splitting bug in one is a check that silently
       # asserts something other than what it says.
-      - name: shellcheck the CI scripts and the template verify scripts
-        run: shellcheck .github/scripts/*.sh scripts/*.sh models/*/verify.sh
+      - name: shellcheck the CI scripts, the template verify scripts and the hot-path stack
+        run: shellcheck .github/scripts/*.sh scripts/*.sh models/*/verify.sh e2e-stack/*.sh
 
       - name: Test the template selector
         run: .github/scripts/select-models.test.sh
