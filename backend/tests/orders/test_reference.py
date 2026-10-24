@@ -15,7 +15,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.outputs import INPUTS_NAME, META_NAME, OutputStore
+from scadbuddy.library.outputs import ARRANGED_NAME, INPUTS_NAME, META_NAME, OutputStore
 from scadbuddy.orders.models import ColourSlot
 from scadbuddy.orders.reference import (
     ReferenceError,
@@ -177,6 +177,32 @@ async def test_an_output_without_a_revision_cannot_be_ordered(library: Library) 
         await library.resolve(slug=None, commit=commit, inputs=None, output_id="out2")
     assert refused.value.field == "commit"
     assert "no revision" in refused.value.problem
+
+
+async def test_an_arranged_output_pins_the_templates_commit(
+    library: Library, paths: DataPaths
+) -> None:
+    """#4565: an Arrange renders nothing and records the template directory's content
+    hash; the item pins the commit the template was at when the output was saved."""
+    commit = library.create("demo")
+    hashed = "sha256:" + "c" * 64
+    library.write_output("demo", "arr1", hashed)
+    (paths.output_dir("demo", "arr1") / ARRANGED_NAME).write_text(
+        json.dumps(["library:3410"]), encoding="utf-8"
+    )
+    resolved = await library.resolve(slug=None, commit=None, inputs=None, output_id="arr1")
+    reference = resolved.reference  # type: ignore[attr-defined]
+    assert (reference.slug, reference.commit) == ("demo", commit)
+    assert resolved.colours == [  # type: ignore[attr-defined]
+        ColourSlot(slot=0, colour="#FF0000"),
+        ColourSlot(slot=1, colour="#00ff00"),
+    ]
+    # The same hash on an output that is not arranged still names no commit.
+    library.write_output("demo", "out2", hashed)
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(slug=None, commit=None, inputs=None, output_id="out2")
+    assert refused.value.field == "commit"
+    assert "is not a commit id" in refused.value.problem
 
 
 async def test_an_output_whose_revision_is_gone_names_it(library: Library) -> None:
