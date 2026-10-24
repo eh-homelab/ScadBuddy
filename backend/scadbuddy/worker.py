@@ -45,7 +45,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore, newest_failed_from
+from scadbuddy.bambuddy.runs import PrintRunStore, RecentRuns, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -1026,7 +1026,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     printers = PrinterStore(pool, kek)
     reports = PrinterReportStore(pool)
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9).
-    lan = LanProgress(print_runs, printers, reports)
+    # The follow's newest-failure read shares its newest-run query (#4540 review).
+    recent_runs = RecentRuns(print_runs)
+    lan = LanProgress(recent_runs.latest, printers, reports)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # As the API's: the follow links archives too (#306), which the rack's settle
@@ -1045,7 +1047,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         read_library=read_library,
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
-        newest_failed=newest_failed_from(print_runs, settings_store.load),
+        newest_failed=newest_failed_from(
+            print_runs, settings_store.load, latest=recent_runs.latest
+        ),
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys.
     native = native_slice_starter(settings)

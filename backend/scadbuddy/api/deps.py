@@ -24,7 +24,12 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents, newest_failed_from
+from scadbuddy.bambuddy.runs import (
+    PrintRunStore,
+    RecentRuns,
+    TransactionalEvents,
+    newest_failed_from,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.components import Components, discover_components
@@ -392,7 +397,9 @@ def _build_core(settings: Settings) -> AppState:
     print_run_store = PrintRunStore(pool, events=transactional_events(events))
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9): the
     # registry's rows and reports, read only, so no key.
-    lan = LanProgress(print_run_store, PrinterStore(pool, None), PrinterReportStore(pool))
+    # The follow's newest-failure read shares its newest-run query (#4540 review).
+    recent_runs = RecentRuns(print_run_store)
+    lan = LanProgress(recent_runs.latest, PrinterStore(pool, None), PrinterReportStore(pool))
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # The follow links archives too (#306), so a print nobody watches is found.
@@ -442,7 +449,9 @@ def _build_core(settings: Settings) -> AppState:
             read=read_progress,
             read_library=read_library,
             events=events,
-            newest_failed=newest_failed_from(print_run_store, settings_store.load),
+            newest_failed=newest_failed_from(
+                print_run_store, settings_store.load, latest=recent_runs.latest
+            ),
         ),
         print_runs=PrintCommands(
             store=print_run_store,

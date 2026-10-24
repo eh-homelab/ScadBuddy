@@ -6,12 +6,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 import pytest
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, finish_run
-from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, newest_failure
 from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.printers.progress import MOVED_ON, NOT_HEARD, PAUSED, LanProgress, from_lan_report
 from scadbuddy.printers.status import print_error_text
@@ -130,11 +131,83 @@ def _run(result: PrintRunResult | None, status: str = "succeeded") -> PrintRun:
 
 def _lan(run: PrintRun | None, value: tuple[dict[str, Any], datetime] | None) -> LanProgress:
     return LanProgress(
-        _Runs(run),  # type: ignore[arg-type]
+        _Runs(run).latest_for_output,
         _Rows(),  # type: ignore[arg-type]
         _Reports(value),  # type: ignore[arg-type]
         now=lambda: at(minutes=1),
     )
+
+
+LAN_RESULT = PrintRunResult(library_file_id=41, copies=1, path="native", lan=[OURS])
+
+
+class _Unreadable:
+    def get(self, printer_id: str) -> object:
+        raise psycopg.OperationalError("the database is gone")
+
+
+async def test_an_unreadable_registry_reads_as_no_lan_print() -> None:
+    """#4540 review: as the runs' read, a registry read that fails is no LAN print."""
+    reports = LanProgress(
+        _Runs(_run(LAN_RESULT)).latest_for_output,
+        _Rows(),  # type: ignore[arg-type]
+        _Unreadable(),  # type: ignore[arg-type]
+    )
+    assert await reports.read("o" * 32) is None
+    rows = LanProgress(
+        _Runs(_run(LAN_RESULT)).latest_for_output,
+        _Unreadable(),  # type: ignore[arg-type]
+        _Reports(report()),  # type: ignore[arg-type]
+    )
+    assert await rows.read("o" * 32) is None
+
+
+async def test_unreadable_runs_read_as_no_lan_print() -> None:
+    async def latest(run_subject: str) -> PrintRun | None:
+        raise psycopg.OperationalError("the database is gone")
+
+    progress = LanProgress(latest, _Rows(), _Reports(report()))  # type: ignore[arg-type]
+    assert await progress.read("o" * 32) is None
+
+
+async def test_a_run_read_already_is_not_read_again() -> None:
+    """#4540 review: a progress route reads the newest run once, for its failure and its
+    LAN print; `given` reads no run."""
+    calls = 0
+
+    async def latest(run_subject: str) -> PrintRun | None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    lan = LanProgress(latest, _Rows(), _Reports(report(gcode_state="FINISH")))  # type: ignore[arg-type]
+    progress = await lan.given(_run(LAN_RESULT)).read("o" * 32)
+    assert progress is not None and progress.stage == "done" and calls == 0
+
+
+async def test_a_follows_two_reads_share_one_query() -> None:
+    """The follow's newest-failure and LAN reads in one tick share one query of the runs
+    (`RecentRuns`); one past its ``ttl`` reads again."""
+    store = _CountingRuns(_run(LAN_RESULT))
+    clock = [0.0]
+    recent = RecentRuns(store, ttl=2.0, clock=lambda: clock[0])  # type: ignore[arg-type]
+    lan = LanProgress(recent.latest, _Rows(), _Reports(report()))  # type: ignore[arg-type]
+    assert await lan.read("o" * 32) is not None
+    assert await newest_failure(store, "o" * 32, latest=recent.latest) is None  # type: ignore[arg-type]
+    assert store.calls == 1
+    clock[0] = 3.0
+    await lan.read("o" * 32)
+    assert store.calls == 2
+
+
+class _CountingRuns(_Runs):
+    def __init__(self, run: PrintRun | None) -> None:
+        super().__init__(run)
+        self.calls = 0
+
+    async def latest_for_output(self, output_id: str) -> PrintRun | None:
+        self.calls += 1
+        return self.run
 
 
 async def test_a_lan_run_is_read_from_its_printers_report() -> None:

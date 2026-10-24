@@ -321,6 +321,7 @@ class PrintActivities:
                     checked = checked.model_copy(update={"path": "bambuddy"})
                 if checked.path == "native":
                     _one_lan_print(checked.plate_ids, input.request)
+                    checked = checked.model_copy(update={"lan_start": True})
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
         return Checked(source=spec, prepared=checked)
@@ -360,7 +361,7 @@ class PrintActivities:
                         native=self.d.native,
                     )
                 )
-                if planned.path == "native" and planned.copies > 1:
+                if planned.lan_start and planned.copies > 1:
                     # The remembered quantity, which the check could not see.
                     raise RunRefusalError(ONE_LAN_PRINT)
                 return planned

@@ -24,7 +24,7 @@ from typing import Any
 
 from scadbuddy.bambuddy.follow import MAX_AGE
 from scadbuddy.bambuddy.progress import CopyProgress, PrintProgress, from_plates
-from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.runs import LatestRun, PrintRun, given_run, read_latest
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.printers.lan_models import LanStarted
@@ -101,36 +101,47 @@ def from_lan_report(
 
 class LanProgress:
     """`bambuddy.progress.LanReads`: a subject's print, when its newest run printed over
-    the LAN; ``None`` otherwise, and the Bambuddy route is read as before."""
+    the LAN; ``None`` otherwise, and the Bambuddy route is read as before. ``latest``
+    reads the newest run: a route's, read once already (`runs.given_run`), or a follow's
+    `runs.RecentRuns`, which its newest-failure read shares, so a progress read adds no
+    query of ``print_runs`` (#4540 review). A database that does not answer reads as no
+    LAN print."""
 
     def __init__(
         self,
-        runs: PrintRunStore,
+        latest: LatestRun,
         printers: PrinterStore,
         reports: PrinterReportStore,
         *,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         max_age: timedelta = MAX_AGE,
     ) -> None:
-        self.runs = runs
+        self.latest = latest
         self.printers = printers
         self.reports = reports
         self.now = now
         self.max_age = max_age
 
+    def given(self, run: PrintRun | None) -> LanProgress:
+        """The same reads, over a newest run read already."""
+        return LanProgress(
+            given_run(run), self.printers, self.reports, now=self.now, max_age=self.max_age
+        )
+
     async def read(self, run_subject: str) -> PrintProgress | None:
-        try:
-            run = await self.runs.latest_for_output(run_subject)
-        except DATABASE_ERRORS:
-            logger.warning("print runs unreadable; a LAN print's progress is not read")
-            return None
+        run = await read_latest(self.latest, run_subject)
         if run is None or run.status != "succeeded" or run.result is None:
             return None
         started = run.result.lan
-        if not started or run.printer is None:
+        printer = run.printer
+        if not started or printer is None:
             return None
-        report = await asyncio.to_thread(self.reports.get, run.printer)
-        row = await asyncio.to_thread(self.printers.get, run.printer)
+        try:
+            report = await asyncio.to_thread(self.reports.get, printer)
+            row = await asyncio.to_thread(self.printers.get, printer)
+        except DATABASE_ERRORS:
+            logger.warning("the printer registry is unreadable; a LAN print's progress is not read")
+            return None
         name = row.name if row is not None else None
         now = self.now()
         plates = [

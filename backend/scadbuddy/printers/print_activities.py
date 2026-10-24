@@ -61,6 +61,8 @@ from scadbuddy.workflows.print_activities import heartbeating, raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
     LAN_PRINT_ACTIVITY,
+    LAN_PROBE_TIMEOUT,
+    LAN_START_WAIT,
     LAN_UNSURE,
     LAN_UPLOAD_ACTIVITY,
     LanPrintInput,
@@ -71,11 +73,6 @@ from scadbuddy.workflows.print_models import (
 
 logger = logging.getLogger(__name__)
 
-#: How long ``lan_print`` waits for the printer to report the plate it sent: it was
-#: ``RUNNING`` 1.8 s after the start on the H2C (Task 7).
-LAN_START_WAIT = 30.0
-#: How long the report read before a start may take.
-PROBE_TIMEOUT = 15.0
 #: A spooled download stays in memory up to this, then goes to a temporary file.
 SPOOL_IN_MEMORY = 8 * 1024 * 1024
 #: The states a report shows for a plate the printer took (OpenBambuAPI ``mqtt.md``).
@@ -237,7 +234,7 @@ class LanActivities:
         and starting again, and the report read first finds a start it did take."""
         row, lan = await self._printer(input.printer)
         try:
-            first = await lan.probe(timeout=PROBE_TIMEOUT)
+            first = await lan.probe(timeout=LAN_PROBE_TIMEOUT)
         except CertificateMismatchError as error:
             raise _failed(str(error), status_code=status.HTTP_409_CONFLICT) from None
         except (OSError, aiomqtt.MqttError, TimeoutError, ConnectionError):

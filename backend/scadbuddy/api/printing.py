@@ -90,7 +90,15 @@ from scadbuddy.bambuddy.projects import (
     _destination_folders,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
+from scadbuddy.bambuddy.runs import (
+    UNEXPECTED_DETAIL,
+    PrintRun,
+    failure_of,
+    given_run,
+    newest_failure,
+    read_latest,
+    run_key,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import (
     DATABASE_ERRORS,
@@ -1215,9 +1223,16 @@ async def failed_before_queueing(state: AppState, run_subject: str) -> str | Non
     return await newest_failure(state.print_runs.store, run_subject)
 
 
-def lan_reads(state: AppState, registry: Printers) -> LanProgress:
-    """A LAN print's progress from its printer's report (plan 2026-10-16 Task 9)."""
-    return LanProgress(state.print_runs.store, registry.store, registry.reports)
+async def newest_run(state: AppState, run_subject: str) -> PrintRun | None:
+    """The subject's newest run, read once for its failure and its LAN print (#4540
+    review); ``None`` with a database that does not answer."""
+    return await read_latest(state.print_runs.store.latest_for_output, run_subject)
+
+
+def lan_reads(registry: Printers, latest: PrintRun | None) -> LanProgress:
+    """A LAN print's progress from its printer's report (plan 2026-10-16 Task 9), over
+    the newest run read already: no second query of the runs."""
+    return LanProgress(given_run(latest), registry.store, registry.reports)
 
 
 @router.get(
@@ -1249,14 +1264,15 @@ async def get_progress(
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
-    failed = await failed_before_queueing(state, meta.id)
+    latest = await newest_run(state, meta.id)
+    failed = failure_of(latest)
     progress: PrintProgress | None
     async with client_for(store.load()) as client:
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
             progress = await progress_for(
-                client, meta, uploads=uploads, links=links, lan=lan_reads(state, registry)
+                client, meta, uploads=uploads, links=links, lan=lan_reads(registry, latest)
             )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed

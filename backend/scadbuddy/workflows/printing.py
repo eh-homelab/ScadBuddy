@@ -57,6 +57,8 @@ with workflow.unsafe.imports_passed_through():
         ACCEPTED_UPDATE,
         FAILED,
         LAN_PRINT_ACTIVITY,
+        LAN_PROBE_TIMEOUT,
+        LAN_START_WAIT,
         LAN_UNSURE,
         LAN_UPLOAD_ACTIVITY,
         PRINT_RUN_WORKFLOW,
@@ -242,8 +244,8 @@ REUSED_GONE_PATCH = "print-slice-again-when-reused-gone"
 #: no Bambuddy run's history records it.
 NATIVE_SLICER_PATCH = "native-slicer"
 #: ``workflow.patched`` id of a plate printed over the LAN (plan 2026-10-16 Task 9):
-#: ``lan_upload`` and ``lan_print`` in place of ``print_enqueue``. Only a run planned on
-#: the native path asks, so no recorded run's history does.
+#: ``lan_upload`` and ``lan_print`` in place of ``print_enqueue``. Only a run whose check
+#: set ``lan_start`` asks, so no recorded run's history does.
 NATIVE_PATCH = "native-print"
 #: One upload of a sliced 3MF to the printer, beating.
 LAN_UPLOAD_TIMEOUT = timedelta(minutes=10)
@@ -252,6 +254,10 @@ LAN_UPLOAD_TIMEOUT = timedelta(minutes=10)
 #: name, since the printer moves a started upload away (Task 7's measurement), and
 #: ``lan_print`` finds a start an earlier attempt did take rather than send it again.
 LAN_START_ATTEMPTS = 3
+#: One ``lan_print``: its report read, its wait for the start, and a margin. No patch
+#: is needed for it: no released build ran ``lan_print``, and it is 60 s, as ``SHORT``
+#: was, so a history recorded on this branch's first build schedules the same.
+LAN_PRINT_TIMEOUT = timedelta(seconds=LAN_PROBE_TIMEOUT + LAN_START_WAIT + 15)
 
 
 def _sliced_by(
@@ -549,7 +555,9 @@ class PrintRunWorkflow:
                 self.enqueue_unstarted = self.cancel_absorbed
                 self._stop_if_cancelled()
                 self.enqueue_attempted = True
-            if planned.path == "native" and workflow.patched(NATIVE_PATCH):
+            # Keyed on the check's own mark, never `path`: a run checked by an older build
+            # may plan `path="native"` without the gate (#4540 review).
+            if planned.lan_start and workflow.patched(NATIVE_PATCH):
                 lan = await self._start_lan(
                     input, accepted, planned, plate, sliced, native, last=index == last
                 )
@@ -759,7 +767,7 @@ class PrintRunWorkflow:
                     layer_inspect=options.layer_inspect is not False,
                 ),
                 result_type=LanStarted,
-                start_to_close_timeout=SHORT,
+                start_to_close_timeout=LAN_PRINT_TIMEOUT,
                 retry_policy=ONCE,
             )
             try:

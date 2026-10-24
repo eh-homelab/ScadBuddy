@@ -213,6 +213,11 @@ class FailInput(BaseModel):
 #: queue: the sliced 3MF onto the printer over FTPS, then ``print.project_file``.
 LAN_UPLOAD_ACTIVITY = "lan_upload"
 LAN_PRINT_ACTIVITY = "lan_print"
+#: How long ``lan_print``'s report read before a start may take, in seconds.
+LAN_PROBE_TIMEOUT = 15.0
+#: How long ``lan_print`` waits for the printer to report the plate it sent: it was
+#: ``RUNNING`` 1.8 s after the start on the H2C (Task 7).
+LAN_START_WAIT = 30.0
 
 
 class SlicedSource(BaseModel):

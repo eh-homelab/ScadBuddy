@@ -1774,6 +1774,10 @@ class PreparedPlates(BaseModel):
     #: run accepted before the registry (#3823), which is Bambuddy's.
     printer: str = ""
     path: RunPath = "bambuddy"
+    #: Set only by a check that put the run on the LAN (plan 3a Task 9): what the
+    #: workflow's LAN branch keys on. A run checked by a build before it, which could
+    #: plan ``path="native"`` without the check's gate, stays on Bambuddy's branch.
+    lan_start: bool = False
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1844,6 +1848,8 @@ class PlannedRun(BaseModel):
     #: defaults keep every recorded ``print_plan`` result reading as Bambuddy's.
     printer: str = ""
     path: RunPath = "bambuddy"
+    #: As :attr:`PreparedPlates.lan_start`: the plates are started over the LAN.
+    lan_start: bool = False
 
 
 class QueuedPlate(BaseModel):
@@ -2225,6 +2231,7 @@ async def plan_run(
         library_queue=native.library_queue if native is not None else "library",
         printer=prepared.printer,
         path=prepared.path,
+        lan_start=prepared.lan_start,
     )
 
 
@@ -2332,6 +2339,7 @@ async def _plan_sliced(
         has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
         printer=prepared.printer,
         path=prepared.path,
+        lan_start=prepared.lan_start,
     )
 
 

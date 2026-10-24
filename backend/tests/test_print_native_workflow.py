@@ -117,6 +117,8 @@ class NativeFake(Fake):
         self.printer = printer
         self.queue = queue
         self.native_slicer = True
+        #: The check's own mark; a run checked by an older build has none.
+        self.lan_start = True
         self.lan_prints = 0
         #: Fail the next real `lan_print` attempts as unsure, after the real one ran.
         self.unsure_after_start = 0
@@ -135,6 +137,7 @@ class NativeFake(Fake):
             library_queue=self.queue,
             printer=self.printer,
             path="native",
+            lan_start=self.lan_start,
         )
 
     @activity.defn(name=SLICE_RUN_ACTIVITY)
@@ -209,10 +212,12 @@ async def _run(
     native_slicer: bool = True,
     unsure: int = 0,
     plan: FilamentPlan = TRAYS,
+    lan_start: bool = True,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
     fake.native_slicer = native_slicer
+    fake.lan_start = lan_start
     deps = LanDeps(
         printers=PrinterStore(pg_pool, KEK),
         # Never read: a native file and a blob need no Bambuddy client.
@@ -319,6 +324,19 @@ async def test_a_plan_with_an_inventory_spool_fails_before_the_start(
     assert run.status == "failed"
     assert run.error is not None and "trays" in run.error.detail
     assert fake_lan.project_files() == []
+
+
+async def test_a_native_path_planned_without_the_checks_mark_queues_in_bambuddy(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4540 review: a run checked by a build before the LAN branch could plan
+    ``path="native"`` past no gate (several plates, inventory spools). Upgraded mid-run,
+    it stays on Bambuddy's branch: only the check's ``lan_start`` takes the LAN."""
+    fake, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), lan_start=False)
+    assert run.status == "succeeded"
+    assert "enqueue:1" in fake.calls
+    assert fake_lan.received()["ftps"] == [] and fake_lan.project_files() == []
+    assert [outcome.lan for outcome in fake.outcomes] == [None]
 
 
 async def test_bambuddy_path_is_unchanged(client: Client) -> None:
