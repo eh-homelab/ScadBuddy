@@ -24,6 +24,8 @@ documented there; Task 7 measured them (`UPLOAD_DIR`, `file_url`) on an H2C, fir
 01.02.00.00, on 2026-10-24: a 3MF stored at ``/<name>`` and named ``ftp://<name>`` in
 `project_file_command`, with the four ids ``"0"`` and no ``ams_mapping2``, was answered
 ``result: SUCCESS`` and ``RUNNING`` 1.8 s later (`tests/printers/test_lan_live.py`).
+Once it started, the printer moved the file to ``/cache/<name>.gcode.3mf``: ``/<name>``
+is gone, so a start that is tried again uploads again rather than naming it.
 Bambuddy does the same (``print_scheduler.py`` "Upload to root directory (not
 /cache/)", ``bambu_mqtt.py`` ``start_print``: ``"url": f"ftp://{filename}"``, read in
 the deployed image 2026-10-24).

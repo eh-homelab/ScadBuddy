@@ -11,7 +11,8 @@ Task 7's measurement, on an H2C (firmware OTA 01.02.00.00, AHB 02.04.11.98, MC
   ``ams_mapping`` [4, 1, 6, 12, 5, 13], ids ``"0"``, no ``ams_mapping2`` or
   ``nozzle_mapping``, was answered ``result: SUCCESS`` in 0.4 s and was ``RUNNING`` at
   1.8 s; the ``stop`` sent then left it ``FAILED``. So `lan.UPLOAD_DIR` is ``/`` and
-  `lan.file_url` is ``ftp://<name>``.
+  `lan.file_url` is ``ftp://<name>``. The printer then moved the file to
+  ``/cache/scadbuddy-probe.3mf.gcode.3mf``; ``/scadbuddy-probe.3mf`` answered 550.
 - While idle the printer pushed a whole ``push_status`` (about 19 KB) every ~1.8 s,
   never a partial one, and messages could arrive out of timestamp order: the merge keys
   on the latest, never the sequence (`tests/printers/fixtures/lan-tray-reinsert-h2c.json`).
