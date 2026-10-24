@@ -142,3 +142,12 @@ NativeReads = Callable[[], Awaitable[LibraryReads | None]]
 
 async def no_native() -> LibraryReads | None:
     return None
+
+
+#: The native library a kind writes a native run's copy to as well as reads from (#3818
+#: tier A): `NativeLibrary` in the API, `RemoteLibrary` on the print worker.
+NativeLibraries = Callable[[], Awaitable[NativeCopies | None]]
+
+
+async def no_native_copies() -> NativeCopies | None:
+    return None

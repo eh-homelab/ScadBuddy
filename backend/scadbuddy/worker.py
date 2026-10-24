@@ -989,7 +989,7 @@ class ApiUrlMissingError(ValueError):
     pass
 
 
-async def _given(library: LibraryReads) -> LibraryReads | None:
+async def _given(library: RemoteLibrary) -> RemoteLibrary | None:
     return library
 
 
@@ -1069,6 +1069,10 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         library=partial(_given, library),
         native_slices=NativeSliceStore(pool),
         native=native,
+        # A native printer's background slice is decided on its registry row, as the
+        # run is (plan 2026-10-18 D2).
+        printers=printers,
+        reports=reports,
     )
     printing = PrintActivities(
         PrintDeps(

@@ -5,6 +5,8 @@ like the render worker, its workflows AUTO_UPGRADE."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 import shutil
 import socket
 import threading
@@ -21,9 +23,15 @@ from temporalio.common import VersioningBehavior
 from temporalio.worker import Worker
 
 from scadbuddy import worker as worker_module
+from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy import output_reader
+from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
+from scadbuddy.print_library.ids import NATIVE_ID_BASE
+from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.slicing import catalogue as native_catalogue_module
 from scadbuddy.worker import (
     ApiUrlMissingError,
@@ -322,3 +330,65 @@ async def test_the_print_workers_stores_write_activity(pg_conninfo: str, tmp_pat
         assert deps.operations.activity is not None
     finally:
         await deps.aclose()
+
+
+class _RoutedError(Exception):
+    """Raised once the background slice has decided its route, to stop it there."""
+
+
+@pytest.mark.requires_postgres
+async def test_the_print_workers_background_slice_takes_a_native_printers_route(
+    pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kinds are built as the print worker builds them (#4547 review): with its own
+    registry, so a native printer's background slice is decided natively there too,
+    never left on Bambuddy's path by a registry the kinds were not given."""
+    kek_file = tmp_path / "kek"
+    kek_file.write_text(base64.b64encode(os.urandom(32)).decode())
+    built: list[list[OperationKind]] = []
+
+    def recording(**kwargs: Any) -> list[OperationKind]:
+        kinds = bambuddy_operations.bambuddy_kinds_over(**kwargs)
+        built.append(kinds)
+        return kinds
+
+    routes: list[RunRoute] = []
+
+    async def routed(*args: Any, **kwargs: Any) -> RunRoute:
+        routes.append(await run_route(*args, **kwargs))
+        raise _RoutedError
+
+    monkeypatch.setattr(worker_module, "bambuddy_kinds_over", recording)
+    monkeypatch.setattr(bambuddy_operations, "run_route", routed)
+    deps = await asyncio.to_thread(
+        build_print_deps, print_settings(pg_conninfo, tmp_path, secret_key_file=kek_file)
+    )
+    try:
+        assert deps.printers is not None and deps.reports is not None
+        row = deps.printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
+        deps.printers.link_lan(
+            row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
+        )
+        deps.printers.patch(row.id, PrinterPatch(preferred_path="native"))
+        deps.reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
+        hot_path = StoredSettings(
+            slicer_backend="native", library_backend="native", store_backend="s3"
+        )
+        monkeypatch.setattr(deps.settings_store, "load", lambda *args, **kwargs: hot_path)
+        [kinds] = built
+        [preview] = [kind for kind in kinds if kind.name == "preview_slice"]
+        request = {
+            "library_file_id": NATIVE_ID_BASE + 1,
+            "request": {
+                "printer": row.id,
+                "filament_plan": {"slots": []},
+                "choices": {"nozzles": [{"size": "0.4"}]},
+            },
+        }
+        with pytest.raises(_RoutedError):
+            await preview.run(request, {})
+    finally:
+        await deps.aclose()
+    [route] = routes
+    assert route.row is not None and route.row.id == row.id
+    assert (route.path, route.native) == ("native", True)

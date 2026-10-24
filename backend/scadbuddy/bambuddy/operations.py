@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from fastapi import status
@@ -27,7 +27,12 @@ from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
 from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.print_run import PrintRunRequest, resolve_project, run_route
+from scadbuddy.bambuddy.print_run import (
+    PrintRunRequest,
+    ensured_route,
+    resolve_project,
+    run_route,
+)
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
@@ -49,7 +54,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
-from scadbuddy.print_library.reads import NativeCopies, NativeReads, no_native, reads_for
+from scadbuddy.print_library.reads import NativeLibraries, no_native_copies, reads_for
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.printers.reports import PrinterReportStore
@@ -96,14 +101,17 @@ def bambuddy_kinds_over(
     uploads: BambuddyUploadStore,
     links: PrintLinkStore,
     archive_cache: ArchiveCache,
-    library: NativeReads = no_native,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+    library: NativeLibraries = no_native_copies,
     native_slices: NativeSliceStore | None = None,
     native: NativeSliceStarter | None = None,
-    printers: PrinterStore | None = None,
-    reports: PrinterReportStore | None = None,
 ) -> list[OperationKind]:
     """The Bambuddy kinds over these stores: the API's, or the print worker's, which
-    reads its outputs (#1060) and native library files (#3827) through the API."""
+    reads its outputs (#1060) and native library files (#3827) through the API.
+    ``printers`` and ``reports`` are the registry the background slice decides its run's
+    path from (plan 2026-10-18 D2); required, so neither process can leave a native
+    printer's slice on Bambuddy's path by omission."""
     cache = archive_cache
 
     async def no_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -354,11 +362,15 @@ def bambuddy_kinds_over(
             if printers is not None and native_backends(settings)
             else None
         )
+        if route is not None and route.row is None and route.printer_id is not None:
+            # As the run's check: a printer with no row yet takes the row it makes.
+            async with client_for(settings) as client:
+                route = await ensured_route(client, settings, printers, reports, route)
         lan = route is not None and route.native
         own = await library()
         # The native library a native run's copy goes into: the API's own
         # (`NativeLibrary`) or, on the print worker, its internal routes (`RemoteLibrary`).
-        copies = cast("NativeCopies | None", own) if lan else None
+        copies = own if lan else None
         title: str | None = None
         async with maybe_client(settings, native=lan) as client:
             source: PrintSource
