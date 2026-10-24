@@ -12,8 +12,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_serializer, model_validator
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
-from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.filaments import FilamentPlan, SpoolOption
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
+from scadbuddy.bambuddy.models import DEFAULT_ALGORITHM, RackAlgorithm
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PlatePlan,
@@ -24,6 +25,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
+from scadbuddy.printers.nozzle_mapping import SlicedRack
 
 #: The workflow type every print route starts.
 PRINT_RUN_WORKFLOW = "PrintRun"
@@ -243,6 +245,9 @@ class LanUploadInput(BaseModel):
     #: In `lan.UPLOAD_DIR`; a new one per start attempt, since the printer moves a
     #: started upload away (Task 7's measurement).
     remote_name: str
+    #: The plate whose rack plan is read (hot-path Task 8); ``None`` reads a file of
+    #: one plate only, as an input from before it.
+    plate_id: int | None = None
 
 
 class LanUploaded(BaseModel):
@@ -251,6 +256,9 @@ class LanUploaded(BaseModel):
     bytes: int
     #: The project's filament slots, read from the 3MF (`ams_mapping`'s count).
     filament_count: int = 1
+    #: The plate's rack plan, read from the 3MF (hot-path Task 8); ``None`` for a
+    #: printer with no rack, or a plan that cannot be read (no ``nozzle_mapping``).
+    rack: SlicedRack | None = None
 
 
 class LanPrintInput(BaseModel):
@@ -265,3 +273,9 @@ class LanPrintInput(BaseModel):
     bed_type: str = "auto"
     timelapse: bool = False
     layer_inspect: bool = True
+    #: The rack pick's ranking and hand-picked position (`PlannedRun`'s), and each slot's
+    #: spool for its Glow test, ranked in ``lan_print`` against the report it reads
+    #: (hot-path Task 8). The defaults read an input from before it.
+    rack_algorithm: RackAlgorithm = DEFAULT_ALGORITHM
+    rack_position: int | None = None
+    spools: dict[int, SpoolOption] = Field(default_factory=dict)

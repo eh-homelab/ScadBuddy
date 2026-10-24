@@ -157,7 +157,9 @@ def pushall_command() -> dict[str, Any]:
 
 
 def project_file_command(file: ProjectFile, sequence_id: str) -> dict[str, Any]:
-    """``print.project_file``; the four ids are ``"0"`` for a local print (`mqtt.md`)."""
+    """``print.project_file``; the four ids are ``"0"`` for a local print (`mqtt.md`).
+    ``nozzle_mapping`` only when there is one (hot-path Task 8, `nozzle_mapping.py`)."""
+    rack = {} if file.nozzle_mapping is None else {"nozzle_mapping": list(file.nozzle_mapping)}
     return {
         "print": {
             "command": "project_file",
@@ -176,6 +178,7 @@ def project_file_command(file: ProjectFile, sequence_id: str) -> dict[str, Any]:
             "profile_id": "0",
             "task_id": "0",
             "subtask_id": "0",
+            **rack,
         }
     }
 

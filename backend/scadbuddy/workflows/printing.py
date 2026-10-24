@@ -746,6 +746,7 @@ class PrintRunWorkflow:
                     printer=planned.printer,
                     sliced=source,
                     remote_name=remote,
+                    plate_id=plate.plate_id,
                 ),
                 result_type=LanUploaded,
                 start_to_close_timeout=LAN_UPLOAD_TIMEOUT,
@@ -765,6 +766,10 @@ class PrintRunWorkflow:
                     bed_type="auto",
                     timelapse=bool(options.timelapse),
                     layer_inspect=options.layer_inspect is not False,
+                    # The rack pick runs in `lan_print`, against the report (Task 8).
+                    rack_algorithm=planned.rack_algorithm,
+                    rack_position=planned.rack_position,
+                    spools=plate.spools,
                 ),
                 result_type=LanStarted,
                 start_to_close_timeout=LAN_PRINT_TIMEOUT,

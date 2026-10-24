@@ -11,9 +11,9 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from temporalio import activity
@@ -89,13 +89,81 @@ SLICED = sliced_3mf()
 
 
 class Blobs:
-    def __init__(self) -> None:
+    def __init__(self, payload: bytes = SLICED) -> None:
         self.read: list[str] = []
+        self.payload = payload
 
     async def stream(self, key: str) -> AsyncGenerator[bytes]:
         self.read.append(key)
-        for at in range(0, len(SLICED), 4096):
-            yield SLICED[at : at + 4096]
+        for at in range(0, len(self.payload), 4096):
+            yield self.payload[at : at + 4096]
+
+
+PRINTER_FIXTURES = Path(__file__).parent / "printers" / "fixtures"
+#: Bambuddy's print_queue item 370 on the live H2C (``rack-project-file.json``).
+MEASURED = json.loads((PRINTER_FIXTURES / "rack-project-file.json").read_text(encoding="utf-8"))
+#: Its trays, from its ``ams_mapping`` [4, 1, 6, 12, 5, 13] (``ams_id * 4 + tray``).
+RACK_TRAYS = FilamentPlan(
+    slots=[
+        SlotChoice(slot_id=slot, spool_id=tray_spool_id(tray // 4, tray % 4))
+        for slot, tray in enumerate(MEASURED["plate"]["ams_mapping"], start=1)
+    ]
+)
+
+
+def rack_3mf() -> bytes:
+    """Item 370's plate as the slicer wrote it: its ``slice_info.config`` and the H2C
+    preset's rack keys."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr(
+            "Metadata/project_settings.config",
+            json.dumps(
+                {
+                    "filament_colour": [
+                        "#482960",
+                        "#FC97B0",
+                        "#FFFFFF",
+                        "#8344B0",
+                        "#FEC600",
+                        "#5E43B7",
+                    ],
+                    "filament_type": ["PLA"] * 6,
+                    "extruder_max_nozzle_count": ["1", "6"],
+                    "physical_extruder_map": ["1", "0"],
+                }
+            ),
+        )
+        archive.writestr(
+            "Metadata/slice_info.config",
+            (PRINTER_FIXTURES / "rack-slice-info-h2c.config").read_text(encoding="utf-8"),
+        )
+        archive.writestr("Metadata/plate_1.gcode", "; G-code\n" * 2000)
+    return out.getvalue()
+
+
+def as_the_h2c(fake_lan: FakeLan) -> dict[str, Any]:
+    """The fake printer reporting the live H2C's AMS and rack of that day
+    (``lan-report-h2c-idle.json``); its ``device`` block, to change."""
+    recorded = json.loads((PRINTER_FIXTURES / "lan-report-h2c-idle.json").read_text("utf-8"))
+    report = recorded["print"]
+    fake_lan.printer.state.update(device=report["device"], ams=report["ams"])
+    device: dict[str, Any] = report["device"]
+    return device
+
+
+class Usage:
+    """Rack usage: no history, and what it was asked."""
+
+    def __init__(self) -> None:
+        self.asked: list[list[str]] = []
+
+    async def usage(self, serials: Iterable[str]) -> dict[str, object]:
+        self.asked.append(list(serials))
+        return {}
+
+    async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
+        raise AssertionError("a LAN-only printer has no Bambuddy id to record it under")
 
 
 class Library:
@@ -122,6 +190,7 @@ class NativeFake(Fake):
         self.lan_prints = 0
         #: Fail the next real `lan_print` attempts as unsure, after the real one ran.
         self.unsure_after_start = 0
+        self.rack_position: int | None = None
 
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
@@ -138,6 +207,9 @@ class NativeFake(Fake):
             printer=self.printer,
             path="native",
             lan_start=self.lan_start,
+            rack_algorithm="least_used",
+            rack_position=self.rack_position,
+            has_rack=True,
         )
 
     @activity.defn(name=SLICE_RUN_ACTIVITY)
@@ -213,11 +285,14 @@ async def _run(
     unsure: int = 0,
     plan: FilamentPlan = TRAYS,
     lan_start: bool = True,
+    rack: Usage | None = None,
+    rack_position: int | None = None,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
     fake.native_slicer = native_slicer
     fake.lan_start = lan_start
+    fake.rack_position = rack_position
     deps = LanDeps(
         printers=PrinterStore(pg_pool, KEK),
         # Never read: a native file and a blob need no Bambuddy client.
@@ -225,6 +300,7 @@ async def _run(
         library=library,  # type: ignore[arg-type]
         blobs=blobs,
         start_wait=10.0,
+        rack=rack,  # type: ignore[arg-type]
     )
     lan = Unsure(deps, unsure)
     arg = PrintRunInput(
@@ -368,6 +444,72 @@ async def test_bambuddy_path_is_unchanged(client: Client) -> None:
         history = await client.get_workflow_handle(f"print-{arg.key}").fetch_history()
     assert run.status == "succeeded" and "enqueue:1" in fake.calls
     assert "native-print" not in history.to_json()
+
+
+async def test_a_rack_print_sends_its_nozzle_mapping(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Item 370's plate on the H2C's rack as its report shows it: the pick, ranked from
+    the report (no Bambuddy client exists here), is sent as ``nozzle_mapping``. Each
+    group's colour is loaded on one eligible hotend but group 4's, so the pick is
+    Bambuddy's own: ``[21, 18, 20, 17, 1, 17, -1 x26]``."""
+    as_the_h2c(fake_lan)
+    usage = Usage()
+    _, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS, rack=usage
+    )
+    assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert sent["ams_mapping"] == MEASURED["plate"]["ams_mapping"]
+    assert sent["nozzle_mapping"] == MEASURED["plate"]["nozzle_mapping"]
+    # Ranked over the hotends the report lists (the carriage's fills position 4).
+    assert [len(serials) for serials in usage.asked] == [6]
+
+
+async def test_the_rack_pick_reads_the_printers_report(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Swap the filaments the report says hotends 17 and 21 last ran: the two Standard
+    groups swap hotends with them."""
+    device = as_the_h2c(fake_lan)
+    info = {entry["id"]: entry for entry in device["nozzle"]["info"]}
+    info[17]["color_m"], info[21]["color_m"] = info[21]["color_m"], info[17]["color_m"]
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS)
+    assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert sent["nozzle_mapping"] == [17, 18, 20, 21, 1, 21] + [-1] * 26
+
+
+async def test_a_rack_pick_that_cannot_be_made_lets_the_printer_pick(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """No 0.4 Standard hotend left on the rack: no ``nozzle_mapping``, never a guess."""
+    device = as_the_h2c(fake_lan)
+    nozzle = device["nozzle"]
+    nozzle["info"] = [e for e in nozzle["info"] if e["id"] not in (17, 21)]
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS)
+    assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert "nozzle_mapping" not in sent
+
+
+async def test_a_hand_picked_rack_position_is_sent(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """The dialog's one rack-side position goes to the lowest rack group (``manual_for``):
+    group 1 on position 6, so group 2 takes 17."""
+    as_the_h2c(fake_lan)
+    _, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(rack_3mf()),
+        plan=RACK_TRAYS,
+        rack_position=6,
+    )
+    assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert sent["nozzle_mapping"][:6] == [17, 18, 20, 21, 1, 21]
 
 
 def test_lan_uploaded_carries_the_project_filament_count() -> None:

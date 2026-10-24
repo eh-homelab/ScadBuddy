@@ -214,28 +214,33 @@ def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackS
             "nozzle_type": str(entry.get("type") or ""),
             "nozzle_diameter": str(entry.get("diameter") or ""),
         }
-        if slot_id >= RACK_FIRST_ID:
-            slot = _valid(
-                NozzleRackSlot,
-                {
-                    **fields,
-                    "id": slot_id,
-                    "serial_number": entry.get("sn"),
-                    "wear": _int(entry.get("wear")),
-                    "stat": _int(entry.get("stat")),
-                    "filament_id": _text(entry.get("fila_id")),
-                    "filament_color": _text(entry.get("color_m")),
-                },
-            )
-            if slot is not None:
-                rack.append(slot)
-        else:
+        slot = _valid(
+            NozzleRackSlot,
+            {
+                **fields,
+                "id": slot_id,
+                "serial_number": entry.get("sn"),
+                "wear": _int(entry.get("wear")),
+                "stat": _int(entry.get("stat")),
+                "filament_id": _text(entry.get("fila_id")),
+                "filament_color": _text(entry.get("color_m")),
+            },
+        )
+        if slot is not None:
+            rack.append(slot)
+        if slot_id < RACK_FIRST_ID:
             mounted[slot_id] = NozzleInfo.model_validate(fields)
     if not mounted and ("nozzle_type" in report or "nozzle_diameter" in report):
         mounted[0] = NozzleInfo(
             nozzle_type=str(report.get("nozzle_type") or ""),
             nozzle_diameter=str(report.get("nozzle_diameter") or ""),
         )
+    # The mounted hotends are listed with the rack, as Bambuddy's status lists them: the
+    # carriage's (id 0) is the position the report omits while it is mounted
+    # (`rack.rank.rack_positions`; the H2C's idle report of 2026-10-24 omits 19 and has
+    # ``src_id`` 19). A printer with no rack lists none.
+    if not any(slot.id >= RACK_FIRST_ID for slot in rack):
+        rack = []
     return [mounted[key] for key in sorted(mounted)], rack
 
 

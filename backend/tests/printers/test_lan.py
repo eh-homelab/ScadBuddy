@@ -71,6 +71,25 @@ def test_project_file_command_fields() -> None:
         False,
         True,
     )
+    # No rack slot: no `nozzle_mapping` at all, as Bambu Studio sends (Task 8).
+    assert "nozzle_mapping" not in body
+
+
+def test_project_file_command_carries_a_nozzle_mapping() -> None:
+    wire = [18, 1, 16] + [-1] * 29
+    cmd = project_file_command(
+        ProjectFile(
+            url="ftp://x.3mf",
+            param="Metadata/plate_1.gcode",
+            subtask_name="x",
+            use_ams=True,
+            ams_mapping=[0, 1, 2],
+            nozzle_mapping=wire,
+            md5="abc",
+        ),
+        "7",
+    )
+    assert cmd["print"]["nozzle_mapping"] == wire
 
 
 def test_merge_report_keeps_unmentioned_keys_and_replaces_ams() -> None:
