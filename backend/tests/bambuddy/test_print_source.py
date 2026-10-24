@@ -1139,3 +1139,84 @@ async def test_a_native_3mf_past_the_download_cap_goes_raw_as_a_3mf(
     [(filename, content, _)] = bambuddy.uploaded
     assert (filename, content) == ("critter (ScadBuddy).3mf", native.bytes_of(NATIVE_ID))
     assert bambuddy.media_types == ["model/3mf"] and printed.id == 101
+
+
+class _HeldFetch(LibrarySource):
+    """A library source whose fetch waits on ``release``, counting each fetch begun."""
+
+    def __init__(self, answer: bytes | BaseException) -> None:
+        super().__init__(file_id=41, colours=["#FF0000"], plates=[1], file_type="3mf")
+        self.answer = answer
+        self.begun = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None:
+        self.begun += 1
+        self.started.set()
+        await self.release.wait()
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+
+async def test_readers_that_arrive_while_the_fetch_runs_share_it() -> None:
+    """#4581 review: the check's layout, slot read and preparation may read the file at
+    once; `_fetch` kept only a finished fetch, so each that came before it ended fetched
+    the file again."""
+    source = _HeldFetch(b"not a 3mf")
+
+    readers = [asyncio.ensure_future(source.fetched_3mf(None)) for _ in range(3)]
+    await source.started.wait()
+    source.release.set()
+
+    assert await asyncio.gather(*readers) == [b"not a 3mf"] * 3
+    assert source.begun == 1
+
+
+async def test_a_fetch_that_runs_out_of_memory_fails_every_reader_and_is_not_made_again() -> None:
+    """#4571 review: the check's slot read, given a `MemoryError`, reads from disk, and its
+    layout then fetched the file again, to run out of memory again."""
+    source = _HeldFetch(MemoryError())
+    first = asyncio.ensure_future(source.fetched_3mf(None))
+    await source.started.wait()
+    source.release.set()
+
+    with pytest.raises(MemoryError):
+        await first
+    with pytest.raises(MemoryError):
+        await source.states_nozzles(None)
+    assert source.begun == 1
+
+
+async def test_a_reader_cancelled_leaves_the_fetch_to_the_others() -> None:
+    source = _HeldFetch(b"not a 3mf")
+    given_up = asyncio.ensure_future(source.fetched_3mf(None))
+    waiting = asyncio.ensure_future(source.fetched_3mf(None))
+    await source.started.wait()
+
+    given_up.cancel()
+    await asyncio.gather(given_up, return_exceptions=True)
+    source.release.set()
+
+    assert await waiting == b"not a 3mf"
+    assert source.begun == 1
+
+
+async def test_a_fetch_every_reader_gave_up_on_is_stopped_and_the_next_starts_anew() -> None:
+    """A check refused before its layout read ends cancels that read: nothing would read
+    the file, so its download stops rather than run on behind the refusal."""
+    source = _HeldFetch(b"not a 3mf")
+    given_up = asyncio.ensure_future(source.fetched_3mf(None))
+    await source.started.wait()
+    fetching = source._fetching
+    assert fetching is not None
+
+    given_up.cancel()
+    await asyncio.gather(given_up, return_exceptions=True)
+    await asyncio.gather(fetching, return_exceptions=True)
+
+    assert fetching.cancelled()
+    source.release.set()
+    assert await source.fetched_3mf(None) == b"not a 3mf"
+    assert source.begun == 2
