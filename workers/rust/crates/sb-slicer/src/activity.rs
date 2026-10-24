@@ -22,7 +22,7 @@ use crate::runner::{self, RunError, RunRequest};
 /// The activity's type name, what callers start it by (spec §5.2).
 pub const SLICE_PLATE: &str = "slice_plate";
 /// The `ApplicationError` type of a slice the CLI failed; its details are always
-/// `{exit_code, stderr_tail}`.
+/// `{exit_code, stderr_tail, errors}`.
 pub const SLICER_ERROR: &str = "SlicerError";
 /// The `ApplicationError` type of the worker's own failure (a temp dir, starting the
 /// CLI): retryable, a message and no details.
@@ -175,7 +175,11 @@ async fn slice(
     acts.stages.observe("slice", outcome.elapsed.as_secs_f64());
     span.record("exit_code", outcome.exit_code);
     if outcome.exit_code != 0 {
-        return Err(error::slicer(outcome.exit_code, &outcome.stderr_tail));
+        return Err(error::slicer(
+            outcome.exit_code,
+            &outcome.stderr_tail,
+            &outcome.errors,
+        ));
     }
     // Bambu Studio can exit 0 without exporting a plate; that is the slicer's failure,
     // with its stderr, not a transfer's, and the same input fails the same way again.
@@ -183,7 +187,7 @@ async fn slice(
         .await
         .map_err(error::local)?
     {
-        return Err(error::no_output(&outcome.stderr_tail));
+        return Err(error::no_output(&outcome.stderr_tail, &outcome.errors));
     }
 
     let sliced = unless_cancelled(cancel, acts.transfer.put(&input.sliced_3mf, &out_3mf)).await?;

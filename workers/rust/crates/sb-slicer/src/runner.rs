@@ -18,8 +18,11 @@ use tokio_util::sync::CancellationToken;
 use crate::models::{Arrange, SliceProgress};
 use crate::progress::{Line, LineBuffer};
 
-/// How much of the CLI's stderr is kept: its last lines name a validation failure.
+/// How much of the CLI's stderr, and of its stdout, is kept: their last lines say why
+/// it failed.
 const STDERR_TAIL: usize = 8 * 1024;
+/// How many of the CLI's own `[error]` log lines a failure reports, the last ones.
+const ERROR_LINES: usize = 3;
 /// At most one progress callback a second; the last line seen is always delivered.
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// The longest the callback goes without a call while the CLI runs: a silent phase
@@ -56,6 +59,9 @@ pub struct RunOutcome {
     pub exit_code: i32,
     pub warnings: Vec<String>,
     pub stderr_tail: String,
+    /// The CLI's `[error]` log lines from its stdout ([`cli_errors`]): where it says why a
+    /// plate failed when stderr is empty, as for an empty plate (exit 206, #4638).
+    pub errors: String,
     pub elapsed: Duration,
 }
 
@@ -196,7 +202,8 @@ pub async fn run(
 
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let mut stderr_task = tokio::spawn(keep_tail(child.stderr.take(), stderr.clone()));
-    let stdout_task = tokio::spawn(keep_tail(child.stdout.take(), Arc::default()));
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let mut stdout_task = tokio::spawn(keep_tail(child.stdout.take(), stdout.clone()));
 
     let mut lines = LineBuffer::default();
     let mut progress = Coalesce::new(req.keepalive);
@@ -240,10 +247,17 @@ pub async fn run(
 
     // A stream still open past the grace is held by something the kill could not reach
     // (outside the group); its reader is stopped, not left running.
-    let _ = tokio::time::timeout(STDERR_GRACE, &mut stderr_task).await;
+    let _ = tokio::time::timeout(STDERR_GRACE, async {
+        let _ = (&mut stderr_task).await;
+        let _ = (&mut stdout_task).await;
+    })
+    .await;
     stderr_task.abort();
     stdout_task.abort();
     let stderr_tail = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
+    let errors = cli_errors(&String::from_utf8_lossy(
+        &stdout.lock().expect("stdout lock"),
+    ));
 
     let exit_code = status
         .code()
@@ -252,8 +266,24 @@ pub async fn run(
         exit_code,
         warnings,
         stderr_tail,
+        errors,
         elapsed,
     })
+}
+
+/// The messages of the last [`ERROR_LINES`] `[error]` lines of the CLI's log, one a line.
+///
+/// The CLI logs `[<time>] [<thread>] [error]   plate 2: Nothing to be sliced, ...` to
+/// stdout, not stderr, so an empty plate's reason was lost (#4638); only the message
+/// after the level is kept.
+pub fn cli_errors(stdout: &str) -> String {
+    const LEVEL: &str = "[error]";
+    let messages: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_once(LEVEL).map(|(_, message)| message.trim()))
+        .filter(|message| !message.is_empty())
+        .collect();
+    messages[messages.len().saturating_sub(ERROR_LINES)..].join("\n")
 }
 
 /// Kills the process group, at most once: on [`Group::kill`] or on drop.
@@ -402,6 +432,25 @@ mod tests {
         cli_env(|name| vars.get(name).cloned(), scratch)
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn the_clis_error_lines_are_its_messages_the_last_few() {
+        let stdout = "[2026-10-24 20:00:29.080527] [0x7751] [trace]   Initializing StaticPrintConfigs\n\
+            [2026-10-24 20:00:29.080527] [0x7751] [error]   plate 2: Nothing to be sliced, \
+            Either the print is empty or no object is fully inside the print volume before apply.\n\
+            \n\
+            run found error, return -50, exit...\n";
+        assert_eq!(
+            cli_errors(stdout),
+            "plate 2: Nothing to be sliced, Either the print is empty or no object is fully \
+             inside the print volume before apply."
+        );
+        let many = (1..=5)
+            .map(|n| format!("[t] [x] [error]   e{n}\n"))
+            .collect::<String>();
+        assert_eq!(cli_errors(&many), "e3\ne4\ne5");
+        assert_eq!(cli_errors("[t] [x] [info]    fine\n"), "");
     }
 
     #[test]
