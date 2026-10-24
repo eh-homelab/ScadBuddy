@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -147,7 +147,7 @@ def _activities(native: Any, **settings: Any) -> PrintActivities:
             observer=unused,
             library=native,
             # The image's profiles a native check resolves against (D5); never read here.
-            native=SimpleNamespace(profiles=unused),
+            native=cast(Any, SimpleNamespace(profiles=unused)),
             native_run=lambda settings, path: True,
         )
     )
