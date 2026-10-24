@@ -258,7 +258,8 @@ test.describe('History cards at phone widths (#4491)', () => {
           expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(40)
         }
       }
-      // #4524 — and the size line's links: Last print, queued #… and in library #….
+      // #4524 — and the size line's links: Last print, queued #… and in library #…. On every
+      // card, as the actions above: no one card has all three, so page-wide is the point.
       const facts = await page.getByTestId('output-facts').locator('a').all()
       expect(facts.length).toBeGreaterThanOrEqual(2)
       for (const link of facts) {
