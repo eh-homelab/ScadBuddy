@@ -9,7 +9,7 @@ import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
 import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
-import { type SessionFiles, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
+import { type SessionFiles, sha256, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
 import type { RiskTier } from './permissions.js'
 
 // The assistant's `http_request` tool (#827): "curl" for a harness that runs
@@ -63,6 +63,12 @@ import type { RiskTier } from './permissions.js'
 //     the session's workspace (workspace/store.ts), under its caps, instead of
 //     as a saved body, so workspace_read reads it and an upload can send it.
 //     A body cut at SAVE_MAX_BYTES is not stored.
+//   - A binary body is never in a result (#2511): it is stored as a workspace
+//     file (at save_to_workspace, else `http/<sha256 prefix>-<URL's file name>`)
+//     and the result names it, `{name, mediaType, size, sha256}`; workspace_read
+//     shows an image as an image. One the workspace cannot hold (cut, over its
+//     caps, or no workspace) is kept as a saved body only for the person's
+//     download (#1292): http_response_read pages text, never binary.
 //   - Every request (every hop) is an `http` audit row: method, scheme, host,
 //     status, size and timing, and on the hop that answered, the id its body
 //     was saved under, if it was (#1292: AI activity links to the body, served
@@ -213,7 +219,10 @@ export type HttpRequestContext = {
   signal?: AbortSignal | undefined
   resolve?: Resolver
   limits?: Partial<HttpLimits>
-  /** Where `save_to_workspace` stores a body (#2329): the session's workspace. Refused without it. */
+  /**
+   * Where `save_to_workspace` and a binary body go (#2329, #2511): a session's workspace, or a
+   * flow run's starter's own. save_to_workspace is refused without it.
+   */
   workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
   /** A redirect to another host is returned (`redirectTo`) instead of followed, as Claude Code's WebFetch does (#2393). */
   sameHostRedirects?: boolean | undefined
@@ -614,11 +623,21 @@ export async function runHttpRequest(
   const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
   const isText = textual(contentType, hop.bytes)
   const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
-  const workspace = target === undefined ? undefined : await saveToWorkspace(context, target, hop, contentType, outcome.url)
-  // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged;
-  // not when the workspace holds it.
+  // A binary body is never in the result (#2511): it goes to the workspace, named by its
+  // content and the URL's file name unless save_to_workspace names it.
+  const binary = !isText && hop.bytes.length > 0 && args.method !== 'HEAD'
+  if (target === undefined && binary) target = autoName(outcome.url, hop.bytes)
+  const workspace =
+    target === undefined
+      ? undefined
+      : context.workspace
+        ? await saveToWorkspace(context, target, hop, contentType, outcome.url)
+        : { name: target, error: 'not saved: there is no workspace here' }
+  const inWorkspace = workspace !== undefined && 'sha256' in workspace
+  // Saved when it does not fit inline, or is binary (not inlined at all), so text can be
+  // paged and a person can download it; not when the workspace holds it.
   let saved: string | undefined
-  if (savesBody(hop, limits) && !(workspace && 'sha256' in workspace)) {
+  if (savesBody(hop, limits) && !inWorkspace) {
     try {
       saved = randomUUID()
       await context.saved.save(saved, hop.bytes, {
@@ -650,9 +669,12 @@ export async function runHttpRequest(
     // False when the body was longer than the save cap and was cut there.
     body_complete: hop.complete,
     body: args.method === 'HEAD' ? null : inline,
-    ...(inline === null && hop.bytes.length > 0 ? { body_omitted: 'binary content; read it from `saved` as base64' } : {}),
-    ...(inline === null && hop.bytes.length > 0 && workspace && 'sha256' in workspace
-      ? { body_omitted: `binary content; it is in the workspace at ${workspace.path}` }
+    ...(binary
+      ? {
+          body_omitted: inWorkspace
+            ? `binary content; it is the workspace file ${workspace.name} (workspace_read reads it, an image as an image)`
+            : 'binary content; it is not in the workspace (see workspace.error), so it cannot be read here',
+        }
       : {}),
     inline_truncated: inline !== null && !fits,
     ...(workspace ? { workspace } : {}),
@@ -660,7 +682,10 @@ export async function runHttpRequest(
       ? {
           id: saved,
           size_bytes: hop.bytes.length,
-          read_with: `${HTTP_READ_TOOL_NAME} (id, offset, length)`,
+          // A binary body is kept only for the person to download from AI activity (#1292).
+          ...(isText
+            ? { read_with: `${HTTP_READ_TOOL_NAME} (id, offset, length)` }
+            : { binary: 'kept for the user to download from AI activity; it cannot be read here' }),
           ...(hop.complete ? {} : { note: `only the first ${limits.saveMaxBytes} bytes were kept` }),
         }
       : null,
@@ -668,9 +693,25 @@ export async function runHttpRequest(
   return text(result)
 }
 
+/**
+ * Where a binary body goes without save_to_workspace (#2511): `http/<first 12 of its
+ * sha256>-<the URL's file name>`, so the same body from the same URL is the same file.
+ */
+export function autoName(url: URL, bytes: Buffer): string {
+  let base = url.pathname.split('/').pop() ?? ''
+  try {
+    base = decodeURIComponent(base)
+  } catch {
+    // keep it encoded
+  }
+  base = base.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 100) || 'body'
+  return `http/${sha256(bytes).slice(0, 12)}-${base}`
+}
+
+/** A workspace file as a pointer (#2479): its path as the name, never its bytes. */
 type WorkspaceSaved =
-  | { path: string; size_bytes: number; sha256: string; media_type: string; read_with: string }
-  | { path: string; error: string }
+  | { name: string; mediaType: string; size: number; sha256: string; read_with: string }
+  | { name: string; error: string }
 
 /** The body as a workspace file (#2329); a refusal (cut body, caps) is reported, never thrown. */
 async function saveToWorkspace(
@@ -680,16 +721,16 @@ async function saveToWorkspace(
   contentType: string | undefined,
   url: URL,
 ): Promise<WorkspaceSaved> {
-  if (!hop.complete) return { path: target, error: `not saved: the body was cut at ${hop.bytes.length} bytes` }
+  if (!hop.complete) return { name: target, error: `not saved: the body was cut at ${hop.bytes.length} bytes` }
   try {
     const info = await context.workspace!.files.write(context.workspace!.ref, target, hop.bytes, {
       mediaType: contentType?.split(';')[0]?.trim() || undefined,
       // The URL without its query, which can carry a token of the server's.
       source: { tool: HTTP_TOOL, url: `${url.origin}${url.pathname}`, status: hop.status },
     })
-    return { path: info.path, size_bytes: info.size, sha256: info.sha256, media_type: info.mediaType, read_with: 'workspace_read' }
+    return { name: info.path, mediaType: info.mediaType, size: info.size, sha256: info.sha256, read_with: 'workspace_read' }
   } catch (err) {
-    if (err instanceof WorkspaceError) return { path: target, error: `not saved: ${err.message}` }
+    if (err instanceof WorkspaceError) return { name: target, error: `not saved: ${err.message}` }
     throw err
   }
 }
@@ -714,16 +755,24 @@ export async function readSavedResponse(input: HttpReadArgs, context: Pick<HttpR
   const want = Math.min(args.length, PAGE_MAX_BYTES)
   // Read a few bytes more so a page can end on a whole UTF-8 sequence.
   const chunk = await context.saved.read(args.id, args.offset, want + 4)
+  // A binary body is never shown as text or base64 (#2511): http_request stores it in the workspace.
+  if (!textual(meta.content_type ?? undefined, chunk)) {
+    return text(
+      {
+        error:
+          `saved response ${args.id} is binary, which ${HTTP_READ_TOOL} does not return; ` +
+          `request it again with ${HTTP_TOOL}, which stores a binary body as a workspace file for workspace_read`,
+      },
+      true,
+    )
+  }
   const bytesRead = chunk.length
-  const isText = textual(meta.content_type ?? undefined, chunk)
+  // Skip a split sequence at the start (the previous page ended before it).
   let start = 0
   let end = Math.min(bytesRead, want)
-  if (isText) {
-    // Skip a split sequence at the start (the previous page ended before it).
-    while (start < end && args.offset + start > 0 && (chunk[start]! & 0xc0) === 0x80) start++
-    end = utf8Boundary(chunk, end)
-    if (end <= start) end = Math.min(bytesRead, want)
-  }
+  while (start < end && args.offset + start > 0 && (chunk[start]! & 0xc0) === 0x80) start++
+  end = utf8Boundary(chunk, end)
+  if (end <= start) end = Math.min(bytesRead, want)
   const page = chunk.subarray(start, end)
   const next = args.offset + end
   return text({
@@ -732,8 +781,8 @@ export async function readSavedResponse(input: HttpReadArgs, context: Pick<HttpR
     size_bytes: meta.size_bytes,
     offset: args.offset + start,
     next_offset: next < meta.size_bytes ? next : null,
-    encoding: isText ? 'utf8' : 'base64',
-    content: isText ? page.toString('utf8') : page.toString('base64'),
+    encoding: 'utf8',
+    content: page.toString('utf8'),
   })
 }
 
@@ -749,8 +798,10 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
     'Make one HTTP request, like curl, to any http or https URL: the internet or the local network. ' +
       'GET and HEAD run at once; POST, PUT, PATCH and DELETE wait for the user to approve that exact request. ' +
       'Only the headers you give are sent. Returns the status, the response headers and the body ' +
-      `(up to ${INLINE_MAX_BYTES} bytes inline); a longer or binary body is saved and read with ${HTTP_READ_TOOL}. ` +
-      'With save_to_workspace the body is stored as a workspace file instead (workspace_read reads it). ' +
+      `(up to ${INLINE_MAX_BYTES} bytes inline); a longer text body is saved and read with ${HTTP_READ_TOOL}. ` +
+      'A binary body (an image, a 3MF, a zip) is stored as a workspace file and the result names it; ' +
+      'workspace_read reads it, an image as an image. ' +
+      'With save_to_workspace any body is stored as that workspace file instead. ' +
       `Follows up to ${MAX_REDIRECTS} redirects.`,
     HttpRequestInput,
     async (args, extra) => {
@@ -762,7 +813,7 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
   const read = tool(
     HTTP_READ_TOOL,
     `Read one page of a response body that ${HTTP_TOOL} saved (its \`saved.id\`), from a byte offset. ` +
-      'Text comes back as text, anything else as base64. A body saved in an earlier turn may be gone; ' +
+      'Text only: a binary body is a workspace file instead. A body saved in an earlier turn may be gone; ' +
       `pass save_to_workspace to ${HTTP_TOOL} to keep one.`,
     HttpReadInput,
     async (args) => markUntrusted(await readSavedResponse(args, context), HTTP_READ_TOOL, 'a saved HTTP response body'),

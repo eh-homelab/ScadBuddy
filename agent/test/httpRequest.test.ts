@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -29,6 +30,7 @@ import {
 import { decide } from '../src/harness/permissions.js'
 import { assertHostAllowed, assertHttpUrl, EgressError } from '../src/http/egress.js'
 import { UNTRUSTED_KEY } from '../src/safety/untrusted.js'
+import type { SessionFiles, WorkspaceFileInfo } from '../src/workspace/store.js'
 
 // The assistant's http_request tool (#827): tiers by method, the guards that
 // stay while reach is open (no actor header, nothing but the model's own
@@ -67,6 +69,30 @@ class MemoryAudit implements AuditSink {
     this.entries.push(entry)
     return Promise.resolve()
   }
+}
+
+const SESSION = '00000000-0000-4000-8000-000000000001'
+
+/** The one SessionFiles method http_request uses, in memory. */
+function memoryWorkspace(): { files: SessionFiles; written: Map<string, Buffer> } {
+  const written = new Map<string, Buffer>()
+  const files = {
+    write: async (_ws: unknown, name: string, bytes: Uint8Array, options: { mediaType?: string } = {}): Promise<WorkspaceFileInfo> => {
+      const data = Buffer.from(bytes)
+      written.set(name, data)
+      const now = new Date()
+      return {
+        path: name,
+        mediaType: options.mediaType ?? 'application/octet-stream',
+        size: data.length,
+        sha256: createHash('sha256').update(data).digest('hex'),
+        source: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+    },
+  }
+  return { files: files as unknown as SessionFiles, written }
 }
 
 async function context(overrides: Partial<HttpRequestContext> = {}): Promise<HttpRequestContext & { audit: MemoryAudit }> {
@@ -246,18 +272,47 @@ describe('the response', () => {
     expect(body.saved).not.toBeNull()
   })
 
-  it('does not inline a binary body; its pages are base64', async () => {
+  it('saves a binary body as a workspace file and answers its pointer, never base64 (#2511)', async () => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 0)])
+    const { url } = await serve((_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png' })
+      res.end(png)
+    })
+    const workspace = memoryWorkspace()
+    const ctx = await context({ workspace: { files: workspace.files, ref: { kind: 'session', sessionId: SESSION } } })
+    const result = await runHttpRequest(args({ url: `${url}/pics/Cube%20Photo.png?token=x` }), ctx)
+    const text = (result.content[0] as { text: string }).text
+    expect(text).not.toContain(png.toString('base64').slice(0, 16))
+    const body = JSON.parse(text) as Record<string, unknown>
+    const digest = createHash('sha256').update(png).digest('hex')
+    const name = `http/${digest.slice(0, 12)}-Cube_Photo.png`
+    expect(body).toMatchObject({ body: null, saved: null })
+    expect(body.workspace).toEqual({ name, mediaType: 'image/png', size: png.length, sha256: digest, read_with: 'workspace_read' })
+    expect(body.body_omitted).toContain(name)
+    expect(workspace.written.get(name)?.equals(png)).toBe(true)
+    // The audit row names no saved body: the workspace holds it.
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+  })
+
+  it('without a workspace, never shows a binary body, and refuses its saved pages (#2511)', async () => {
     const bytes = Buffer.from([0, 1, 2, 255, 254, 0, 7])
     const { url } = await serve((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/octet-stream' })
       res.end(bytes)
     })
     const ctx = await context()
-    const body = json(await runHttpRequest(args({ url }), ctx))
+    const result = await runHttpRequest(args({ url }), ctx)
+    const text = (result.content[0] as { text: string }).text
+    expect(text).not.toContain(bytes.toString('base64'))
+    const body = JSON.parse(text) as Record<string, unknown>
     expect(body.body).toBeNull()
-    const saved = body.saved as { id: string }
-    const page = json(await readSavedResponse({ id: saved.id, offset: 0, length: 100 }, ctx))
-    expect(page).toMatchObject({ encoding: 'base64', content: bytes.toString('base64'), next_offset: null })
+    expect((body.workspace as { error: string }).error).toMatch(/no workspace/)
+    // Kept only for the person's download (#1292); the model cannot page it.
+    const saved = body.saved as { id: string; read_with?: string }
+    expect(saved.read_with).toBeUndefined()
+    const page = await readSavedResponse({ id: saved.id, offset: 0, length: 100 }, ctx)
+    expect(page.isError).toBe(true)
+    expect((page.content[0] as { text: string }).text).not.toContain(bytes.toString('base64'))
   })
 
   it('gives up at the deadline', async () => {

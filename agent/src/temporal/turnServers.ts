@@ -232,12 +232,20 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                 secrets: () => secrets,
                 audit: http.audit,
                 actor: context.owner,
-                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`),
-                // nor a workspace to save to.
+                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`).
                 sessionId: context.flow ? undefined : context.session,
                 ...(context.turnId ? { turnId: context.turnId } : {}),
-                ...(http.files && !context.flow
-                  ? { workspace: { files: http.files, ref: { kind: 'session' as const, sessionId: context.session } } }
+                // A flow's workspace is its starter's own, the one its `tool('workspace_read', …)` reads
+                // (workspaceOf, a call in no session), so a binary body it fetched is readable (#2511).
+                ...(http.files
+                  ? {
+                      workspace: {
+                        files: http.files,
+                        ref: context.flow
+                          ? { kind: 'principal' as const, principalKind: context.owner.kind, principalId: context.owner.id }
+                          : { kind: 'session' as const, sessionId: context.session },
+                      },
+                    }
                   : {}),
                 signal: context.signal,
                 ...(http.resolve ? { resolve: http.resolve } : {}),
