@@ -283,6 +283,10 @@ class FilamentOptions(BaseModel):
     #: One sentence per spool provider whose records are stale or missing, on a native
     #: run: those records are left out and the trays shown alone.
     overlay_notes: list[str] = Field(default_factory=list)
+    #: A native run's spool providers by key, as a person reads them
+    #: (`SpoolProvider.label`): what names a ``records`` entry (#4516). Empty on the
+    #: Bambuddy path.
+    provider_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class QueueFilaments(BaseModel):
@@ -509,10 +513,12 @@ def _options(
     notes: list[str] | None = None,
     trays: list[UnknownTray] | None = None,
     shelf: list[SpoolOption] | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> FilamentOptions:
     """The dialog's answer over ``options``, already in display order: each slot's
     colour matches, the opening selection and its warnings. ``trays`` and ``shelf`` are
-    a native run's questions and the rows they name (`trays.tray_questions`)."""
+    a native run's questions and the rows they name (`trays.tray_questions`), and
+    ``labels`` its providers' names."""
     suggested = suggest(requirements, options, printer_id=printer_id)
     built = FilamentOptions(
         library_file_id=library_file_id,
@@ -522,6 +528,7 @@ def _options(
         overlay_notes=notes or [],
         trays=trays or [],
         shelf=shelf or [],
+        provider_labels=dict(labels or {}),
         slots=[
             slot.model_copy(
                 update={
@@ -1113,6 +1120,7 @@ async def _tray_plate_options(
             notes=notes,
             trays=[question.model_copy(deep=True) for question in questions],
             shelf=[spool.model_copy(deep=True) for spool in shelf],
+            labels=labels,
         )
         for requirements in per_plate
     ]

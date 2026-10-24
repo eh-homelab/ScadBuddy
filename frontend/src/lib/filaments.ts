@@ -41,11 +41,13 @@ export function trayChoiceLabel(spool: SpoolOption): string {
 }
 
 /**
- * A spool provider as a person reads it: Bambuddy's inventory, or another's name. A
- * provider's own label (`SpoolProvider.label`) is not on the wire, so any other key is
- * title-cased, its underscores read as spaces (`open_spool` is "Open Spool").
+ * A spool provider as a person reads it: its own label (`SpoolProvider.label`) when the
+ * answer carries it (`FilamentOptions.provider_labels`, #4516), else Bambuddy's inventory
+ * or another's key title-cased, its underscores read as spaces (`open_spool` is "Open Spool").
  */
-export function providerLabel(provider: string): string {
+export function providerLabel(provider: string, labels?: Readonly<Record<string, string>>): string {
+  const own = labels?.[provider]
+  if (own) return own
   if (provider === 'bambuddy') return 'Bambuddy'
   if (provider === 'native') return 'ScadBuddy'
   return provider

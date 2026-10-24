@@ -5134,6 +5134,25 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     }
   })
 
+  it("names a tray question's records by the answer's provider labels (#4516)", async () => {
+    setHotPath(true)
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          printer_id: HOT_PRINTER.bambuddy_printer_id,
+          filaments: { ...hotFilaments(), provider_labels: { bambuddy: 'Bambuddy (garage)' } },
+          model_choices: { printer_id: null, filament_plan: [] },
+          lan_printers: [HOT_PRINTER.id],
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+    const question = await screen.findByTestId('tray-question-0-1')
+    expect(within(question).getByText(/Bambuddy \(garage\)'s record/)).toBeInTheDocument()
+  })
+
   it('offers a shelf row one tray claimed to no other tray, until the re-read lands', async () => {
     setHotPath(true)
     const answer = hotFilaments()

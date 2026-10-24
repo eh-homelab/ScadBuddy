@@ -106,6 +106,37 @@ def test_a_native_row_is_listed_on_the_hot_paths_backends() -> None:
     assert listed == [_both_links_native().id]
 
 
+def test_the_reports_are_read_in_one_query() -> None:
+    """#4516: on every choices read, the registry's reports are one query, not one per
+    row in turn; an ``auto`` row is on the LAN while its report is fresh."""
+
+    def auto(n: int) -> PrinterRow:
+        row = _both_links_native()
+        return row.model_copy(
+            update={"id": f"00000000-0000-4000-8000-0000000000{n:02x}", "preferred_path": "auto"}
+        )
+
+    class Rows:
+        def list(self) -> list[PrinterRow]:
+            return [auto(1), auto(2), auto(3)]
+
+    class Reports:
+        reads = 0
+
+        def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:
+            self.reads += 1
+            now = datetime.now(UTC)
+            return {auto(1).id: ({}, now), auto(3).id: ({}, now)}
+
+        def get(self, printer_id: str) -> object:
+            raise AssertionError("a report was read on its own")
+
+    reports = Reports()
+    listed = asyncio.run(lan_printers(StoredSettings(**HOT_PATH), Rows(), reports))  # type: ignore[arg-type]
+    assert listed == [auto(1).id, auto(3).id]
+    assert reports.reads == 1
+
+
 @pytest.mark.parametrize(
     ("change", "path", "native"),
     [

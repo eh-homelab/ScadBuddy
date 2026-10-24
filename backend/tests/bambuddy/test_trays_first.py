@@ -354,6 +354,13 @@ async def test_a_stale_overlay_degrades_with_a_note() -> None:
     ]
 
 
+async def test_the_providers_names_are_on_the_wire() -> None:
+    """#4516: a record's provider is named by its own `SpoolProvider.label`, not a name
+    the client derives from its key."""
+    options = await _gather(h2c_status(), _overlay(), "#000000")
+    assert options.provider_labels == {"bambuddy": "Bambuddy"}
+
+
 async def test_a_provider_never_refreshed_says_so() -> None:
     options = await _gather(h2c_status(), _overlay(stale={"bambuddy": None}))
     assert options.overlay_notes == ["No spool records from Bambuddy yet; showing the trays only."]
