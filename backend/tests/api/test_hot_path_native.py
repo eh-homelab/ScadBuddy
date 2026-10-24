@@ -37,6 +37,7 @@ from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.spools.component import SPOOLS, Spools
 from scadbuddy.spools.models import SpoolSnapshot
 from tests.api.conftest import follow_operation, set_fake_env
+from tests.api.test_library_native import _one_colour, _upload
 from tests.api.test_print_preview_native import _settings, _state, dialog_profiles
 from tests.api.test_print_preview_native import kek_file as kek_file  # the fixture, shared
 from tests.api.test_print_run_choices import follow_run
@@ -461,6 +462,25 @@ def test_the_dialog_reads_answer_without_bambuddy(
         },
     )
     assert checked.status_code == 200, checked.text
+
+
+@NO_BAMBUDDY
+def test_a_library_check_naming_no_printer_answers_without_bambuddy(
+    native_app: TestClient, tmp_path: Path
+) -> None:
+    """AC2: a native library file's check that names no printer judges nothing, and
+    reads the file from the native library with no client (`post_library_check`)."""
+    plug = _upload(native_app, _one_colour(tmp_path / "plug.3mf"))
+    checked = native_app.post(
+        f"/api/v1/print/library/{plug.id}/check",
+        json={
+            "copies": 1,
+            "filament_plan": {"slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+        },
+    )
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["errors"] == [], checked.json()
 
 
 @NO_BAMBUDDY

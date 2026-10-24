@@ -1825,6 +1825,33 @@ async def dialog_route(
     return route if route.native else None
 
 
+async def first_native_route(
+    settings: StoredSettings,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+) -> RunRoute | None:
+    """The :class:`RunRoute` of the first registry row a run reaches natively (D2), or
+    ``None``: where a dialog opens with no Bambuddy configured and no printer named
+    (#3818 tier A, AC2). The rows are read once, and each row's report at most once; a
+    row a run could not start on now (no report, a stale one) is passed over."""
+    if printers is None or not native_backends(settings):
+        return None
+    for row in await asyncio.to_thread(printers.list):
+        try:
+            path, report_status = await _registry_path(row, printers, reports, say_fallback=False)
+        except ApiError:
+            continue
+        if hot_path_native(settings, path):
+            return RunRoute(
+                row=row,
+                printer_id=row.bambuddy_printer_id,
+                path=path,
+                status=report_status,
+                native=True,
+            )
+    return None
+
+
 async def prepare_run(
     client: BambuddyClient | None,
     source: PrintSource,
