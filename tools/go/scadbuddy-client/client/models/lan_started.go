@@ -16,6 +16,8 @@ type LanStarted struct {
 	started_at *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time
 	// The subtask_name property
 	subtask_name *string
+	// The warnings property
+	warnings []FilamentWarningable
 }
 
 // NewLanStarted instantiates a new LanStarted and sets the default values.
@@ -61,6 +63,22 @@ func (m *LanStarted) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["warnings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfObjectValues(CreateFilamentWarningFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]FilamentWarningable, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = v.(FilamentWarningable)
+				}
+			}
+			m.SetWarnings(res)
+		}
+		return nil
+	}
 	return res
 }
 
@@ -76,6 +94,12 @@ func (m *LanStarted) GetSubtaskName() *string {
 	return m.subtask_name
 }
 
+// GetWarnings gets the warnings property value. The warnings property
+// returns a []FilamentWarningable when successful
+func (m *LanStarted) GetWarnings() []FilamentWarningable {
+	return m.warnings
+}
+
 // Serialize serializes information the current object
 func (m *LanStarted) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
@@ -86,6 +110,18 @@ func (m *LanStarted) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteStringValue("subtask_name", m.GetSubtaskName())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetWarnings() != nil {
+		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetWarnings()))
+		for i, v := range m.GetWarnings() {
+			if v != nil {
+				cast[i] = v.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable)
+			}
+		}
+		err := writer.WriteCollectionOfObjectValues("warnings", cast)
 		if err != nil {
 			return err
 		}
@@ -114,11 +150,18 @@ func (m *LanStarted) SetSubtaskName(value *string) {
 	m.subtask_name = value
 }
 
+// SetWarnings sets the warnings property value. The warnings property
+func (m *LanStarted) SetWarnings(value []FilamentWarningable) {
+	m.warnings = value
+}
+
 type LanStartedable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetStartedAt() *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time
 	GetSubtaskName() *string
+	GetWarnings() []FilamentWarningable
 	SetStartedAt(value *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time)
 	SetSubtaskName(value *string)
+	SetWarnings(value []FilamentWarningable)
 }
