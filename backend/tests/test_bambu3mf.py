@@ -1826,6 +1826,92 @@ def test_re_placing_sits_an_object_on_its_printed_parts_not_its_negative_part(
     assert float(centre) == pytest.approx(h2c.usable.centre[0], abs=1e-6)
 
 
+def _body_and_cut(tmp_path: Path) -> bytes:
+    """A 20 mm body (z -5 to 5) and a negative part reaching z -10, one file each."""
+    body = ColourPart(1, "Body", "#FF6AC1", trimesh.creation.box(extents=(20, 20, 10)))
+    cut = ColourPart(
+        1,
+        "Hole",
+        "#FF6AC1",
+        trimesh.creation.box(extents=(30, 6, 8), transform=_translate(0, 0, -6)),
+        negative=True,
+    )
+    out = tmp_path / "cut.3mf"
+    write_plates_3mf([PlateParts((body, cut), (1, 1))], ["#FF6AC1"], out, thumbnails=None)
+    return out.read_bytes()
+
+
+def test_an_object_file_a_printed_part_shares_with_a_cut_still_prints(tmp_path: Path) -> None:
+    """#4525: a Bambu Studio project keeps an object's parts, its cuts among them, in
+    one object file. The subtype is the part's, so a file a printed part also uses is
+    never unprinted: its floor counts, rather than the plate losing its printed one."""
+    payload = _body_and_cut(tmp_path)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        [apart] = laid_out_plates(archive)
+    [cut_file] = apart.unprinted
+    printed_file = next(name for name in apart.object_files if name != cut_file)
+
+    def shared(data: bytes) -> bytes:
+        return data.replace(f'p:path="/{cut_file}"'.encode(), f'p:path="/{printed_file}"'.encode())
+
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            data = archive.read(info.filename)
+            out.writestr(info, shared(data) if info.filename == "3D/3dmodel.model" else data)
+    with zipfile.ZipFile(buffer) as archive:
+        [together] = laid_out_plates(archive)
+
+    assert together.object_files == (printed_file, printed_file)
+    assert together.unprinted == frozenset()
+
+
+def test_one_objects_cut_below_the_bed_leaves_the_plate_on_the_printed_parts(
+    tmp_path: Path,
+) -> None:
+    """#4525: two objects on one plate, one with a cut reaching below the bed. The
+    plate's unprinted files are the union over its objects, so the plate still sits on
+    the lowest printed part, both bodies on the bed and the cut below it."""
+    cut_body = ColourPart(1, "Body", "#FF6AC1", trimesh.creation.box(extents=(20, 20, 10)))
+    cut = ColourPart(
+        1,
+        "Hole",
+        "#FF6AC1",
+        trimesh.creation.box(extents=(30, 6, 8), transform=_translate(0, 0, -6)),
+        negative=True,
+    )
+    plain = ColourPart(
+        1,
+        "Plain",
+        "#FF6AC1",
+        trimesh.creation.box(extents=(10, 10, 16), transform=_translate(60, 0, 3)),
+    )
+    out = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts((cut_body, cut, plain), (1, 1, 1), (1, 1, 2))],
+        ["#FF6AC1"],
+        out,
+        thumbnails=None,
+    )
+    with zipfile.ZipFile(out) as archive:
+        [laid_out] = laid_out_plates(archive)
+    assert len(laid_out.assembly_ids) == 2
+    assert len(laid_out.unprinted) == 1
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    lows = {
+        (obj.name, part.negative): float(part.mesh.bounds[0][2])
+        for obj in read_objects(moved)
+        for part in obj.parts
+    }
+    assert sorted(lows.values()) == pytest.approx([-5.0, 0.0, 0.0], abs=1e-6)
+    assert [low for (_, negative), low in lows.items() if negative] == pytest.approx([-5.0])
+
+
 def _rewritten_objects(payload: bytes, change: Callable[[bytes], bytes]) -> bytes:
     """``payload`` with every object file passed through ``change``."""
     buffer = io.BytesIO()
