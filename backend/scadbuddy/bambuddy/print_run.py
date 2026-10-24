@@ -99,6 +99,7 @@ from scadbuddy.bambuddy.prime_tower import (
     prime_tower_overrides,
     prime_tower_warnings,
     template_keys_dropped,
+    tower_dropped,
 )
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
@@ -119,6 +120,7 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.slot_presets import SlotPresets
 from scadbuddy.bambuddy.supports import (
     SUPPORT_KEYS,
     SupportsChoice,
@@ -2394,6 +2396,18 @@ async def queue_plate(
         else None
     )
     notes: list[FilamentWarning] = []
+    if (
+        planned.slicer == "bambuddy"
+        and plate.plan is not None
+        and len(plate.plan.filament_presets) > 1
+    ):
+        # Before the queue call, which is made once: this never raises (#3962).
+        notes += await tower_dropped(
+            client,
+            sliced=sliced,
+            plate_id=plate.plate_id,
+            process_overrides=plate.plan.process_overrides,
+        )
     choice = (
         await rack_chooser(
             client,
@@ -2640,6 +2654,15 @@ async def plan_run(
         ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    if not native_slicing and not native_run and client is not None:
+        # Bambuddy's slicer drops the prime tower when slots share one preset name
+        # (#3962): each repeat gets a preset of its own, before any key is taken, so
+        # the preview, the slice and a reprint's lookup all name the same refs.
+        slot_presets = SlotPresets(client, catalogue)
+        ready = [
+            (plate_id, options, resolved, await slot_presets.plan(plan))
+            for plate_id, options, resolved, plan in ready
+        ]
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.slicing.start import NativeSliceKeys
