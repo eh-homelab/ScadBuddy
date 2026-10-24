@@ -9,7 +9,7 @@ import type { AgentApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import { PgEventListener } from '../src/events/pgListener.js'
-import { PgMcpSessionRelay, sessionHash } from '../src/mcp/sessionRelay.js'
+import { PgMcpSessionRelay, type SessionOwner, sessionHash } from '../src/mcp/sessionRelay.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { BACKEND, LOOPBACK, MCP_URL, testApp } from './helpers/mcp.js'
 import { InMemoryTokenStore } from './support/memoryTokens.js'
@@ -26,6 +26,40 @@ const backend = setupServer(http.get(`${BACKEND}/api/v1/models`, () => HttpRespo
 beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
+
+/** A relay whose owner, armed, stalls its process once the first chunk of its next relayed answer has gone. */
+class StallingRelay extends PgMcpSessionRelay {
+  stallAfterFirstChunk: (() => void) | undefined
+
+  override serve(owner: SessionOwner): void {
+    super.serve({
+      run: async (...args) => {
+        const res = await owner.run(...args)
+        const stall = this.stallAfterFirstChunk
+        if (!stall || !res.body) return res
+        this.stallAfterFirstChunk = undefined
+        const reader = res.body.getReader()
+        let sent = false
+        // highWaterMark 0: pulled only when the relay reads, so a second pull means
+        // the chunk before has been sent on, NOTIFY and all.
+        const body = new ReadableStream<Uint8Array>(
+          {
+            async pull(controller) {
+              if (sent) stall()
+              const { done, value } = await reader.read()
+              if (done) return controller.close()
+              controller.enqueue(value)
+              sent = true
+            },
+            cancel: (reason) => reader.cancel(reason),
+          },
+          { highWaterMark: 0 },
+        )
+        return new Response(body, { status: res.status, headers: res.headers })
+      },
+    })
+  }
+}
 
 type Replica = { app: AgentApp; relay: PgMcpSessionRelay; listener: PgEventListener; bus: MemoryEventSource }
 
@@ -46,9 +80,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     mcp: { maxSessionsPerCaller?: number } = {},
     hears: (payload: string) => boolean = () => true,
     log: (message: string) => void = () => {},
+    Relay: typeof PgMcpSessionRelay = PgMcpSessionRelay,
   ): Replica {
     const listener = new PgEventListener(url, { searchPath: 'public', log: () => {} })
-    const relay = new PgMcpSessionRelay(db.sql, {
+    const relay = new Relay(db.sql, {
       listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload) ? f(payload) : undefined)),
       ackTimeoutMs: ACK_TIMEOUT_MS,
       beatMs: BEAT_MS,
@@ -383,6 +418,59 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
       expect(relayed.isError, `${n} models`).toBeFalsy()
       expect(relayed.content, `${n} models`).toEqual(direct.content)
     }
+  })
+
+  /** Busy for longer than the beats a peer may miss: nothing else in this process runs. */
+  function stall(): void {
+    const until = performance.now() + BEAT_MS * 6
+    while (performance.now() < until) {
+      // busy
+    }
+  }
+
+  /** A tools/call relayed through B, read whole: it rejects if the answer ended as an error. */
+  async function callThroughB(token: string, sessionId: string): Promise<string> {
+    const res = await post(b, token, sessionId, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/call',
+      params: { name: 'list_models', arguments: {} },
+    })
+    const text = await res.text()
+    expect(res.status, text).toBe(200)
+    return text
+  }
+
+  // #4552: after a stall (CPU starvation, a long GC) the liveness timers run before
+  // the messages that arrived meanwhile are read. Timed by the clock, each side took
+  // the other, still talking, for gone: the owner stopped the call, and the relaying
+  // replica dropped the owner's directory row, so the client's next call met a 404.
+  it('keeps a live owner through a stall while the call waits for its head (#4552)', async () => {
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    backend.use(
+      http.get(`${BACKEND}/api/v1/models`, async () => {
+        await delay(BEAT_MS) // B has heard the ack
+        stall()
+        return HttpResponse.json(MODELS)
+      }),
+    )
+    expect(await callThroughB(token, sessionOf(client))).toContain('keychain')
+    backend.resetHandlers()
+    expect(await callThroughB(token, sessionOf(client))).toContain('keychain')
+  })
+
+  it('keeps a live owner, and its session, through a stall between the answer and its end (#4552)', async () => {
+    await swap('a', () => replica({}, undefined, undefined, StallingRelay))
+    const owner = a.relay as StallingRelay
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    owner.stallAfterFirstChunk = stall
+    expect(await callThroughB(token, sessionOf(client))).toContain('keychain')
+    expect(await callThroughB(token, sessionOf(client))).toContain('keychain')
+    expect(await db.sql`SELECT replica FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(sessionOf(client))}`).toEqual([
+      { replica: a.relay.replica },
+    ])
   })
 
   it('ends an answer with an error, not as whole, when its owner stops it for the relaying replica going silent', async () => {

@@ -40,6 +40,14 @@ import { type Principal, TIERS } from '../auth/principal.js'
 // answers 503, and a body already streaming is ended with an error, so the
 // client reconnects and meets the 404.
 //
+// Silence, both ways, is counted in this replica's own beat ticks that passed
+// with nothing heard, never timed by the clock (#4552). After a stall (CPU
+// starvation, a long GC) Node runs due timers before it reads the messages that
+// came in meanwhile, so a clock-timed check took a peer that had kept talking for
+// gone, and the owner's directory row with it: the client's next request met a
+// 404. A stall fires an interval once however long it lasted, so it costs one
+// silent tick, not the SILENT_AFTER_BEATS that make a peer gone.
+//
 // The channel is `scadbuddy_mcp`, LISTENed on the event listener's own
 // connection (events/pgListener.ts `listenAlso`), as the bridge's is.
 //
@@ -51,7 +59,7 @@ export const MCP_CHANNEL = 'scadbuddy_mcp'
 export const ACK_TIMEOUT_MS = 3_000
 /** How often an owner says it is still working on a relayed request. */
 export const BEAT_MS = 10_000
-/** Beats missed before the owner is taken for gone. */
+/** Beat ticks in a row with nothing heard before the peer is taken for gone. */
 const SILENT_AFTER_BEATS = 3
 /**
  * NOTIFY payloads are capped at 8000 bytes; a chunk whose whole payload, as
@@ -176,7 +184,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
   readonly #log: (message: string) => void
   readonly #waiting = new Map<string, Waiting>()
   /** Relayed requests this replica is running as owner, to cancel. */
-  readonly #running = new Map<string, { controller: AbortController; heard: number }>()
+  readonly #running = new Map<string, { controller: AbortController; silentTicks: number }>()
   readonly #touched = new Map<string, number>()
   #owner: SessionOwner | undefined
   #lastSweep = 0
@@ -246,7 +254,8 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       let settled = false
       let acked = false
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
-      let lastHeard = Date.now()
+      /** Liveness ticks since the owner was last heard. */
+      let silentTicks = 0
       let ackTimer: NodeJS.Timeout | undefined
       let liveness: NodeJS.Timeout | undefined
       // Liveness both ways: the owner stops a request whose relaying replica
@@ -319,7 +328,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       this.#waiting.set(req, {
         chain: Promise.resolve(),
         heard: () => {
-          lastHeard = Date.now()
+          silentTicks = 0
         },
         shutdown: () => {
           done()
@@ -336,9 +345,9 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           clearTimeout(ackTimer)
           if (acked) return
           acked = true
-          lastHeard = Date.now()
+          silentTicks = 0
           liveness = setInterval(() => {
-            if (Date.now() - lastHeard > this.#beatMs * SILENT_AFTER_BEATS) void ownerGone()
+            if (++silentTicks > SILENT_AFTER_BEATS) void ownerGone()
           }, this.#beatMs)
         },
         head: (status, headers) => {
@@ -425,7 +434,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const running = this.#running.get(header.req)
     if (running) {
       // As the owner: the relaying replica is still there, and still wants the answer.
-      if (header.t === 'beat') running.heard = Date.now()
+      if (header.t === 'beat') running.silentTicks = 0
       return
     }
     const waiting = this.#waiting.get(header.req)
@@ -475,7 +484,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const to = body.from
     const req = header.req
     const controller = new AbortController()
-    const running = { controller, heard: Date.now() }
+    const running = { controller, silentTicks: 0 }
     this.#running.set(req, running)
     // One message at a time, so they commit, and so are heard, in order.
     let queue = Promise.resolve()
@@ -494,7 +503,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const beat = setInterval(() => {
       // The relaying replica has gone silent: nobody will read the answer, and a
       // GET stream held for it would refuse the client's reconnect (409).
-      if (Date.now() - running.heard > this.#beatMs * SILENT_AFTER_BEATS) {
+      if (++running.silentTicks > SILENT_AFTER_BEATS) {
         controller.abort()
         return
       }
