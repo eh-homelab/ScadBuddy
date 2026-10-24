@@ -9,11 +9,14 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
 import pytest
 import respx
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.print_run import (
@@ -22,15 +25,21 @@ from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     check_print,
     prepare_run,
+    run_route,
 )
 from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.workflows import print_activities
+from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.print_models import CheckInput, SourceSpec
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
+from tests.test_print_workflow import run_input
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -38,6 +47,12 @@ BASE = "http://bambuddy.test"
 API = f"{BASE}/api/v1"
 SERIAL = "01P00A0000000AA"
 CERT = "cd" * 32
+#: The hot path's stored backends (plan 2026-10-18 D2).
+HOT_PATH: dict[str, Any] = {
+    "slicer_backend": "native",
+    "library_backend": "native",
+    "store_backend": "s3",
+}
 REPORT = json.loads((Path(__file__).parent / "fixtures" / "lan-report-h2c.json").read_text())
 
 
@@ -160,17 +175,104 @@ async def test_a_printer_merged_away_falls_back_to_the_bambuddy_printers_row(
 
 
 @respx.mock
-async def test_a_printer_unlinked_since_falls_back_to_the_bambuddy_printers_row(
+async def test_a_printer_unlinked_since_is_a_disagreement(
     printers: PrinterStore, reports: PrinterReportStore
 ) -> None:
+    """#4516: a named row that links no Bambuddy printer (one only the LAN reaches, or
+    unlinked since) never prints on the ``printer_id`` sent beside it."""
     bambuddy_routes()
     row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
     printers.unlink_bambuddy(row.id)
 
-    prepared = await prepare(printers, reports, run_request(printer=row.id, printer_id=1))
+    with pytest.raises(ApiError) as refused:
+        await prepare(printers, reports, run_request(printer=row.id, printer_id=1))
 
-    now = printers.by_bambuddy_id(1)
-    assert now is not None and prepared.printer == now.id and prepared.printer_id == 1
+    assert refused.value.status == 422
+    assert "Garage is not linked to Bambuddy printer 1" in refused.value.detail
+
+
+@respx.mock
+async def test_a_lan_only_row_beside_a_bambuddy_id_never_prints_there(
+    printers_with_kek: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """#4516: on the hot path's backends too, a LAN-only row named with a stale
+    ``printer_id`` is refused, not printed on the Bambuddy printer or over the LAN."""
+    status = bambuddy_routes()
+    pid = lan_linked(printers_with_kek, reports, preferred_path="native")
+    printers_with_kek.unlink_bambuddy(pid)
+
+    with pytest.raises(ApiError) as refused:
+        await run_route(
+            StoredSettings(**HOT_PATH),
+            printers_with_kek,
+            reports,
+            printer=pid,
+            printer_id=1,
+        )
+
+    assert refused.value.status == 422
+    assert "disagreeing printer" in refused.value.detail
+    assert not status.called
+
+
+@respx.mock
+async def test_the_check_makes_a_first_runs_row_before_it_decides_the_path(
+    printers_with_kek: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4442 M2 on the hot path: no row links Bambuddy printer 1 yet, but a LAN-linked
+    row holds its serial. The run's check merges it first, so the first run is native."""
+    bambuddy_routes()
+    row = printers_with_kek.create(PrinterCreate(serial=SERIAL, name="Garage", model="H2C"))
+    printers_with_kek.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256=CERT
+    )
+    printers_with_kek.patch(row.id, PrinterPatch.model_validate({"preferred_path": "auto"}))
+    reports.put(row.id, REPORT["print"], datetime.now(UTC))
+    seen: dict[str, Any] = {}
+
+    async def stop(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise ApiError(418, "stop here")
+
+    unused: Any = None
+    settings = StoredSettings(bambuddy_url=BASE, bambuddy_api_key="k", **HOT_PATH)
+    activities = PrintActivities(
+        PrintDeps(
+            settings_store=cast(Any, SimpleNamespace(load=lambda: settings)),
+            outputs=unused,
+            uploads=unused,
+            prints=unused,
+            store=unused,
+            observer=unused,
+            library=cast(Any, object()),
+            native=cast(Any, SimpleNamespace(profiles=unused)),
+            printers=printers_with_kek,
+            reports=reports,
+        )
+    )
+
+    async def source(*args: Any) -> Any:
+        return object()
+
+    monkeypatch.setattr(print_activities, "prepare_run", stop)
+    monkeypatch.setattr(activities, "_source", source)
+    check = CheckInput(
+        input=run_input().model_copy(
+            update={
+                "request": run_request(printer_id=1),
+                "source": SourceSpec(kind="library", file_id=NATIVE_ID_BASE + 1),
+            }
+        ),
+        started_at=datetime.now(UTC),
+    )
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(activities.check, check)
+
+    assert raised.value.details[0].status == 418, raised.value
+    route = seen["route"]
+    assert (route.row.id, route.path, route.native) == (row.id, "native", True)
 
 
 @respx.mock

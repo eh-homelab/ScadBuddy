@@ -48,6 +48,7 @@ from scadbuddy.bambuddy.print_run import (
     ResolvedProject,
     RunPath,
     RunRefusalError,
+    ensured_route,
     finish_run,
     plan_run,
     prepare_run,
@@ -73,7 +74,7 @@ from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
-from scadbuddy.printers.hot_path import hot_path_native
+from scadbuddy.printers.hot_path import hot_path_native, native_backends
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsage
@@ -290,6 +291,18 @@ class PrintActivities:
                 printer_id=request.printer_id,
                 decide=self.d.native_run,
             )
+            if route.row is None and route.printer_id is not None and native_backends(settings):
+                # A printer the registry has no row for yet: its row is made (or a
+                # LAN-linked one merged) first, so its first run takes that row's path.
+                async with client_for(settings) as client:
+                    route = await ensured_route(
+                        client,
+                        settings,
+                        self.d.printers,
+                        self.d.reports,
+                        route,
+                        decide=self.d.native_run,
+                    )
             native = route.native
             if native:
                 # D6: refused before anything is read or recorded.

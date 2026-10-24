@@ -325,7 +325,7 @@ def _view(
 
 
 async def native_choices_for(
-    source: Awaitable[PrintSource],
+    source: PrintSource,
     settings: StoredSettings,
     route: RunRoute,
     *,
@@ -345,7 +345,8 @@ async def native_choices_for(
         raise ApiError(http.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
     assert route.row is not None and route.status is not None, "a native route is a report's"
     status = route.status
-    catalogue, ready = await asyncio.gather(catalogue_for(None, native=profiles), source)
+    ready = source
+    catalogue = await catalogue_for(None, native=profiles)
     filaments = await filament_options(
         None,
         ready,

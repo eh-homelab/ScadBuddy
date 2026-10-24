@@ -1337,7 +1337,7 @@ async def native_choices(
     image's presets and the trays; no Bambuddy call."""
     overlay, labels = await _overlay_of(spools, route)
     return await native_choices_for(
-        _given_source(source),
+        source,
         settings,
         route,
         remembered=remembered,
@@ -1347,10 +1347,6 @@ async def native_choices(
         provider_labels=labels,
         rack=rack,
     )
-
-
-async def _given_source(source: PrintSource) -> PrintSource:
-    return source
 
 
 async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:

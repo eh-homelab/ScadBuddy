@@ -1713,14 +1713,15 @@ async def run_route(
     *,
     printer: str | None,
     printer_id: int | None,
-    say_fallback: bool = True,
+    say_fallback: bool = False,
     decide: Callable[[StoredSettings, RunPath], bool] | None = None,
 ) -> RunRoute:
     """The run's :class:`RunRoute`, from the registry and its reports only: the row
     ``printer`` names, else the row linking ``printer_id`` (or Settings' printer). No
-    Bambuddy call: a row Bambuddy has not been asked about yet is made later, on
-    Bambuddy's path (`prepare_run`'s `_ensure_row`). ``decide`` is `hot_path_native`
-    unless a caller's own (`PrintDeps.native_run`)."""
+    Bambuddy call: a row Bambuddy has not been asked about yet is :func:`ensured_route`'s
+    to make. ``decide`` is `hot_path_native` unless a caller's own
+    (`PrintDeps.native_run`). ``say_fallback`` is off by default: on Bambuddy's path
+    `prepare_run` reads the path again and says the key's fallback itself, once."""
     decide = decide or hot_path_native
     named, bambuddy_id = await _named_printer(printer, printer_id, settings, printers)
     row = named
@@ -1739,6 +1740,39 @@ async def run_route(
         path=path,
         status=report_status,
         native=native,
+    )
+
+
+async def ensured_route(
+    client: BambuddyClient,
+    settings: StoredSettings,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+    route: RunRoute,
+    *,
+    decide: Callable[[StoredSettings, RunPath], bool] | None = None,
+) -> RunRoute:
+    """``route`` once its row is made or merged, as the run's first check makes it
+    (`_ensure_row`, #4442 M2): a Bambuddy printer no row links yet, whose serial a
+    LAN-linked row holds, takes that row's path from its first run. Only on the hot
+    path's backends, and only then is Bambuddy asked for its printer: a row the
+    registry knows needs no read."""
+    if (
+        route.row is not None
+        or route.printer_id is None
+        or printers is None
+        or not native_backends(settings)
+    ):
+        return route
+    printer = await _require_resolvable_printer(client, route.printer_id, any_model=True)
+    row = await _ensure_row(printers, None, printer)
+    path, report_status = await _registry_path(row, printers, reports, say_fallback=False)
+    return RunRoute(
+        row=row,
+        printer_id=route.printer_id,
+        path=path,
+        status=report_status,
+        native=(decide or hot_path_native)(settings, path),
     )
 
 
@@ -1962,10 +1996,11 @@ async def _named_printer(
     run prints on (``None`` for a row Bambuddy does not reach).
 
     Sent with ``printer_id``, ``printer`` is a cross-check (#4442 I1): every other choice
-    in the body was made for that Bambuddy printer, so it decides. A named row merged
-    away, deleted or unlinked since the body was made (a stored batch step, a dialog
-    that has not re-read the registry) falls back to the row for ``printer_id``; only a
-    row that links another Bambuddy printer now is refused."""
+    in the body was made for that Bambuddy printer. A named row merged away or deleted
+    since the body was made (a stored batch step, a dialog that has not re-read the
+    registry) falls back to the row for ``printer_id``; a row that links another
+    Bambuddy printer, or none (a row only the LAN reaches, #4516), is refused, so a
+    disagreeing pair never prints on the Bambuddy printer."""
     if printers is None or printer is None:
         printer_id = sent or settings.printer_id
         if printer_id is None:
@@ -1980,13 +2015,20 @@ async def _named_printer(
                 f"There is no printer {printer} in the registry. Pick another printer."
             )
         return named, named.bambuddy_printer_id
-    if named is None or named.bambuddy_printer_id is None:
+    if named is None:
         logger.info(
-            "the named printer no longer links Bambuddy printer %s; printing on its row",
+            "the named printer is gone; printing on Bambuddy printer %s's row",
             sent,
             extra={"printer": printer, "printer_id": sent},
         )
         return None, sent
+    if named.bambuddy_printer_id is None:
+        # Never printed on the Bambuddy printer instead (#4516): the row may be one only
+        # the LAN reaches, whose run the dialog asked for.
+        raise RunRefusalError(
+            f"disagreeing printer: {named.name} is not linked to Bambuddy printer {sent}."
+            " Pick the printer again."
+        )
     if named.bambuddy_printer_id != sent:
         raise RunRefusalError(
             f"disagreeing printer: {named.name} is Bambuddy printer"
