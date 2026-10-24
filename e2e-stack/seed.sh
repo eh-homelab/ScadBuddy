@@ -146,7 +146,7 @@ if [ "$mode" = recorder ]; then
   fi
   call PUT /settings '{"spool_overlay_refresh_seconds": 0}' >/dev/null
   restart_app
-  curl --fail --silent --show-error -X POST http://127.0.0.1:18000/__reset >/dev/null
+  curl --fail --silent --show-error -X POST "http://127.0.0.1:${SB_HOTPATH_RECORDER_PORT:-18000}/__reset" >/dev/null
 fi
 
 curl --fail --silent --show-error -X POST http://127.0.0.1:18081/__reset >/dev/null

@@ -66,6 +66,8 @@ repo="$(cd "$here/.." && pwd)"
 export SB_HOTPATH_APP_IMAGE="${SB_HOTPATH_APP_IMAGE:-scadbuddy:hot-path-app}"
 export SB_HOTPATH_SLICER_IMAGE="${SB_HOTPATH_SLICER_IMAGE:-scadbuddy-slicer:hot-path}"
 export SB_HOTPATH_TOOLS_IMAGE="${SB_HOTPATH_TOOLS_IMAGE:-scadbuddy:hot-path-test}"
+# The recorder's host port: 18000 unless the host already uses it (seed.sh, compose.yaml).
+export SB_HOTPATH_RECORDER_PORT="${SB_HOTPATH_RECORDER_PORT:-18000}"
 compose=(docker compose -p sb-hotpath -f "$here/compose.yaml")
 
 state="$(mktemp -d)"
@@ -132,7 +134,7 @@ for index in "${!modes[@]}"; do
   if (
     cd "$repo/frontend"
     E2E_BASE_URL=http://127.0.0.1:18080 E2E_HOT_PATH=1 E2E_HOT_PATH_MODE="$current" \
-      E2E_PRINTER_URL=http://127.0.0.1:18081 E2E_RECORDER_URL=http://127.0.0.1:18000 \
+      E2E_PRINTER_URL=http://127.0.0.1:18081 E2E_RECORDER_URL="http://127.0.0.1:${SB_HOTPATH_RECORDER_PORT}" \
       pnpm exec playwright test e2e/real-hot-path.spec.ts --output "test-results/hot-path-${current}"
   ); then
     results+=("${current}: passed")
@@ -147,7 +149,7 @@ for index in "${!modes[@]}"; do
       >"$repo/frontend/test-results/hot-path-${current}/stack.log" 2>&1 || true
     logs_saved=1
     echo "--- recorded by the recorder:"
-    curl --silent http://127.0.0.1:18000/__recorded || true
+    curl --silent "http://127.0.0.1:${SB_HOTPATH_RECORDER_PORT}/__recorded" || true
     echo
   fi
   if [ "$index" -lt $((${#modes[@]} - 1)) ]; then
