@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from itertools import count
+from typing import Any
 
 import pytest
 
+from scadbuddy.print_library import store as store_module
 from scadbuddy.print_library.ids import NATIVE_ID_BASE, is_native_id
 from scadbuddy.print_library.store import (
     FolderCycleError,
@@ -135,7 +138,7 @@ def test_filing_and_keys(rows: NativeLibraryStore) -> None:
 
 
 def _wait_for_a_lock_wait(pool: PgPool) -> None:
-    """Until some backend of this database waits on a lock (the delete, here)."""
+    """Until some backend of this database waits on a lock."""
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         with pool.connection() as conn:
@@ -146,7 +149,7 @@ def _wait_for_a_lock_wait(pool: PgPool) -> None:
         if row is not None and row["n"] > 0:
             return
         time.sleep(0.05)
-    raise AssertionError("the delete never waited on a lock")
+    raise AssertionError("no backend ever waited on a lock")
 
 
 def test_a_move_inside_a_subtree_being_deleted_does_not_deadlock(
@@ -212,3 +215,75 @@ def _wait_for_lock_waits(pool: PgPool, n: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"fewer than {n} backends ever waited on a lock")
+
+
+def _paused_after_writing(
+    monkeypatch: pytest.MonkeyPatch, file_id: int
+) -> tuple[threading.Event, threading.Event]:
+    """Pause the write of ``file_id`` (an insert or an update) after its statement, its
+    transaction still open: ``written`` once it has written, then waits for ``go``."""
+    written, go = threading.Event(), threading.Event()
+    insert, update = store_module._insert_file, store_module._update_file
+
+    def hold(target: int) -> None:
+        if target == file_id:
+            written.set()
+            assert go.wait(30)
+
+    def insert_paused(conn: Any, row: NativeFile) -> NativeFile:
+        out = insert(conn, row)
+        hold(row.id)
+        return out
+
+    def update_paused(conn: Any, id: int, sets: list[str], params: list[Any]) -> NativeFile | None:
+        out = update(conn, id, sets, params)
+        hold(id)
+        return out
+
+    monkeypatch.setattr(store_module, "_insert_file", insert_paused)
+    monkeypatch.setattr(store_module, "_update_file", update_paused)
+    return written, go
+
+
+@pytest.mark.parametrize("writer", ["upload", "move", "rename"])
+def test_a_put_beside_another_write_into_the_folder_takes_another_name(
+    rows: NativeLibraryStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """#4512: every write of a name into a folder takes its ``folder-names`` lock, so a
+    put whose name pick overlaps an upload, move or rename of ``Sign.3mf`` into the folder
+    waits for it, sees the name and takes ``Sign (2).3mf``. Before, only puts took it, and
+    the put picked ``Sign.3mf`` beside the other write's uncommitted one."""
+    gifts = rows.create_folder("Gifts", None).id
+    if writer == "upload":
+        row = file_row(folder_id=gifts, name="Sign.3mf").model_copy(
+            update={"id": rows.next_file_id()}
+        )
+
+        def write() -> object:
+            return rows.insert_file(row)
+
+    else:
+        row = stored(rows, folder_id=None if writer == "move" else gifts, name="Old.3mf")
+        if writer == "move":
+            rows.update_file(row.id, name="Sign.3mf", folder_id=Unset, filed=None)
+
+        def write() -> object:
+            if writer == "move":
+                return rows.update_file(row.id, name=None, folder_id=gifts, filed=None)
+            return rows.update_file(row.id, name="Sign.3mf", folder_id=Unset, filed=None)
+
+    written, go = _paused_after_writing(monkeypatch, row.id)
+    put = file_row(output_id="c" * 32).model_copy(update={"id": rows.next_file_id()})
+    with ThreadPoolExecutor(2) as pool:
+        writing = pool.submit(write)
+        assert written.wait(30)
+        putting = pool.submit(rows.put_for_output, put, gifts, "Sign")
+        try:
+            _wait_for_a_lock_wait(pg_pool)
+            assert not putting.done()
+        finally:
+            go.set()
+        writing.result(timeout=30)
+        placed, inserted = putting.result(timeout=30)
+    assert inserted and placed.name == "Sign (2).3mf"
+    assert sorted(f.name for f in rows.files(gifts)) == ["Sign (2).3mf", "Sign.3mf"]

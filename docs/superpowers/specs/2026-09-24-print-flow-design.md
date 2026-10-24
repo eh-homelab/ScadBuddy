@@ -125,9 +125,11 @@ spool for gets a `trays` question. Its `candidates` name rows of the answer's `s
 (`FilamentOptions.shelf`), not of `spools`:
 
 - The shelf is the fresh provider records no tray holds (`store.py` `_shelf`). A
-  record is left out when it or its physical spool carries an RFID key, when any record
-  of its spool has a provider `location`, or when a person's link on an untagged tray
-  still holds its spool. It is a Postgres read in the overlay's own read, of records
+  record is left out when it or its physical spool carries an RFID key, when a tray of
+  this printer shows its spool, or when a person's link or any of its spool's records'
+  provider `location` puts the spool on another printer. A link or placement on this
+  printer holds only through a tray the report shows and the overlay resolved to that
+  spool (#4511, #4515). It is a Postgres read in the overlay's own read, of records
   the background refresh cached (`workflows/spool_refresh.py`), so the dialog never
   calls Bambuddy or any other provider. `tests/bambuddy/test_trays_first.py` and
   `tests/api/test_tray_spools.py` check this inside `forbid_bambuddy`.
