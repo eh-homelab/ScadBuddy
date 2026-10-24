@@ -1009,6 +1009,8 @@ export const printTools: Tool[] = [
       '`folder_id` (from list_print_projects\' `folders`) puts the 3MF in a library folder of no project ' +
       'instead; it cannot be sent with a `project_id`. ' +
       '`printer` names a registry printer by its id (list_printers) in place of `printer_id`. ' +
+      "This tool queues on Bambuddy's queue, on the Bambuddy printer the registry printer links: a printer " +
+      "reached only over the LAN is refused, and the browser's print dialog prints those without Bambuddy. " +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
