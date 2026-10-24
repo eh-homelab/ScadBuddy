@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.models import (
     PresetCatalogue,
     PresetRef,
 )
+from scadbuddy.bambuddy.slot_presets import is_slot_preset
 from scadbuddy.core.secrets import Kek
 
 logger = logging.getLogger(__name__)
@@ -176,7 +177,9 @@ def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> Catalogue
         filaments.extend(_choice(preset) for preset in tier.filament)
     printers.extend(_local_choice(row) for row in local.printer)
     processes.extend(_local_choice(row) for row in local.process)
-    filaments.extend(_local_choice(row) for row in local.filament)
+    # A slot's own preset is one already offered, under ScadBuddy's name (#3962): it
+    # is never offered in a picker or matched to a spool beside the preset it copies.
+    filaments.extend(_local_choice(row) for row in local.filament if not is_slot_preset(row.name))
     return Catalogue(printer=printers, process=processes, filament=filaments)
 
 
