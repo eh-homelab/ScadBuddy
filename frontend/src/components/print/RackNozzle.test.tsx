@@ -60,6 +60,17 @@ describe('RackNozzleStep (#836, #2166)', () => {
     expect(onPosition).toHaveBeenLastCalledWith(2)
   })
 
+  it('says a LAN print leaves Let Bambuddy pick to the printer', () => {
+    const { rerender } = render(
+      <RackNozzleStep rack={rack} algorithm="bambuddy" position={null} onAlgorithm={vi.fn()} onPosition={vi.fn()} />,
+    )
+    expect(screen.getByTestId('rack-algorithm-bambuddy')).toHaveTextContent(
+      'Printed over the LAN, the printer picks the hotends itself, unless a position is picked above.',
+    )
+    rerender(<RackNozzleStep rack={rack} algorithm="least_used" position={null} onAlgorithm={vi.fn()} onPosition={vi.fn()} />)
+    expect(screen.queryByTestId('rack-algorithm-bambuddy')).toBeNull()
+  })
+
   it('names each hotend by the filament it last ran, never by a hex', () => {
     const ran: RackPickView = {
       ...rack,

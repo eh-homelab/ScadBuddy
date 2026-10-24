@@ -1083,7 +1083,13 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     # under the key (plan 2026-10-16 Task 9); a LAN print needs the key anyway.
     blobs = RemoteBlobs(settings.api_internal_url, kek) if kek is not None else None
     lan_printing = LanActivities(
-        LanDeps(printers=printers, settings_store=settings_store, library=library, blobs=blobs)
+        LanDeps(
+            printers=printers,
+            settings_store=settings_store,
+            library=library,
+            blobs=blobs,
+            rack=rack,
+        )
     )
     return PrintWorkerDeps(
         settings_store=settings_store,

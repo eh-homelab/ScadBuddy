@@ -14,6 +14,13 @@ whole ``push_status`` about every 1.8 s, sometimes out of order; `LanPrinter.rep
 merges them, so the latest merged state is what is read.
 
 The access code is opened from the row inside each activity, never passed in its input.
+
+A rack printer's plate (hot-path Task 8): ``lan_upload`` reads the plate's rack plan from
+the sliced 3MF, and ``lan_print`` ranks the rack in the report it reads as it starts
+(never Bambuddy's status) and sends the picks as ``nozzle_mapping``
+(`printers.nozzle_mapping`). The pick runs inside ``lan_print``, so a hotend's serial
+never enters the history; whatever it cannot resolve sends no field, and the firmware
+picks.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
 from scadbuddy.bambuddy.print_run import LAN_NEEDS_KEK
 from scadbuddy.bambuddy.runs import PrintRunError
@@ -54,8 +62,11 @@ from scadbuddy.printers.lan import (
 )
 from scadbuddy.printers.lan_models import LanReport, LanStarted, ProjectFile
 from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.nozzle_mapping import choose_nozzles, read_rack_plan
 from scadbuddy.printers.status import print_error_text, status_from_report
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
+from scadbuddy.rack.rank import rack_serials
+from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.workflows.print_activities import heartbeating, raised_as
 from scadbuddy.workflows.print_models import (
@@ -144,6 +155,8 @@ class LanDeps:
     blobs: SlicedBlobs | None = None
     connect: Connect = LanPrinter
     start_wait: float = LAN_START_WAIT
+    #: Rack hotend usage (#836): ranks a rack print's pick (hot-path Task 8).
+    rack: RackUsage | None = None
 
 
 class LanActivities:
@@ -219,11 +232,15 @@ class LanActivities:
             spool.seek(0)
             count = project_filament_count(spool)
             spool.seek(0)
+            rack = read_rack_plan(spool, input.plate_id)
+            spool.seek(0)
             try:
                 md5 = await heartbeating(lan.upload(spool, f"{UPLOAD_DIR}{input.remote_name}"))  # type: ignore[arg-type]
             except CertificateMismatchError as error:
                 raise _failed(str(error), status_code=status.HTTP_409_CONFLICT) from None
-        return LanUploaded(remote_name=input.remote_name, md5=md5, bytes=size, filament_count=count)
+        return LanUploaded(
+            remote_name=input.remote_name, md5=md5, bytes=size, filament_count=count, rack=rack
+        )
 
     @activity.defn(name=LAN_PRINT_ACTIVITY)
     async def lan_print(self, input: LanPrintInput) -> LanStarted:
@@ -249,7 +266,7 @@ class LanActivities:
                 raise _failed(f"{row.name} reports this print stopped.")
             if before.get("gcode_state") in STARTED_STATES:
                 return LanStarted(subtask_name=input.subtask_name, started_at=datetime.now(UTC))
-        command = self._command(row, first, input)
+        command = await self._command(row, first, input)
         error_before = _int(before.get("print_error"))
         try:
             async with asyncio.timeout(self.d.start_wait):
@@ -265,7 +282,60 @@ class LanActivities:
             raise _unsure(f"{row.name}'s LAN connection dropped while it was started.") from None
         raise _unsure(f"{row.name} closed its LAN connection while it was started.")
 
-    def _command(self, row: PrinterRow, first: LanReport, input: LanPrintInput) -> dict[str, Any]:
+    async def _nozzle_mapping(
+        self, row: PrinterRow, printer: PrinterStatus, input: LanPrintInput
+    ) -> list[int] | None:
+        """The rack pick from the report's status, as the wire; ``None`` sends no field.
+        It never raises: on any failure it logs the type and the firmware picks."""
+        plan = input.uploaded.rack
+        if plan is None or not plan.on_rack:
+            return None
+        try:
+            usage = {}
+            if self.d.rack is not None and input.rack_algorithm != "bambuddy":
+                try:
+                    usage = await self.d.rack.usage(rack_serials(printer.nozzle_rack))
+                except Exception as exc:
+                    # Usage only ranks (#1043): ranked as if no hotend had printed.
+                    logger.warning(
+                        "rack usage unreadable; ranked without it",
+                        extra={"printer": row.id, "error": type(exc).__name__},
+                    )
+            if row.bambuddy_printer_id is not None:
+                # The rack's hotends seen, under the id the rack tables key on (#836).
+                await record_seen(self.d.rack, row.bambuddy_printer_id, printer)
+            chosen = choose_nozzles(
+                plan,
+                printer,
+                algorithm=input.rack_algorithm,
+                manual_position=input.rack_position,
+                usage=usage,
+                spools=input.spools,
+            )
+        except Exception as exc:
+            # Never str(exc): an error's text can carry a serial (spec 2026-10-01 §7).
+            logger.warning(
+                "nozzle_mapping not sent: the rack pick failed",
+                extra={"printer": row.id, "error": type(exc).__name__},
+            )
+            return None
+        for warning in chosen.warnings:
+            logger.info("rack pick: %s", warning.kind, extra={"printer": row.id})
+        if chosen.declined:
+            logger.info(
+                "nozzle_mapping not sent: the rack algorithm leaves the hotends to the printer",
+                extra={"printer": row.id},
+            )
+        elif chosen.mapping is None:
+            logger.warning(
+                "nozzle_mapping not sent: the rack pick placed not every rack group",
+                extra={"printer": row.id},
+            )
+        return chosen.mapping
+
+    async def _command(
+        self, row: PrinterRow, first: LanReport, input: LanPrintInput
+    ) -> dict[str, Any]:
         printer = status_from_report(row, first, now=first.received_at)
         # At least the largest slot chosen (`ams_mapping`'s rule for the count).
         count = max([input.uploaded.filament_count, *(c.slot_id for c in input.plan.slots)])
@@ -281,8 +351,6 @@ class LanActivities:
                 f"The filaments chosen do not map to {row.name}'s trays: {error}.",
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             ) from None
-        # No `nozzle_mapping`: the firmware picks the nozzle until hot-path Task 8
-        # measures the rack command (a wrong id prints with another nozzle).
         file = ProjectFile(
             url=file_url(input.uploaded.remote_name),
             param=f"Metadata/plate_{input.plate_id}.gcode",
@@ -293,6 +361,7 @@ class LanActivities:
             timelapse=input.timelapse,
             layer_inspect=input.layer_inspect,
             md5=input.uploaded.md5,
+            nozzle_mapping=await self._nozzle_mapping(row, printer, input),
         )
         return project_file_command(file, str(secrets.randbelow(10**9)))
 

@@ -33,6 +33,9 @@ class ProjectFile(BaseModel):
     timelapse: bool = False
     layer_inspect: bool = True
     md5: str
+    #: One physical nozzle id per filament slot on a rack printer
+    #: (`printers.nozzle_mapping`); ``None`` sends no field, and the firmware picks.
+    nozzle_mapping: list[int] | None = None
 
 
 class LanStarted(BaseModel):

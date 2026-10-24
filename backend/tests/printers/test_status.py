@@ -66,11 +66,23 @@ def test_the_nozzles_and_the_rack(report_h2c: LanReport) -> None:
         ("HH01", "0.4"),
     ]
     assert status.active_extruder == 1
+    # The two mounted hotends too, as Bambuddy's status lists them: the rack's carriage
+    # (id 0) fills the position the report omits while it is mounted (Task 8).
     assert [(slot.id, slot.nozzle_diameter, slot.serial_number) for slot in status.nozzle_rack] == [
+        (0, "0.4", "REDACTED"),
+        (1, "0.4", "REDACTED"),
         (16, "0.2", "REDACTED-16"),
         (17, "0.6", ""),
     ]
-    assert status.nozzle_rack[0].wear == 3
+    assert status.nozzle_rack[2].wear == 3
+
+
+def test_a_printer_without_a_rack_lists_no_rack(report_h2c: LanReport) -> None:
+    """An H2D reports its two mounted hotends only: no rack, so no ``nozzle_rack``."""
+    nozzle = report_h2c.print["device"]["nozzle"]
+    nozzle["info"] = [entry for entry in nozzle["info"] if entry["id"] < 16]
+    status = status_from_report(row(), report_h2c, now=report_h2c.received_at)
+    assert len(status.nozzles) == 2 and status.nozzle_rack == []
 
 
 def test_the_bambuddy_id_is_the_link_when_there_is_one(report_h2c: LanReport) -> None:
@@ -293,8 +305,8 @@ def test_a_recorded_h2c_report(recorded_h2c: LanReport) -> None:
     assert status.fila_switch is not None and status.fila_switch.installed
     assert status.ams_extruder_map == {}
     assert status.ams_switch_inlet == {"0": "A", "1": "B", "2": "B", "3": "A", "128": "A"}
-    assert [slot.id for slot in status.nozzle_rack] == [16, 17, 20, 21, 18]
-    first = status.nozzle_rack[0]
+    assert [slot.id for slot in status.nozzle_rack] == [0, 1, 16, 17, 20, 21, 18]
+    first = status.nozzle_rack[2]
     assert (first.nozzle_type, first.nozzle_diameter) == ("HS00", "0.2")
     assert (first.filament_id, first.filament_colour) == ("GFA00", "EC008CFF")
 
