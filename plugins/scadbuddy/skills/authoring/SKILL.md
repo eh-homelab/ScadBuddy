@@ -665,9 +665,13 @@ for geometry you do not have. Nothing is written to Bambuddy. Sources: design
 Workflow:
 
 1. Open the mesh with `create_model_from_mesh`. Give exactly one source: a Bambuddy
-   `library_file_id` (from `list_library`), an `output_id`, or a 3MF/STL as
-   `content_base64` + `filename` (or `workspace_path` + `workspace_sha256` for a large
-   one). Each object in the file becomes a scene object.
+   `library_file_id` (from `list_library`), an `output_id`, or a 3MF/STL in your
+   workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
+   panel, or one saved by `http_request` `save_to_workspace` or `workspace_save`; bytes
+   are never a tool argument, #2510, `agent/src/tools/workspaceUploads.ts`). Over an
+   external `/mcp` install there is no panel: `http_request` `save_to_workspace` and
+   `workspace_save` are the only ways in until #4550. Each object
+   in the file becomes a scene object.
 2. Read it with `get_scene`: object ids (`o1`, `o2`, ...), each object's colour parts
    (`p1`, ...), its ops in order, and its transform (translate, rotate in degrees X then
    Y then Z, scale). Look before you edit; ids and part names are not guessable.

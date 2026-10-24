@@ -170,7 +170,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
 
     it('reads an image as an image block, and other binary as metadata only', async () => {
       const c = ctx()
-      await runTool(tool('workspace_write'), { path: 'p.png', content_base64: PNG.toString('base64') }, c)
+      await files.write(ws, 'p.png', PNG)
       const img = await runTool(tool('workspace_read'), { path: 'p.png' }, c)
       expect(img.content.find((b) => b.type === 'image')).toMatchObject({ mimeType: 'image/png', data: PNG.toString('base64') })
       await files.write(ws, 'm.3mf', Buffer.from([0x50, 0x4b, 3, 4, 0, 0]))
@@ -300,20 +300,25 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(result).toMatchObject({ id: 11 })
     })
 
-    it('refuses a changed file, a path without its sha256, and both or neither of the two', async () => {
+    it('refuses a changed file, a path without its sha256, inline bytes, and inline text with a file or neither', async () => {
       const info = await files.write(ws, 'p.png', PNG)
       const { c, seen } = upload()
       const changed = await runTool(tool('set_model_thumbnail'), { slug: 'box', workspace_path: 'p.png', workspace_sha256: 'f'.repeat(64) }, c)
       expect(String(firstText(changed))).toMatch(/changed since it was read.*nothing was sent/)
       const noSha = await runTool(tool('set_model_thumbnail'), { slug: 'box', workspace_path: 'p.png' }, c)
-      expect(String(firstText(noSha))).toMatch(/needs `workspace_sha256`/)
-      const both = await runTool(
+      expect(String(firstText(noSha))).toMatch(/invalid arguments.*workspace_sha256/s)
+      // Bytes are never an argument (#2510), even beside the file.
+      const inline = await runTool(
         tool('set_model_thumbnail'),
         { slug: 'box', png_base64: PNG.toString('base64'), workspace_path: 'p.png', workspace_sha256: info.sha256 },
         c,
       )
+      expect(String(firstText(inline))).toMatch(/invalid arguments.*png_base64/s)
+      const noSha2 = await runTool(tool('set_readme'), { slug: 'box', workspace_path: 'p.png' }, c)
+      expect(String(firstText(noSha2))).toMatch(/needs `workspace_sha256`/)
+      const both = await runTool(tool('set_readme'), { slug: 'box', content: '# Box', workspace_path: 'p.png', workspace_sha256: info.sha256 }, c)
       expect(String(firstText(both))).toMatch(/exactly one of the two/)
-      const neither = await runTool(tool('set_model_thumbnail'), { slug: 'box' }, c)
+      const neither = await runTool(tool('set_readme'), { slug: 'box' }, c)
       expect(String(firstText(neither))).toMatch(/exactly one of the two/)
       const missing = await runTool(tool('set_model_thumbnail'), { slug: 'box', workspace_path: 'nope.png', workspace_sha256: info.sha256 }, c)
       expect(String(firstText(missing))).toMatch(/no file nope.png/)
@@ -362,7 +367,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(seen).toHaveLength(4)
     })
 
-    it('refuses every upload that carries a credential, from the workspace or inline, and never says which', async () => {
+    it('refuses every upload that carries a credential, from the workspace or inline text, and never says which', async () => {
       const SECRET = 'sk-ant-planted-0123456789'
       const { c, seen } = upload(() => Response.json({ ok: true }), ['xy', SECRET])
       // Text, and binary with the secret across the 1 MiB slice boundary the search reads in.
@@ -377,13 +382,10 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const calls: [string, Record<string, unknown>][] = [
         ['upload_asset', { slug: 'box', ...fromPng }],
         ['upload_asset', { slug: 'box', workspace_path: 'across.bin', workspace_sha256: spanning.sha256, filename: 'x.png' }],
-        ['upload_asset', { slug: 'box', filename: 'x.png', content_base64: binary.toString('base64') }],
         ['set_model_thumbnail', { slug: 'box', ...fromPng }],
-        ['set_model_thumbnail', { slug: 'box', png_base64: binary.toString('base64') }],
         ['set_output_thumbnail', { output_id: OUTPUT, ...fromPng }],
-        ['set_output_thumbnail', { output_id: OUTPUT, png_base64: binary.toString('base64') }],
         ['add_model_media', { slug: 'box', ...fromPng }],
-        ['add_model_media', { slug: 'box', filename: 'p.png', content_base64: binary.toString('base64') }],
+        ['create_model_from_mesh', { name: 'Leak', filename: 'leak.stl', ...fromPng }],
         ['create_model', { name: 'Leak', ...fromText }],
         ['create_model', { name: 'Leak', source: `// ${SECRET}` }],
         ['import_model', fromText],

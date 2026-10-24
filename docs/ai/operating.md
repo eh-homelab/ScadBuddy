@@ -1216,8 +1216,14 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   [`agent/src/tools/workspaceUploads.ts`](../../agent/src/tools/workspaceUploads.ts)):
   `upload_asset`, `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`,
   `create_model`, `import_model`, `write_source_file`, `write_file` and `set_readme` take
-  `workspace_path` with its `workspace_sha256` instead of their inline content (exactly
-  one of the two). The sha256 is the one the model read the file at; a file no longer at
+  `workspace_path` with its `workspace_sha256`. The text tools (`create_model`,
+  `import_model`, `write_source_file`, `write_file`, `set_readme`) take it instead of
+  their inline text (exactly one of the two); the binary ones (`upload_asset`,
+  `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`, and
+  `create_model_from_mesh`'s upload) take it only (#2510): no tool takes bytes as a
+  base64 argument, and `workspace_write` writes text only. Binary reaches the workspace
+  by the user's upload in the panel (`routes/sessionFiles.ts`), `http_request`
+  `save_to_workspace` or `workspace_save`. The sha256 is the one the model read the file at; a file no longer at
   it is refused, so an approval card and an audit row (the call's input) name the path
   and the exact content, and never carry the bytes. Each tool keeps its tier
   (`import_model` from a file is still `outward`). A binary file is streamed from

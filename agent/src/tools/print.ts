@@ -722,7 +722,7 @@ export const printTools: Tool[] = [
           body: { file: name, folder_id: folder_id ?? null },
           ...uploadInit(
             ctx,
-            { info },
+            info,
             { name: 'file', filename: name, type: 'application/octet-stream' },
             headers,
             folder_id === undefined ? {} : { folder_id: String(folder_id) },

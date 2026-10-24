@@ -84,6 +84,32 @@ describe('registry projections', () => {
     expect(called).toBe(false)
   })
 
+  // #2510: the projections pass each tool's raw shape, so the SDK strips an unknown
+  // `*_base64` key rather than refusing it; the call still fails, on the missing
+  // pointer, and nothing reaches the backend (claude-review of #4532).
+  it.each(['harness', 'external'] as const)('refuse a stale *_base64 call over the %s projection', async (side) => {
+    let called = false
+    const backend = createBackendClient(BACKEND, async () => {
+      called = true
+      return Response.json({})
+    })
+    const principal = { id: 'browser', kind: 'browser' as const, tiers: tiersUpTo('outward') }
+    const server =
+      side === 'harness'
+        ? createHarnessServer(ALL_TOOLS, services({ backend }), principal).instance
+        : createExternalServer(ALL_TOOLS, services({ backend }))
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverSide)
+    const client = new Client({ name: 'projection-test', version: '0' })
+    await client.connect(clientSide)
+    const result = await client
+      .callTool({ name: 'set_model_thumbnail', arguments: { slug: 'w', png_base64: 'iVBORw0KGgo=' } })
+      .catch((error: unknown) => ({ isError: true, error }))
+    await client.close()
+    expect(result.isError, JSON.stringify(result)).toBe(true)
+    expect(called).toBe(false)
+  })
+
   it('mark read tools readOnly and outward tools destructive', () => {
     for (const tool of ALL_TOOLS) {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.risk === 'read')

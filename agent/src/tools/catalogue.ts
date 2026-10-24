@@ -4,11 +4,11 @@ import { staleBase } from './authoring.js'
 import { command, commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
-import { defineTool, image, json, text, type Tool, ToolError } from './registry.js'
+import { defineTool, image, json, text, type Tool } from './registry.js'
 import { backendPage, PAGED, pageInput, totalCount } from './pagination.js'
 import {
-  binarySource,
   fromWorkspace,
+  FROM_WORKSPACE_ONLY,
   inlineOrWorkspace,
   textSource,
   uploadInit,
@@ -16,6 +16,7 @@ import {
   withSent,
   workspacePathInput,
   workspaceShaInput,
+  workspaceFile,
   workspaceText,
 } from './workspaceUploads.js'
 
@@ -327,25 +328,26 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'set_model_thumbnail',
-    description: "Set a model's thumbnail from a PNG (at most 10 MiB), as a revision in its history." + fromWorkspace('`png_base64`'),
-    input: z.object({
-      slug,
-      png_base64: z.string().min(1).optional().describe('The PNG as base64'),
-      workspace_path: workspacePathInput.optional(),
-      workspace_sha256: workspaceShaInput.optional(),
-    }),
+    description: "Set a model's thumbnail from a PNG (at most 10 MiB), as a revision in its history." + FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        slug,
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+      })
+      .strict(),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/thumbnail'],
-    handler: async ({ slug, png_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const source = await binarySource(ctx, { upload: 'set_model_thumbnail', base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
+    handler: async ({ slug, workspace_path, workspace_sha256 }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'set_model_thumbnail')
       const answer = await command(ctx, `set thumbnail of ${slug}`, (headers) =>
         ctx.backend.PUT('/api/v1/models/{slug}/thumbnail', {
           params: { path: { slug } },
           body: { file: 'thumbnail.png' },
-          ...uploadInit(ctx, source, { name: 'file', filename: 'thumbnail.png', type: 'image/png' }, headers),
+          ...uploadInit(ctx, info, { name: 'file', filename: 'thumbnail.png', type: 'image/png' }, headers),
         }),
       )
-      return json(withSent(answer, 'info' in source ? source.info : undefined))
+      return json(withSent(answer, info))
     },
   }),
 
@@ -354,31 +356,30 @@ export const catalogueTools: Tool[] = [
     description:
       "Add an image (PNG, JPEG or WebP, at most 10 MB) or a video (MP4 or WebM) to a model's media gallery, as its " +
       'last item and one revision; the type comes from the bytes. Answers the model, whose `media` lists the items.' +
-      fromWorkspace('`content_base64` (with `filename`)'),
-    input: z.object({
-      slug,
-      workspace_path: workspacePathInput.optional(),
-      workspace_sha256: workspaceShaInput.optional(),
-      content_base64: z.string().min(1).optional().describe("The file's bytes as base64; a video is better sent from the workspace"),
-      filename: z.string().min(1).max(255).optional().describe('e.g. "photo.jpg"; with workspace_path, the file\'s own name by default'),
-      caption: z.string().max(500).optional().describe("The item's caption"),
-    }),
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        slug,
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+        filename: z.string().min(1).max(255).optional().describe('e.g. "photo.jpg"; the workspace file\'s own name by default'),
+        caption: z.string().max(500).optional().describe("The item's caption"),
+      })
+      .strict(),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/media'],
-    title: ({ slug, filename, workspace_path }) => `Add media ${filename ?? workspace_path ?? ''} → ${slug}`,
-    handler: async ({ slug, workspace_path, workspace_sha256, content_base64, filename, caption }, ctx) => {
-      const source = await binarySource(ctx, { upload: 'add_model_media', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
-      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
-      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
-      const type = 'info' in source ? source.info.mediaType : 'application/octet-stream'
+    title: ({ slug, filename, workspace_path }) => `Add media ${filename ?? workspace_path} → ${slug}`,
+    handler: async ({ slug, workspace_path, workspace_sha256, filename, caption }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'add_model_media')
+      const name = filename ?? uploadName(info.path)
       const answer = await command(ctx, `add media to ${slug}`, (headers) =>
         ctx.backend.POST('/api/v1/models/{slug}/media', {
           params: { path: { slug } },
           body: { file: name, caption: caption ?? null, poster: null },
-          ...uploadInit(ctx, source, { name: 'file', filename: name, type }, headers, caption === undefined ? {} : { caption }),
+          ...uploadInit(ctx, info, { name: 'file', filename: name, type: info.mediaType }, headers, caption === undefined ? {} : { caption }),
         }),
       )
-      return json(withSent(answer, 'info' in source ? source.info : undefined))
+      return json(withSent(answer, info))
     },
   }),
 

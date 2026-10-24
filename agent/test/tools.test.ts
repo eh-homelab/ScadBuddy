@@ -20,6 +20,7 @@ import { validateParams } from '../src/tools/validate.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { OPENSCAD_COLOUR_NAMES } from '../src/tools/colours.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
+import { memoryWorkspace } from './helpers/workspace.js'
 
 // Handlers against an msw backend, called with `execute` where a test needs
 // an outward tool's real behaviour (after approval, #258), and through
@@ -537,7 +538,7 @@ describe('render_model', () => {
 })
 
 describe('uploads', () => {
-  it('sends a base64 file as multipart form data', async () => {
+  it('sends a workspace file as multipart form data', async () => {
     let received: { type: string | null; name: string | undefined; bytes: number } | undefined
     server.use(
       http.post(`${BACKEND}/api/v1/models/box/assets`, async ({ request }) => {
@@ -547,8 +548,8 @@ describe('uploads', () => {
         return HttpResponse.json({ id: 'a'.repeat(64) }, { status: 201 })
       }),
     )
-    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')
-    const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'logo.svg', content_base64: svg }, ctx())
+    const ws = memoryWorkspace({ 'downloads/logo.svg': Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') })
+    const result = await runTool(tool('upload_asset'), { slug: 'box', ...ws.ref('downloads/logo.svg') }, ctx({ workspace: ws.workspace }))
     expect(result.isError).toBeFalsy()
     expect(received?.type).toMatch(/^multipart\/form-data; boundary=/)
     expect(received).toMatchObject({ name: 'logo.svg', bytes: 41 })
@@ -1948,12 +1949,29 @@ describe('library search and the upgrade flow (#1913, #1914)', () => {
   })
 })
 
-describe('base64 inputs', () => {
-  it('refuses malformed base64 instead of uploading truncated bytes', async () => {
-    const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'a.png', content_base64: 'iVBOR!!w0K' }, ctx())
+describe('binary inputs by pointer, never base64 (#2510)', () => {
+  const png = 'iVBORw0KGgo='
+  it.each([
+    ['set_model_thumbnail', { slug: 'w', png_base64: png }],
+    ['set_output_thumbnail', { output_id: 'b'.repeat(32), png_base64: png }],
+    ['add_model_media', { slug: 'w', filename: 'p.png', content_base64: png }],
+    ['upload_asset', { slug: 'w', filename: 'p.png', content_base64: png }],
+    ['create_model_from_mesh', { name: 'X', filename: 'x.stl', content_base64: png }],
+    ['workspace_write', { path: 'p.png', content_base64: png }],
+  ] as const)('%s takes no *_base64 argument and refuses one, sending nothing', async (name, args) => {
+    expect(Object.keys(tool(name).shape).filter((k) => k.endsWith('_base64'))).toEqual([])
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toContain('not valid base64')
+    expect(String(firstText(result))).toMatch(/invalid arguments/)
   })
+
+  it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'upload_asset'])(
+    '%s requires workspace_path and workspace_sha256',
+    (name) => {
+      const schema = z.toJSONSchema(z.object(tool(name).shape), { io: 'input' })
+      expect(schema.required).toEqual(expect.arrayContaining(['workspace_path', 'workspace_sha256']))
+    },
+  )
 })
 
 describe('set_print_options: a settings write (spec §8.1), unlike the remember_* choices', () => {
@@ -2440,13 +2458,14 @@ describe("a model's edits as operations (#1054)", () => {
   const op = { id: 'op-9', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
   const model = { slug: 'w', name: 'W', libraries: [] }
   const base = 'abc1234'
+  const pngs = memoryWorkspace({ 'p.png': Buffer.from('\x89PNG\r\n\x1a\n') })
 
   it.each([
     ['update_source', { slug: 'w', source: 'cube(2);' }, 'put', '/api/v1/models/w/source'],
     ['apply_patch', { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, 'post', '/api/v1/models/w/source/patch'],
     ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
     ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
-    ['set_model_thumbnail', { slug: 'w', png_base64: 'iVBORw0KGgo=' }, 'put', '/api/v1/models/w/thumbnail'],
+    ['set_model_thumbnail', { slug: 'w', ...pngs.ref('p.png') }, 'put', '/api/v1/models/w/thumbnail'],
     ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
     ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
     ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],
@@ -2463,7 +2482,7 @@ describe("a model's edits as operations (#1054)", () => {
       }),
       http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
     )
-    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx({ workspace: pngs.workspace }))
     expect(result.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
@@ -2496,13 +2515,13 @@ describe("a model's edits as operations (#1054)", () => {
 describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
   const op = { id: 'op-6', kind: 'output_create', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
   const OUT = 'b'.repeat(32)
-  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')
+  const svgs = memoryWorkspace({ 'logo.svg': Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') })
 
   it.each([
     ['save_output', { slug: 'w', job_id: 'j' }, 'post', '/api/v1/models/w/outputs', { id: OUT }],
     ['delete_output', { output_id: OUT }, 'delete', `/api/v1/outputs/${OUT}`, {}],
     ['rename_output', { output_id: OUT, name: 'Shed sign' }, 'patch', `/api/v1/outputs/${OUT}`, { id: OUT }],
-    ['upload_asset', { slug: 'w', filename: 'logo.svg', content_base64: svg }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
+    ['upload_asset', { slug: 'w', ...svgs.ref('logo.svg') }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
     ['fetch_asset', { slug: 'w', url: 'https://openmoji.org/x.svg' }, 'post', '/api/v1/models/w/assets/fetch', { id: 'a1' }],
     ['install_font', { family: 'Pacifico' }, 'post', '/api/v1/fonts/install', { family: 'Pacifico' }],
     ['save_preset', { slug: 'w', name: 'Wide' }, 'post', '/api/v1/models/w/presets', { id: 'p1' }],
@@ -2517,7 +2536,7 @@ describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
       }),
       http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result })),
     )
-    const answer = await runTool({ ...tool(name), gated: false }, args, ctx())
+    const answer = await runTool({ ...tool(name), gated: false }, args, ctx({ workspace: svgs.workspace }))
     expect(answer.isError).toBeFalsy()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
     expect(JSON.stringify(answer.content)).not.toContain('"running"')

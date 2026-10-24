@@ -4,7 +4,7 @@ import { command } from './command.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
-import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
+import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Mesh models (#2146, spec docs/superpowers/specs/2026-10-11-mesh-models-design.md):
 // a 3MF/STL opened as a model whose scene.json compiles to its model.scad. Routes:
@@ -56,46 +56,50 @@ export const meshModelTools: Tool[] = [
     name: 'create_model_from_mesh',
     description:
       'Open a mesh as an editable model: a Bambuddy library file (library_file_id, from list_library), an output ' +
-      '(output_id), or a 3MF/STL you have (filename + content_base64). Each object becomes a scene object you can ' +
-      'cut, join with a peg and socket, lay flat, add to or subtract from with edit_scene, then render and print ' +
-      'like any template. Nothing is written to Bambuddy.' +
-      fromWorkspace('`content_base64` (with `filename`)'),
-    input: z.object({
-      name: z.string().min(1).max(200),
-      description: z.string().max(10_000).optional(),
-      library_file_id: z.number().int().positive().optional(),
-      output_id: z.string().regex(/^[0-9a-f]{32}$/).optional(),
-      filename: z.string().min(1).max(255).optional().describe('The upload\'s name, ending .3mf or .stl; with workspace_path, the file\'s own name by default'),
-      content_base64: z.string().min(1).optional().describe('The mesh as base64; a large one is better sent from the workspace'),
-      workspace_path: workspacePathInput.optional(),
-      workspace_sha256: workspaceShaInput.optional(),
-    }),
+      '(output_id), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a ' +
+      'scene object you can cut, join with a peg and socket, lay flat, add to or subtract from with edit_scene, then ' +
+      'render and print like any template. Nothing is written to Bambuddy. Bytes are never an argument: a mesh ' +
+      "reaches the workspace by the user's upload in the assistant panel, http_request `save_to_workspace`, or workspace_save.",
+    input: z
+      .object({
+        name: z.string().min(1).max(200),
+        description: z.string().max(10_000).optional(),
+        library_file_id: z.number().int().positive().optional(),
+        output_id: z.string().regex(/^[0-9a-f]{32}$/).optional(),
+        filename: z.string().min(1).max(255).optional().describe('The upload\'s name, ending .3mf or .stl; the workspace file\'s own name by default'),
+        workspace_path: workspacePathInput.optional(),
+        workspace_sha256: workspaceShaInput.optional(),
+      })
+      .strict(),
     risk: 'write',
     routes: ['POST /api/v1/models/from-mesh', 'POST /api/v1/models/from-mesh/upload'],
     title: ({ name }) => `Open a mesh as the model "${name}"`,
-    handler: async ({ name, description, library_file_id, output_id, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const uploading = content_base64 !== undefined || workspace_path !== undefined
-      if ([library_file_id !== undefined, output_id !== undefined, uploading].filter(Boolean).length !== 1) {
-        throw new ToolError('give exactly one source: library_file_id, output_id, or an upload (content_base64 or workspace_path)')
+    handler: async ({ name, description, library_file_id, output_id, filename, workspace_path, workspace_sha256 }, ctx) => {
+      if ([library_file_id !== undefined, output_id !== undefined, workspace_path !== undefined].filter(Boolean).length !== 1) {
+        throw new ToolError('give exactly one source: library_file_id, output_id, or workspace_path')
       }
-      if (!uploading) {
+      if (workspace_path === undefined) {
+        if (workspace_sha256 !== undefined) throw new ToolError('`workspace_sha256` goes with `workspace_path` only')
         const body =
           library_file_id !== undefined
             ? { name, description: description ?? '', library_file_id }
             : { name, description: description ?? '', output_id: output_id! }
         return json(await command(ctx, `open ${name}`, (headers) => ctx.backend.POST('/api/v1/models/from-mesh', { body, headers })))
       }
-      const source = await binarySource(ctx, { upload: 'create_model_from_mesh', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
-      const file = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
+      if (workspace_sha256 === undefined) {
+        throw new ToolError('`workspace_path` needs `workspace_sha256`: the sha256 workspace_list or workspace_read gave for the file')
+      }
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'create_model_from_mesh')
+      const file = filename ?? uploadName(info.path)
       // The extension says whether the bytes are an STL or a 3MF.
-      if (file === undefined || !/\.(3mf|stl)$/i.test(file)) throw new ToolError('give a `filename` ending .3mf or .stl')
+      if (!/\.(3mf|stl)$/i.test(file)) throw new ToolError('give a `filename` ending .3mf or .stl')
       const answer = await command(ctx, `open ${file}`, (headers) =>
         ctx.backend.POST('/api/v1/models/from-mesh/upload', {
           body: { file: file, name, description: description ?? null },
-          ...uploadInit(ctx, source, { name: 'file', filename: file, type: 'application/octet-stream' }, headers, { name, ...(description === undefined ? {} : { description }) }),
+          ...uploadInit(ctx, info, { name: 'file', filename: file, type: 'application/octet-stream' }, headers, { name, ...(description === undefined ? {} : { description }) }),
         }),
       )
-      return json(withSent(answer, 'info' in source ? source.info : undefined))
+      return json(withSent(answer, info))
     },
   }),
 
