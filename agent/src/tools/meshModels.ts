@@ -58,8 +58,7 @@ export const meshModelTools: Tool[] = [
       'Open a mesh as an editable model: a Bambuddy library file (library_file_id, from list_library), an output ' +
       '(output_id), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a ' +
       'scene object you can cut, join with a peg and socket, lay flat, add to or subtract from with edit_scene, then ' +
-      'render and print like any template. Nothing is written to Bambuddy. ' +
-      BYTES_NEVER_AN_ARGUMENT,
+      'render and print like any template. Nothing is written to Bambuddy. ' + BYTES_NEVER_AN_ARGUMENT,
     input: z
       .object({
         name: z.string().min(1).max(200),
