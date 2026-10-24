@@ -250,6 +250,36 @@ def test_a_declined_pick_says_the_hand_picked_position_was_not_sent() -> None:
     ]
 
 
+def test_a_declined_pick_says_an_unfitting_position_once() -> None:
+    """#4555: position 1 (a 0.2) does not fit group 1 (0.4 Standard). The run says it
+    was not sent, and not a second time that it was not used."""
+    plan = read_rack_plan(sliced(), 1)
+    assert plan is not None
+    chosen = choose_nozzles(
+        plan, idle_status(), algorithm="bambuddy", manual_position=1, usage={}, spools={}
+    )
+    assert chosen.declined
+    manual = [w.message for w in chosen.warnings if w.kind == "rack-manual-partial"]
+    assert manual == [
+        "Rack position 1 was not sent: the slice put the rack side in 4 nozzle groups, and"
+        " over the LAN the printer picks for all of them or none."
+    ]
+
+
+def test_a_declined_pick_says_the_printer_picks_an_abrasives_nozzle() -> None:
+    """#4555: over the LAN it is the printer, not Bambuddy, that picks the hotend."""
+    info = SLICE_INFO.replace('type="PLA" color="#8344B080"', 'type="PLA-CF" color="#8344B080"')
+    plan = read_rack_plan(sliced(info), 1)
+    assert plan is not None
+    chosen = choose_nozzles(
+        plan, idle_status(), algorithm="bambuddy", manual_position=None, usage={}, spools={}
+    )
+    unsafe = [w.message for w in chosen.warnings if w.kind == "rack-unsafe-material"]
+    assert unsafe == [
+        "The printer picks the nozzle and may use a non-hardened one for PLA-CF, PLA."
+    ]
+
+
 def test_a_file_with_no_slice_info_has_no_plan() -> None:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:

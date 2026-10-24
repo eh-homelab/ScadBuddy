@@ -567,6 +567,8 @@ async def test_a_sent_rack_pick_carries_no_left_to_the_printer_warning(
         client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS
     )
     assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert "nozzle_mapping" in sent
     [outcome] = fake.outcomes
     assert outcome.lan is not None
     assert not any(w.kind == "rack-left-to-bambuddy" for w in outcome.lan.warnings)

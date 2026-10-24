@@ -437,8 +437,11 @@ def rack_warnings(
     algorithm: RackAlgorithm,
     picks: Mapping[int, Pick],
     manual: Mapping[int, int],
+    *,
+    picker: str = "Bambuddy",
 ) -> list[FilamentWarning]:
-    """What the run carries about each group's pick (spec §5, §6)."""
+    """What the run carries about each group's pick (spec §5, §6). ``picker`` is who
+    picks the hotends the "bambuddy" ranking leaves: the printer, over the LAN."""
     positions = rack_positions(rack)
     found: list[FilamentWarning] = []
     for group in sorted(groups, key=lambda g: g.group_id):
@@ -479,7 +482,7 @@ def rack_warnings(
                 found.append(
                     _warning(
                         "rack-unsafe-material",
-                        "Bambuddy picks the nozzle and may use a non-hardened one for "
+                        f"{picker} picks the nozzle and may use a non-hardened one for "
                         f"{_materials(group)}.",
                     )
                 )
