@@ -3,7 +3,9 @@ import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
+import type { SessionFiles } from '../src/workspace/store.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
+import { memoryWorkspace } from './helpers/workspace.js'
 
 // #2146: mesh models. Every write is a command (an Idempotency-Key, 202 followed).
 
@@ -35,9 +37,10 @@ function tool(name: string) {
   return found
 }
 
-async function call(name: string, args: unknown, client: ReturnType<typeof backend>['client']) {
+async function call(name: string, args: unknown, client: ReturnType<typeof backend>['client'], workspace?: SessionFiles) {
   const ctx: ToolContext = {
     ...services({ backend: client }),
+    ...(workspace === undefined ? {} : { workspace }),
     principal: { id: 'token:t1', kind: 'bearer', tiers: tiersUpTo('write') },
     progress: async () => {},
     signal: new AbortController().signal,
@@ -61,29 +64,36 @@ describe('mesh model tools', () => {
     expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh', body: { name: 'Carrot', output_id: 'a'.repeat(32), description: '' } }))
   })
 
-  it('uploads base64 as multipart', async () => {
+  it('uploads a workspace file as multipart, named by its path', async () => {
     const { seen, client } = backend()
-    await call('create_model_from_mesh', { name: 'Carrot', filename: 'carrot.stl', content_base64: Buffer.from('solid x').toString('base64') }, client)
+    const ws = memoryWorkspace({ 'downloads/carrot.stl': Buffer.from('solid x') })
+    const result = await call('create_model_from_mesh', { name: 'Carrot', ...ws.ref('downloads/carrot.stl') }, client, ws.workspace)
     expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh/upload', body: 'multipart', fields: { name: 'Carrot' } }))
+    expect(firstText(result)).toMatchObject({ workspace_file: { path: 'downloads/carrot.stl', size_bytes: 7 } })
   })
 
   it('sends an upload\'s description as a multipart field', async () => {
     const { seen, client } = backend()
-    await call('create_model_from_mesh', { name: 'Carrot', description: 'Two carrots', filename: 'carrot.stl', content_base64: Buffer.from('solid x').toString('base64') }, client)
+    const ws = memoryWorkspace({ 'mesh.bin': Buffer.from('solid x') })
+    await call('create_model_from_mesh', { name: 'Carrot', description: 'Two carrots', filename: 'carrot.stl', ...ws.ref('mesh.bin') }, client, ws.workspace)
     expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh/upload', fields: { name: 'Carrot', description: 'Two carrots' } }))
   })
 
-  it('refuses no source, two sources, a missing filename and a wrong extension, sending nothing', async () => {
+  it('refuses no source, two sources, a path without its sha256, a missing filename and a wrong extension, sending nothing', async () => {
     const { seen, client } = backend()
-    const b64 = Buffer.from('x').toString('base64')
+    const ws = memoryWorkspace({ 'x.bin': Buffer.from('x') })
     for (const args of [
       { name: 'X' },
       { name: 'X', library_file_id: 1, output_id: 'a'.repeat(32) },
-      { name: 'X', content_base64: b64 },
-      { name: 'X', content_base64: b64, filename: 'x.obj' },
+      { name: 'X', library_file_id: 1, ...ws.ref('x.bin') },
+      { name: 'X', library_file_id: 1, workspace_sha256: ws.ref('x.bin').workspace_sha256 },
+      { name: 'X', workspace_path: 'x.bin' },
+      { name: 'X', ...ws.ref('x.bin') },
+      { name: 'X', ...ws.ref('x.bin'), filename: 'x.obj' },
     ]) {
-      const result = await call('create_model_from_mesh', args, client)
-      expect(JSON.stringify(firstText(result))).toMatch(/exactly one source|filename|\.3mf or \.stl/)
+      const result = await call('create_model_from_mesh', args, client, ws.workspace)
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(firstText(result))).toMatch(/exactly one source|goes with `workspace_path`|needs `workspace_sha256`|\.3mf or \.stl/)
     }
     expect(seen).toEqual([])
   })

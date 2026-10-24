@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { ToolError } from './registry.js'
 
 // Argument schemas several tool groups share. Patterns mirror the backend's own
 // path-parameter validation in backend/openapi.json, so a bad value is refused
@@ -115,18 +114,6 @@ export const params = z
   .object({})
   .catchall(paramValue)
   .describe('Customizer values by parameter name; omitted parameters keep their defaults')
-
-export function decodeBase64(value: string, what: string): Uint8Array<ArrayBuffer> {
-  // Node's decoder silently drops characters outside the alphabet, so check the
-  // shape first rather than upload silently truncated bytes.
-  const compact = value.replace(/\s+/g, '')
-  if (compact.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
-    throw new ToolError(`${what} is not valid base64`)
-  }
-  const bytes = Buffer.from(compact, 'base64')
-  if (bytes.byteLength === 0) throw new ToolError(`${what} is empty or not base64`)
-  return new Uint8Array(bytes)
-}
 
 /** A multipart body with one `file` part, for the backend's upload routes. */
 export function fileForm(bytes: Uint8Array<ArrayBuffer>, filename: string, type: string): FormData {

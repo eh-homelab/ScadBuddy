@@ -1,13 +1,15 @@
 import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import { decodeText, type WorkspaceFileInfo, WorkspaceError, workspaceOf, workspacePath } from '../workspace/store.js'
-import { decodeBase64 } from './common.js'
 import { ToolError, type ToolContext } from './registry.js'
 
 // Uploads from the assistant's workspace (#2329 part 2): every tool that sends a
-// file's bytes or text to ScadBuddy takes `workspace_path` as the alternative to
-// its inline content, so a file the assistant downloaded, saved or wrote is sent
-// without the model writing it out token by token.
+// file's text to ScadBuddy takes `workspace_path` as the alternative to its inline
+// content, so a file the assistant downloaded, saved or wrote is sent without the
+// model writing it out token by token. A binary file goes by `workspace_path` only
+// (#2510): no tool takes bytes as a base64 argument. Binary reaches the workspace
+// by the panel's upload (routes/sessionFiles.ts), http_request `save_to_workspace`
+// or workspace_save, never through the model.
 //
 // `workspace_sha256` goes with it, required: it is the sha256 the model read the
 // file at (workspace_list, workspace_read, workspace_save), and the upload is
@@ -46,7 +48,13 @@ export function fromWorkspace(inline: string): string {
   )
 }
 
-type Choice<T> = { inline: T } | { workspace: { path: string; sha256: string } }
+/** The sentence each binary upload tool's description ends with: a workspace file is the only way in (#2510). */
+export const FROM_WORKSPACE_ONLY =
+  ' Give `workspace_path` with its `workspace_sha256`: the file in your workspace to send. Bytes are never an ' +
+  "argument: a binary file reaches the workspace by the user's upload in the assistant panel, http_request " +
+  '`save_to_workspace`, or workspace_save.'
+
+type Choice<T> ={ inline: T } | { workspace: { path: string; sha256: string } }
 
 /** Which one the call gave: the inline value or a workspace file. Refuses both, neither, or a path without its sha256. */
 export function inlineOrWorkspace<T>(
@@ -84,8 +92,8 @@ function asToolError(err: unknown): never {
 // the workspace (an http_request body, a browser download, a saved file) could
 // otherwise be moved into a README, a source file or an asset and read back
 // unredacted through get_readme or read_file, or reach Bambuddy. So every upload
-// is searched for every secret first, the workspace file's bytes and inline
-// content alike, text and binary (a byte search), and refused when one is there.
+// is searched for every secret first, the workspace file's bytes (text and
+// binary, a byte search) and inline text alike, and refused when one is there.
 // The refusal names the upload and says a credential was found, never which.
 
 /** The secrets an upload must not carry, as bytes; shorter than four characters is not a secret (secrets.ts `redact`). */
@@ -107,12 +115,11 @@ function credentialFound(upload: string, what: string): ToolError {
   )
 }
 
-/** Refuses inline bytes or text that carry a credential. */
-async function checkInline(ctx: ToolContext, upload: string, field: string, content: Uint8Array | string): Promise<void> {
+/** Refuses inline text that carries a credential. */
+async function checkInline(ctx: ToolContext, upload: string, field: string, content: string): Promise<void> {
   const secrets = await secretBytes(ctx)
   if (secrets.length === 0) return
-  const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
-  if (holdsSecret(bytes, secrets)) throw credentialFound(upload, `\`${field}\``)
+  if (holdsSecret(Buffer.from(content, 'utf8'), secrets)) throw credentialFound(upload, `\`${field}\``)
 }
 
 /** Refuses a workspace file whose bytes carry a credential, read a slice at a time (a secret across two slices is found too). */
@@ -231,44 +238,21 @@ export function streamedForm(
   return { body, contentType: `multipart/form-data; boundary=${boundary}` }
 }
 
-/** A file an upload sends: bytes given inline, or a workspace file checked by `workspaceFile`. */
-export type UploadSource = { bytes: Uint8Array<ArrayBuffer> } | { info: WorkspaceFileInfo }
-
 /**
- * The openapi-fetch options of ONE send of a multipart upload, to spread into
- * the call: inline bytes as FormData, or a workspace file streamed
+ * The openapi-fetch options of ONE send of a multipart upload of a workspace
+ * file checked by `workspaceFile`, to spread into the call: the file streamed
  * (`streamedForm`, with `duplex: 'half'`, which a streamed request body needs).
  * Call it inside the send, so a re-send gets a fresh stream.
  */
 export function uploadInit<H extends Record<string, string>>(
   ctx: ToolContext,
-  source: UploadSource,
+  info: WorkspaceFileInfo,
   part: { name: string; filename: string; type: string },
   headers: H,
   fields: Record<string, string> = {},
-): { bodySerializer: () => FormData | ReadableStream<Uint8Array>; headers: H | (H & { 'Content-Type': string }); duplex?: 'half' } {
-  if ('bytes' in source) {
-    const form = new FormData()
-    for (const [name, value] of Object.entries(fields)) form.append(name, value)
-    form.append(part.name, new Blob([source.bytes], { type: part.type }), part.filename)
-    return { bodySerializer: () => form, headers }
-  }
-  const streamed = streamedForm(ctx, source.info, part, fields)
+): { bodySerializer: () => ReadableStream<Uint8Array>; headers: H & { 'Content-Type': string }; duplex: 'half' } {
+  const streamed = streamedForm(ctx, info, part, fields)
   return { bodySerializer: () => streamed.body, headers: { ...headers, 'Content-Type': streamed.contentType }, duplex: 'half' }
-}
-
-/** The file a binary upload sends: its base64 decoded, or the workspace file, checked. */
-export async function binarySource(
-  ctx: ToolContext,
-  args: { upload: string; base64: string | undefined; base64Name: string; path: string | undefined; sha256: string | undefined },
-): Promise<UploadSource> {
-  const choice = inlineOrWorkspace(args.base64, args.base64Name, args.path, args.sha256)
-  if ('inline' in choice) {
-    const bytes = decodeBase64(choice.inline, args.base64Name)
-    await checkInline(ctx, args.upload, args.base64Name, bytes)
-    return { bytes }
-  }
-  return { info: await workspaceFile(ctx, choice.workspace, args.upload) }
 }
 
 /** The text a text upload sends: given inline, or the workspace file's, decoded. `info` names the file it came from. */

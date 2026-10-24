@@ -16,7 +16,7 @@ import {
 } from '../workspace/store.js'
 import { readCapped } from './binary.js'
 import { ok } from './call.js'
-import { decodeBase64, outputId, slug } from './common.js'
+import { outputId, slug } from './common.js'
 import { applyEdits, numbered } from './files.js'
 import { libraryFileId } from './print.js'
 import { defineTool, json, text, ToolError, type Tool, type ToolContext } from './registry.js'
@@ -315,27 +315,29 @@ export const workspaceTools: Tool[] = [
   defineTool({
     name: 'workspace_write',
     description:
-      'Create or replace a workspace file with `content` (text) or `content_base64` (bytes). Give `expected_sha256` ' +
-      '(from workspace_read or workspace_list) to replace only the file you read, or `null` to create a new file only. ' +
-      'Prefer workspace_edit to change part of a text file. Answers the stored file\'s size and sha256.',
-    input: z.object({
-      path,
-      content: z.string().optional().describe("The file's whole text (UTF-8)"),
-      content_base64: z.string().optional().describe("The file's bytes as base64, for a binary file"),
-      media_type: z.string().min(1).max(255).optional().describe('The media type; guessed from the bytes and the extension when omitted'),
-      expected_sha256: sha
-        .nullable()
-        .optional()
-        .describe("The sha256 the file must have now (else nothing is written), or null for a file that must not exist yet"),
-    }),
+      'Create or replace a workspace text file with `content`. Give `expected_sha256` (from workspace_read or ' +
+      'workspace_list) to replace only the file you read, or `null` to create a new file only. Prefer workspace_edit ' +
+      "to change part of a text file. Text only: a binary file reaches the workspace by the user's upload in the " +
+      'assistant panel, http_request `save_to_workspace`, or workspace_save, never as an argument. Answers the stored ' +
+      "file's size and sha256.",
+    input: z
+      .object({
+        path,
+        content: z.string().describe("The file's whole text (UTF-8)"),
+        media_type: z.string().min(1).max(255).optional().describe('The media type; guessed from the bytes and the extension when omitted'),
+        expected_sha256: sha
+          .nullable()
+          .optional()
+          .describe("The sha256 the file must have now (else nothing is written), or null for a file that must not exist yet"),
+      })
+      .strict(),
     risk: 'write',
     source: SOURCE,
     routes: [],
     title: ({ path: p }) => `Write workspace file ${p}`,
-    handler: async ({ path: p, content, content_base64, media_type, expected_sha256 }, ctx) =>
+    handler: async ({ path: p, content, media_type, expected_sha256 }, ctx) =>
       guarded(async () => {
-        if ((content === undefined) === (content_base64 === undefined)) throw new ToolError('give `content` or `content_base64`, not both or neither')
-        const bytes = content !== undefined ? new TextEncoder().encode(content) : decodeBase64(content_base64!, 'content_base64')
+        const bytes = new TextEncoder().encode(content)
         const { files, ws } = filesOf(ctx)
         const info = await files.write(ws, p, bytes, {
           mediaType: media_type,

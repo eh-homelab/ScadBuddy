@@ -4,7 +4,7 @@ import { ACCEPTING_MS, command, type CommandHeaders, reattachFollowing, RESPOND_
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
-import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
+import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { blob, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER, renderPrincipal } from './renderLimits.js'
 import { validateParams } from './validate.js'
@@ -509,34 +509,34 @@ export const customizerTools: Tool[] = [
     description:
       'Upload an SVG or PNG for a `// file` parameter. Returns its asset id, the value to pass ' +
       'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.' +
-      fromWorkspace('`content_base64`'),
-    input: z.object({
-      slug,
-      filename: z
-        .string()
-        .min(1)
-        .optional()
-        .describe('e.g. "logo.svg"; the content is sniffed, not trusted by name. With workspace_path, the file\'s own name by default'),
-      content_base64: z.string().min(1).optional().describe("The file's bytes as base64"),
-      workspace_path: workspacePathInput.optional(),
-      workspace_sha256: workspaceShaInput.optional(),
-    }),
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        slug,
+        filename: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('e.g. "logo.svg"; the content is sniffed, not trusted by name. The workspace file\'s own name by default'),
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+      })
+      .strict(),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/assets'],
-    title: ({ slug, filename, workspace_path }) => `Upload ${filename ?? workspace_path ?? 'asset'} → ${slug}`,
-    handler: async ({ slug, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const source = await binarySource(ctx, { upload: 'upload_asset', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
-      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
-      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
+    title: ({ slug, filename, workspace_path }) => `Upload ${filename ?? workspace_path} → ${slug}`,
+    handler: async ({ slug, filename, workspace_path, workspace_sha256 }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'upload_asset')
+      const name = filename ?? uploadName(info.path)
       const type = name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
       const answer = await command(ctx, `upload ${name}`, (headers) =>
         ctx.backend.POST('/api/v1/models/{slug}/assets', {
           params: { path: { slug } },
           body: { file: name },
-          ...uploadInit(ctx, source, { name: 'file', filename: name, type }, headers),
+          ...uploadInit(ctx, info, { name: 'file', filename: name, type }, headers),
         }),
       )
-      return json(withSent(answer, 'info' in source ? source.info : undefined))
+      return json(withSent(answer, info))
     },
   }),
 
