@@ -441,7 +441,8 @@ def rack_warnings(
     picker: str = "Bambuddy",
 ) -> list[FilamentWarning]:
     """What the run carries about each group's pick (spec §5, §6). ``picker`` is who
-    picks the hotends the "bambuddy" ranking leaves: the printer, over the LAN."""
+    picks the hotends ScadBuddy leaves, worded mid-sentence ("the printer" over the
+    LAN); it is capitalised where it starts one."""
     positions = rack_positions(rack)
     found: list[FilamentWarning] = []
     for group in sorted(groups, key=lambda g: g.group_id):
@@ -482,14 +483,14 @@ def rack_warnings(
                 found.append(
                     _warning(
                         "rack-unsafe-material",
-                        f"{picker} picks the nozzle and may use a non-hardened one for "
-                        f"{_materials(group)}.",
+                        f"{picker[:1].upper()}{picker[1:]} picks the nozzle and may use a "
+                        f"non-hardened one for {_materials(group)}.",
                     )
                 )
             continue
         if diameter(group.nozzle_diameter) is None:
-            message = f"Rack pick left to Bambuddy: {group.name}: nozzle size unreadable."
+            message = f"Rack pick left to {picker}: {group.name}: nozzle size unreadable."
         else:
-            message = f"Rack pick left to Bambuddy: no eligible position for {group.name}."
+            message = f"Rack pick left to {picker}: no eligible position for {group.name}."
         found.append(_warning("rack-left-to-bambuddy", message))
     return found
