@@ -248,3 +248,77 @@ def test_a_presence_bit_an_ams_4_shares_with_an_ams_ht_vetoes_neither() -> None:
     status = status_from_report(row(), report, now=report.received_at)
     exists = {(unit.id, tray.id): tray.exists for unit in status.ams for tray in unit.tray}
     assert exists == {(4, 0): None, (4, 2): False, (128, 0): None}
+
+
+RECORDED = Path(__file__).parent / "fixtures" / "lan-report-h2c-idle.json"
+
+
+@pytest.fixture
+def recorded_h2c() -> LanReport:
+    data = json.loads(RECORDED.read_text(encoding="utf-8"))
+    data.pop("firmware")
+    return LanReport.model_validate(data)
+
+
+def test_a_recorded_h2c_report(recorded_h2c: LanReport) -> None:
+    """The live H2C (firmware 01.02.00.00, 2026-10-24): four AMS 2 Pro on the Filament
+    Track Switch's inlets (``info`` 11002E03 is A, 10002E03 B), an AMS-HT, and the rack."""
+    status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
+    assert status.state == "FINISH"
+    assert [unit.id for unit in status.ams] == [0, 1, 2, 3, 128]
+    assert all(tray.exists for unit in status.ams for tray in unit.tray)
+    assert status.ams[1].tray[1].tray_color == "FEC600FF"
+    assert [tray.id for tray in status.vt_tray] == [254, 255]
+    assert status.fila_switch is not None and status.fila_switch.installed
+    assert status.ams_extruder_map == {}
+    assert status.ams_switch_inlet == {"0": "A", "1": "B", "2": "B", "3": "A", "128": "A"}
+    assert [slot.id for slot in status.nozzle_rack] == [16, 17, 20, 21, 18]
+    first = status.nozzle_rack[0]
+    assert (first.nozzle_type, first.nozzle_diameter) == ("HS00", "0.2")
+    assert (first.filament_id, first.filament_colour) == ("GFA00", "EC008CFF")
+
+
+def test_a_unit_on_a_fixed_extruder_is_mapped_and_has_no_inlet(recorded_h2c: LanReport) -> None:
+    data = recorded_h2c.print
+    del data["device"]["fila_switch"]
+    data["ams"]["ams"][0]["info"] = "10001003"
+    status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
+    assert status.fila_switch is None
+    # Unit 1 still says 0xE ("not fixed"), and with no switch that names nothing.
+    assert status.ams_extruder_map == {"0": 0}
+    assert status.ams_switch_inlet == {}
+
+
+def test_an_inlet_other_than_a_or_b_is_unknown(recorded_h2c: LanReport) -> None:
+    from scadbuddy.bambuddy.extruders import extruder_of
+
+    recorded_h2c.print["ams"]["ams"][0]["info"] = "12002E03"  # inlet nibble 2
+    status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
+    assert "0" not in status.ams_switch_inlet and "0" not in status.ams_extruder_map
+    assert extruder_of(0, 0, status) is None
+
+
+def test_an_info_that_is_not_hex_text_reads_as_absent(recorded_h2c: LanReport) -> None:
+    data = recorded_h2c.print
+    data["ams"]["ams"][0]["info"] = 1003
+    data["ams"]["ams"][1]["info"] = "zz"
+    status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
+    assert set(status.ams_switch_inlet) == {"2", "3", "128"}
+
+
+REINSERT = Path(__file__).parent / "fixtures" / "lan-tray-reinsert-h2c.json"
+
+
+def test_a_spool_pulled_and_pushed_back(recorded_h2c: LanReport) -> None:
+    """AMS 1 slot 1 pulled and pushed back on the live H2C: its presence bit (5) follows
+    the spool at once, and the tray stays bare until the RFID read finishes ~20 s later."""
+    seen: list[tuple[bool | None, str | None]] = []
+    for step in json.loads(REINSERT.read_text(encoding="utf-8"))["steps"]:
+        data = recorded_h2c.print
+        data["ams"]["tray_exist_bits"] = step["tray_exist_bits"]
+        data["ams"]["ams"][1]["tray"][1] = step["ams_1_tray_1"]
+        tray = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at).ams[1].tray[1]
+        seen.append((tray.exists, tray.tray_type))
+    assert seen[0] == (True, "PLA") and seen[1] == (False, None)
+    assert (True, None) in seen[2:]
+    assert seen[-1] == (True, "PLA")

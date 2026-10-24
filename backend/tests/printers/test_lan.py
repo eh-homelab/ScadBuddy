@@ -24,16 +24,23 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from scadbuddy.printers.lan import (
+    UPLOAD_DIR,
     CertificateMismatchError,
     ImplicitFtpTls,
     LanPrinter,
     fetch_cert_sha256,
+    file_url,
     merge_report,
     pinned_context,
     project_file_command,
     pushall_command,
 )
 from scadbuddy.printers.lan_models import ProjectFile
+
+
+def test_the_measured_upload_place_and_url() -> None:
+    """Task 7, on an H2C (`lan.py`'s docstring): the root, named ``ftp://<name>``."""
+    assert (UPLOAD_DIR, file_url("scadbuddy-1-p1.3mf")) == ("/", "ftp://scadbuddy-1-p1.3mf")
 
 
 def test_pushall_command() -> None:
