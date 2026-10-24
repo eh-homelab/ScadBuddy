@@ -48,7 +48,7 @@ export const farmTools: Tool[] = [
       'the Bambuddy printer id every print tool takes (as get_print_targets lists them), `id`, its registry id, ' +
       'which the registry tools and print_output (`printer`) take, and `path`, the link that answered (native ' +
       'over the LAN, bambuddy, or none). `printer_id` is null for a printer reached only over the LAN, which the ' +
-      'print tools cannot address yet.',
+      'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`).',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,
