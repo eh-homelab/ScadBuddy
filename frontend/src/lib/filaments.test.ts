@@ -432,4 +432,9 @@ describe('trayChoiceLabel and providerLabel', () => {
     expect(providerLabel('spoolman')).toBe('Spoolman')
     expect(providerLabel('open_spool')).toBe('Open Spool')
   })
+
+  it("prefers the provider's own label from the answer (#4516)", () => {
+    expect(providerLabel('open_spool', { open_spool: 'OpenSpool' })).toBe('OpenSpool')
+    expect(providerLabel('open_spool', { bambuddy: 'Bambuddy' })).toBe('Open Spool')
+  })
 })

@@ -1029,6 +1029,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9).
     # The follow's newest-failure read shares its newest-run query (#4540 review).
     recent_runs = RecentRuns(print_runs)
+    # A subject's ``print.run`` drops its kept run (#4541).
+    events.add_listener(recent_runs.heard)
     lan = LanProgress(recent_runs.latest, printers, reports)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:

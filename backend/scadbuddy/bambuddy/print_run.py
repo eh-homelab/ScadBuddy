@@ -1664,14 +1664,16 @@ async def lan_printers(
     """The registry rows a run would reach over the LAN (#3818): those `run_path` puts on
     the LAN, when the stored backends make such a run native (`hot_path_native`, D2).
     None otherwise, so the dialog keeps its project, Bambuddy's folders and "queued" for
-    every printer, and the registry is not read."""
+    every printer, and the registry is not read. The reports are one query (#4516):
+    this is on every choices read."""
     if printers is None or not native_backends(settings):
         return []
     rows = await asyncio.to_thread(printers.list)
+    seen = {} if reports is None else await asyncio.to_thread(reports.all)
     now = datetime.now(UTC)
     out: list[str] = []
     for row in rows:
-        report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
+        report = seen.get(row.id)
         path = run_path(row, None if report is None else report[1], now=now)
         if hot_path_native(settings, path):
             out.append(row.id)

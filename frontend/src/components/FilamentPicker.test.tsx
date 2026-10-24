@@ -430,6 +430,11 @@ describe('FilamentPicker on the native path (source: trays)', () => {
     expect(within(slot(2)).queryByTestId(`records-${UNTAGGED_TRAY}`)).not.toBeInTheDocument()
   })
 
+  it("names a record by its provider's own label (#4516)", () => {
+    open({ ...hotFilaments(), provider_labels: { bambuddy: 'Bambuddy (garage)' } })
+    expect(within(slot(1)).getByTestId(`records-${TAGGED_TRAY}`)).toHaveTextContent('Bambuddy (garage): Bambu Lab Blue')
+  })
+
   it('offers only the loaded trays: a shelf record is for linking, never a print choice', async () => {
     // The backend keeps it in `shelf` (#4506); one in `spools` too would still not be offered.
     const options = hotFilaments()

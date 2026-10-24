@@ -262,6 +262,7 @@ export function hotFilaments(): FilamentOptions {
     ],
     trays: unknownTrays(),
     warnings: [],
+    provider_labels: { bambuddy: 'Bambuddy' },
   }
 }
 

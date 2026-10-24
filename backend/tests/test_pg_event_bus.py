@@ -16,6 +16,7 @@ import pytest
 import pytest_asyncio
 
 from scadbuddy.api.deps import build_state
+from scadbuddy.bambuddy.runs import RecentRuns
 from scadbuddy.core import pg_events
 from scadbuddy.core.events import (
     PG_CHANNEL,
@@ -564,6 +565,11 @@ def test_a_database_url_selects_the_postgres_bus_on_the_projection_s_listener(
     assert state.events.listener is projection.pg_listener
     assert state.events.retention == EventLogRetention(seconds=60, rows=10)
     assert PG_CHANNEL in projection.pg_listener.channels
+    # #4541: a subject's print.run drops the follow's kept newest run.
+    assert any(
+        getattr(listener, "__func__", None) is RecentRuns.heard
+        for listener in state.events.local._listeners
+    )
 
 
 @pytest.mark.parametrize("field", ["event_log_retention_seconds", "event_log_retention_rows"])

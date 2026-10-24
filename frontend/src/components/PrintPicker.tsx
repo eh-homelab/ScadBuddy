@@ -1615,6 +1615,7 @@ export function PrintPicker({
                         tray={tray}
                         // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.
                         spools={nativeRow ? openShelf : (filaments?.spools ?? [])}
+                        providerLabels={filaments?.provider_labels}
                         onAssigned={(link) => claim(tray, link)}
                         onDecline={() => trays.decline(tray)}
                       />

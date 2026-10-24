@@ -400,6 +400,8 @@ def _build_core(settings: Settings) -> AppState:
     # registry's rows and reports, read only, so no key.
     # The follow's newest-failure read shares its newest-run query (#4540 review).
     recent_runs = RecentRuns(print_run_store)
+    # A subject's ``print.run`` drops its kept run (#4541).
+    events.add_listener(recent_runs.heard)
     lan = LanProgress(recent_runs.latest, PrinterStore(pool, None), PrinterReportStore(pool))
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
