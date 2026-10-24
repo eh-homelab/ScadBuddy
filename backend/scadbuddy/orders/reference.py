@@ -18,7 +18,8 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
 from scadbuddy.core.config import Config
@@ -99,6 +100,23 @@ def reference_from_output(meta: OutputMeta, inputs: Mapping[str, Any]) -> Output
     )
 
 
+def is_commit_id(version: str | None) -> bool:
+    """A models-repository commit id, not the content hash an output falls back to."""
+    return version is not None and _COMMIT.match(version) is not None
+
+
+def arranged_revision(history: ModelHistory, slug: str, made: datetime) -> str | None:
+    """The template's commit when an arranged output was saved (#4565). An Arrange
+    renders nothing, so its output records the content hash of the template's directory
+    rather than a commit; the item pins the revision the template was at then."""
+    if not history.available:
+        return None
+    for revision in history.log(model_path(slug)):
+        if revision.date <= made:
+            return revision.commit
+    return None
+
+
 def render_key_of(slug: str, inputs: Mapping[str, Any], commit: str, *, pipeline: bool) -> str:
     """The job key a render of the reference would take (§3.3): the whole inputs for a
     pipeline template, else the params, as ``render/submit.py`` chooses."""
@@ -157,8 +175,14 @@ async def resolve_reference(
         try:
             meta = await asyncio.to_thread(outputs.get, output_id)
             facts = reference_from_output(meta, await asyncio.to_thread(outputs.inputs, output_id))
+            arranged = bool(await asyncio.to_thread(outputs.arranged_from, output_id))
         except OutputNotFoundError:
             raise ReferenceError("output_id", f"no output {output_id!r}") from None
+        if arranged and facts.commit is not None and not is_commit_id(facts.commit):
+            pinned = await asyncio.to_thread(
+                arranged_revision, history, facts.slug, meta.created_at
+            )
+            facts = replace(facts, commit=pinned)
         if slug is not None and slug != facts.slug:
             raise ReferenceError(
                 "output_id", f"output {output_id!r} is a render of {facts.slug!r}, not {slug!r}"
@@ -191,7 +215,7 @@ async def resolve_reference(
         if remembered is not None:
             raise TemplateDeletedError(slug)
         raise ReferenceError("slug", f"no model named {slug!r}")
-    if not _COMMIT.match(commit):
+    if not is_commit_id(commit):
         raise ReferenceError("commit", f"{commit!r} is not a commit id (7 to 40 hex characters)")
     if not history.available:
         raise ReferenceError("commit", "the models repository has no history to pin a commit in")

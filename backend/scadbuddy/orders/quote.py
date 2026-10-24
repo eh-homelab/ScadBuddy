@@ -52,7 +52,7 @@ from scadbuddy.orders.lifecycle import (
 from scadbuddy.orders.models import Actor, Filament, Order, OrderItem, PricingPolicy, Quote
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, PricingError, price
 from scadbuddy.orders.problems import PROBLEMS, refused
-from scadbuddy.orders.reference import colours_of
+from scadbuddy.orders.reference import colours_of, is_commit_id
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.inputs import inputs_key
 from scadbuddy.render.job_models import Job
@@ -226,6 +226,7 @@ class OutputsRead(Protocol):
 
     def get(self, output_id: str) -> OutputMeta: ...
     def inputs(self, output_id: str) -> dict[str, Any]: ...
+    def arranged_from(self, output_id: str) -> list[str]: ...
 
 
 class PolicySource(Protocol):
@@ -256,18 +257,22 @@ _SETTLED_JOB = frozenset({"failed", "cancelled"})
 
 def output_matches(outputs: OutputsRead, output_id: str | None, item: OrderItem) -> bool:
     """The output is there and its ``meta.json`` and inputs are the reference's (Ruling
-    7): its ``slug``, ``model_version`` and normalised inputs."""
+    7): its ``slug``, ``model_version`` and normalised inputs. An arranged output records
+    a content hash where a render records its commit, and the item pins the template's
+    commit instead (#4565): no render of the reference remakes the arrangement, so its
+    hash stands for the pinned commit."""
     if output_id is None:
         return False
     try:
         meta = outputs.get(output_id)
         inputs = outputs.inputs(output_id)
+        arranged = not is_commit_id(meta.model_version) and bool(outputs.arranged_from(output_id))
     except (OutputNotFoundError, OSError, ValueError):
         return False
     reference = item.reference
     return (
         meta.slug == reference.slug
-        and meta.model_version == reference.commit
+        and (meta.model_version == reference.commit or arranged)
         and inputs == reference.inputs
     )
 
