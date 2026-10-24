@@ -592,7 +592,11 @@ class RecentRuns:
         #: How many ``print.run`` events were heard, of any subject: a read that spans
         #: one may answer the run before it, so it is not kept. One counter, not one per
         #: subject, so nothing has to be evicted to bound it, and no eviction can make a
-        #: read that spanned an event look as if it had not (#4566 review).
+        #: read that spanned an event look as if it had not (#4566 review). Another
+        #: subject's event costs a read only its keep, and only when it lands inside the
+        #: read's query (3.2 ms median, measured for #4596 over 10,000 rows): with two
+        #: events per run (its insert and its end), even 50 runs started in one second
+        #: drop about 27% of that second's keeps, each one indexed query on the next read.
         self._heard = 0
 
     async def latest(self, run_subject: str) -> PrintRun | None:
