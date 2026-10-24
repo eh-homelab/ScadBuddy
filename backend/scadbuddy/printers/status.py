@@ -241,9 +241,12 @@ def _routing(report: dict[str, Any], switch: bool) -> tuple[dict[str, int], dict
     for entry in _list(block.get("ams") if isinstance(block, dict) else None):
         if not isinstance(entry, dict) or (unit := _int(entry.get("id"))) is None:
             continue
+        raw = entry.get("info")
         try:
-            info = int(str(entry.get("info")), 16)
+            info = int(raw, 16) if isinstance(raw, str) else None
         except ValueError:
+            info = None
+        if info is None:
             continue
         extruder = info >> 8 & 0xF
         if extruder != 0xE:

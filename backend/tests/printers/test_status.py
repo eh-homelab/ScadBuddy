@@ -284,8 +284,17 @@ def test_a_unit_on_a_fixed_extruder_is_mapped_and_has_no_inlet(recorded_h2c: Lan
     data["ams"]["ams"][0]["info"] = "10001003"
     status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
     assert status.fila_switch is None
+    # Unit 1 still says 0xE ("not fixed"), and with no switch that names nothing.
     assert status.ams_extruder_map == {"0": 0}
     assert status.ams_switch_inlet == {}
+
+
+def test_an_info_that_is_not_hex_text_reads_as_absent(recorded_h2c: LanReport) -> None:
+    data = recorded_h2c.print
+    data["ams"]["ams"][0]["info"] = 1003
+    data["ams"]["ams"][1]["info"] = "zz"
+    status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
+    assert set(status.ams_switch_inlet) == {"2", "3", "128"}
 
 
 REINSERT = Path(__file__).parent / "fixtures" / "lan-tray-reinsert-h2c.json"

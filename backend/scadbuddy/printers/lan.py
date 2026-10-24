@@ -50,6 +50,7 @@ import socket
 import ssl
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import Any, BinaryIO
 
 import aiomqtt
@@ -285,13 +286,36 @@ class LanPrinter:
         address = await lan_address(self.host)
         return await asyncio.to_thread(self._upload, address, data, remote_name)
 
-    def _upload(self, address: str, data: BinaryIO, remote_name: str) -> str:
-        md5 = hashlib.md5(usedforsecurity=False)
+    async def download(self, remote_name: str) -> bytes:
+        """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file)."""
+        address = await lan_address(self.host)
+        return await asyncio.to_thread(self._download, address, remote_name)
+
+    def _ftps(self, address: str) -> ImplicitFtpTls:
+        """A logged-in, protected FTPS session on ``address``; the caller closes it."""
         ftp = ImplicitFtpTls(context=ftps_context(self.cert_sha256), timeout=FTP_TIMEOUT)
         try:
             ftp.connect(address, FTPS_PORT)
             ftp.login(USERNAME, self._access_code)
             ftp.prot_p()
+        except BaseException:
+            ftp.close()
+            raise
+        return ftp
+
+    def _download(self, address: str, remote_name: str) -> bytes:
+        ftp = self._ftps(address)
+        try:
+            out = BytesIO()
+            ftp.retrbinary(f"RETR {remote_name}", out.write)
+            return out.getvalue()
+        finally:
+            ftp.close()
+
+    def _upload(self, address: str, data: BinaryIO, remote_name: str) -> str:
+        md5 = hashlib.md5(usedforsecurity=False)
+        ftp = self._ftps(address)
+        try:
             ftp.voidcmd("TYPE I")
             conn = ftp.transfercmd(f"STOR {remote_name}")
             try:

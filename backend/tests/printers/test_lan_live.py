@@ -62,7 +62,10 @@ def test_mqtt_and_ftps_present_one_certificate(printer: dict[str, str]) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("SCADBUDDY_TEST_PRINTER_PRINT") != "1", reason="starts a print: opt in"
+    os.environ.get("SCADBUDDY_TEST_PRINTER_PRINT") != "1"
+    or not os.environ.get("SCADBUDDY_TEST_PRINTER_FILE")
+    or not os.environ.get("SCADBUDDY_TEST_PRINTER_AMS"),
+    reason="starts a print: opt in with SCADBUDDY_TEST_PRINTER_PRINT=1, _FILE and _AMS",
 )
 async def test_upload_then_project_file_is_accepted(printer: dict[str, str]) -> None:
     """Stores a sliced 3MF the printer already holds under a probe name (set
@@ -70,7 +73,7 @@ async def test_upload_then_project_file_is_accepted(printer: dict[str, str]) -> 
     starts it with ``SCADBUDDY_TEST_PRINTER_AMS`` (comma-separated tray ids) as its
     ``ams_mapping``, and stops it as soon as the printer is running it."""
     lan = LanPrinter(**printer, cert_sha256=fetch_cert_sha256(printer["host"]))
-    sliced = await asyncio.to_thread(_download, lan, os.environ["SCADBUDDY_TEST_PRINTER_FILE"])
+    sliced = await lan.download(os.environ["SCADBUDDY_TEST_PRINTER_FILE"])
     assert "Metadata/plate_1.gcode" in zipfile.ZipFile(BytesIO(sliced)).namelist()
     name = "scadbuddy-probe.3mf"
     md5 = await lan.upload(BytesIO(sliced), f"{UPLOAD_DIR}{name}")
@@ -90,25 +93,10 @@ async def test_upload_then_project_file_is_accepted(printer: dict[str, str]) -> 
         await lan.publish(command)
         async with asyncio.timeout(60):
             async for report in lan.reports():
+                if report.print.get("subtask_name") != "scadbuddy-probe":
+                    continue
                 assert report.print.get("print_error", 0) == 0
-                if report.print.get("subtask_name") == "scadbuddy-probe" and report.print.get(
-                    "gcode_state"
-                ) in ("PREPARE", "RUNNING"):
+                if report.print.get("gcode_state") in ("PREPARE", "RUNNING"):
                     break
     finally:
         await lan.publish({"print": {"command": "stop", "sequence_id": "20002"}})
-
-
-def _download(lan: LanPrinter, path: str) -> bytes:
-    from scadbuddy.printers.lan import FTPS_PORT, USERNAME, ImplicitFtpTls, ftps_context
-
-    ftp = ImplicitFtpTls(context=ftps_context(lan.cert_sha256), timeout=30)
-    try:
-        ftp.connect(lan.host, FTPS_PORT)
-        ftp.login(USERNAME, lan._access_code)
-        ftp.prot_p()
-        out = BytesIO()
-        ftp.retrbinary(f"RETR {path}", out.write)
-        return out.getvalue()
-    finally:
-        ftp.close()
