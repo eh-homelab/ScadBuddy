@@ -995,7 +995,9 @@ async def check_print(
             return PrintCheck(errors=[error.detail])
         if isinstance(error, MemoryError):
             # As the layout's read below (#4576 review): a read of the file that runs out
-            # of memory is the check's refusal, never a 500.
+            # of memory is the check's refusal, never a 500. Logged, as the allocation
+            # that failed may not have been a read of the file.
+            logger.warning("print check ran out of memory preparing the run", exc_info=True)
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     if laying_out is None:
@@ -1011,6 +1013,7 @@ async def check_print(
         if isinstance(error, MemoryError):
             # The file too large to hold here (#4562 review): refused as a read of it is,
             # saying how to bound it, never a 500.
+            logger.warning("print check ran out of memory laying out the file", exc_info=True)
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     inventory = await reading if reading is not None else None
