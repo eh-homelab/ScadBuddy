@@ -105,6 +105,7 @@ from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     OutputSource,
     PrintSource,
+    SharedFilamentReader,
     bambuddy_client,
 )
 from scadbuddy.bambuddy.projects import require_destination_folder
@@ -1590,15 +1591,15 @@ async def check_for_library(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
-    filaments: FilamentReader | None = None,
+    filaments: SharedFilamentReader | None = None,
     files: LibraryReads | None = None,
     printers: PrinterStore | None = None,
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
-    slots read from the file itself (#2550), from the download the check's layout reads
-    anyway (#4495); ``files`` reads a native one (#3827)."""
+    slots read from the file itself (#2550): from their cache, else from the download
+    the check's layout reads anyway (#4495); ``files`` reads a native one (#3827)."""
     return await check_print(
         client,
         await LibrarySource.load(
@@ -1606,8 +1607,7 @@ async def check_for_library(
             file_id,
             uploads=uploads,
             settings=settings,
-            filaments=filaments,
-            share_fetch=True,
+            shared=filaments,
             files=files,
         ),
         settings,
