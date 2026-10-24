@@ -133,21 +133,47 @@ updates:
       go-fuse:
         patterns: ["github.com/hanwen/go-fuse/*"]
 
+  # The frontend and the AI agent service (#261), one entry for both. A group
+  # in a multi-directory entry is one PR across every directory it touches,
+  # which zod needs: agent/test/zodAlias.test.ts fails unless agent/ and
+  # frontend/ declare the same zod range, so separate entries opened one
+  # failing PR per directory (#4294, #4307). The groups are the union of the
+  # two old entries'; a pattern that matches nothing in a directory is a no-op
+  # there. The cost is the domain label: one entry cannot label frontend and
+  # agent PRs differently, so they carry only `dependencies` and `npm`.
+  #
+  # `@anthropic-ai/claude-agent-sdk` is pinned to an exact version, and it
+  # bundles the Claude Code binary the harness runs. The `agent` job's tests
+  # run that binary against a fake endpoint, so an SDK bump that changes what
+  # the harness relies on reds the job on its PR (#1540).
   - package-ecosystem: "npm"
-    directory: "/frontend"
+    directories:
+      - "/frontend"
+      - "/agent"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "04:00"
-    open-pull-requests-limit: 10
+    # The two old entries' 10 each.
+    open-pull-requests-limit: 20
     reviewers:
       - "ElanHasson"
     commit-message:
       prefix: "deps"
       prefix-development: "deps-dev"
       include: "scope"
-    labels: ["dependencies", "frontend", "npm"]
+    labels: ["dependencies", "npm"]
     groups:
+      # The SDK declares these as peer dependencies; they move together. zod
+      # is here for both directories: the agent's SDK peers on it and the
+      # frontend's must match it (see above).
+      agent-sdk:
+        patterns:
+          - "@anthropic-ai/*"
+          - "@modelcontextprotocol/sdk"
+          - "zod"
+      hono:
+        patterns: ["hono", "@hono/*"]
       # React and the three.js stack move together; separate PRs for
       # react/react-dom or three/@react-three/* land a tree that does not build.
       react:
@@ -188,46 +214,10 @@ updates:
       types:
         patterns:
           - "@types/node"
-
-  # The AI agent service (#261). `@anthropic-ai/claude-agent-sdk` is pinned to
-  # an exact version, and it bundles the Claude Code binary the harness runs.
-  # The `agent` job's tests run that binary against a fake endpoint, so an SDK
-  # bump that changes what the harness relies on reds the job on its PR (#1540).
-  - package-ecosystem: "npm"
-    directory: "/agent"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "04:00"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "ElanHasson"
-    commit-message:
-      prefix: "deps"
-      prefix-development: "deps-dev"
-      include: "scope"
-    labels: ["dependencies", "api", "npm"]
-    groups:
-      # The SDK declares these as peer dependencies; they move together.
-      agent-sdk:
-        patterns:
-          - "@anthropic-ai/*"
-          - "@modelcontextprotocol/sdk"
-          - "zod"
-      hono:
-        patterns: ["hono", "@hono/*"]
-      eslint:
-        patterns:
-          - "eslint"
-          - "@eslint/*"
-          - "typescript-eslint"
-          - "globals"
-      types:
-        patterns:
-          - "@types/node"
     ignore:
-      # @types/node tracks the runtime's major (Node 24, the Dockerfile's agent
-      # stages); a newer major would type APIs the service cannot call.
+      # @types/node tracks the runtime's major (Node 24, the Dockerfile's
+      # frontend and agent stages); a newer major would type APIs neither can
+      # call.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
