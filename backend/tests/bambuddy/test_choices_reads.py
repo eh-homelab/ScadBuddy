@@ -379,11 +379,15 @@ async def test_an_unreadable_kept_catalogue_is_read_again(
 
     assert (await cached_catalogue(bambuddy, tmp_path)).process
     assert presets.call_count == 2
-    (record, *_) = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
-    assert (record.__dict__["error"], record.__dict__["errno"]) == ("ValidationError", None)
-    assert record.__dict__["file"] == kept.name
+    # Two misses: the open's, and the first read's own look before it reads (#3809 review).
+    misses = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
+    assert [(r.__dict__["error"], r.__dict__["errno"], r.__dict__["file"]) for r in misses] == [
+        ("ValidationError", None, kept.name)
+    ] * 2
     # The extras too, which the default formatter leaves out of `caplog.text`.
-    assert not any("leaked-file-text" in str(value) for value in record.__dict__.values())
+    assert not any(
+        "leaked-file-text" in str(value) for r in misses for value in r.__dict__.values()
+    )
     assert "leaked-file-text" not in caplog.text
 
 
