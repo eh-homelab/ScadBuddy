@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, printRunPoll, rackAlgorithmSave } from '../api/client'
-import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
+import type { AnalysisRequest, Output, PrinterRow, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
@@ -5170,6 +5170,47 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     expect(choices.answered).toBeLessThan(choices.urls.length)
     expect(screen.queryByTestId('tray-question-0-1')).not.toBeInTheDocument()
     expect(screen.queryByTestId('tray-question-0-2')).not.toBeInTheDocument()
+  })
+
+  it('sends no Bambuddy id beside a LAN-only row, even while the old view is in (#4516 Task 9)', async () => {
+    setHotPath(true)
+    const garage: PrinterRow = {
+      ...HOT_PRINTER,
+      id: '00000000-0000-4000-8000-0000000000c3',
+      serial: '31B8BP000000C3',
+      name: 'Garage',
+      bambuddy_printer_id: null,
+      bambuddy_active: false,
+    }
+    server.use(
+      http.get('/api/v1/printers', () => HttpResponse.json([HOT_PRINTER, garage])),
+      http.get('/api/v1/print/outputs/:id/choices', async ({ request }) => {
+        const lan = new URL(request.url).searchParams.get('printer') === garage.id
+        // The LAN row's read is slow: the view still shows the H2C's Bambuddy id meanwhile.
+        if (lan) await delay(400)
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: lan ? null : HOT_PRINTER.bambuddy_printer_id,
+          filaments: hotFilaments(),
+          model_choices: { printer_id: null, filament_plan: [] },
+          lan_printers: [HOT_PRINTER.id, garage.id],
+        })
+      }),
+    )
+    const choices = watch('GET', '/choices')
+    const checks = watch('POST', '/check')
+    const runs = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByText(/sends it to the printer over the LAN/)).toBeInTheDocument())
+    await choose(user, await screen.findByRole('combobox', { name: 'Printer' }), /^Garage/)
+    await waitFor(() => expect(checks.bodies.some((body) => body['printer'] === garage.id)).toBe(true))
+    await waitFor(() => expect(choices.answered).toBe(choices.urls.length))
+    for (const body of checks.bodies.filter((body) => body['printer'] === garage.id)) {
+      expect(body['printer_id']).toBeNull()
+    }
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies[0]).toMatchObject({ printer: garage.id, printer_id: null }))
   })
 
   it('offers the folders, not projects, in Advanced', async () => {
