@@ -292,7 +292,18 @@ def _load(path: Path) -> tuple[float, Catalogue] | None:
             held = (stat.st_mtime_ns, _ADAPTER.validate_json(path.read_bytes()))
             _parsed.clear()
             _parsed[path] = held
-    except (OSError, ValidationError):
+    except (OSError, ValidationError) as error:
+        # Said by its type and errno only, never its text (#3446): a check on prod waited
+        # on a fresh read with this file on the shared volume, and nothing said why (#4196).
+        # The name is a digest with no key in it (#3313).
+        logger.info(
+            "no kept preset catalogue could be read",
+            extra={
+                "error": type(error).__name__,
+                "errno": getattr(error, "errno", None),
+                "file": path.name,
+            },
+        )
         return None
     return time.time() - stat.st_mtime, held[1]
 

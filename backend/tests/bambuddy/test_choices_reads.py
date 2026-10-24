@@ -7,8 +7,10 @@ on the one before it deadlocks and the test times out, rather than passing slowl
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import hmac
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -363,16 +365,41 @@ def test_forget_catalogues_drops_a_refresh_whose_event_loop_has_closed() -> None
 
 @respx.mock
 async def test_an_unreadable_kept_catalogue_is_read_again(
-    bambuddy: BambuddyClient, tmp_path: Path
+    bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """And says why, by the error's type alone (#4196): the file's text stays out."""
     presets, _ = _preset_routes()
     await cached_catalogue(bambuddy, tmp_path)
     (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
-    kept.write_text("{", encoding="utf-8")
+    kept.write_text('{"leaked-file-text"', encoding="utf-8")
     catalogue.forget_catalogues()
+    caplog.set_level(logging.INFO, logger=catalogue.__name__)
+    # The first read's own miss (nothing kept yet) is logged too, where INFO already is.
+    caplog.clear()
 
     assert (await cached_catalogue(bambuddy, tmp_path)).process
     assert presets.call_count == 2
+    # Two misses: the open's, and the first read's own look before it reads (#3809 review).
+    misses = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
+    assert [(r.__dict__["error"], r.__dict__["errno"], r.__dict__["file"]) for r in misses] == [
+        ("ValidationError", None, kept.name)
+    ] * 2
+    # The extras too, which the default formatter leaves out of `caplog.text`.
+    assert not any(
+        "leaked-file-text" in str(value) for r in misses for value in r.__dict__.values()
+    )
+    assert "leaked-file-text" not in caplog.text
+
+
+def test_a_missing_kept_catalogue_says_its_errno(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=catalogue.__name__)
+
+    assert catalogue._load(tmp_path / "absent.json") is None
+    (record,) = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
+    assert record.__dict__["error"] == "FileNotFoundError"
+    assert record.__dict__["errno"] == errno.ENOENT
 
 
 @respx.mock
