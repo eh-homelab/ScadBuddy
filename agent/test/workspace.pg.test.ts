@@ -597,6 +597,87 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(String(out)).toContain('dl/p.png')
       expect((await files.read(ws, 'dl/p.png'))?.bytes.equals(PNG)).toBe(true)
     })
+
+    // #2511: a binary body is a workspace file in every mode, never base64 in the result.
+    async function servePng(): Promise<string> {
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'image/png' })
+        res.end(PNG)
+      })
+      servers.push(server)
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+      return `http://127.0.0.1:${(server.address() as AddressInfo).port}/p.png`
+    }
+    const NAME = `http/${sha256(PNG).slice(0, 12)}-p.png`
+
+    it("stores a durable session's binary body in its workspace, and workspace_read shows it (#2511)", async () => {
+      const url = await servePng()
+      const deps = {
+        sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
+        servers: turnServers({
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          settings: { get: async <T,>() => true as T },
+        }),
+      }
+      const out = String(
+        await new MockActivityEnvironment({
+          activityId: 'tool-toolu_bin',
+          workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
+          activityType: `turn:${HTTP_SERVER}__${HTTP_TOOL}`,
+          taskQueue: 'agent-tools',
+        }).run(turnToolActivity(deps), { url }),
+      )
+      expect(out).not.toContain(PNG.toString('base64').slice(0, 16))
+      expect(out).toContain(NAME)
+      expect((await files.read(ws, NAME))?.bytes.equals(PNG)).toBe(true)
+      const activities = toolActivities(ALL_TOOLS, {
+        services: services({ workspace: files }),
+        sessions: { ownerOf: async (id) => (id === sessionId ? browser : undefined) },
+        blobs: { put: async () => {} },
+      })
+      const read = await new MockActivityEnvironment({
+        activityId: 'tool-toolu_bin_read',
+        workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
+        activityType: 'workspace_read',
+        taskQueue: 'agent-tools',
+      }).run(activities.workspace_read!, { path: NAME })
+      expect(read as string).toMatch(/\[image [0-9a-f]+\.png\]/)
+    })
+
+    it("stores a flow run's binary body in its starter's own workspace, which its workspace_read reads (#2511)", async () => {
+      const url = await servePng()
+      const flow = '00000000-0000-4000-8000-0000000000f1'
+      const deps = {
+        sessions: { ownerOf: async () => undefined },
+        flows: { startedBy: async (run: string) => (run === flow ? browser : undefined), approved: async () => false },
+        servers: turnServers({
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          settings: { get: async <T,>() => true as T },
+        }),
+      }
+      const out = String(
+        await new MockActivityEnvironment({
+          activityId: 'tool-flow_bin',
+          workflowExecution: { workflowId: `flow-${flow}`, runId: 'run-1' },
+          activityType: `turn:${HTTP_SERVER}__${HTTP_TOOL}`,
+          taskQueue: 'agent-tools',
+        }).run(turnToolActivity(deps), { url }),
+      )
+      expect(out).not.toContain(PNG.toString('base64').slice(0, 16))
+      expect(out).toContain(NAME)
+      const own: WorkspaceRef = { kind: 'principal', principalKind: browser.kind, principalId: browser.id }
+      expect((await files.read(own, NAME))?.bytes.equals(PNG)).toBe(true)
+      // A flow's tool call runs in no session, as its starter: the same workspace.
+      const ctx: ToolContext = {
+        ...services({ workspace: files }),
+        principal: { id: browser.id, kind: browser.kind, tiers: tiersUpTo('outward') },
+        progress: async () => {},
+        signal: new AbortController().signal,
+      }
+      const read = await runTool(tool('workspace_read'), { path: NAME }, ctx)
+      expect(read.content.find((b) => b.type === 'image')).toMatchObject({ mimeType: 'image/png' })
+      await files.delete(own, NAME)
+    })
   })
 
   describe('http_request save_to_workspace', () => {
@@ -622,7 +703,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const dir = (await tempPaths()).stateDir
       const result = await runHttpRequest(withDefaults({ url: `${url}/img.png?token=abc`, save_to_workspace: 'dl/img.png' }), context(dir))
       const body = JSON.parse((result.content[0] as { text: string }).text) as Record<string, unknown>
-      expect(body.workspace).toMatchObject({ path: 'dl/img.png', size_bytes: PNG.length, media_type: 'image/png', sha256: sha256(PNG) })
+      expect(body.workspace).toEqual({ name: 'dl/img.png', mediaType: 'image/png', size: PNG.length, sha256: sha256(PNG), read_with: 'workspace_read' })
       expect(body.saved).toBeNull()
       const stored = await files.read(ws, 'dl/img.png')
       expect(stored?.bytes.equals(PNG)).toBe(true)

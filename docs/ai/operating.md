@@ -1160,7 +1160,8 @@ so a change applies from the next turn.
 - `GET` and `HEAD` run at once; `POST`, `PUT`, `PATCH` and `DELETE` wait for an
   approval in the UI.
 - Limits: 30 s per request by default (the model may ask for up to 120 s), 5
-  redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved in
+  redirects, 1 MiB inline and 20 MiB read. A binary body is a workspace file (§13,
+  #2511), never base64 in the result. A longer text body is saved in
   Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, classic and
   durable alike, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
@@ -1200,10 +1201,17 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `workspace_read` pages text as `read_file` does, returns an image as an image (a
   durable session gets its name, to see it with `view_tool_images`, #2402), and only the
   metadata of other binary files. `workspace_edit` is made against the sha256 the model read.
-- `http_request` takes `save_to_workspace: "<path>"` (classic and durable sessions, #2496): the whole body
-  becomes a workspace file instead of a saved body on the state volume (§12). A body cut
-  at the 20 MiB read cap, or one over the workspace caps, is not stored, and the result
-  says why.
+- `http_request` takes `save_to_workspace: "<path>"` (classic and durable sessions, #2496;
+  a flow run's starter's own workspace, #2511): the whole body
+  becomes a workspace file instead of a saved body (§12). A binary body (anything not
+  text, an image included) is stored the same way without it (#2511), at
+  `http/<first 12 hex of its sha256>-<the URL's file name>`, so the same body from the
+  same URL is one file; the result answers `workspace: {name, mediaType, size, sha256}`
+  and never the bytes, and `workspace_read` shows an image as an image. A body cut
+  at the 20 MiB read cap, or one over the workspace caps (`workspace_file_max_bytes`,
+  `workspace_max_bytes`), is not stored, and the result says why (`workspace.error`);
+  a binary one is then kept as a saved body only for the **View / download body**
+  link, which `http_response_read` refuses to page.
 - Uploads send workspace files (#2329 part 2,
   [`agent/src/tools/workspaceUploads.ts`](../../agent/src/tools/workspaceUploads.ts)):
   `upload_asset`, `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`,
