@@ -264,6 +264,10 @@ def test_a_declined_pick_says_an_unfitting_position_once() -> None:
         "Rack position 1 was not sent: the slice put the rack side in 4 nozzle groups, and"
         " over the LAN the printer picks for all of them or none."
     ]
+    # Under any kind, so a renamed kind cannot let the duplicate back in (#4575).
+    assert not any(
+        "does not fit" in w.message or "so it was not used" in w.message for w in chosen.warnings
+    )
 
 
 def test_a_declined_pick_says_the_printer_picks_an_abrasives_nozzle() -> None:
@@ -364,6 +368,10 @@ def test_no_eligible_hotend_sends_no_mapping() -> None:
         plan, status, algorithm="least_used", manual_position=None, usage={}, spools={}
     )
     assert chosen.mapping is None
+    # #4575: over the LAN the printer picks what is left, not Bambuddy.
+    left = [w.message for w in chosen.warnings if w.kind == "rack-left-to-bambuddy"]
+    assert left and all(m.startswith("Rack pick left to the printer: ") for m in left)
+    assert not any("Bambuddy" in w.message for w in chosen.warnings)
 
 
 def test_let_the_printer_pick_sends_no_mapping() -> None:
