@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal, Protocol
 
 import psycopg
@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.linking import link_by_hash, link_item, scan_library_by_hash
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
-from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.stages import Stage, stage_of
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -493,6 +493,7 @@ async def library_progress(
     *,
     uploads: BambuddyUploadStore | None = None,
     lan: LanReads | None = None,
+    sends: Sequence[PrintSend] | None = None,
 ) -> PrintProgress | None:
     """The progress of a library file's print (#1073), read as an output's is: each of
     its last run's queue items (`PrintLinkStore.last_run`, #1751), as one progress over
@@ -501,10 +502,12 @@ async def library_progress(
     (`linking.link_library_prints` does the same for the prints list); one Bambuddy no
     longer has reads as done, as an output's does, and with ``uploads`` has the file's
     archives looked for by hash (#1755), as an output's gone item does. With ``lan``,
-    a LAN print is read from the printer's report, as `progress_for` reads one."""
+    a LAN print is read from the printer's report, as `progress_for` reads one. ``sends``
+    is the last run's, when the caller has read it already."""
     if lan is not None and (native := await lan.read(subject.run_subject)) is not None:
         return native
-    sends = await links.last_run(subject)
+    if sends is None:
+        sends = await links.last_run(subject)
     if not sends:
         return None
     url = client.config.web_url(QUEUE_PATH)

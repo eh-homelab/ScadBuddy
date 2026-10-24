@@ -1389,12 +1389,12 @@ async def get_library_progress(
         # Nothing was queued, so nothing of Bambuddy's is read (AC2).
         progress = from_failed_run(failed, bambuddy_url=queue_url(store.load()))
     elif (progress := await lan_reads(registry, latest).read(key)) is None and (
-        await links.last_run(subject)
+        sends := await links.last_run(subject)
     ):
         # Only a print Bambuddy queued is read there; a LAN print's is its printer's
         # report, and a file never queued has none: neither builds a client (D3, AC2).
         async with client_for(store.load()) as client:
-            progress = await library_progress(client, subject, links, uploads=uploads)
+            progress = await library_progress(client, subject, links, uploads=uploads, sends=sends)
     observer.observe_subject(key, library_slug(subject), progress)
     # As an output's: a print someone is looking at that is still moving is followed.
     if progress is not None and not progress.settled:
