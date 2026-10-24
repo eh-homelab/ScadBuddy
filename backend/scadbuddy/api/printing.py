@@ -87,7 +87,7 @@ from scadbuddy.bambuddy.print_run import (
     dialog_route,
     filament_options,
     filament_options_for_output,
-    lan_printers,
+    first_native_route,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
@@ -1197,22 +1197,13 @@ async def opening_route(
 ) -> RunRoute | None:
     """`dialog_route`, and with no Bambuddy configured and no printer named (by the
     request or Settings), the first registry row a run reaches natively (#3818 tier A,
-    AC2): Bambuddy's choices would open on a printer of its own, and cannot be read.
-    The dialog then opens on that row, as it does on a LAN-only one (``lan_printers``)."""
-    route = await dialog_route(
-        settings, printers.store, printers.reports, printer=printer, printer_id=printer_id
-    )
-    if (
-        route is not None
-        or settings.bambuddy_url
-        or not names_no_printer(settings, printer, printer_id)
-    ):
-        return route
-    rows = await lan_printers(settings, printers.store, printers.reports)
-    if not rows:
-        return None
+    AC2, `first_native_route`): Bambuddy's choices would open on a printer of its own,
+    and cannot be read. The dialog then opens on that row, as it does on a LAN-only one
+    (``lan_printers``)."""
+    if not settings.bambuddy_url and names_no_printer(settings, printer, printer_id):
+        return await first_native_route(settings, printers.store, printers.reports)
     return await dialog_route(
-        settings, printers.store, printers.reports, printer=rows[0], printer_id=None
+        settings, printers.store, printers.reports, printer=printer, printer_id=printer_id
     )
 
 

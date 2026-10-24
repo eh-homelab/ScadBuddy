@@ -447,13 +447,21 @@ async def test_the_hook_passes_its_read_timeout(store: RackUsageStore, pool: PgP
 
 
 async def test_with_no_bambuddy_the_hook_builds_no_client(
-    store: RackUsageStore, pool: PgPool
+    store: RackUsageStore, pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#3818 tier A, AC2: with no ``bambuddy_url`` there is no archive of Bambuddy's to
     read, so a LAN print's settle (which links none) ends quietly, never with
     `client_for`'s 409 for the follow to log as a failed hook."""
+    built: list[StoredSettings] = []
+
+    def client_for(settings: StoredSettings) -> None:
+        built.append(settings)
+        raise AssertionError("the hook built a Bambuddy client")
+
+    monkeypatch.setattr(usage, "client_for", client_for)
     hook = settle_hook(store, PrintLinkStore(pool), lambda _timeout: StoredSettings())
     await hook(SUBJECT)
+    assert built == []
 
 
 async def test_a_failed_settings_read_says_the_settles_usage_was_dropped(
