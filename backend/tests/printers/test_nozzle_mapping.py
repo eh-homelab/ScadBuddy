@@ -189,6 +189,51 @@ def test_a_plan_that_cannot_be_resolved_is_none(
     assert caplog.records
 
 
+def test_a_corrupt_member_has_no_plan(caplog: pytest.LogCaptureFixture) -> None:
+    """A deflated slice_info.config whose stream is damaged: the read raises inside
+    zipfile (``zlib.error`` or a bad CRC), never out of ``read_rack_plan``."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Metadata/project_settings.config", json.dumps(H2C_SETTINGS))
+        archive.writestr("Metadata/slice_info.config", SLICE_INFO)
+    data = bytearray(out.getvalue())
+    with zipfile.ZipFile(io.BytesIO(bytes(data))) as archive:
+        info = archive.getinfo("Metadata/slice_info.config")
+    start = info.header_offset + 30 + len(info.filename) + len(info.extra)
+    for at in range(start + 8, start + 40):
+        data[at] ^= 0xFF
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(io.BytesIO(bytes(data)), 1) is None
+    assert "unreadable" in caplog.text
+
+
+def test_an_unsupported_compression_has_no_plan() -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("Metadata/project_settings.config", json.dumps(H2C_SETTINGS))
+        archive.writestr("Metadata/slice_info.config", SLICE_INFO)
+    patched = bytearray(out.getvalue())
+    # The central directory's compression method (offset 10 of the entry) as 99, which
+    # zipfile refuses with NotImplementedError.
+    entry = patched.rfind(b"PK\x01\x02")
+    assert patched[entry + 46 : entry + 46 + 26] == b"Metadata/slice_info.config"
+    patched[entry + 10 : entry + 12] = (99).to_bytes(2, "little")
+    assert read_rack_plan(io.BytesIO(bytes(patched)), 1) is None
+
+
+def test_let_the_printer_pick_is_said_as_declined() -> None:
+    plan = read_rack_plan(sliced(), 1)
+    assert plan is not None
+    chosen = choose_nozzles(
+        plan, idle_status(), algorithm="bambuddy", manual_position=None, usage={}, spools={}
+    )
+    assert chosen.declined
+    least = choose_nozzles(
+        plan, idle_status(), algorithm="least_used", manual_position=None, usage={}, spools={}
+    )
+    assert not least.declined
+
+
 def test_a_file_with_no_slice_info_has_no_plan() -> None:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:

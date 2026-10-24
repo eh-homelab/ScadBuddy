@@ -321,7 +321,12 @@ class LanActivities:
             return None
         for warning in chosen.warnings:
             logger.info("rack pick: %s", warning.kind, extra={"printer": row.id})
-        if chosen.mapping is None:
+        if chosen.declined:
+            logger.info(
+                "nozzle_mapping not sent: the rack algorithm leaves the hotends to the printer",
+                extra={"printer": row.id},
+            )
+        elif chosen.mapping is None:
             logger.warning(
                 "nozzle_mapping not sent: the rack pick placed not every rack group",
                 extra={"printer": row.id},

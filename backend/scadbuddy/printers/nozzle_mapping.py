@@ -31,6 +31,7 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import IO, Any
@@ -267,14 +268,31 @@ def _plan(archive: zipfile.ZipFile, plate_id: int | None) -> SlicedRack | None:
 def read_rack_plan(file: IO[bytes], plate_id: int | None) -> SlicedRack | None:
     """``plate_id``'s rack plan from the sliced 3MF, or ``None``: on a file for a printer
     with no rack, and (with a warning) on one whose plan cannot be read with confidence.
-    The only plate of a file of one is read whatever its number (or with none)."""
+    The only plate of a file of one is read whatever its number (or with none). It never
+    raises: a file it cannot read only sends no field (an upload never fails on it)."""
     try:
         with zipfile.ZipFile(file) as archive:
             return _plan(archive, plate_id)
-    except (zipfile.BadZipFile, OSError, KeyError):
-        return None
     except _UnresolvedError as error:
         logger.warning("nozzle_mapping not sent: %s", error)
+        return None
+    except (
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        OSError,
+        KeyError,
+        EOFError,
+        NotImplementedError,
+        RuntimeError,
+        ValueError,
+        zlib.error,
+    ) as error:
+        # A corrupt or unsupported member (a bad CRC, a truncated stream, an
+        # unknown compression or an encrypted entry): unreadable, so no field.
+        logger.warning(
+            "nozzle_mapping not sent: the sliced file is unreadable",
+            extra={"error": type(error).__name__},
+        )
         return None
 
 
@@ -286,6 +304,8 @@ class NozzleChoice:
     mapping: list[int] | None
     picks: list[Pick] = field(default_factory=list)
     warnings: list[FilamentWarning] = field(default_factory=list)
+    #: The "bambuddy" ranking left the rack groups to the firmware on purpose.
+    declined: bool = False
 
 
 def choose_nozzles(
@@ -309,7 +329,7 @@ def choose_nozzles(
     picks = rank_rack(groups, status.nozzle_rack, algorithm, usage, manual)
     found = rank_warnings(groups, status.nozzle_rack, algorithm, picks, manual)
     if algorithm == "bambuddy" and len(picks) < len(groups):
-        return NozzleChoice(mapping=None, warnings=[*notes, *found])
+        return NozzleChoice(mapping=None, warnings=[*notes, *found], declined=True)
     mapping = nozzle_mapping(
         plan.slot_groups,
         plan.fixed_groups,
