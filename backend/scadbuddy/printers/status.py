@@ -12,9 +12,16 @@ extruder) and each rack slot (ids from 16) with ``type``, ``diameter``, ``sn``,
 ``wear`` and ``stat``; ``device.extruder.state`` carries the active extruder in bits
 4-7.
 
-Not in a recorded report: the test fixture is synthetic (no printer was reachable when
-this was written, plan Task 7). Not mapped, so left at their defaults: ``ams_mapping``,
-``ams_extruder_map``, ``ams_switch_inlet``, ``fila_switch``, ``current_plate_id``,
+``fila_switch`` is fitted when ``device.fila_switch`` is present, and each AMS unit's
+``info`` (hex) names its extruder in bits 8-11, ``0xE`` meaning "not fixed": with the
+switch fitted, bits 24-27 then name its inlet, 0 B and 1 A (Bambuddy
+``bambu_mqtt.py`` ``_parse_fila_switch`` and its ``ams_extruder_map`` pass, after
+BambuStudio ``DevFilaSystem.cpp``, read in the deployed image 2026-10-24). A rack
+slot's ``fila_id`` and ``color_m`` are the filament it last ran.
+
+`tests/printers/fixtures/lan-report-h2c-idle.json` is a recorded H2C report (firmware
+01.02.00.00, 2026-10-24): four AMS 2 Pro on the switch's inlets and an AMS-HT, five rack
+slots. Not mapped, so left at their defaults: ``ams_mapping``, ``current_plate_id``,
 ``current_archive_id`` (Bambuddy's own), ``awaiting_plate_clear`` and ``cover_url``.
 A field that is not the type it should be reads as absent, never as a failed status.
 """
@@ -30,6 +37,7 @@ from pydantic import BaseModel, ValidationError
 from scadbuddy.bambuddy.models import (
     AmsTray,
     AmsUnit,
+    FilaSwitch,
     HmsError,
     NozzleInfo,
     NozzleRackSlot,
@@ -63,6 +71,18 @@ def _valid[M: BaseModel](model: type[M], data: Any) -> M | None:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def print_error_text(code: int) -> str:
+    """A report's ``print_error`` as Bambu's apps show it: eight hex digits split in
+    two, ``0500_C010``."""
+    text = f"{code & 0xFFFFFFFF:08X}"
+    return f"{text[:4]}_{text[4:]}"
+
+
+def _text(value: Any) -> str:
+    """``value`` when it is a string, else ``""``: a mistyped field reads as absent."""
+    return value if isinstance(value, str) else ""
 
 
 def _int(value: Any) -> int | None:
@@ -194,27 +214,63 @@ def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackS
             "nozzle_type": str(entry.get("type") or ""),
             "nozzle_diameter": str(entry.get("diameter") or ""),
         }
-        if slot_id >= RACK_FIRST_ID:
-            slot = _valid(
-                NozzleRackSlot,
-                {
-                    **fields,
-                    "id": slot_id,
-                    "serial_number": entry.get("sn"),
-                    "wear": _int(entry.get("wear")),
-                    "stat": _int(entry.get("stat")),
-                },
-            )
-            if slot is not None:
-                rack.append(slot)
-        else:
+        slot = _valid(
+            NozzleRackSlot,
+            {
+                **fields,
+                "id": slot_id,
+                "serial_number": entry.get("sn"),
+                "wear": _int(entry.get("wear")),
+                "stat": _int(entry.get("stat")),
+                "filament_id": _text(entry.get("fila_id")),
+                "filament_color": _text(entry.get("color_m")),
+            },
+        )
+        if slot is not None:
+            rack.append(slot)
+        if slot_id < RACK_FIRST_ID:
             mounted[slot_id] = NozzleInfo.model_validate(fields)
     if not mounted and ("nozzle_type" in report or "nozzle_diameter" in report):
         mounted[0] = NozzleInfo(
             nozzle_type=str(report.get("nozzle_type") or ""),
             nozzle_diameter=str(report.get("nozzle_diameter") or ""),
         )
+    # The mounted hotends are listed with the rack, as Bambuddy's status lists them: the
+    # carriage's (id 0) is the position the report omits while it is mounted
+    # (`rack.rank.rack_positions`; the H2C's idle report of 2026-10-24 omits 19 and has
+    # ``src_id`` 19). A printer with no rack lists none.
+    if not any(slot.id >= RACK_FIRST_ID for slot in rack):
+        rack = []
     return [mounted[key] for key in sorted(mounted)], rack
+
+
+def _fila_switch(report: dict[str, Any]) -> FilaSwitch | None:
+    device = report.get("device")
+    fitted = isinstance(device, dict) and isinstance(device.get("fila_switch"), dict)
+    return FilaSwitch(installed=True) if fitted else None
+
+
+def _routing(report: dict[str, Any], switch: bool) -> tuple[dict[str, int], dict[str, str]]:
+    """``ams_extruder_map`` and ``ams_switch_inlet`` from each unit's ``info``."""
+    block = report.get("ams")
+    extruders: dict[str, int] = {}
+    inlets: dict[str, str] = {}
+    for entry in _list(block.get("ams") if isinstance(block, dict) else None):
+        if not isinstance(entry, dict) or (unit := _int(entry.get("id"))) is None:
+            continue
+        raw = entry.get("info")
+        try:
+            info = int(raw, 16) if isinstance(raw, str) else None
+        except ValueError:
+            info = None
+        if info is None:
+            continue
+        extruder = info >> 8 & 0xF
+        if extruder != 0xE:
+            extruders[str(unit)] = extruder
+        elif switch and (inlet := {0: "B", 1: "A"}.get(info >> 24 & 0xF)) is not None:
+            inlets[str(unit)] = inlet
+    return extruders, inlets
 
 
 def _active_extruder(report: dict[str, Any]) -> int:
@@ -229,6 +285,8 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
     data = report.print
     nozzles, rack = _nozzles(data)
     ams = _ams(data)
+    switch = _fila_switch(data)
+    extruders, inlets = _routing(data, switch is not None)
     status = PrinterStatus.model_validate(
         {
             "id": row.bambuddy_printer_id or 0,
@@ -251,6 +309,9 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
             "nozzles": nozzles,
             "nozzle_rack": rack,
             "active_extruder": _active_extruder(data),
+            "fila_switch": switch,
+            "ams_extruder_map": extruders,
+            "ams_switch_inlet": inlets,
             "hms_errors": hms_errors(data.get("hms")),
         }
     )

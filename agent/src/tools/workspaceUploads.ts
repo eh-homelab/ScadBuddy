@@ -54,7 +54,7 @@ export const FROM_WORKSPACE_ONLY =
   "argument: a binary file reaches the workspace by the user's upload in the assistant panel, http_request " +
   '`save_to_workspace`, or workspace_save.'
 
-type Choice<T> ={ inline: T } | { workspace: { path: string; sha256: string } }
+type Choice<T> = { inline: T } | { workspace: { path: string; sha256: string } }
 
 /** Which one the call gave: the inline value or a workspace file. Refuses both, neither, or a path without its sha256. */
 export function inlineOrWorkspace<T>(

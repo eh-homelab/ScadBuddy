@@ -120,6 +120,8 @@ def _state() -> SimpleNamespace:
             )
         ),
         projection=SimpleNamespace(pool=None),
+        # No content store: a LAN print's blob is not read here (plan 2026-10-16 Task 9).
+        store=SimpleNamespace(content=None),
     )
 
 

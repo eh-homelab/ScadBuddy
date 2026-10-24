@@ -33,3 +33,15 @@ class ProjectFile(BaseModel):
     timelapse: bool = False
     layer_inspect: bool = True
     md5: str
+    #: One physical nozzle id per filament slot on a rack printer
+    #: (`printers.nozzle_mapping`); ``None`` sends no field, and the firmware picks.
+    nozzle_mapping: list[int] | None = None
+
+
+class LanStarted(BaseModel):
+    """A plate the printer took over the LAN (plan 2026-10-16 Task 9): the
+    ``subtask_name`` its reports carry while it runs it, which the native follow reads
+    its progress by, and when the start was seen."""
+
+    subtask_name: str
+    started_at: datetime

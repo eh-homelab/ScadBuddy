@@ -437,6 +437,11 @@ function DeleteOutputDialog({
   )
 }
 
+/** #4491 — a row's actions are a finger's target on a phone: 40 px tall, below `sm`. */
+const PHONE_TAP = 'max-sm:h-10'
+/** #4524 — a link on a row (Download 3MF, the size line's) the same, its text centred. */
+const PHONE_TAP_LINK = `max-sm:inline-flex max-sm:items-center ${PHONE_TAP}`
+
 /**
  * A recorded Bambuddy id, linked to the page it means something on (#89). A queue item
  * links to its own page, and a library file to the library. `target=_blank` because
@@ -454,7 +459,7 @@ function BambuddyId({
   if (!href) return <span className={className}>{children}</span>
   return (
     <a
-      className={`${className} underline decoration-dotted underline-offset-2`}
+      className={`${className} underline decoration-dotted underline-offset-2 ${PHONE_TAP_LINK}`}
       href={href}
       target="_blank"
       rel="noopener noreferrer"
@@ -495,9 +500,6 @@ function OutputLibraries({
     </p>
   )
 }
-
-/** #4491 — a row's actions are a finger's target on a phone: 40 px tall, below `sm`. */
-const PHONE_TAP = 'max-sm:h-10'
 
 function OutputRow({
   output,
@@ -561,6 +563,9 @@ function OutputRow({
   const [naming, setNaming] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [renameError, setRenameError] = useState<string | null>(null)
+  /** #4520 — Rename was chosen: the menu's close hands the focus to the name field. */
+  const toNameField = useRef(false)
+  const nameField = useRef<HTMLInputElement>(null)
 
   async function rename(name: string) {
     setRenaming(true)
@@ -623,12 +628,12 @@ function OutputRow({
                 }}
               >
                 <Input
+                  ref={nameField}
                   aria-label={`Name for ${label}`}
                   value={naming}
                   placeholder={shortId(output.id)}
                   onChange={(event) => setNaming(event.target.value)}
                   maxLength={200}
-                  autoFocus
                   className="h-7 min-w-32 flex-1"
                 />
                 <Button size="sm" type="submit" disabled={renaming}>
@@ -644,12 +649,12 @@ function OutputRow({
             </span>
           </div>
           {renameError && (
-            <p role="alert" className="mt-1 text-xs text-destructive">
+            <p role="alert" className="mt-1 text-xs text-destructive" data-testid="output-rename-error">
               {renameError}
             </p>
           )}
           {/* #4491 — each fact on one line, the line wrapping between them. */}
-          <p className="sb-num mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+          <p className="sb-num mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground" data-testid="output-facts">
             <span className="whitespace-nowrap">
               {output.bbox_mm ? formatBbox(output.bbox_mm, unit) : 'No dimensions recorded'}
             </span>
@@ -659,7 +664,7 @@ function OutputRow({
             {lastPrint && (
               <Link
                 to={`/prints/${lastPrint.archive_id}`}
-                className={`underline underline-offset-2 ${printTone(lastPrint.status)}`}
+                className={`underline underline-offset-2 ${PHONE_TAP_LINK} ${printTone(lastPrint.status)}`}
               >
                 {`Last print: ${statusLabel(lastPrint.status)}`}
               </Link>
@@ -684,14 +689,21 @@ function OutputRow({
               </BambuddyId>
             )}
             {!output.queue_item_id && lastCopy(output) && (
-              <BambuddyId className="whitespace-nowrap text-muted-foreground" href={bambuddyUrl && `${bambuddyUrl}/library`}>
+              <BambuddyId
+                className="whitespace-nowrap text-muted-foreground"
+                href={bambuddyUrl && `${bambuddyUrl}/library`}
+              >
                 in library #{lastCopy(output)?.id}
               </BambuddyId>
             )}
           </p>
           <OutputLibraries libraries={output.libraries ?? []} pinned={pinned} />
           {/* #2282 — an arranged output's layout is what it is: its plates, on the row. */}
-          {arrangedFrom > 0 && !platesAbove && <LazyArrangedPlates outputId={output.id} size="sm" />}
+          {arrangedFrom > 0 && !platesAbove && (
+            <div data-testid="output-plates">
+              <LazyArrangedPlates outputId={output.id} size="sm" />
+            </div>
+          )}
         </div>
 
         <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="output-actions">
@@ -722,7 +734,7 @@ function OutputRow({
             url={api.downloadUrl(output.id)}
             // The server names it (`download_filename`), as every other download of it.
             filename={`${output.slug}-${output.id}.3mf`}
-            className={`px-1 text-sm text-primary underline-offset-4 hover:underline max-sm:inline-flex max-sm:items-center ${PHONE_TAP}`}
+            className={`px-1 text-sm text-primary underline-offset-4 hover:underline ${PHONE_TAP_LINK}`}
           >
             Download 3MF
           </BlobDownload>
@@ -740,7 +752,18 @@ function OutputRow({
                 {deleting ? <Spinner /> : <MoreHorizontalIcon />}
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-auto min-w-40">
+            <DropdownMenuContent
+              align="end"
+              className="w-auto min-w-40"
+              onCloseAutoFocus={(event) => {
+                // #4520 — the one way the field gets the focus: not back to the ⋯ button, and
+                // not autoFocus, which the closing menu took back and dropped on <body>.
+                if (!toNameField.current) return
+                toNameField.current = false
+                event.preventDefault()
+                nameField.current?.focus()
+              }}
+            >
               <DropdownMenuItem onSelect={() => setTimeout(onQueue, 0)} aria-label={`Queue ${label}`}>
                 Queue
               </DropdownMenuItem>
@@ -749,13 +772,11 @@ function OutputRow({
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={naming !== null}
-                // After the menu has put the focus back on its button, so the name field keeps it.
-                onSelect={() =>
-                  setTimeout(() => {
-                    setRenameError(null)
-                    setNaming(output.name ?? '')
-                  }, 0)
-                }
+                onSelect={() => {
+                  toNameField.current = true
+                  setRenameError(null)
+                  setNaming(output.name ?? '')
+                }}
                 aria-label={`Rename ${label}`}
               >
                 Rename

@@ -53,7 +53,12 @@ from scadbuddy.api.outputs import (
     native_outputs_for_files,
     read_plain_files,
 )
-from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
+from scadbuddy.api.printing import (
+    PRINT_RUN_PROBLEMS,
+    accept_run,
+    lan_reads,
+    newest_run,
+)
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for, with_lan_printers
@@ -91,7 +96,7 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, library_progress
 from scadbuddy.bambuddy.projects import AttachResult, ProjectAttach
-from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.runs import PrintRun, failure_of
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -1292,6 +1297,7 @@ async def get_library_progress(
     observer: PrintProgressDep,
     follows: FollowsDep,
     state: StateDep,
+    registry: PrintersDep,
 ) -> PrintProgress | None:
     """As ``/print/outputs/{id}/progress`` (#1751): the file's newest run, its queue
     items read off Bambuddy until it is ``settled``. ``null`` when ScadBuddy never
@@ -1299,13 +1305,16 @@ async def get_library_progress(
     (``route: "run"``). Changes are published on ``print:library:<file id>``."""
     subject = PrintSubject.library(file_id)
     key = subject.run_subject
-    failed = await failed_before_queueing(state, key)
+    latest = await newest_run(state, key)
+    failed = failure_of(latest)
     progress: PrintProgress | None = None
     async with client_for(store.load()) as client:
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await library_progress(client, subject, links, uploads=uploads)
+            progress = await library_progress(
+                client, subject, links, uploads=uploads, lan=lan_reads(registry, latest)
+            )
     observer.observe_subject(key, library_slug(subject), progress)
     # As an output's: a print someone is looking at that is still moving is followed.
     if progress is not None and not progress.settled:

@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.print_run import (
     PrintRunResult,
     QueuedPlate,
     ResolvedProject,
+    RunRefusalError,
     finish_run,
     native_runs,
     plan_run,
@@ -128,6 +129,20 @@ async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error:
         extra={"library_file_id": input.sliced, "status": code},
     )
     return False
+
+
+#: Why a LAN run prints one plate once (plan 2026-10-16 Task 9).
+ONE_LAN_PRINT = (
+    "A print over the LAN starts one plate, once: the printer has no queue to hold the"
+    " rest. Print one plate with one copy, or set the printer's path to Bambuddy."
+)
+
+
+def _one_lan_print(plate_ids: list[int], request: PrintRunRequest) -> None:
+    """Refuse what a LAN start cannot do: a second ``project_file`` replaces the print
+    running, and nothing queues behind it."""
+    if len(plate_ids) > 1 or (request.copies or 1) > 1:
+        raise RunRefusalError(ONE_LAN_PRINT)
 
 
 @dataclass
@@ -299,9 +314,17 @@ class PrintActivities:
                     printers=self.d.printers,
                     reports=self.d.reports,
                 )
+                checked = PreparedPlates.of(prepared)
+                if checked.path == "native" and not native:
+                    # Until native runs are on (hot-path plan Task 9), a row whose own
+                    # path is the LAN still prints through Bambuddy, as before Task 9.
+                    checked = checked.model_copy(update={"path": "bambuddy"})
+                if checked.path == "native":
+                    _one_lan_print(checked.plate_ids, input.request)
+                    checked = checked.model_copy(update={"lan_start": True})
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
-        return Checked(source=spec, prepared=PreparedPlates.of(prepared))
+        return Checked(source=spec, prepared=checked)
 
     @activity.defn(name="print_insert")
     async def insert(self, input: InsertInput) -> PrintRun:
@@ -328,7 +351,7 @@ class PrintActivities:
         try:
             async with client_for(settings) as client:
                 source = await self._source(client, input.accepted.source, settings)
-                return await heartbeating(
+                planned = await heartbeating(
                     plan_run(
                         client,
                         source,
@@ -338,6 +361,10 @@ class PrintActivities:
                         native=self.d.native,
                     )
                 )
+                if planned.lan_start and planned.copies > 1:
+                    # The remembered quantity, which the check could not see.
+                    raise RunRefusalError(ONE_LAN_PRINT)
+                return planned
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 

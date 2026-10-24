@@ -24,16 +24,23 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from scadbuddy.printers.lan import (
+    UPLOAD_DIR,
     CertificateMismatchError,
     ImplicitFtpTls,
     LanPrinter,
     fetch_cert_sha256,
+    file_url,
     merge_report,
     pinned_context,
     project_file_command,
     pushall_command,
 )
 from scadbuddy.printers.lan_models import ProjectFile
+
+
+def test_the_measured_upload_place_and_url() -> None:
+    """Task 7, on an H2C (`lan.py`'s docstring): the root, named ``ftp://<name>``."""
+    assert (UPLOAD_DIR, file_url("scadbuddy-1-p1.3mf")) == ("/", "ftp://scadbuddy-1-p1.3mf")
 
 
 def test_pushall_command() -> None:
@@ -64,6 +71,25 @@ def test_project_file_command_fields() -> None:
         False,
         True,
     )
+    # No rack slot: no `nozzle_mapping` at all, as Bambu Studio sends (Task 8).
+    assert "nozzle_mapping" not in body
+
+
+def test_project_file_command_carries_a_nozzle_mapping() -> None:
+    wire = [18, 1, 16] + [-1] * 29
+    cmd = project_file_command(
+        ProjectFile(
+            url="ftp://x.3mf",
+            param="Metadata/plate_1.gcode",
+            subtask_name="x",
+            use_ams=True,
+            ams_mapping=[0, 1, 2],
+            nozzle_mapping=wire,
+            md5="abc",
+        ),
+        "7",
+    )
+    assert cmd["print"]["nozzle_mapping"] == wire
 
 
 def test_merge_report_keeps_unmentioned_keys_and_replaces_ams() -> None:

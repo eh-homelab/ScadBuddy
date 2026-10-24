@@ -527,6 +527,11 @@ What the wire carries, from two sources that agree with each other and disagree 
 
 ---
 
+> **Measured 2026-10-24, for Task 8 below** (H2C, firmware 01.02.00.00):
+> - `nozzle_mapping` is 32 entries, one per filament slot (index 0 = slot 1), each a **physical** nozzle id: `1` the fixed hotend, `16`-`21` rack positions, `-1` a slot the plate does not print. Extruder indices are another namespace: extruder 0 is the rack carriage, extruder 1 the fixed hotend. A plate that needs no rack slot sends no `nozzle_mapping` at all. A wrong id levels with one nozzle and prints with another (a first layer in mid-air), so the failure mode is to omit the field and let the firmware pick (Bambuddy `bambu_mqtt.py` `resolve_rack_nozzle_mapping` and its comments, deployed image, read 2026-10-24).
+> - Completed prints Bambuddy sent this printer, from its `print_queue` (`ams_mapping` → `nozzle_mapping`): item 370 `[4, 1, 6, 12, 5, 13]` → `[21, 18, 20, 17, 1, 17, -1 x26]`; 367 `[3, 15, 0, 11, 8, 5, 6]` → `[18, 1, 1, 20, 1, 18, 20, -1 x25]`; 374 `[128]` (the AMS-HT) → `[18, -1 x31]`. The positions follow which nozzle type and diameter each rack slot holds (`device.nozzle.info`), so they are computed per print from the report, never stored.
+> - This H2C has a Filament Track Switch: every AMS unit's `info` has extruder bits `0xE` (not fixed), its inlet in bits 24-27 (A for units 0, 3 and 128, B for 1 and 2), so any tray reaches either carriage (`printers/status.py` maps it since this measurement).
+
 ### Task 8: The H2C rack over LAN: measure the command, then send it (A-rack, D7)
 
 **Files:**

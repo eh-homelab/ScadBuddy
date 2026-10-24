@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 // #362 — the customize page at a phone's width. msw-backed: the templates are fixtures.
 test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
@@ -131,17 +131,35 @@ test.describe('model lists at 390 px (#1036)', () => {
 
 /**
  * #4491 — every pair of a History card's parts (picture, checkbox, colour chips, name, age,
- * the size line's facts and each action) whose boxes overlap, and every part outside its card.
+ * the size line's facts, an arranged output's plates, a rename's error and each action) whose
+ * boxes overlap, and every part outside its card.
  */
+/** How many lines the element's text runs to, from its text's client rects. */
+async function textLines(line: Locator): Promise<number> {
+  // Typed by hand: this file is checked without the DOM lib.
+  type Lined = {
+    ownerDocument: {
+      createRange(): { selectNodeContents(node: unknown): void; getClientRects(): ArrayLike<{ top: number; height: number }> }
+    }
+  }
+  return line.evaluate((el: Lined) => {
+    const range = el.ownerDocument.createRange()
+    range.selectNodeContents(el)
+    const tops = new Set<number>()
+    for (const rect of Array.from(range.getClientRects())) if (rect.height > 0) tops.add(Math.round(rect.top))
+    return tops.size
+  })
+}
+
 async function cardOverlaps(page: Page): Promise<string[]> {
   return (await page.evaluate(`(() => {
     const out = []
     for (const card of document.querySelectorAll('li:has([data-testid="output-actions"])')) {
       const summary = card.querySelector('[data-testid="output-summary"]')
-      const facts = summary && summary.querySelector('p.sb-num')
+      const facts = summary && summary.querySelector('[data-testid="output-facts"]')
       // A renamed hook would otherwise surface as a TypeError on null from inside evaluate.
       if (!summary || !summary.firstElementChild || !facts) {
-        out.push('a card without ' + (summary ? 'its size line (p.sb-num)' : 'output-summary'))
+        out.push('a card without ' + (summary ? 'its size line (output-facts)' : 'output-summary'))
         continue
       }
       const parts = [
@@ -150,6 +168,8 @@ async function cardOverlaps(page: Page): Promise<string[]> {
           'button[role="checkbox"], [role="img"], [data-testid="output-name"], [data-testid="output-age"], form > *',
         ),
         ...facts.children,
+        // #4523 — the arranged plates and a failed rename's alert, below the size line.
+        ...summary.querySelectorAll('[data-testid="output-plates"], [data-testid="output-rename-error"]'),
         ...card.querySelector('[data-testid="output-actions"]').children,
       ]
       const name = (el) => el.getAttribute('aria-label') || el.textContent.trim().slice(0, 24) || el.tagName
@@ -219,18 +239,14 @@ test.describe('History cards at phone widths (#4491)', () => {
       expect(await sidewaysScrollers(page)).toEqual([])
       expect(await cardOverlaps(page)).toEqual([])
       // The long name truncates to one line, its whole text in the title; the age and the
-      // library copy each stay on one line. One line is under two of the element's own
-      // line-heights, so a theme's type scale moves the limit with it.
+      // library copy each stay on one line. Lines of text, counted from the text's own
+      // boxes: the library copy is a 40 px tap target, taller than its one line.
       for (const line of [
         page.getByTitle(long),
         page.getByTestId('output-age').last(),
         page.getByText(/^in library #/).first(),
       ]) {
-        // Typed by hand: this file is checked without the DOM lib.
-        type Styled = { ownerDocument: { defaultView: { getComputedStyle(el: unknown): { lineHeight: string } } } }
-        const lineHeight = await line.evaluate((el: Styled) => parseFloat(el.ownerDocument.defaultView.getComputedStyle(el).lineHeight))
-        expect(lineHeight).toBeGreaterThan(0)
-        expect((await line.boundingBox())!.height).toBeLessThan(2 * lineHeight)
+        expect(await textLines(line)).toBe(1)
       }
       // Every action a finger has to hit is 40 px tall, on every card: an arranged one has
       // "Arranged from …" where the others have Edit.
@@ -242,6 +258,12 @@ test.describe('History cards at phone widths (#4491)', () => {
           expect((await action.boundingBox())!.height).toBeGreaterThanOrEqual(40)
         }
       }
+      // #4524 — and the size line's links: Last print, queued #… and in library #….
+      const facts = await page.getByTestId('output-facts').locator('a').all()
+      expect(facts.length).toBeGreaterThanOrEqual(2)
+      for (const link of facts) {
+        expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(40)
+      }
 
       // Rename's field and its two buttons fit the summary's 10rem: nothing overlaps or
       // leaves the card, and the field is wide enough to type in.
@@ -251,6 +273,18 @@ test.describe('History cards at phone widths (#4491)', () => {
       await expect(field).toBeVisible()
       expect(await cardOverlaps(page)).toEqual([])
       expect((await field.boundingBox())!.width).toBeGreaterThanOrEqual(64)
+
+      // #4523 — a rename that fails says why under the name, inside the card: the output
+      // is gone from the mock's store, so the save is a 404.
+      await page.evaluate(`(async () => {
+        const outputs = await (await fetch('/api/v1/models/name-keychain/outputs')).json()
+        const gone = outputs.find((o) => o.name === ${JSON.stringify(long)})
+        const deleted = await fetch('/api/v1/outputs/' + gone.id, { method: 'DELETE' })
+        if (!deleted.ok) throw new Error('delete failed: ' + deleted.status)
+      })()`)
+      await page.getByRole('button', { name: 'Save' }).click()
+      await expect(page.getByTestId('output-rename-error')).toHaveText('Output not found')
+      expect(await cardOverlaps(page)).toEqual([])
     })
   }
 })

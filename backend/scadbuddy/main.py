@@ -64,7 +64,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
-from scadbuddy.bambuddy.output_reader import LocalOutputs
+from scadbuddy.bambuddy.output_reader import ContentBlobs, LocalOutputs
 from scadbuddy.bambuddy.preview import PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
@@ -103,6 +103,7 @@ from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_hol
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
@@ -1159,8 +1160,18 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
     watches = WatchActivities(registry.store, registry.reports, state.events)
+    content = state.store.content
+    lan = LanDeps(
+        printers=registry.store,
+        settings_store=state.settings_store,
+        library=deps.library,
+        # A native slice's blob, from this process's own store (plan 2026-10-16 Task 9).
+        blobs=ContentBlobs(content) if content is not None else None,
+        rack=deps.rack,
+    )
     activities = [
         *PrintActivities(deps).all(),
+        *LanActivities(lan).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
     ]
     while not stop.is_set():

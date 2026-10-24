@@ -107,6 +107,11 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
               ))}
             </SelectContent>
           </Select>
+          {algorithm === 'bambuddy' && (
+            <p data-testid="rack-algorithm-bambuddy" className="text-xs text-muted-foreground">
+              Printed over the LAN, the printer picks the hotends itself, unless a position is picked above.
+            </p>
+          )}
           {algorithmUnsaved && (
             <p role="alert" data-testid="rack-algorithm-unsaved" className="text-xs text-destructive">
               Not remembered for this printer; this print still uses it.

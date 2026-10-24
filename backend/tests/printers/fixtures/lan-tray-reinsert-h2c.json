@@ -1,0 +1,219 @@
+{
+ "what": "AMS 1 slot 1 (global tray 5, bit 0x20) pulled at ~10 s and pushed back at ~28 s, H2C firmware 01.02.00.00, 2026-10-24; one entry per change of these fields, in arrival order",
+ "steps": [
+  {
+   "seconds": 0.0,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffff",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "0",
+   "ams_1_tray_1": {
+    "bed_temp": "0",
+    "bed_temp_type": "0",
+    "cali_idx": -1,
+    "cols": [
+     "FEC600FF"
+    ],
+    "ctype": 2,
+    "drying_temp": "55",
+    "drying_time": "8",
+    "id": "1",
+    "nozzle_temp_max": "230",
+    "nozzle_temp_min": "190",
+    "remain": 100,
+    "state": 11,
+    "tag_uid": "REDACTED",
+    "total_len": 330000,
+    "tray_color": "FEC600FF",
+    "tray_diameter": "1.75",
+    "tray_id_name": "A00-Y02",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "PLA Basic",
+    "tray_type": "PLA",
+    "tray_uuid": "REDACTED",
+    "tray_weight": "1000",
+    "xcam_info": "000000000000000000000000"
+   }
+  },
+  {
+   "seconds": 9.8,
+   "tray_exist_bits": "1ffdf",
+   "tray_read_done_bits": "1ffdf",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "0",
+   "ams_1_tray_1": {
+    "id": "1",
+    "state": 10
+   }
+  },
+  {
+   "seconds": 27.8,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffdf",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "0",
+   "ams_1_tray_1": {
+    "id": "1",
+    "state": 1
+   }
+  },
+  {
+   "seconds": 31.6,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffdf",
+   "tray_reading_bits": "20",
+   "tray_hall_out_bits": "0",
+   "ams_1_tray_1": {
+    "id": "1",
+    "state": 5
+   }
+  },
+  {
+   "seconds": 35.6,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffdf",
+   "tray_reading_bits": "20",
+   "tray_hall_out_bits": "20",
+   "ams_1_tray_1": {
+    "id": "1",
+    "state": 21
+   }
+  },
+  {
+   "seconds": 49.7,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffff",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "20",
+   "ams_1_tray_1": {
+    "bed_temp": "0",
+    "bed_temp_type": "0",
+    "cali_idx": -1,
+    "cols": [
+     "FEC600FF"
+    ],
+    "ctype": 2,
+    "drying_temp": "55",
+    "drying_time": "8",
+    "id": "1",
+    "nozzle_temp_max": "230",
+    "nozzle_temp_min": "190",
+    "remain": -1,
+    "state": 27,
+    "tag_uid": "REDACTED",
+    "total_len": 330000,
+    "tray_color": "FEC600FF",
+    "tray_diameter": "1.75",
+    "tray_id_name": "A00-Y02",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "PLA Basic",
+    "tray_type": "PLA",
+    "tray_uuid": "REDACTED",
+    "tray_weight": "1000",
+    "xcam_info": "000000000000000000000000"
+   }
+  },
+  {
+   "seconds": 51.6,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffff",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "0",
+   "ams_1_tray_1": {
+    "bed_temp": "0",
+    "bed_temp_type": "0",
+    "cali_idx": -1,
+    "cols": [
+     "FEC600FF"
+    ],
+    "ctype": 2,
+    "drying_temp": "55",
+    "drying_time": "8",
+    "id": "1",
+    "nozzle_temp_max": "230",
+    "nozzle_temp_min": "190",
+    "remain": -1,
+    "state": 11,
+    "tag_uid": "REDACTED",
+    "total_len": 330000,
+    "tray_color": "FEC600FF",
+    "tray_diameter": "1.75",
+    "tray_id_name": "A00-Y02",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "PLA Basic",
+    "tray_type": "PLA",
+    "tray_uuid": "REDACTED",
+    "tray_weight": "1000",
+    "xcam_info": "000000000000000000000000"
+   }
+  },
+  {
+   "seconds": 51.2,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffff",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "20",
+   "ams_1_tray_1": {
+    "bed_temp": "0",
+    "bed_temp_type": "0",
+    "cali_idx": -1,
+    "cols": [
+     "FEC600FF"
+    ],
+    "ctype": 2,
+    "drying_temp": "55",
+    "drying_time": "8",
+    "id": "1",
+    "nozzle_temp_max": "230",
+    "nozzle_temp_min": "190",
+    "remain": -1,
+    "state": 27,
+    "tag_uid": "REDACTED",
+    "total_len": 330000,
+    "tray_color": "FEC600FF",
+    "tray_diameter": "1.75",
+    "tray_id_name": "A00-Y02",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "PLA Basic",
+    "tray_type": "PLA",
+    "tray_uuid": "REDACTED",
+    "tray_weight": "1000",
+    "xcam_info": "000000000000000000000000"
+   }
+  },
+  {
+   "seconds": 63.2,
+   "tray_exist_bits": "1ffff",
+   "tray_read_done_bits": "1ffff",
+   "tray_reading_bits": "0",
+   "tray_hall_out_bits": "0",
+   "ams_1_tray_1": {
+    "bed_temp": "0",
+    "bed_temp_type": "0",
+    "cali_idx": -1,
+    "cols": [
+     "FEC600FF"
+    ],
+    "ctype": 2,
+    "drying_temp": "55",
+    "drying_time": "8",
+    "id": "1",
+    "nozzle_temp_max": "230",
+    "nozzle_temp_min": "190",
+    "remain": 100,
+    "state": 11,
+    "tag_uid": "REDACTED",
+    "total_len": 330000,
+    "tray_color": "FEC600FF",
+    "tray_diameter": "1.75",
+    "tray_id_name": "A00-Y02",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "PLA Basic",
+    "tray_type": "PLA",
+    "tray_uuid": "REDACTED",
+    "tray_weight": "1000",
+    "xcam_info": "000000000000000000000000"
+   }
+  }
+ ]
+}

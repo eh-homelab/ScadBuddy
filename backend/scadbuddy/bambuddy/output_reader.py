@@ -10,8 +10,9 @@ and :class:`RemoteOutputs` through the API's internal routes (``api/internal.py`
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
@@ -21,8 +22,12 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
 from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.secrets import Kek
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, OutputNotFoundError, OutputStore
+from scadbuddy.slicing.transfer import INTERNAL_BLOBS, TRANSFER_HEADER
+from scadbuddy.slicing.transfer_token import TransferToken, sign, transfer_key
+from scadbuddy.store.content import ContentStore
 
 #: The API's internal routes the remote reader calls (``api/internal.py``).
 INTERNAL_OUTPUTS = "/api/v1/internal/outputs"
@@ -182,3 +187,74 @@ class RemoteOutputs:
     async def naming(self, meta: OutputMeta) -> OutputNaming:
         response = await self._get(f"{INTERNAL_OUTPUTS}/{meta.id}/naming")
         return OutputNaming.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)
+
+
+#: How long a `RemoteBlobs` read's token is good for: one read, started at once.
+BLOB_TOKEN_TTL = timedelta(minutes=10)
+#: A sliced 3MF streamed from the API: as long as an upload may take.
+BLOB_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
+
+
+class BlobMissingAnswerError(LookupError):
+    """The API has no blob under the key (its own 404)."""
+
+
+class SlicedBlobs(Protocol):
+    """A native slice's 3MF by its blob key (plan 2026-10-16 Task 9): what a LAN print
+    sends to the printer."""
+
+    def stream(self, key: str) -> AsyncGenerator[bytes]: ...
+
+
+class RemoteBlobs:
+    """`SlicedBlobs` through the API's internal blob route (`api/internal_blobs.py`), as
+    `RemoteOutputs` reads outputs: the print worker holds no store. Each read carries a
+    token for its one key (`slicing/transfer_token.py`), MACed under the KEK, which a
+    LAN print's worker holds anyway; never logged."""
+
+    def __init__(
+        self,
+        base_url: str,
+        kek: Kek,
+        *,
+        client: httpx.AsyncClient | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._secret = transfer_key(kek)
+        self._now = now
+        self._client = client or httpx.AsyncClient(
+            base_url=base_url.rstrip("/"), timeout=BLOB_TIMEOUT
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def stream(self, key: str) -> AsyncGenerator[bytes]:
+        expires_at = (self._now() + BLOB_TOKEN_TTL).replace(microsecond=0)
+        token = sign(self._secret, TransferToken(method="GET", blob_key=key, expires_at=expires_at))
+        async with self._client.stream(
+            "GET", f"{INTERNAL_BLOBS}/{key}", headers={TRANSFER_HEADER: token}
+        ) as response:
+            if not response.is_success:
+                await response.aread()
+                if _gone(response):
+                    raise BlobMissingAnswerError(key)
+                if _is_problem(response):
+                    raise _problem(response)
+                response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                yield chunk
+
+
+@dataclass
+class ContentBlobs:
+    """`SlicedBlobs` on the API's own content store: the in-process print worker's."""
+
+    content: ContentStore
+
+    async def stream(self, key: str) -> AsyncGenerator[bytes]:
+        stat = await self.content.stat(key)
+        if stat is None:
+            raise BlobMissingAnswerError(key)
+        async for chunk in self.content.get(stat.ref):
+            yield chunk

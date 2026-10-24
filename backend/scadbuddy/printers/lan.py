@@ -20,7 +20,15 @@ The protocol facts, each cited:
   ``tests/printers/test_lan_ftps.py``: 200,000 bytes sent, 98,304 arrived).
 
 Which directory a 3MF goes in and the ``url`` the printer then accepts are not
-documented there: Task 7 measures them on a printer, so this module sets neither.
+documented there; Task 7 measured them (`UPLOAD_DIR`, `file_url`) on an H2C, firmware
+01.02.00.00, on 2026-10-24: a 3MF stored at ``/<name>`` and named ``ftp://<name>`` in
+`project_file_command`, with the four ids ``"0"`` and no ``ams_mapping2``, was answered
+``result: SUCCESS`` and ``RUNNING`` 1.8 s later (`tests/printers/test_lan_live.py`).
+Once it started, the printer moved the file to ``/cache/<name>.gcode.3mf``: ``/<name>``
+is gone, so a start that is tried again uploads again rather than naming it.
+Bambuddy does the same (``print_scheduler.py`` "Upload to root directory (not
+/cache/)", ``bambu_mqtt.py`` ``start_print``: ``"url": f"ftp://{filename}"``, read in
+the deployed image 2026-10-24).
 
 The printer's certificate is self-signed and names no host, so verification is by pin,
 never off: `fetch_cert_sha256` reads the leaf certificate's SHA-256 once, when the user
@@ -44,6 +52,7 @@ import socket
 import ssl
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import Any, BinaryIO
 
 import aiomqtt
@@ -58,6 +67,8 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 #: How long an FTPS command or block may wait.
 FTP_TIMEOUT = 30.0
 FTP_BLOCK = 64 * 1024
+#: Where a 3MF is stored for ``print.project_file`` (Task 7, measured; module docstring).
+UPLOAD_DIR = "/"
 #: How long an upload waits for the printer's answer to its ``close_notify``. Some
 #: printers never send one (ha-bambulab skips the unwrap for that reason); the ``226``
 #: reply, not the close, says the file arrived.
@@ -136,12 +147,19 @@ def ftps_context(cert_sha256_hex: str) -> ssl.SSLContext:
     return context
 
 
+def file_url(remote_name: str) -> str:
+    """The ``url`` ``print.project_file`` takes for a file in `UPLOAD_DIR` (Task 7)."""
+    return f"ftp://{remote_name}"
+
+
 def pushall_command() -> dict[str, Any]:
     return {"pushing": {"sequence_id": "0", "command": "pushall"}}
 
 
 def project_file_command(file: ProjectFile, sequence_id: str) -> dict[str, Any]:
-    """``print.project_file``; the four ids are ``"0"`` for a local print (`mqtt.md`)."""
+    """``print.project_file``; the four ids are ``"0"`` for a local print (`mqtt.md`).
+    ``nozzle_mapping`` only when there is one (hot-path Task 8, `nozzle_mapping.py`)."""
+    rack = {} if file.nozzle_mapping is None else {"nozzle_mapping": list(file.nozzle_mapping)}
     return {
         "print": {
             "command": "project_file",
@@ -160,6 +178,7 @@ def project_file_command(file: ProjectFile, sequence_id: str) -> dict[str, Any]:
             "profile_id": "0",
             "task_id": "0",
             "subtask_id": "0",
+            **rack,
         }
     }
 
@@ -243,17 +262,26 @@ class LanPrinter:
                 return report
         raise ConnectionError("the printer closed the connection before it reported")
 
-    async def reports(self, connected: asyncio.Event | None = None) -> AsyncIterator[LanReport]:
+    async def reports(
+        self,
+        connected: asyncio.Event | None = None,
+        *,
+        command: dict[str, Any] | None = None,
+    ) -> AsyncIterator[LanReport]:
         """Each report, merged over the ones before, for as long as the connection
         lasts. A message that is not a JSON object with a ``print`` object is skipped.
         ``connected`` is set once the printer has taken the login and the subscription:
-        the evidence it is there, before it has said anything."""
+        the evidence it is there, before it has said anything. ``command`` is published
+        after the ``pushall`` on the same connection, so what it does is reported here
+        without a second one (a LAN start, `print_activities.lan_print`)."""
         merged: dict[str, Any] | None = None
         async with await self._client() as client:
             await client.subscribe(self.report_topic)
             if connected is not None:
                 connected.set()
             await client.publish(self.request_topic, json.dumps(pushall_command()))
+            if command is not None:
+                await client.publish(self.request_topic, json.dumps(command))
             async for message in client.messages:
                 delta = _print_of(message.payload)
                 if delta is None:
@@ -267,18 +295,41 @@ class LanPrinter:
 
     async def upload(self, data: BinaryIO, remote_name: str) -> str:
         """Send ``data`` over implicit FTPS as ``remote_name`` (a path on the printer;
-        which directory is Task 7's measurement) and return the md5 (hex) of what was
+        in `UPLOAD_DIR`, Task 7) and return the md5 (hex) of what was
         sent, which ``print.project_file`` names."""
         address = await lan_address(self.host)
         return await asyncio.to_thread(self._upload, address, data, remote_name)
 
-    def _upload(self, address: str, data: BinaryIO, remote_name: str) -> str:
-        md5 = hashlib.md5(usedforsecurity=False)
+    async def download(self, remote_name: str) -> bytes:
+        """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file)."""
+        address = await lan_address(self.host)
+        return await asyncio.to_thread(self._download, address, remote_name)
+
+    def _ftps(self, address: str) -> ImplicitFtpTls:
+        """A logged-in, protected FTPS session on ``address``; the caller closes it."""
         ftp = ImplicitFtpTls(context=ftps_context(self.cert_sha256), timeout=FTP_TIMEOUT)
         try:
             ftp.connect(address, FTPS_PORT)
             ftp.login(USERNAME, self._access_code)
             ftp.prot_p()
+        except BaseException:
+            ftp.close()
+            raise
+        return ftp
+
+    def _download(self, address: str, remote_name: str) -> bytes:
+        ftp = self._ftps(address)
+        try:
+            out = BytesIO()
+            ftp.retrbinary(f"RETR {remote_name}", out.write)
+            return out.getvalue()
+        finally:
+            ftp.close()
+
+    def _upload(self, address: str, data: BinaryIO, remote_name: str) -> str:
+        md5 = hashlib.md5(usedforsecurity=False)
+        ftp = self._ftps(address)
+        try:
             ftp.voidcmd("TYPE I")
             conn = ftp.transfercmd(f"STOR {remote_name}")
             try:
