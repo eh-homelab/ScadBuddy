@@ -52,8 +52,20 @@ class Library:
         yield self.payload[100:]
 
 
-async def warned(library: Library, overrides: dict[str, Any], plate_id: int = 1) -> list[str]:
-    found = await tower_dropped(library, sliced=9, plate_id=plate_id, process_overrides=overrides)
+async def warned(
+    library: Library,
+    overrides: dict[str, Any],
+    plate_id: int = 1,
+    *,
+    preset_tower: bool | None = True,
+) -> list[str]:
+    found = await tower_dropped(
+        library,
+        sliced=9,
+        plate_id=plate_id,
+        process_overrides=overrides,
+        preset_tower=preset_tower,
+    )
     assert all(warning.kind == "prime-tower-not-applied" for warning in found)
     return [warning.message for warning in found]
 
@@ -84,9 +96,32 @@ async def test_a_plate_of_one_filament_says_nothing() -> None:
     assert await warned(Library(sliced_3mf(DROPPED, 2)), {"enable_prime_tower": "1"}) == []
 
 
-async def test_a_preset_whose_own_tower_is_off_says_nothing() -> None:
-    off = {"enable_prime_tower": "0", "different_settings_to_system": ["sparse_infill_density"]}
-    assert await warned(Library(sliced_3mf(off, 1, 2)), {}) == []
+async def test_a_preset_whose_own_tower_is_off_is_not_read() -> None:
+    """#4627 review: a user process preset that turns the tower off (its system parent's
+    on) slices to ``"0"`` with the key in ``different_settings_to_system`` too, exactly
+    as the CLI dropping it does; only the preset's own value tells them apart."""
+    library = Library(sliced_3mf(DROPPED, 1, 2))
+    assert await warned(library, {}, preset_tower=False) == []
+    assert library.downloads == []
+
+
+async def test_a_preset_that_could_not_be_read_is_not_read() -> None:
+    library = Library(sliced_3mf(DROPPED, 1, 2))
+    assert await warned(library, {}, preset_tower=None) == []
+    assert library.downloads == []
+
+
+async def test_an_override_on_wins_over_a_preset_with_it_off() -> None:
+    assert await warned(
+        Library(sliced_3mf(DROPPED, 1, 2)), {"enable_prime_tower": "1"}, preset_tower=False
+    )
+
+
+async def test_the_warning_names_shared_presets_as_only_the_likely_cause() -> None:
+    """#4627 review: by-object printing drops it too."""
+    [message] = await warned(Library(sliced_3mf(DROPPED, 1, 2)), {})
+    assert "The likely cause is filament slots sharing one preset" in message
+    assert "printing by object" in message
 
 
 async def test_a_tower_asked_off_is_not_read() -> None:
@@ -126,7 +161,9 @@ class Bambuddy(Library):
         return type("Item", (), {"id": 31})()
 
 
-def planned(slicer: str) -> PlannedRun:
+def planned(
+    slicer: str, *, slots_shared: bool = True, process_tower: bool | None = True
+) -> PlannedRun:
     shared = PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
     plan = SlicePlan(
         printer_preset=PresetRef(source="standard", id="Bambu Lab H2C 0.4 nozzle"),
@@ -142,8 +179,9 @@ def planned(slicer: str) -> PlannedRun:
             "nozzle_size": "0.4",
             "copies": 1,
             "options": PrintOptions(),
-            "plates": [PlatePlan(plate_id=1, plan=plan)],
+            "plates": [PlatePlan(plate_id=1, plan=plan, slots_shared=slots_shared)],
             "slicer": slicer,
+            "process_tower": process_tower,
         }
     )
 
@@ -171,3 +209,35 @@ async def test_a_native_slice_is_not_read_for_it() -> None:
 
     assert queued.warnings == []
     assert bambuddy.downloads == []
+
+
+async def test_a_plate_whose_slots_were_distinct_from_the_start_is_not_read() -> None:
+    """#4627 review: no slot preset was needed, and the CLI keeps the tower then."""
+    bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
+    run = planned("bambuddy", slots_shared=False)
+
+    queued = await queue_plate(
+        cast(BambuddyClient, bambuddy), planned=run, plate=run.plates[0], sliced=9, rack=None
+    )
+
+    assert queued.warnings == []
+    assert bambuddy.downloads == []
+
+
+async def test_a_plan_recorded_before_the_fields_is_still_read() -> None:
+    """A ``print_plan`` result in a workflow's history has neither field: its plates
+    are read, and a plate with no tower override says nothing, its preset unread."""
+    run = planned("bambuddy")
+    recorded = run.model_dump(mode="json")
+    del recorded["process_tower"]
+    del recorded["plates"][0]["slots_shared"]
+    old = PlannedRun.model_validate(recorded)
+    bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
+
+    queued = await queue_plate(
+        cast(BambuddyClient, bambuddy), planned=old, plate=old.plates[0], sliced=9, rack=None
+    )
+
+    assert old.plates[0].slots_shared is True
+    assert old.process_tower is None
+    assert queued.warnings == []

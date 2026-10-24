@@ -273,7 +273,7 @@ def test_slots_sharing_a_preset_slice_each_with_its_own(client: TestClient, mode
     local = LocalPresets()
     sliced = Job().routes()
     sliced_routes()
-    respx.get(f"{API}/library/files/{SLICED}/download").mock(
+    download = respx.get(f"{API}/library/files/{SLICED}/download").mock(
         return_value=httpx.Response(200, content=sliced_file({"enable_prime_tower": "1"}, 1, 2))
     )
     queue_route()
@@ -301,6 +301,8 @@ def test_slots_sharing_a_preset_slice_each_with_its_own(client: TestClient, mode
         }
     ]
     assert not [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-not-applied"]
+    # Rewritten slots are what the guard proves worked (#4627 review): still read.
+    assert download.called
 
 
 @respx.mock
@@ -331,3 +333,57 @@ def test_a_slice_that_still_lost_its_tower_says_so(client: TestClient, model: st
     assert sent["filament_presets"] == [{"source": "cloud", "id": "GFSG00_24"}] * 2
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-not-applied"]
     assert warning["message"].startswith("Bambuddy's slicer dropped the prime tower from plate 1")
+
+
+#: A slice with no tower whose process lists it as changed: the CLI dropping it, or a
+#: user process preset that turns it off over its system parent's on.
+NO_TOWER = {"enable_prime_tower": "0", "different_settings_to_system": ["enable_prime_tower"]}
+
+
+@respx.mock
+def test_shared_slots_on_a_preset_with_its_tower_off_say_nothing(
+    client: TestClient, model: str
+) -> None:
+    """#4627 review: no choice, and the process preset's own tower is off, so a slice
+    with none is what was asked for, though ``different_settings_to_system`` names it."""
+    output_id = prepared(client, model)
+    routes()
+    preset_values({"enable_prime_tower": "0", "wipe_tower_no_sparse_layers": "0"})
+    respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(403, json={"detail": "API key does not have permission"})
+    )
+    download = respx.get(f"{API}/library/files/77/download").mock(
+        return_value=httpx.Response(200, content=sliced_file(NO_TOWER, 1, 2))
+    )
+
+    response = run_print(client, output_id, json={**body(), "filament_plan": SAME_PRESET})
+
+    assert response.status_code == 200, response.text
+    assert not [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-not-applied"]
+    assert not download.called
+
+
+@respx.mock
+def test_slots_distinct_from_the_start_are_not_read(client: TestClient, model: str) -> None:
+    """#4627 review: no slot needed a preset of its own, and the CLI keeps the tower
+    for distinct names, so the sliced file is not downloaded for the guard."""
+    output_id = prepared(client, model)
+    sliced = routes()
+    preset_values(PRESET)
+    download = respx.get(url__regex=rf"{API}/library/files/\d+/download").mock(
+        return_value=httpx.Response(200, content=sliced_file(NO_TOWER, 1, 2))
+    )
+
+    response = run_print(client, output_id, json={**body(), "prime_tower": {"enabled": True}})
+
+    assert response.status_code == 200, response.text
+    assert (
+        len(
+            {
+                json.dumps(ref)
+                for ref in json.loads(sliced.calls.last.request.content)["filament_presets"]
+            }
+        )
+        == 2
+    )
+    assert not download.called

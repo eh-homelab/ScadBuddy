@@ -97,6 +97,12 @@ class SlotPresets:
             return ref.id
         return self._names.get((ref.source, ref.id), f"{ref.source}:{ref.id}")
 
+    def shared(self, plan: SlicePlan) -> bool:
+        """Whether two of ``plan``'s slots name one preset as the CLI sees it: the plates
+        :meth:`plan` rewrites, and the only ones whose slice can lose its tower to it."""
+        names = [self._name(ref) for ref in plan.filament_presets]
+        return len(set(names)) < len(names)
+
     async def plan(self, plan: SlicePlan) -> SlicePlan:
         """``plan`` with every repeat of a preset name after its first on its slot's own
         preset; ``plan`` itself when nothing repeats or nothing could be made."""

@@ -236,6 +236,18 @@ async def test_distinct_presets_ask_nothing_of_bambuddy(bambuddy: BambuddyClient
     assert not respx.calls
 
 
+async def test_shared_is_by_the_name_the_cli_sees(bambuddy: BambuddyClient) -> None:
+    """What the post-slice tower guard keys on (#4627 review): a plate it may skip has
+    no two slots of one name, a cloud ref of a bundled name included."""
+    cloud = PresetRef(source="cloud", id="GFSA00_14")
+    names = SlotPresets(bambuddy, catalogue(PresetChoice(ref=cloud, name=PLA)))
+    other = PresetRef(source="standard", id="Bambu PETG HF @BBL H2C")
+
+    assert names.shared(plan(STANDARD, STANDARD))
+    assert names.shared(plan(STANDARD, cloud))
+    assert not names.shared(plan(STANDARD, other))
+
+
 def test_slot_presets_are_never_offered_in_the_catalogue() -> None:
     local = LocalPresetCatalogue.model_validate(
         {

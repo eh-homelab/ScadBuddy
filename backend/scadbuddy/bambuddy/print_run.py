@@ -96,6 +96,7 @@ from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
     not_resliced,
+    preset_tower,
     prime_tower_overrides,
     prime_tower_warnings,
     template_keys_dropped,
@@ -2264,6 +2265,11 @@ class PlatePlan(BaseModel):
     filaments: QueueFilaments | None = None
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
+    #: Whether two of the plan's slots named one preset before each repeat got its own
+    #: (``slot_presets``, #3962). A plate whose slots were distinct from the start is
+    #: not read for a dropped tower (:func:`queue_plate`); the default reads it, so a
+    #: plan recorded before this field is checked as before.
+    slots_shared: bool = True
 
 
 #: A run on the native slicer without Bambu Studio's profiles (a process outside the
@@ -2301,6 +2307,10 @@ class PlannedRun(BaseModel):
     path: RunPath = "bambuddy"
     #: As :attr:`PreparedPlates.lan_start`: the plates are started over the LAN.
     lan_start: bool = False
+    #: The process preset's own ``enable_prime_tower`` (``prime_tower.preset_tower``),
+    #: read only for a Bambuddy run whose shared slots slice with no tower override:
+    #: what such a plate asked for (#3962). ``None`` when unread.
+    process_tower: bool | None = None
 
 
 class QueuedPlate(BaseModel):
@@ -2400,13 +2410,16 @@ async def queue_plate(
         planned.slicer == "bambuddy"
         and plate.plan is not None
         and len(plate.plan.filament_presets) > 1
+        and plate.slots_shared
     ):
-        # Before the queue call, which is made once: this never raises (#3962).
+        # Before the queue call, which is made once: this never raises (#3962). Slots
+        # distinct from the start need no own presets, and the CLI keeps their tower.
         notes += await tower_dropped(
             client,
             sliced=sliced,
             plate_id=plate.plate_id,
             process_overrides=plate.plan.process_overrides,
+            preset_tower=planned.process_tower,
         )
     choice = (
         await rack_chooser(
@@ -2654,11 +2667,21 @@ async def plan_run(
         ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    slots_shared: dict[int, bool] = {}
+    process_tower: bool | None = None
     if not native_slicing and not native_run and client is not None:
         # Bambuddy's slicer drops the prime tower when slots share one preset name
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
         # the preview, the slice and a reprint's lookup all name the same refs.
         slot_presets = SlotPresets(client, catalogue)
+        slots_shared = {plate_id: slot_presets.shared(plan) for plate_id, _, _, plan in ready}
+        if any(
+            slots_shared[plate_id] and "enable_prime_tower" not in plan.process_overrides
+            for plate_id, _, _, plan in ready
+        ):
+            # What those plates ask for, for the post-slice guard: `read` already
+            # holds it when supports read the preset.
+            process_tower = await preset_tower(client, process, read=read)
         ready = [
             (plate_id, options, resolved, await slot_presets.plan(plan))
             for plate_id, options, resolved, plan in ready
@@ -2727,6 +2750,7 @@ async def plan_run(
                 sliced_file_id=reused,
                 filaments=queue_filaments(options, request.filament_plan),
                 spools=_spools_by_slot(options, request.filament_plan),
+                slots_shared=slots_shared.get(plate_id, True),
             )
             for plate_id, options, _, plan, reused in planned
         ],
@@ -2743,6 +2767,7 @@ async def plan_run(
         printer=prepared.printer,
         path=prepared.path,
         lan_start=prepared.lan_start,
+        process_tower=process_tower,
     )
 
 

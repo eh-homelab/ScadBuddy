@@ -152,8 +152,32 @@ class SlicedFiles(Protocol):
     def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]: ...
 
 
+async def preset_tower(
+    client: BambuddyClient | None, process: PresetRef | None, *, read: ReadPresetValues | None
+) -> bool | None:
+    """The process preset's own ``enable_prime_tower``, what a print with no tower
+    choice slices with; ``None`` when it cannot be read or is not ``"1"``/``"0"``. It
+    only feeds :func:`tower_dropped`'s warning, so like it, it never raises."""
+    if process is None:
+        return None
+    try:
+        answer = await preset_reader(client, read)(process)
+    except Exception as error:
+        logger.info(
+            "the process preset's prime tower could not be read",
+            extra={"source": process.source, "error": type(error).__name__},
+        )
+        return None
+    return {"1": True, "0": False}.get(str(answer.values.get("enable_prime_tower")))
+
+
 async def tower_dropped(
-    client: SlicedFiles, *, sliced: int, plate_id: int, process_overrides: Mapping[str, object]
+    client: SlicedFiles,
+    *,
+    sliced: int,
+    plate_id: int,
+    process_overrides: Mapping[str, object],
+    preset_tower: bool | None,
 ) -> list[FilamentWarning]:
     """Say so when Bambuddy's slice of ``plate_id`` came back with no prime tower that
     was asked for, on a plate printing two or more filaments (#3962). Bambu Studio's CLI
@@ -162,11 +186,12 @@ async def tower_dropped(
     shows. A warning, never a refusal, and it never raises: an unread file says nothing.
 
     Asked for means ``enable_prime_tower`` ``"1"`` among the plan's process overrides,
-    or none at all and the slice's value not its process preset's
-    (:attr:`SlicedProfile.prime_tower_changed`): with the preset's default on, that is
-    what the CLI's override leaves. A plate asked to print no tower is not read."""
+    or none there and ``preset_tower``, the process preset's own value (:func:`preset_tower`),
+    on. ``different_settings_to_system`` is no evidence: it lists what differs from the
+    *system* parent, so a user preset that turns the tower off lists it too. A plate
+    not asked for a tower, or whose preset could not be read, is not read."""
     asked = process_overrides.get("enable_prime_tower")
-    if asked == "0":
+    if asked != "1" and (asked is not None or preset_tower is not True):
         return []
     try:
         data = bytearray()
@@ -185,8 +210,6 @@ async def tower_dropped(
     profile = read.profile
     if profile is None or profile.prime_tower is not False:
         return []
-    if asked != "1" and not profile.prime_tower_changed:
-        return []
     plate = read.sliced.get(plate_id)
     if plate is None and len(read.sliced) == 1:
         plate = next(iter(read.sliced.values()))
@@ -199,8 +222,9 @@ async def tower_dropped(
             message=(
                 f"Bambuddy's slicer dropped the prime tower from plate {plate_id}, which"
                 f" prints {filaments} filaments: the tower was asked for, and the sliced"
-                " file has none. Its slicer does this when the filament slots share one"
-                " preset."
+                " file has none. The likely cause is filament slots sharing one preset,"
+                " which makes its slicer drop the tower; other settings, such as printing"
+                " by object, can drop it too."
             ),
         )
     ]
