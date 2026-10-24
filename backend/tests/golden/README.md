@@ -12,7 +12,9 @@ Two kinds of golden live here.
   `Application` as `BambuStudio-…` with `Origin` as ScadBuddy — that claim is
   what makes Bambu Studio read the config at all, and those five options are
   what stop it segfaulting once it does (#110). None of them is cosmetic: drop
-  one and the slicer crashes rather than complains.
+  one and the slicer crashes rather than complains. `printable_area` is the bed the
+  plates are spaced by: without it the CLI takes the file for a 200 x 200 bed and
+  finds every plate after the first empty (#4638).
 - `name-keychain-*/` — integration goldens for the example models in `models/`.
   Each one is a real render through the production pipeline, recorded by
   `tests/test_golden_models.py`.

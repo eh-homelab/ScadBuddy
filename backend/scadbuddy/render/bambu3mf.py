@@ -547,6 +547,19 @@ def printer_preset(plate: PlateGeometry, nozzle: str) -> str:
     return f"{plate.model} {nozzle} nozzle" if plate.model else PRESET_PLACEHOLDER
 
 
+def printable_area(plate: PlateGeometry) -> list[str]:
+    """``printable_area`` for ``plate``, as Bambu Studio writes it (``["0x0", "330x0",
+    "330x320", "0x320"]``): the bed the file's plates were laid out on (#4638).
+
+    The CLI reads it as the file's own bed ("old printable size from 3mf") and spaces
+    the file's plates by it before it reads where any object is. A file without it is
+    taken for a 200 x 200 bed, so plate N's origin is not :func:`plate_origin`'s and
+    every object past plate 1 lies outside its plate: "Nothing to be sliced" (exit 206).
+    Whole millimetres, as :func:`plate_origin` spaces the plates."""
+    width, depth = int(plate.size[0]), int(plate.size[1])
+    return ["0x0", f"{width}x0", f"{width}x{depth}", f"0x{depth}"]
+
+
 def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
     """Every filament on extruder 1, as Bambu Studio 02.08.02.61 saved the maintainer's
     two-colour H2C keychain at 0.2 mm, which printed through the one 0.2 mm nozzle
@@ -607,6 +620,8 @@ def project_settings(
         "print_settings_id": PRESET_PLACEHOLDER,
         "filament_settings_id": [PRESET_PLACEHOLDER for _ in colours],
         "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
+        # The bed the plates are spaced by; without it plates 2+ slice empty (#4638).
+        "printable_area": printable_area(plate),
         "printable_height": _number(plate.height),
         # Required-or-segfault on a slice with no profiles (#4089).
         **filament_vectors(len(colours)),
@@ -1305,6 +1320,8 @@ def replate_3mf(
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
             settings["printable_height"] = _number(plate.height)
+            # And the bed the plates were just spaced by (#4638).
+            settings["printable_area"] = printable_area(plate)
             # A file written before #4089 lacks these, and Bambuddy's preview slice
             # segfaults on it; a file that states them keeps its own.
             for key, value in filament_vectors(len(settings.get("filament_colour", []))).items():
