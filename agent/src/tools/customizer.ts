@@ -528,7 +528,8 @@ export const customizerTools: Tool[] = [
     handler: async ({ slug, filename, workspace_path, workspace_sha256 }, ctx) => {
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'upload_asset')
       const name = filename ?? uploadName(info.path)
-      const type = name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+      const type =
+        filename === undefined ? info.mediaType : name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
       const answer = await command(ctx, `upload ${name}`, (headers) =>
         ctx.backend.POST('/api/v1/models/{slug}/assets', {
           params: { path: { slug } },

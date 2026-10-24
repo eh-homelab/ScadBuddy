@@ -19,6 +19,8 @@ export function memoryWorkspace(files: Record<string, Buffer>, mediaType = 'appl
       const { bytes: _bytes, ...info } = found
       return info
     },
+    // Unlike `SessionFiles.chunks`, this checks no sha256 or range: a test of a file
+    // that changed under the upload cannot rely on it.
     async *chunks(_ws: unknown, path: string) {
       yield infos.get(path)!.bytes
     },
