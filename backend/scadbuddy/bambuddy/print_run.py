@@ -95,6 +95,7 @@ from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
+    may_share_a_name,
     not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
@@ -2400,13 +2401,16 @@ async def queue_plate(
     if (
         planned.slicer == "bambuddy"
         and plate.plan is not None
-        and len(plate.plan.filament_presets) > 1
+        and may_share_a_name(plate.plan.filament_presets)
     ):
-        # Before the queue call, which is made once: this never raises (#3962).
+        # Before the queue call, which is made once: this never raises (#3962). Slots
+        # that each have a preset of their own keep the tower, so their slice is not
+        # downloaded to look (#4649).
         notes += await tower_dropped(
             client,
             sliced=sliced,
             plate_id=plate.plate_id,
+            process=plate.plan.process_preset,
             process_overrides=plate.plan.process_overrides,
         )
     choice = (
