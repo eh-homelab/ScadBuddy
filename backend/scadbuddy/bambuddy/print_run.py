@@ -1688,13 +1688,16 @@ class RunRoute:
     """Which printer a run prints on and how, decided before any Bambuddy client is
     built (#3818 tier A, plan 2026-10-18 D2, D3): the registry row, the Bambuddy printer
     (``None`` for a row Bambuddy does not reach), the row's path and, on the LAN path, its
-    status from the report (D4). ``native`` is `hot_path_native` of the path."""
+    status from the report (D4). ``native`` is `hot_path_native` of the path. ``listed``
+    is Bambuddy's printer when :func:`ensured_route` read it, so `prepare_run` does not
+    read it again on Bambuddy's path (#4551)."""
 
     row: PrinterRow | None
     printer_id: int | None
     path: RunPath
     status: PrinterStatus | None
     native: bool
+    listed: Printer | None = None
 
     @property
     def printer(self) -> Printer:
@@ -1773,6 +1776,7 @@ async def ensured_route(
         path=path,
         status=report_status,
         native=(decide or hot_path_native)(settings, path),
+        listed=printer,
     )
 
 
@@ -1913,11 +1917,18 @@ async def prepare_run(
             assert named is not None  # `_named_printer` refuses a request naming nothing
             raise RunRefusalError(_not_on_bambuddy(named))
         printer_id = bambuddy_id
-        # Resolved before the path is decided (#4442 M2), so a row this run links or
-        # merges takes its own path from its first run.
-        printer = await _require_resolvable_printer(
-            bambuddy_client(client), printer_id, any_model=source.is_sliced
-        )
+        listed = None if route is None else route.listed
+        if listed is not None and listed.id == printer_id:
+            # `ensured_route` read it for this run's first check (#4551): one read.
+            printer = listed
+            if not source.is_sliced:
+                _require_model(printer)
+        else:
+            # Resolved before the path is decided (#4442 M2), so a row this run links or
+            # merges takes its own path from its first run.
+            printer = await _require_resolvable_printer(
+                bambuddy_client(client), printer_id, any_model=source.is_sliced
+            )
         row = await _ensure_row(printers, named, printer)
         path, report_status = await _registry_path(
             row, printers, reports, say_fallback=refuse_manual_pick
@@ -1986,6 +1997,11 @@ async def _record_seen(
         await record_seen(rack, printer_id, printer_status)
 
 
+#: How a disagreeing printer's refusal ends: a batch print's file says it of its own step
+#: (`print_batches._queue_one`, #4551).
+PICK_AGAIN = "Pick the printer again."
+
+
 async def _named_printer(
     printer: str | None,
     sent: int | None,
@@ -2027,12 +2043,12 @@ async def _named_printer(
         # the LAN reaches, whose run the dialog asked for.
         raise RunRefusalError(
             f"disagreeing printer: {named.name} is not linked to Bambuddy printer {sent}."
-            " Pick the printer again."
+            f" {PICK_AGAIN}"
         )
     if named.bambuddy_printer_id != sent:
         raise RunRefusalError(
             f"disagreeing printer: {named.name} is Bambuddy printer"
-            f" {named.bambuddy_printer_id} now, not {sent}. Pick the printer again."
+            f" {named.bambuddy_printer_id} now, not {sent}. {PICK_AGAIN}"
         )
     return named, sent
 

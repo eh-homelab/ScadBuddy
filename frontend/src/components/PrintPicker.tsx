@@ -391,11 +391,13 @@ export function PrintPicker({
   /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   /**
-   * #3818 Task 9 — the `printer_id` every run, check and preview body sends: none beside a
-   * LAN-only row, which links no Bambuddy printer. `registryPrinter` is `registryAsked`
-   * first, so while the view still shows the Bambuddy printer's read the old id would ride
-   * along with the asked row, and the server refuses that pair (422) rather than print on
-   * the Bambuddy printer.
+   * #3818 Task 9 — the `printer_id` every run, check, background-slice and batch-step body
+   * sends beside `printer`: none beside a LAN-only row, which links no Bambuddy printer.
+   * `registryPrinter` is `registryAsked` first, so while the view still shows the Bambuddy
+   * printer's read the old id would ride along with the asked row, and the server refuses
+   * that pair (422) rather than print on the Bambuddy printer. Arrange, analysis and quote
+   * send the view's `printerId` and no `printer` (#4551): their routes take no registry
+   * printer, and a null there would mean Settings' printer, not the LAN-only row.
    */
   const sentPrinterId = lanOnly.some((row) => row.id === registryPrinter) ? null : printerId
   const { askRegistry } = picker

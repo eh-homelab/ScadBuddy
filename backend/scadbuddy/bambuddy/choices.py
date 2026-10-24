@@ -345,11 +345,10 @@ async def native_choices_for(
         raise ApiError(http.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
     assert route.row is not None and route.status is not None, "a native route is a report's"
     status = route.status
-    ready = source
     catalogue = await catalogue_for(None, native=profiles)
     filaments = await filament_options(
         None,
-        ready,
+        source,
         printer_id=route.printer_id,
         trays_from=status,
         overlay=overlay,
@@ -365,7 +364,7 @@ async def native_choices_for(
     return _view(
         settings,
         catalogue,
-        ready,
+        source,
         filaments,
         printers=printers,
         printer_id=route.printer_id,

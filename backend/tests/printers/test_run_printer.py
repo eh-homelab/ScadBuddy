@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.print_run import (
     PreparedRun,
     PrintRunRequest,
     check_print,
+    ensured_route,
     prepare_run,
     run_route,
 )
@@ -273,6 +274,35 @@ async def test_the_check_makes_a_first_runs_row_before_it_decides_the_path(
     assert raised.value.details[0].status == 418, raised.value
     route = seen["route"]
     assert (route.row.id, route.path, route.native) == (row.id, "native", True)
+
+
+@respx.mock
+async def test_a_first_run_on_bambuddys_path_reads_the_printer_once(
+    printers: PrinterStore, reports: PrinterReportStore
+) -> None:
+    """#4551: on the hot path's backends, a Bambuddy printer with no row yet is read
+    once, by `ensured_route`, and `prepare_run` takes that printer rather than listing
+    Bambuddy's printers again."""
+    bambuddy_routes()
+    listing = respx.routes[0]
+    settings = StoredSettings(**HOT_PATH)
+    request = run_request(printer_id=1)
+    route = await run_route(settings, printers, reports, printer=None, printer_id=1)
+    async with BambuddyClient(BambuddyConfig(base_url=BASE, api_key="k")) as client:
+        route = await ensured_route(client, settings, printers, reports, route)
+        assert route.row is not None and not route.native
+        prepared = await prepare_run(
+            client,
+            cast(PrintSource, OnePlate()),
+            settings,
+            request,
+            printers=printers,
+            reports=reports,
+            route=route,
+        )
+
+    assert (prepared.printer, prepared.printer_id, prepared.path) == (route.row.id, 1, "bambuddy")
+    assert listing.call_count == 1
 
 
 @respx.mock
