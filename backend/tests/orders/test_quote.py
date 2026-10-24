@@ -183,9 +183,15 @@ class FakeRenders:
 
 
 class FakeOutputs:
-    def __init__(self, meta: OutputMeta | None = None, inputs: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        meta: OutputMeta | None = None,
+        inputs: dict[str, Any] | None = None,
+        arranged: list[str] | None = None,
+    ):
         self.meta = meta
         self.saved_inputs = inputs or {}
+        self.arranged = arranged or []
 
     def get(self, output_id: str) -> OutputMeta:
         if self.meta is None or self.meta.id != output_id:
@@ -194,6 +200,9 @@ class FakeOutputs:
 
     def inputs(self, output_id: str) -> dict[str, Any]:
         return self.saved_inputs
+
+    def arranged_from(self, output_id: str) -> list[str]:
+        return self.arranged
 
 
 class Book:
@@ -416,6 +425,36 @@ async def test_ensure_output_reuses_a_matching_output(shop: Shop) -> None:
     assert saved[0]["job_id"] == "job-1" and saved[0]["inputs"] == INPUTS
     assert saved[0]["name"] == f"{shop.order.number} Demo"
     assert shop.get_item().output_id == "out-10"
+
+
+async def test_ensure_output_reuses_an_arranged_output(shop: Shop) -> None:
+    """#4565: an arranged output records a content hash, not the commit the item pins,
+    and no render of the reference remakes the arrangement: it is the one sliced."""
+    item = shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, output_id="out-9")
+    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="sha256:" + "c" * 64)
+    renders = FakeRenders()
+
+    async def never(body: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("an arranged output is reused, never rendered again")
+
+    async def ensure(outputs: FakeOutputs) -> str:
+        return await ensure_output(
+            lifecycle=shop.lifecycle,
+            outputs=outputs,
+            renders=renders,
+            create_output=never,
+            order=shop.get_order(),
+            item=item,
+            filaments={},
+            by=BY,
+            follow_every=0.0,
+        )
+
+    assert await ensure(FakeOutputs(meta, INPUTS, ["library:3410"])) == "out-9"
+    assert renders.submitted == []
+    # The same hash on an output that was not arranged matches nothing.
+    with pytest.raises(AssertionError, match="never rendered again"):
+        await ensure(FakeOutputs(meta, INPUTS))
 
 
 async def test_the_run_writes_the_filaments_first(shop: Shop, tmp_path: Path) -> None:
