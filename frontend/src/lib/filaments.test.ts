@@ -7,6 +7,8 @@ import {
   facets,
   filterSpools,
   fromTrays,
+  providerLabel,
+  trayChoiceLabel,
   loadedLabel,
   seedPlan,
   slicedPlateSlots,
@@ -415,3 +417,19 @@ describe('slicedPlateSlots (#2702 review)', () => {
   })
 })
 
+describe('trayChoiceLabel and providerLabel', () => {
+  it('says what is in a tray and where', () => {
+    expect(
+      trayChoiceLabel({ spool_id: -1, material: 'PLA', colour: '#0047BB', colour_word: 'blue', label: 'AMS-A slot 1' }),
+    ).toBe('PLA blue in AMS-A slot 1')
+    expect(
+      trayChoiceLabel({ spool_id: -1, material: 'PETG', colour: null, loaded: { printer_id: 0, ams_id: 1, tray_id: 2 } }),
+    ).toMatch(/^PETG in AMS-B/)
+  })
+
+  it('names the providers', () => {
+    expect(providerLabel('bambuddy')).toBe('Bambuddy')
+    expect(providerLabel('spoolman')).toBe('Spoolman')
+    expect(providerLabel('open_spool')).toBe('Open Spool')
+  })
+})

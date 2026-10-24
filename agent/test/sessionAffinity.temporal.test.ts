@@ -1162,6 +1162,41 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(a.spawned).toBe(3)
   })
 
+  it('a kept home full of running turns as the next turn arrives refuses NoCapacity, and the turn moves: never past the cap, no placement spent (#3443)', async () => {
+    const hold = latch()
+    script = (r) =>
+      conversation(r).includes('slow please') && !conversation(r).includes('tool_result')
+        ? { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } }
+        : { text: 'ok' }
+    const a = await replica('a', { maxEntries: 1 })
+    const kept = await startOn(a, 'one')
+    expect(await kept.turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(kept.id)
+    // Another session takes A's one place (the kept session's idle process is evicted for it,
+    // as a lapsed reservation would be) and holds it with a running turn.
+    slowGate = hold.promise
+    const other = await startOn(a, 'slow please')
+    await pollUntil(() => slowCalls, 1)
+    expect(a.spawned).toBe(2)
+    const b = await replica('b')
+    const run = await runningRun(kept.id)
+    const second = await a.m.send(kept.id, browser, 'second')
+    void watch(kept.id, 'second', second.done)
+    expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // Refused on A as it arrived, so nothing was spawned there past its cap; taken by B.
+    expect({ aSpawned: a.spawned, aWarm: a.m.warm.size(), bSpawned: b.spawned, bWarm: b.m.warm.size() }).toEqual({ aSpawned: 2, aWarm: 1, bSpawned: 1, bWarm: 1 })
+    const failures = (await historyTypes(kept.id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_FAILED')
+    expect(failures).toHaveLength(1)
+    expect(JSON.stringify(failures[0])).toContain('NoCapacity')
+    // Nothing ran on A: B sends the message itself, never the restart notice.
+    const last = conversation(fake.messageCalls().at(-1)!)
+    expect(last).toContain('second')
+    expect(last).not.toContain(RESTARTED_PROMPT)
+    expect(await said(a, kept.id, 'could not be placed')).toBe(false)
+    hold.release()
+    expect(await other.turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+  })
+
   it('a turn holding the session host queue never blocks a pinned agent-tools.<identity> call', async () => {
     const hold = latch()
     slowGate = hold.promise

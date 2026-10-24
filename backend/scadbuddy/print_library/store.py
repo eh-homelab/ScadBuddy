@@ -127,18 +127,6 @@ def _lock_folder_names(conn: Connection[DictRow], folder_id: int | None) -> bool
     return True
 
 
-def _live_copy_in_folder(
-    conn: Connection[DictRow], output_id: str, folder_id: int
-) -> NativeFile | None:
-    """The output's oldest live copy in ``folder_id``: filed, put or moved there."""
-    row = conn.execute(
-        f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
-        f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
-        (output_id, folder_id),
-    ).fetchone()
-    return None if row is None else NativeFile.model_validate(row)
-
-
 def _update_file(
     conn: Connection[DictRow], id: int, sets: list[str], params: list[Any]
 ) -> NativeFile | None:
@@ -168,6 +156,18 @@ def _filed_rows_of_output(conn: Connection[DictRow], output_id: str) -> list[Nat
         (output_id,),
     ).fetchall()
     return [NativeFile.model_validate(r) for r in rows]
+
+
+def _live_copy_in_folder(
+    conn: Connection[DictRow], output_id: str, folder_id: int
+) -> NativeFile | None:
+    """The output's first live row in ``folder_id``, whoever put it there."""
+    row = conn.execute(
+        f"SELECT {_FILE_COLUMNS} FROM library_files WHERE output_id = %s"
+        f" AND folder_id = %s AND deleted_at IS NULL ORDER BY id LIMIT 1".encode(),
+        (output_id, folder_id),
+    ).fetchone()
+    return None if row is None else NativeFile.model_validate(row)
 
 
 def _lock_output(conn: Connection[DictRow], output_id: str) -> None:
@@ -364,12 +364,18 @@ class NativeLibraryStore:
             return _filed_for_output(conn, output_id)
 
     def rows_for_output(self, output_id: str) -> list[NativeFile]:
+        """Every row the output has, live or not; only the tests read it."""
         with self._pool.connection() as conn:
             return _rows_of_output(conn, output_id)
 
     def filed_rows_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
             return _filed_rows_of_output(conn, output_id)
+
+    def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
+        """The output's live copy in ``folder_id``, if any; no lock, so a hint only."""
+        with self._pool.connection() as conn:
+            return _live_copy_in_folder(conn, output_id, folder_id)
 
     def file_for_output(self, row: NativeFile, folder: str) -> tuple[NativeFile, bool]:
         """Insert ``row``, an output's filed copy, in the top-level folder ``folder``
@@ -384,10 +390,6 @@ class NativeLibraryStore:
                 return existing[0], False
             folder_id = _template_folder(conn, folder).id
             return _insert_file(conn, row.model_copy(update={"folder_id": folder_id})), True
-
-    def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
-        with self._pool.connection() as conn:
-            return _live_copy_in_folder(conn, output_id, folder_id)
 
     def put_for_output(self, row: NativeFile, folder_id: int, stem: str) -> tuple[NativeFile, bool]:
         """Insert ``row``, an output's copy, in ``folder_id`` under a name made from

@@ -167,6 +167,8 @@ def test_every_filled_tray_is_a_choice() -> None:
     assert first.spool_id == tray_spool_id(0, 0) and first.tray_only
     assert (first.material, first.colour, first.slicer_filament) == ("PLA", "#000000", "GFA00")
     assert first.remain_percent == 80 and first.loaded is not None
+    # The word the dialog reads ("PLA black in AMS-A slot 1"), never worked out there.
+    assert first.colour_word == "black"
     # An untagged tray's -1 is "unknown", never a percentage.
     assert options[1].remain_percent is None
 
@@ -551,13 +553,11 @@ async def test_one_overlay_numbers_the_shelf_alike_on_every_plate() -> None:
 def test_a_tray_with_no_material_is_not_asked_about(
     monkeypatch: pytest.MonkeyPatch, material: str | None
 ) -> None:
-    """#4511: a tray reporting no material (none, or an empty one) has nothing to match
-    on, so a shelf record with none is not close to it. `_filled` drops such a tray
-    before `seen_trays` today; the question does not lean on that."""
+    """#4511: a tray reporting no material has nothing to match on, so a shelf record
+    with none is not close to it. `_filled` drops such a tray before `seen_trays` today;
+    the question does not lean on that."""
     monkeypatch.setattr(
-        trays,
-        "seen_trays",
-        lambda status: [SeenTray(ams_id=0, tray_id=2, material=material, colour="#FFFFFF")],
+        trays, "seen_trays", lambda status: [SeenTray(ams_id=0, tray_id=2, colour="#FFFFFF")]
     )
     overlay = Overlay(
         trays=[TraySpool(ams_id=0, tray_id=2)],

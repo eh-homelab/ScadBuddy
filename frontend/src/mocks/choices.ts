@@ -89,6 +89,7 @@ export const choicesView: ChoicesView = {
 /** What `POST /print/outputs/{id}/run` answers: the spool-first run only slices and queues. */
 export const queuedResult: PrintRunResult = {
   route: 'slice_queue',
+  path: 'bambuddy',
   library_file_id: 8812,
   printer_id: 1,
   slice_job_id: 31,

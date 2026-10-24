@@ -90,7 +90,9 @@ import {
 // turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
 // again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
 // replica can take it, and the last placement unrestricted), then the turn on the new home,
-// resumed from its transcript (`restarted`), at most PLACEMENTS times. Each placement carries
+// resumed from its transcript (`restarted`), at most PLACEMENTS times. A home kept from an
+// earlier turn re-reserves as the turn arrives, and refuses NoCapacity when every slot there
+// runs a turn: that move is free, once per turn (FULL_HOME_PATCH). Each placement carries
 // its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never
 // moves it. On `end` the workflow releases its place on `home`.
 //
@@ -118,6 +120,8 @@ const withdrawInputUpdate = defineUpdate<boolean, [WithdrawInputArgs]>(WITHDRAW_
 const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
 /** An `end` that lands while the last handlers finish ends the session there (Task 5.3). */
 const END_WHILE_FINISHING_PATCH = 'agent-session-end-while-finishing'
+/** A kept home that is full when the turn arrives moves the turn at no cost to its placements, once (#3443). */
+const FULL_HOME_PATCH = 'agent-session-full-home'
 const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
@@ -137,13 +141,20 @@ function overTime(err: unknown): boolean {
   return cause instanceof TimeoutFailure && cause.timeoutType === 'START_TO_CLOSE'
 }
 
+/** The application failure's type behind an activity's failure, if it is one. */
+function failureType(err: unknown): string | null | undefined {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  return cause instanceof ApplicationFailure ? cause.type : undefined
+}
+
 /** A failure that says the turn's worker is gone or cannot take it: place the turn elsewhere (§5.2). */
 export function movesWorker(err: unknown): boolean {
   const cause = err instanceof ActivityFailure ? err.cause : err
   // A home that never started the turn, or stopped answering in it. A turn past its
   // `turn_max_seconds` (StartToClose) is over, not lost: placing it again could triple its spend.
   if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' || cause.timeoutType === 'HEARTBEAT'
-  return cause instanceof ApplicationFailure && (cause.type === SHUTTING_DOWN_FAILURE || cause.type === NO_CAPACITY)
+  const type = failureType(err)
+  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY
 }
 
 /**
@@ -279,12 +290,16 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     let last: unknown
     /** The homes this turn was lost on: acquire_worker places it elsewhere while it can. */
     const lost: string[] = []
-    for (let cycle = 0; cycle < PLACEMENTS; cycle++) {
+    let placements = PLACEMENTS
+    for (let cycle = 0; cycle < placements; cycle++) {
       const { continuation: _previous, ...rest } = input
+      // A home kept from an earlier turn: its reservation may have lapsed (`warm_idle_seconds`).
+      const kept = home !== undefined
       try {
         // Inside the try: a replica that refuses (NoCapacity past its retries) costs a placement, as a lost one does.
         if (!home) {
-          const exclude = cycle < PLACEMENTS - 1 && lost.length ? { exclude: [...lost] } : {}
+          // The last placement names no exclusion; `placements` grows by one after a kept home's free move.
+          const exclude = cycle < placements - 1 && lost.length ? { exclude: [...lost] } : {}
           const acquired = (await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId, ...exclude } satisfies AcquireInput)) as {
             hostQueue: string
             elsewhere?: string[]
@@ -321,8 +336,14 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         // An interrupt cancels the turn; it never moves the session (BudgetExhausted, CredentialRefused, SessionGone: the turn's end).
         if (isCancellation(err) || interrupted !== undefined || !movesWorker(err)) throw err
         last = err
+        // A kept home whose slots all run turns refused this one as it arrived (session_turn
+        // re-reserves there, TurnHost.run): nothing ran, and its place was never this turn's, so
+        // the move costs no placement. Only the first cycle's home is kept, so this happens once.
+        if (kept && failureType(err) === NO_CAPACITY && patched(FULL_HOME_PATCH)) placements++
         if (home && !lost.includes(home)) lost.push(home)
         home = undefined
+        // `restarted` after a refusal too (a full home, NoCapacity): it only asks the next worker to
+        // read the transcript, and the turn's message, not landed there, is sent as itself (§5.5).
         continuation = mergeRestarted(continuation)
       }
     }

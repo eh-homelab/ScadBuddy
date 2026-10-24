@@ -393,7 +393,8 @@ export function CustomizePage() {
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
   // Temporal UI, when Settings knows where that is.
-  const settings = useAsync(() => api.getSettings(), []).data
+  const settingsRead = useAsync(() => api.getSettings(), [])
+  const settings = settingsRead.data
   const workflowUrl =
     job?.status === 'pending' || job?.status === 'running' || job?.status === 'failed'
       ? temporalWorkflowUrl(settings, job.workflow_id)
@@ -971,6 +972,7 @@ export function CustomizePage() {
   const actionBar = (
     <ActionBar
       ref={actions}
+      settings={settingsRead}
       slug={slug}
       job={job}
       rendering={rendering || !settled}

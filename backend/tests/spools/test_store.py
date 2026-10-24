@@ -744,6 +744,37 @@ async def test_a_stale_placement_leaves_its_spool_on_the_shelf(store: SpoolStore
     assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
 
 
+async def test_a_placement_in_a_tray_a_persons_link_overrules_is_on_the_shelf(
+    store: SpoolStore,
+) -> None:
+    """#4515: record 13 places itself in tray (1,2), but a person's link there is to
+    another spool, which wins (`_manual_tray_spool`): the tray shows that one and 13 is on
+    the shelf."""
+    await store.replace_records("bambuddy", [record("12", colour="#FF0000")], NOW)
+    await store.link(PRINTER, tray(1, 2), provider="bambuddy", record_id="12")
+    await store.replace_records(
+        "bambuddy", [record("12", colour="#FF0000"), located("13", 1, 2)], NOW
+    )
+    overlay = await store.overlay(
+        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
+    )
+    assert overlay.trays[0].linked_by == "manual"
+    assert overlay.trays[0].records["bambuddy"].record_id == "12"
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
+async def test_a_placement_in_a_tray_the_printer_did_not_report_is_on_the_shelf(
+    store: SpoolStore,
+) -> None:
+    """#4515: record 13 names tray (1,2) of this printer, which is not in ``trays`` (an AMS
+    not reported): no tray shows it, so it is on the shelf, as the docstring says."""
+    await store.replace_records("bambuddy", [located("13", 1, 2)], NOW)
+    overlay = await store.overlay(
+        PRINTER, [tray(0, 0)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
+    )
+    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
+
+
 async def test_a_placement_by_a_provider_with_no_name_here_holds_its_spool(
     store: SpoolStore,
 ) -> None:
@@ -794,31 +825,3 @@ async def test_a_second_placement_in_one_tray_is_on_the_shelf(store: SpoolStore)
     )
     assert overlay.trays[0].records["bambuddy"].record_id == "13"
     assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["14"]
-
-
-async def test_a_placement_a_persons_link_overrules_is_on_the_shelf(store: SpoolStore) -> None:
-    """#4515: a record placed in this printer's matching tray, where a person linked
-    another spool (`_manual_tray_spool` wins over `_located`): the tray shows the
-    person's spool, so the placed record is on the shelf for a person to link."""
-    await store.replace_records("bambuddy", [located("13", 1, 2), record("14")], NOW)
-    await store.link(PRINTER, tray(1, 2), provider="bambuddy", record_id="14")
-    overlay = await store.overlay(
-        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
-    )
-    assert overlay.trays[0].linked_by == "manual"
-    assert overlay.trays[0].records["bambuddy"].record_id == "14"
-    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]
-
-
-async def test_a_placement_in_a_tray_this_printer_does_not_report_is_on_the_shelf(
-    store: SpoolStore,
-) -> None:
-    """#4515: a placement naming a tray of this printer that its report leaves out (an
-    AMS not reported, or a tray `_filled` drops as empty) is on the shelf, as a person's
-    link to such a tray holds nothing: no tray shows the spool."""
-    await store.replace_records("bambuddy", [located("13", 2, 0)], NOW)
-    overlay = await store.overlay(
-        PRINTER, [tray(1, 2)], now=NOW, providers=["bambuddy"], located={"bambuddy": "bambuddy:1"}
-    )
-    assert overlay.trays[0].records == {}
-    assert [entry.records["bambuddy"].record_id for entry in overlay.shelf] == ["13"]

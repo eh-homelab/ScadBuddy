@@ -1791,6 +1791,41 @@ def test_re_placing_two_objects_keeps_the_tower_their_painting_needs(
     assert ("wipe_tower_x" in _settings_of_bytes(moved)) is tower
 
 
+def test_re_placing_sits_an_object_on_its_printed_parts_not_its_negative_part(
+    tmp_path: Path,
+) -> None:
+    """#4061: library file 2440's cat has a negative part (its bottom hole) reaching
+    5.92 mm below the bed. Replate set the plate on the lowest vertex of every part, the
+    cut's included, so the cat floated 5.92 mm up and Bambu Studio failed it at
+    "Optimizing toolpath" (exit 156). The printed parts stay on the bed and the cut
+    keeps reaching below it, as in the source; X and Y still count the cut's reach,
+    as Arrange's footprint does."""
+    body = ColourPart(1, "Body", "#FF6AC1", trimesh.creation.box(extents=(20, 20, 10)))
+    cut = ColourPart(
+        1,
+        "Hole",
+        "#FF6AC1",
+        trimesh.creation.box(extents=(30, 6, 8), transform=_translate(0, 0, -6)),
+        negative=True,
+    )
+    out = tmp_path / "cut.3mf"
+    write_plates_3mf([PlateParts((body, cut), (1, 1))], ["#FF6AC1"], out, thumbnails=None)
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    [obj] = read_objects(moved)
+    printed, [hole] = (
+        [p.mesh for p in obj.parts if not p.negative],
+        [p.mesh for p in obj.parts if p.negative],
+    )
+    assert min(float(mesh.bounds[0][2]) for mesh in printed) == pytest.approx(0.0, abs=1e-6)
+    assert float(hole.bounds[0][2]) == pytest.approx(-5.0, abs=1e-6)
+    # Centred by the cut's reach in X, which is wider than the body's.
+    h2c = plate_for("Bambu Lab H2C")
+    centre = (hole.bounds[0][0] + hole.bounds[1][0]) / 2
+    assert float(centre) == pytest.approx(h2c.usable.centre[0], abs=1e-6)
+
+
 def _rewritten_objects(payload: bytes, change: Callable[[bytes], bytes]) -> bytes:
     """``payload`` with every object file passed through ``change``."""
     buffer = io.BytesIO()

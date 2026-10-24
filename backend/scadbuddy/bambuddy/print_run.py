@@ -342,6 +342,10 @@ class RackPickView(BaseModel):
     options: list[RackOption] = Field(default_factory=list)
 
 
+#: How a run reaches its printer (#3823, plan Task 8).
+RunPath = Literal["bambuddy", "native"]
+
+
 class PrintRunResult(BaseModel):
     """What a run queued. ``route`` is always ``"slice_queue"`` now; it stays so a
     reader of the result need not change until the dialog does (following it to
@@ -371,6 +375,11 @@ class PrintRunResult(BaseModel):
     #: rack (#836). A pick can go stale before the print starts; that shows in progress,
     #: not here (spec §10).
     rack_picks: list[RackSentPick] = Field(default_factory=list)
+    #: How the run reached its printer (#3818): ``bambuddy`` through Bambuddy's queue, as
+    #: every run queued today does (`_queued`); ``native`` over the LAN once plan 3a
+    #: Task 9's LAN branch reports its own. The dialog's "sent over the LAN" reads this,
+    #: never its own guess at the path.
+    path: RunPath = "bambuddy"
 
 
 def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
@@ -1424,9 +1433,6 @@ class PreparedRun:
     path: RunPath = "bambuddy"
 
 
-RunPath = Literal["bambuddy", "native"]
-
-
 def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> RunPath:
     """How a run reaches ``row`` (#3823, plan Task 8): its ``preferred_path`` as set,
     and for ``auto`` the LAN when it has a LAN link whose last report (``seen_at``) is
@@ -1435,6 +1441,36 @@ def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> Run
         return row.preferred_path
     fresh = seen_at is not None and is_fresh(seen_at, now)
     return "native" if row.lan_host is not None and fresh else "bambuddy"
+
+
+def native_runs(settings: StoredSettings, request: PrintRunRequest | None = None) -> bool:
+    """Whether a run is on the native path at all (#3818 tier A, D2): there its project
+    is refused, none is resolved, and its folder is ScadBuddy's own (Task 5, D6).
+
+    Plan 3a Task 9 decides it from ``hot_path_native``; until then every run is
+    Bambuddy's. `PrintDeps.native_run` defaults to it and the dialog's
+    `ChoicesView.lan_printers` is read from it, so the two never disagree."""
+    return False
+
+
+async def lan_printers(
+    settings: StoredSettings,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+) -> list[str]:
+    """The registry rows a run would reach over the LAN (#3818): those `run_path` puts on
+    the native path, once `native_runs` puts runs there. None until plan 3a Task 9, so
+    the dialog keeps its project, Bambuddy's folders and "queued" for every printer."""
+    if printers is None or not native_runs(settings):
+        return []
+    rows = await asyncio.to_thread(printers.list)
+    now = datetime.now(UTC)
+    out: list[str] = []
+    for row in rows:
+        report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
+        if run_path(row, None if report is None else report[1], now=now) == "native":
+            out.append(row.id)
+    return out
 
 
 async def prepare_run(

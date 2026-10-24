@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { FilamentOptions, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
+import { TAGGED_TRAY, UNLINKED_RECORD, UNTAGGED_TRAY, hotFilaments, setHotPath } from '../mocks/features/hotPath'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import { FilamentPicker } from './FilamentPicker'
@@ -410,5 +411,51 @@ describe('FilamentPicker · grams from the last slice (#2365)', () => {
       <FilamentPicker options={fixtures.filamentOptions} plan={[]} copies={1} onChange={vi.fn()} gramsStale />,
     )
     expect(within(slot(1)).getByText('4.8 g for 1 copy, from the last slice')).toBeInTheDocument()
+  })
+})
+
+// #3818 (plan 2026-10-18 D1) — a native run's choices are the printer's loaded trays.
+describe('FilamentPicker on the native path (source: trays)', () => {
+  it('lists each tray by its slot and AMS percent, with the Bambuddy record over it', async () => {
+    const { user } = open(hotFilaments())
+    expect(within(slot(1)).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
+    expect(within(slot(1)).getByText('81%')).toBeInTheDocument()
+    const records = within(slot(1)).getByTestId(`records-${TAGGED_TRAY}`)
+    expect(records).toHaveTextContent('Bambuddy: Bambu Lab Blue · 812 g')
+    // The untagged tray has no record yet, and no percent: an unknown is a dash.
+    await expand(user, 2)
+    const untagged = within(slot(2)).getByTestId(`spool-${UNTAGGED_TRAY}`).closest('label')!
+    expect(untagged).toHaveTextContent('PLA pink in AMS-A slot 2')
+    expect(untagged).toHaveTextContent('—')
+    expect(within(slot(2)).queryByTestId(`records-${UNTAGGED_TRAY}`)).not.toBeInTheDocument()
+  })
+
+  it('offers only the loaded trays: a shelf record is for linking, never a print choice', async () => {
+    // The backend keeps it in `shelf` (#4506); one in `spools` too would still not be offered.
+    const options = hotFilaments()
+    const { user } = open({ ...options, spools: [...(options.spools ?? []), ...(options.shelf ?? [])] })
+    await expand(user, 1)
+    expect(within(slot(1)).getByTestId(`spool-${TAGGED_TRAY}`)).toBeInTheDocument()
+    expect(within(slot(1)).getByTestId(`spool-${UNTAGGED_TRAY}`)).toBeInTheDocument()
+    expect(within(slot(1)).queryByTestId(`spool-${UNLINKED_RECORD}`)).not.toBeInTheDocument()
+    // A few trays, not an inventory: no filters.
+    expect(screen.queryByTestId('filter-material')).not.toBeInTheDocument()
+  })
+
+  it('says, quietly, when the overlay is stale, and shows the trays alone', () => {
+    setHotPath(true, { stale: true })
+    open(hotFilaments())
+    expect(screen.getByTestId('overlay-notes')).toHaveTextContent(
+      "Bambuddy's spool records are from 13:40 UTC; showing the trays only.",
+    )
+    expect(within(slot(1)).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
+    expect(within(slot(1)).queryByTestId(`records-${TAGGED_TRAY}`)).not.toBeInTheDocument()
+  })
+
+  it('shows no note and keeps the inventory picker for a Bambuddy answer', async () => {
+    const { user } = open({ ...fixtures.filamentOptions, overlay_notes: ['ignored'] })
+    expect(screen.queryByTestId('overlay-notes')).not.toBeInTheDocument()
+    await expand(user, 1)
+    expect(screen.getByTestId('filter-material')).toBeInTheDocument()
   })
 })

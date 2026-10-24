@@ -128,7 +128,9 @@ def _slice(payload: bytes, plate: int) -> list[SlicedPlate]:
         return json.dumps({"name": f"ScadBuddy #385 {kind}", "inherits": name}).encode()
 
     files = [
-        ("file", ("maze.3mf", payload, "application/vnd.ms-package.3dmanufacturing-3dmodel+xml")),
+        # bambuddy-1.2.5.6's upload filter takes only `model/3mf` or `model/stl`
+        # (`dist/middleware/upload.js`); the package type answers 400 (#4061).
+        ("file", ("maze.3mf", payload, "model/3mf")),
         ("printerProfile", ("printer.json", profile(PRINTER, "printer"), "application/json")),
         ("presetProfile", ("process.json", profile(PROCESS, "process"), "application/json")),
         *(

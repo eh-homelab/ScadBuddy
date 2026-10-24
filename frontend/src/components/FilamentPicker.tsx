@@ -1,14 +1,17 @@
 import { useState } from 'react'
-import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed } from '../api/types'
+import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOption } from '../api/types'
 import { normalizeHex } from '../lib/format'
 import {
   NO_FILTERS,
   facets,
   filterSpools,
+  fromTrays,
   loadedLabel,
+  providerLabel,
   slotNeed,
   checkPlan,
   spoolLabel,
+  trayChoiceLabel,
   warningsFor,
   type SpoolFilters,
 } from '../lib/filaments'
@@ -191,6 +194,28 @@ export function WarningList({ warnings, testId }: { warnings: FilamentWarning[];
   )
 }
 
+/**
+ * #3818 — what each spool provider's record says of the spool in a tray, labelled by
+ * provider: "Bambuddy: Bambu Lab Blue · 812 g". The overlay's own order (priority) is kept.
+ */
+function TrayRecords({ spool }: { spool: SpoolOption }) {
+  const records = Object.entries(spool.records ?? {})
+  if (records.length === 0) return null
+  return (
+    <ul className="basis-full space-y-0.5 pl-6 text-[11px] text-muted-foreground" data-testid={`records-${spool.spool_id}`}>
+      {records.map(([provider, record]) => (
+        <li key={provider}>
+          <span className="text-foreground">{providerLabel(provider)}:</span>{' '}
+          {[record.brand, record.name].filter(Boolean).join(' ') || record.material || 'a spool'}
+          {record.remaining_g !== null && record.remaining_g !== undefined && (
+            <span className="sb-num"> · {grams(record.remaining_g)}</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 interface Props {
   options: FilamentOptions
   plan: SlotChoice[]
@@ -225,12 +250,20 @@ export function FilamentPicker({
       return next
     })
 
-  const spools = (options.spools ?? []).filter(
-    (spool) =>
-      !spool.tray_only ||
-      offeredTrays?.has(spool.spool_id) ||
-      plan.some((choice) => choice.spool_id === spool.spool_id),
+  /**
+   * #3818 — a native run's choices are the printer's loaded trays (plan 2026-10-18 D1):
+   * every one a choice of its own, with the providers' records over it. A shelf record
+   * (loaded nowhere) is only for linking, in the tray question, never a print choice.
+   */
+  const trays = fromTrays(options)
+  const spools = (options.spools ?? []).filter((spool) =>
+    trays
+      ? spool.loaded !== null && spool.loaded !== undefined
+      : !spool.tray_only ||
+        offeredTrays?.has(spool.spool_id) ||
+        plan.some((choice) => choice.spool_id === spool.spool_id),
   )
+  const notes = trays ? (options.overlay_notes ?? []) : []
   const slots = options.slots ?? []
   const suggested = options.suggested ?? []
   const choices = facets(spools)
@@ -258,7 +291,8 @@ export function FilamentPicker({
   const isOpen = (slotId: number) => chosenFor(slotId) === null || opened.has(slotId)
   // The filters narrow the open lists; with every slot showing only its spool they
   // would filter nothing.
-  const anyOpen = slots.some((slot) => isOpen(slot.slot_id))
+  // A native run's trays are a few slots, not an inventory: nothing to filter (#3818).
+  const anyOpen = !trays && slots.some((slot) => isOpen(slot.slot_id))
 
   return (
     <section className="space-y-3">
@@ -341,11 +375,19 @@ export function FilamentPicker({
         </div>
       )}
 
+      {notes.length > 0 && (
+        <ul className="space-y-0.5 text-xs text-muted-foreground" data-testid="overlay-notes">
+          {notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
+
       <div className="space-y-3">
         {slots.map((slot) => {
           const need = slotNeed(slot, copies)
           const chosen = chosenFor(slot.slot_id)
-          const matched = filterSpools(spools, filters, need)
+          const matched = trays ? spools : filterSpools(spools, filters, need)
           /**
            * The chosen spool is always on the list, even when the filters exclude it.
            * A radio group whose checked member is not rendered shows nothing selected,
@@ -425,7 +467,8 @@ export function FilamentPicker({
                   className="max-h-56 gap-0 overflow-y-auto rounded-lg border"
                 >
                   {rows.map((spool) => {
-                    const where = loadedLabel(spool, options.printer_id)
+                    // A tray's label already says where it is.
+                    const where = trays ? null : loadedLabel(spool, options.printer_id)
                     // Shown, not hidden: printing two slots from one spool is a real thing
                     // to want, and Bambuddy accepts it. It just should not be a surprise.
                     const elsewhere = plan.find(
@@ -443,7 +486,9 @@ export function FilamentPicker({
                         <Swatch colour={spool.colour} size="sm" />
                         {/* The name takes at least 12rem; when the row is narrower than that
                             plus the details, the details wrap onto a second line (#944). */}
-                        <span className="min-w-0 flex-[1_1_12rem] truncate text-xs">{spoolLabel(spool)}</span>
+                        <span className="min-w-0 flex-[1_1_12rem] truncate text-xs">
+                          {trays ? trayChoiceLabel(spool) : spoolLabel(spool)}
+                        </span>
                         <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2.5">
                           {elsewhere && (
                             <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -453,11 +498,17 @@ export function FilamentPicker({
                           {where && <Badge variant="secondary">{where}</Badge>}
                           {showSides && spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />}
                           <span className="sb-num shrink-0 text-[11px] text-muted-foreground">
-                            {spool.remaining_g === null || spool.remaining_g === undefined
-                              ? '—'
-                              : grams(spool.remaining_g)}
+                            {trays
+                              ? // The AMS's own estimate; the grams are each record's, below.
+                                spool.remain_percent === null || spool.remain_percent === undefined
+                                ? '—'
+                                : `${spool.remain_percent}%`
+                              : spool.remaining_g === null || spool.remaining_g === undefined
+                                ? '—'
+                                : grams(spool.remaining_g)}
                           </span>
                         </span>
+                        {trays && <TrayRecords spool={spool} />}
                       </label>
                     )
                   })}

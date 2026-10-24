@@ -517,6 +517,7 @@ const removed = new Set<number>()
 function startLibraryRun(fileId: number, body: PrintRunRequest): PrintRun {
   const result = {
     route: 'slice_queue',
+    path: 'bambuddy',
     library_file_id: fileId,
     printer_id: body.printer_id ?? null,
     slice_job_id: nextNumber(),

@@ -10,7 +10,7 @@ import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { QuestionGate, QuestionVerdict, UserQuestion } from '../harness/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
-import { SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
+import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, type TurnOutcome } from './manager.js'
@@ -216,6 +216,11 @@ export class TurnHost {
   #stopping = false
   /** The placement running here for each session. */
   readonly #running = new Map<string, Running>()
+  /**
+   * Each session's latest arrival here: only it may give back the place it reserved (`unreserve`).
+   * A token of its own, not the attempt id, which the next turn's first placement in a run shares.
+   */
+  readonly #arrived = new Map<string, object>()
   /** Held calls by request id: each is woken by its entry's NOTIFY. */
   readonly #waiters = new Map<string, Set<() => void>>()
 
@@ -260,6 +265,19 @@ export class TurnHost {
   async run(input: SessionTurnInput, control: TurnControl): Promise<SessionTurnResult> {
     const id = input.sessionId
     const attempt = input.attempt ?? randomUUID()
+    // A replica shutting down takes no new placement, and evicts nothing for one: the turn moves.
+    if (this.#stopping) throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: false })
+    // Its place here again (§5.2): a home kept across turns may have let its reservation lapse
+    // (`warm_idle_seconds`), and the cache filled since. Refused, before anything is claimed or
+    // spawned, when every process here runs a turn: the workflow moves the turn (`movesWorker`),
+    // and the replica never goes past `warm_max_per_replica`. Taking the place may evict another
+    // session's idle process, as acquire_worker's does; a turn that then ends before its spawn
+    // (SessionGone, a refusal, a move) gives the place back (`unreserve`, below).
+    if (this.#deps.core.warm.reserve(id) === 'full') {
+      throw ApplicationFailure.retryable(`every warm session on ${this.#deps.hostQueue} is running a turn`, NO_CAPACITY)
+    }
+    const arrival = {}
+    this.#arrived.set(id, arrival)
     // An older placement of the session still here (cut at its time cap, its activity not yet told): it goes first.
     const before = this.#running.get(id)
     if (before) {
@@ -298,7 +316,13 @@ export class TurnHost {
     this.#running.set(id, self)
     try {
       return await this.#run(input, attempt, control, controller, () => cut, cutOff, entries, holds)
+    } catch (err) {
+      // Its place, unless a spawn took it: the workflow places the turn again, elsewhere or here.
+      // Not when a newer placement of the session arrived since (it cut this one): the place is its.
+      if (this.#arrived.get(id) === arrival) this.#deps.core.warm.unreserve(id)
+      throw err
     } finally {
+      if (this.#arrived.get(id) === arrival) this.#arrived.delete(id)
       if (this.#running.get(id) === self) this.#running.delete(id)
       finished()
     }

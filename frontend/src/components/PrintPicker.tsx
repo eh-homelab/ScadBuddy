@@ -3,6 +3,8 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
+  TraySpoolLink,
+  UnknownTray,
   PrinterRow,
   AnalysisTarget,
   BatchSummary,
@@ -68,7 +70,7 @@ import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
 import { NozzleStep } from './print/NozzleStep'
 import { PreviewPane } from './print/PreviewPane'
 import { TrayQuestion } from './print/TrayQuestion'
-import { useDeclinedTrays } from '../lib/trays'
+import { linkKey, linkOf, useDeclinedTrays } from '../lib/trays'
 import { PrintVerdict } from './print/PrintVerdict'
 import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
@@ -250,6 +252,7 @@ interface Props {
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
 const NO_ROWS: PrinterRow[] = []
+const NO_IDS: string[] = []
 /** A closed dialog follows no topic. */
 const NO_TOPICS: readonly string[] = []
 
@@ -270,7 +273,7 @@ export function PrintPicker({
   onClose,
   onRan,
   onPrinterModel,
-  project,
+  project: pageProjectGiven,
   printSettings,
   batch,
   queue = false,
@@ -363,10 +366,64 @@ export function PrintPicker({
   // `registry.error` is deliberately not shown: an unreadable registry is no rows, and
   // the dialog prints on Bambuddy ids alone.
   const registryRows = registry.data ?? NO_ROWS
-  const registryPrinter = registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null
+  /**
+   * #3818 — the hot path (plan 2026-10-18 D2): a printer the server says a run reaches
+   * over the LAN (`ChoicesView.lan_printers`, from `print_run.py` `native_runs` and
+   * `run_path`) is printed to with no Bambuddy call. The dialog never works the path out
+   * itself: until plan 3a Task 9 the server lists none, and every run is Bambuddy's. A
+   * LAN-only row is chosen by its id (`askRegistry`), the one way to name a printer only
+   * the LAN reaches, and every dialog read names it as `printer`.
+   */
+  const lanIds = choices?.lan_printers ?? NO_IDS
+  const nativeRows = useMemo(() => registryRows.filter((row) => lanIds.includes(row.id)), [registryRows, lanIds])
+  // The row that links the Bambuddy printer in view, only when there is one: a LAN-only
+  // row's `bambuddy_printer_id` is null too, so a null printer must match no row.
+  const registryPrinter =
+    picker.registryAsked ??
+    (printerId === null ? null : (registryRows.find((row) => row.bambuddy_printer_id === printerId)?.id ?? null))
+  const nativeRow = nativeRows.find((row) => row.id === registryPrinter) ?? null
+  const native = nativeRow !== null
+  /** The printer's name, whichever link names it. */
+  const printerName = printer?.name ?? nativeRow?.name ?? null
   // Only a row the LAN reaches and Bambuddy does not: one just created by serial reaches
   // neither, and one linked to a Bambuddy printer is that printer's entry (#4340 review M3).
   const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
+  /** #3818 — of those, the ones the server says a run reaches: choosable (none until Task 9). */
+  const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
+  const { askRegistry } = picker
+  /**
+   * No Bambuddy printer to open on, and one the LAN prints to: open on that one, once
+   * per open and only while the server's own opening stands. A printer chosen since
+   * (either kind) is the person's: a read for it still in flight shows the old view,
+   * whose `printer_id` null must not snap the choice back to the LAN row.
+   */
+  const openedOnLan = useRef(false)
+  useEffect(() => {
+    if (!open) openedOnLan.current = false
+  }, [open])
+  const nativeFirst =
+    choices !== null && printerId === null && picker.registryAsked === null && picker.printerAsked === null
+      ? (lanChoosable[0]?.id ?? null)
+      : null
+  useEffect(() => {
+    if (!open || nativeFirst === null || openedOnLan.current) return
+    openedOnLan.current = true
+    askRegistry(nativeFirst)
+  }, [open, nativeFirst, askRegistry])
+  /**
+   * Whether the dialog knows its path yet: the registry read and, with a row the LAN
+   * reaches, the choices that say whether a run goes over it, and the printer the dialog
+   * opened on. Until then nothing that differs by path (the destinations and their
+   * default) is read, so a hot-path dialog never asks Bambuddy first.
+   */
+  const lanLinked = registryRows.some((row) => row.lan_host != null)
+  const pathKnown =
+    (registry.data !== undefined || registry.error !== undefined) &&
+    // Known once the choices are read, or once that read failed (as ActionBar counts a
+    // failed Settings read settled); opening on a LAN row is still to come until it lands.
+    (!lanLinked || ((choices !== null || loadError !== null) && nativeFirst === null))
+  /** #3818 (D6) — projects are Bambuddy's: a native print is filed in a native folder. */
+  const project = native ? undefined : pageProjectGiven
   const { nozzles, tier, processName, bedType, overrides } = selection
   /**
    * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only
@@ -401,6 +458,7 @@ export function PrintPicker({
     choices,
     plate,
     carry,
+    picker.registryAsked,
   )
 
   // null until the user sets it, so a remembered quantity is not overridden by the
@@ -577,7 +635,7 @@ export function PrintPicker({
    * Advanced step. Read on each open, as the picker was, and never when the page passes
    * its project.
    */
-  const ownProjects = useProjectList(undefined, open && !project)
+  const ownProjects = useProjectList(undefined, open && !project && pathKnown, native)
   /**
    * #3651 — where the dialog opens: the one project all of the content is in already,
    * else the Settings default, else none. Asked on each open of a new source;
@@ -596,7 +654,7 @@ export function PrintPicker({
   const contentKey = `${contentOutputs.join(',')}|${contentFiles.join(',')}`
   const pageProject = project !== undefined
   useEffect(() => {
-    if (!open || pageProject) return
+    if (!open || pageProject || !pathKnown) return
     ownChosen.current = false
     setOwnDefaultKnown(false)
     setOwnDefaultFor(null)
@@ -604,7 +662,7 @@ export function PrintPicker({
     let live = true
     const [outputIds, libraryFileIds] = contentKey.split('|').map((ids) => (ids ? ids.split(',') : []))
     api
-      .getDefaultProject({ outputIds, libraryFileIds: libraryFileIds?.map(Number) })
+      .getDefaultProject({ outputIds, libraryFileIds: libraryFileIds?.map(Number), ...(native ? { native } : {}) })
       .then((answer) => {
         if (!live || ownChosen.current) return
         setOwnProjectId(answer.project_id ?? null)
@@ -618,7 +676,7 @@ export function PrintPicker({
     return () => {
       live = false
     }
-  }, [open, pageProject, contentKey])
+  }, [open, pageProject, contentKey, native, pathKnown])
   /** #3651 — Print waits for the default, so a Simple-mode print goes where it says. */
   const ownDefaultPending = open && !pageProject && ownDefaultFor !== contentKey
   function chooseOwnProject(next: number | null) {
@@ -644,7 +702,9 @@ export function PrintPicker({
   const folderId = project ? (project.folder?.value ?? null) : ownFolderId
   // A page project without a shared list is read by its own picker, out of sight here.
   const projectKnown = project ? project.list?.choices !== null : ownDefaultKnown
-  const projectId = pickedProject === null && folderId === null && !projectKnown ? undefined : pickedProject
+  // A native run names no project (D6): one sent is refused.
+  const projectId =
+    native || (pickedProject === null && folderId === null && !projectKnown) ? undefined : pickedProject
 
   /**
    * #1660 — the project the print is filed under, named, for Simple mode: its picker is an
@@ -658,7 +718,11 @@ export function PrintPicker({
   const filedUnderLabel =
     folderId !== null
       ? `${shownFolder?.path ?? `folder ${folderId}`} (folder)`
-      : projectId === undefined
+      : native
+        ? source?.kind === 'library'
+          ? 'the top of the library'
+          : 'the template’s folder'
+        : projectId === undefined
         ? null
         : projectId === null
           ? 'No project'
@@ -711,6 +775,7 @@ export function PrintPicker({
       list={ownProjects}
       disabled={projectCreating}
       onCreating={reportProjectCreating}
+      native={native}
     />
   )
 
@@ -953,6 +1018,12 @@ export function PrintPicker({
   const checkRequest: PrintRunRequest | null =
     choices && printChoices && !noPlate
       ? {
+          // Task 9 note (#3818): `registryPrinter` is `registryAsked` first, so a LAN row
+          // asked for while the view still shows the Bambuddy printer's read pairs that
+          // row with the old `printer_id`, which `prepare_run` refuses as a mismatch until
+          // the read lands. Unreachable while the server lists no LAN printer; once a LAN-only
+          // row is choosable, send `printer_id: null` beside an asked row.
+          ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
@@ -1018,7 +1089,43 @@ export function PrintPicker({
     slicedNow ??
     (previewPlate !== single && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
-  const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
+  const trays = useDeclinedTrays(nativeRow?.id ?? printerId, filaments?.trays ?? [])
+  /**
+   * #3818 — what this answer's native questions have linked: the trays answered and the
+   * shelf rows they claimed, by link identity (`linkKey`, never the positional
+   * `spool_id`). A claimed row is offered to no other tray, and an answered tray asked
+   * nothing more, until the re-read the link starts replaces the answer.
+   */
+  const [claims, setClaims] = useState<{ answer: typeof filaments; links: string[]; trays: string[] }>({
+    answer: null,
+    links: [],
+    trays: [],
+  })
+  const claimed = claims.answer !== null && claims.answer === filaments ? claims : null
+  const openShelf = useMemo(
+    () => (filaments?.shelf ?? []).filter((spool) => !claimed?.links.includes(linkKey(linkOf(spool)) ?? '')),
+    [filaments, claimed],
+  )
+  function claim(tray: UnknownTray, link: TraySpoolLink | undefined) {
+    const key = linkKey(link ?? null)
+    if (key && filaments) {
+      setClaims((current) => {
+        const same = current.answer === filaments
+        return {
+          answer: filaments,
+          links: [...(same ? current.links : []), key],
+          trays: [...(same ? current.trays : []), `${tray.ams_id}:${tray.tray_id}`],
+        }
+      })
+    }
+    picker.reload()
+  }
+  /** Who a tray question's answer is recorded for: the registry row natively, else Bambuddy's printer. */
+  const trayTarget = nativeRow
+    ? { native: { printer: nativeRow.id } }
+    : printerId !== null
+      ? { printerId }
+      : null
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
   // position gone from its options) would be sent unseen, so it goes back to Automatic.
   // Only a current verdict decides: one still on its way keeps the pick.
@@ -1163,7 +1270,7 @@ export function PrintPicker({
     const spools = filaments?.spools ?? []
     const estimate = sliced ? slicedEstimate(sliced, first, filaments, single ?? 'all') : previewSlice.result
     const summary: BatchSummary = {
-      printer: printer?.name ?? null,
+      printer: printerName,
       plate: single === null ? platesSummary(plate, plates) : plateLabel(plates, single),
       spools: plan.map((choice) => {
         const spool = spools.find((entry) => entry.spool_id === choice.spool_id)
@@ -1238,9 +1345,14 @@ export function PrintPicker({
         ? 'Choose the spools to slice with and the price-book filament for each slot. ScadBuddy slices every plate and prices it; nothing is queued.'
         : sliced
         ? 'This file is sliced already. Choose the spools, and Bambuddy queues it as it is.'
-        : picker.advanced
-          ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
-          : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+        : native
+          ? // #3818 — the hot path: ScadBuddy's own slicer, and the printer over the LAN.
+            picker.advanced
+            ? 'Choose the trays, nozzles, quality and plate. ScadBuddy slices it and sends it to the printer over the LAN.'
+            : 'Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.'
+          : picker.advanced
+            ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+            : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
   const split = (choices || source) && !result && unanswered === null
   const footer = quoting ? (
           <>
@@ -1361,7 +1473,7 @@ export function PrintPicker({
       {result ? (
         <QueuedPanel
           result={{ ...result, warnings: shown(result.warnings) }}
-          printerName={printer?.name ?? null}
+          printerName={printerName}
           progress={progress}
           polling={polling}
           plates={plates}
@@ -1408,13 +1520,27 @@ export function PrintPicker({
                     value={picker.advanced}
                     onToggle={picker.toggleAdvanced}
                     disabled={projectCreating}
+                    native={native}
                   />
-                  {printers.length > 1 && (
+                  {printers.length + lanChoosable.length > 1 && (
                     <div className="grid gap-1.5">
                       <Label htmlFor="print-printer">Printer</Label>
                       <Select
-                        value={printerId === null ? '' : String(printerId)}
-                        onValueChange={(next) => picker.askPrinter(Number(next))}
+                        value={
+                          picker.registryAsked !== null
+                            ? `registry:${picker.registryAsked}`
+                            : // The printer asked for, while its read is out; then the one read.
+                              picker.printerAsked !== null
+                              ? String(picker.printerAsked)
+                              : printerId === null
+                                ? ''
+                                : String(printerId)
+                        }
+                        onValueChange={(next) =>
+                          next.startsWith('registry:')
+                            ? askRegistry(next.slice('registry:'.length))
+                            : picker.askPrinter(Number(next))
+                        }
                       >
                         <SelectTrigger id="print-printer" className="w-full">
                           <SelectValue placeholder="Choose a printer" />
@@ -1426,12 +1552,19 @@ export function PrintPicker({
                               {entry.model ? ` (${entry.model})` : ''}
                             </SelectItem>
                           ))}
-                          {lanOnly.map((row) => (
-                            <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
-                              {row.name}
-                              {row.model ? ` (${row.model})` : ''}: not in Bambuddy, so not yet printable from here
-                            </SelectItem>
-                          ))}
+                          {lanOnly.map((row) =>
+                            lanChoosable.includes(row) ? (
+                              <SelectItem key={row.id} value={`registry:${row.id}`}>
+                                {row.name}
+                                {row.model ? ` (${row.model})` : ''}: over the LAN
+                              </SelectItem>
+                            ) : (
+                              <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
+                                {row.name}
+                                {row.model ? ` (${row.model})` : ''}: not in Bambuddy, so not yet printable from here
+                              </SelectItem>
+                            ),
+                          )}
                         </SelectContent>
                       </Select>
                     </div>
@@ -1453,14 +1586,26 @@ export function PrintPicker({
                   {!picker.advanced && !sliced && (
                     <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
                   )}
-                  {printerId !== null &&
-                    trays.open.map((tray) => (
+                  {trayTarget &&
+                    trays.open
+                      // A native run's tray is a choice already: asked only with a record to link.
+                      .filter(
+                        (tray) =>
+                          !nativeRow ||
+                          (!claimed?.trays.includes(`${tray.ams_id}:${tray.tray_id}`) &&
+                            (tray.candidates ?? []).some((id) => openShelf.some((spool) => spool.spool_id === id))),
+                      )
+                      .map((tray) => (
                       <TrayQuestion
-                        key={`${tray.ams_id}:${tray.tray_id}`}
-                        printerId={printerId}
+                        // Keyed by its target too: a Bambuddy printer's view whose registry
+                        // row prints natively asks Bambuddy's question until the registry
+                        // read lands, and the native one must start over on the shelf.
+                        key={`${nativeRow ? 'native' : 'bambuddy'}:${tray.ams_id}:${tray.tray_id}`}
+                        {...trayTarget}
                         tray={tray}
-                        spools={filaments?.spools ?? []}
-                        onAssigned={picker.reload}
+                        // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.
+                        spools={nativeRow ? openShelf : (filaments?.spools ?? [])}
+                        onAssigned={(link) => claim(tray, link)}
                         onDecline={() => trays.decline(tray)}
                       />
                     ))}

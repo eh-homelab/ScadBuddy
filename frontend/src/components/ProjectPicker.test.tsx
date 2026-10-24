@@ -11,6 +11,8 @@ import { renderPage } from '../test/utils'
 import { useProjectList } from '../lib/projects'
 import { chooseParent, chooseProject, openPicker, pickerValue } from '../test/projectPicker'
 import { ProjectPicker } from './ProjectPicker'
+import { HOT_FOLDERS, NO_BAMBUDDY, setHotPath } from '../mocks/features/hotPath'
+import { choose } from '../test/select'
 
 /**
  * The picker is controlled — the parent owns the chosen id because the run request
@@ -473,5 +475,52 @@ describe('ProjectPicker', () => {
     await listed()
     // The remembered project does not replace the one just made.
     expect(pickerValue(select())).toBe('99')
+  })
+})
+
+// #3818 (plan 2026-10-18 D6) — a native print is filed in ScadBuddy's own library.
+describe('ProjectPicker on a native printer', () => {
+  beforeEach(() => resetMockState())
+
+  function mountNative(onFolder: (folderId: number | null) => void = vi.fn()) {
+    function Harness() {
+      const [folder, setFolder] = useState<number | null>(null)
+      return (
+        <ProjectPicker
+          native
+          value={null}
+          onChange={vi.fn()}
+          folder={{
+            value: folder,
+            onChange: (next) => {
+              setFolder(next)
+              onFolder(next)
+            },
+          }}
+        />
+      )
+    }
+    return renderPage(<Harness />)
+  }
+
+  it('lists the native folders only, read with native=true, and no project', async () => {
+    setHotPath(true)
+    const read = vi.spyOn(api, 'getProjects')
+    const onFolder = vi.fn()
+    const { user } = mountNative(onFolder)
+    const trigger = await screen.findByRole('combobox', { name: 'Folder' })
+    expect(read).toHaveBeenCalledWith({ native: true })
+    expect(trigger).toHaveTextContent('The template’s folder')
+    expect(screen.queryByText(/project/i)).not.toBeInTheDocument()
+
+    await choose(user, trigger, `${HOT_FOLDERS[1]!.path} · 1 file`)
+    expect(onFolder).toHaveBeenLastCalledWith(HOT_FOLDERS[1]!.id)
+    expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
+  })
+
+  it('asks Bambuddy for its projects when not native, which the hot path refuses', async () => {
+    setHotPath(true)
+    mount()
+    expect(await screen.findByRole('alert')).toHaveTextContent(NO_BAMBUDDY)
   })
 })

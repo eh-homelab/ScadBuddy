@@ -62,3 +62,17 @@ describe('QueuedPanel · rack picks (#836)', () => {
     expect(screen.queryByTestId('rack-picks')).toBeNull()
   })
 })
+
+// #3818 — "over the LAN" is the path the run reports, never the dialog's guess at it.
+describe('QueuedPanel · the path the run took', () => {
+  it('says the print went over the LAN only when the run reports the native path', () => {
+    renderPanel({ ...queuedResult, path: 'native' })
+    expect(screen.getByTestId('queued-items')).toHaveTextContent('Sliced and sent to H2C over the LAN')
+  })
+
+  it("names Bambuddy's queue when the run went through it", () => {
+    renderPanel({ ...queuedResult, path: 'bambuddy' })
+    expect(screen.getByTestId('queued-items')).toHaveTextContent('Sliced and queued for H2C')
+    expect(screen.getByTestId('queued-items')).not.toHaveTextContent('over the LAN')
+  })
+})

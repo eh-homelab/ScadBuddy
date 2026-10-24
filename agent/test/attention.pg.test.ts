@@ -1576,8 +1576,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         finished = held.then(() => reconnected(...args))
         return finished
       })
-      const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (back = resolve)) })
-      await expect.poll(async () => (await openRows()).length).toBe(1)
+      // The check starts after the row commits (questions/service.ts gate), so a poll can
+      // see the row before `back` is set (#4514): wait for the check itself.
+      let checking: () => void = () => undefined
+      const checked = new Promise<void>((resolve) => (checking = resolve))
+      const a = wait({
+        tool: 'browser_snapshot',
+        toolUseId: 'toolu_a',
+        signal: first.signal,
+        isBack: () =>
+          new Promise((resolve) => {
+            back = resolve
+            checking()
+          }),
+      })
+      await checked
+      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_a' }])
       back(true)
       await reconnecting
       first.abort()

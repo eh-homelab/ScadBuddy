@@ -608,12 +608,10 @@ def _shelf(
 
     This printer's links and placements hold only through ``found``, so one whose tray
     no longer matches (the spool came out, #4511) holds nothing, as `_tray_spool` reads
-    them: a spool is in a tray or on the shelf, never in neither. That holds on purpose
-    for a placement whose tray here a person's link overrules (`_manual_tray_spool` wins
-    over `_located`), and for one naming a tray here that ``trays`` leaves out (an AMS
-    the report does not carry, or a tray `_filled` dropped as empty): ``trays`` is
-    everything this printer says it holds, so no tray shows the spool, and the shelf
-    keeps it linkable (#4515).
+    them: a spool is in a tray or on the shelf, never in neither. So too a placement
+    naming a tray of this printer that is not in ``trays`` (an AMS the printer did not
+    report), and one in a matching tray where a person's link to another spool wins
+    (`_manual_tray_spool`): the tray shows no such spool, so the shelf does.
 
     Only an untagged tray is asked about, so with none nothing is read. Otherwise every
     fresh untagged record is read, not only those of the trays' materials: which

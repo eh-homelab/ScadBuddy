@@ -26,6 +26,12 @@ describe('mock features', () => {
     })
   })
 
+  it('puts a `first` scenario ahead of the rest, the rest in file-path order', () => {
+    const scenario = { handlers: [], first: true }
+    const loaded = toFeatures({ './features/a.ts': { handlers: [] }, './features/z.ts': scenario })
+    expect(loaded[0]).toBe(scenario)
+  })
+
   it('names the file when a feature module does not export handlers', () => {
     expect(() => toFeatures({ './features/broken.ts': { reset: () => {} } })).toThrow(
       './features/broken.ts',

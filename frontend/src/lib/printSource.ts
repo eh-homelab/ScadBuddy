@@ -1,4 +1,4 @@
-import { api, type Slicer } from '../api/client'
+import { api, type FilamentsQuery, type Slicer } from '../api/client'
 import type { Within } from './traceAction'
 import type {
   AttachResult,
@@ -29,12 +29,10 @@ export type PrintSource =
     }
   | { kind: 'library'; file: Pick<LibraryEntry, 'id' | 'filename'> }
 
-export type FilamentQuery = { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] }
-
 /** The dialog's reads and writes for one source. */
 export interface SourceApi {
-  getChoices: (printerId: number | null) => Promise<ChoicesView>
-  getFilaments: (query: FilamentQuery) => Promise<FilamentOptions>
+  getChoices: (printerId: number | null, printer?: string | null) => Promise<ChoicesView>
+  getFilaments: (query: FilamentsQuery) => Promise<FilamentOptions>
   getPlates: () => Promise<OutputPlate[]>
   plateThumbnailUrl: (index: number) => string
   /**
@@ -122,7 +120,8 @@ export function sourceApi(source: PrintSource): SourceApi {
   if (source.kind === 'output') {
     const { id, slug } = source.output
     return {
-      getChoices: (printerId) => api.getChoices(id, printerId),
+      // Only named when chosen, so a read for a Bambuddy printer is as it always was.
+      getChoices: (printerId, printer) => (printer ? api.getChoices(id, printerId, printer) : api.getChoices(id, printerId)),
       getFilaments: (query) => api.getFilaments(id, query),
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
@@ -137,7 +136,8 @@ export function sourceApi(source: PrintSource): SourceApi {
   }
   const { id } = source.file
   return {
-    getChoices: (printerId) => api.getLibraryChoices(id, printerId),
+    getChoices: (printerId, printer) =>
+      printer ? api.getLibraryChoices(id, printerId, printer) : api.getLibraryChoices(id, printerId),
     getFilaments: (query) => api.getLibraryFilaments(id, query),
     getPlates: () => api.getLibraryPlates(id),
     plateThumbnailUrl: (index) => api.libraryPlateThumbnailUrl(id, index),
