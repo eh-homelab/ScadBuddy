@@ -277,6 +277,19 @@ async def test_a_print_is_uploaded_recorded_and_runs_to_finish(lan: _Lan) -> Non
     assert lan.control("GET", "/__received") == {"mqtt": [], "ftps": [], "refused": []}
 
 
+async def test_a_started_upload_moves_to_the_cache(lan: _Lan, tmp_path: Path) -> None:
+    """As the H2C (plan 3a Task 7): once a print starts its file is
+    ``/cache/<name>.gcode.3mf``, and a start that names the upload again fails."""
+    data = os.urandom(1000)
+    md5 = await asyncio.to_thread(lan.upload, data, "/job.3mf")
+    await _states_until(lan, "FINISH", _project_file(md5))
+    card = tmp_path / "sdcard"
+    assert not (card / "job.3mf").exists()
+    assert (card / "cache" / "job.3mf.gcode.3mf").read_bytes() == data
+    states = await _states_until(lan, "FAILED", _project_file(md5))
+    assert states[1]["result"] == "FAIL" and "never uploaded" in states[1]["reason"]
+
+
 async def test_a_stop_fails_the_print(lan: _Lan) -> None:
     await asyncio.to_thread(lan.upload, b"x", "/job.3mf")
     stop = {"print": {"command": "stop", "sequence_id": "8", "param": ""}}

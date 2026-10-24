@@ -15,7 +15,9 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   and a ``result``, as a printer echoes a dispatch there ~2 s before ``PREPARE``
   (Bambuddy ``bambu_mqtt.py:2067-2101`` at ``0d427510``, which reads only a
   ``result`` of ``SUCCESS``). Its ``url`` must name a file uploaded under the upload
-  directory (``resolve_url``); then it runs ``gcode_state`` ``PREPARE``, ``RUNNING``
+  directory (``resolve_url``); then it moves the file to ``/cache/<name>.gcode.3mf``,
+  as an H2C does once it starts a print (``/<name>`` then names nothing), and runs
+  ``gcode_state`` ``PREPARE``, ``RUNNING``
   (``mc_percent`` 0 to 100 over ``FAKE_PRINT_SECONDS``) and ``FINISH``. Otherwise the echo
   says ``result: FAIL`` with a reason, the print goes ``FAILED`` with a non-zero
   ``print_error`` and the refusal is listed. The failure's values are made up: what a
@@ -42,12 +44,13 @@ printer's is stable: a LAN client pins its SHA-256 when it is linked (3a's
 ``LanPrinter``), so a new one at each restart would break the pin.
 
 The upload directory, ``FAKE_PRINTER_UPLOAD_DIR``, is made at start so a ``STOR`` into
-it works. Which directory a real printer takes a print in, and the ``url`` it then
-accepts, are plan 3a Task 7's measurement, not yet made. **The default is UNMEASURED:**
-``/``, the SD card's root, is what Bambuddy uploads to ("the start_print command
+it works. Its default, ``/``, and the ``ftp://<name>`` a print names are plan 3a Task
+7's measurement on an H2C (firmware 01.02.00.00, 2026-10-24; ``scadbuddy/printers/lan.py``
+``UPLOAD_DIR``, ``file_url``): a 3MF stored at ``/<name>`` and named ``ftp://<name>``
+started, and the printer then moved it to ``/cache/<name>.gcode.3mf``, after which
+``/<name>`` answered 550. Bambuddy uploads to the root too ("the start_print command
 references files by name only (ftp://{filename}), so they must be in the root",
-``backend/app/services/print_scheduler.py:7698-7701`` at maziggy/bambuddy ``0d427510``,
-read 2026-10-18). Set it to 3a Task 7's measured directory when that lands.
+``backend/app/services/print_scheduler.py:7698-7701`` at maziggy/bambuddy ``0d427510``).
 
 Other variables: ``FAKE_PRINTER_SERIAL``, ``FAKE_PRINTER_ACCESS_CODE`` (required),
 ``FAKE_PRINTER_HOST`` (the bind address and the certificate's name, ``0.0.0.0``),
@@ -93,9 +96,11 @@ from pyftpdlib.servers import FTPServer
 log = logging.getLogger("fake-printer")
 
 USERNAME = "bblp"
-#: UNMEASURED (plan 3a Task 7): Bambuddy's upload directory, the SD card's root. See
-#: the module docstring.
+#: The SD card's root, where a print's 3MF is uploaded (plan 3a Task 7, measured; the
+#: module docstring).
 DEFAULT_UPLOAD_DIR = "/"
+#: Where a started print's file is moved to (Task 7, measured): ``/cache/<name>.gcode.3mf``.
+CACHE_DIR = "/cache"
 REPORT = Path(__file__).with_name("report.json")
 #: ``print_error`` for a ``project_file`` whose file is missing. Made up (not measured on
 #: a printer); a client should only rely on it being non-zero.
@@ -492,6 +497,7 @@ class FakePrinter:
                 await self._publish(client)
                 return
             assert path is not None
+            self._take(path)
             self._printing = asyncio.create_task(self._print(client, command, path))
         elif command.get("command") == "stop" and self._printing is not None:
             self._printing.cancel()
@@ -509,6 +515,15 @@ class FakePrinter:
         if not (self.config.sdcard / path.lstrip("/")).is_file():
             return f"{path} was never uploaded"
         return None
+
+    def _take(self, path: str) -> str:
+        """Move a started print's file to `CACHE_DIR` as ``<name>.gcode.3mf``, as an H2C
+        does: the upload's own path then names nothing."""
+        card = self.config.sdcard
+        cached = f"{CACHE_DIR}/{PurePosixPath(path).name}.gcode.3mf"
+        (card / CACHE_DIR.lstrip("/")).mkdir(parents=True, exist_ok=True)
+        (card / path.lstrip("/")).replace(card / cached.lstrip("/"))
+        return cached
 
     async def _echo(
         self, client: aiomqtt.Client, command: dict[str, Any], url: str, reason: str | None
