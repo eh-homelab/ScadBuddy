@@ -2600,6 +2600,8 @@ describe('PrintPicker · Supports (#1899)', () => {
     await loaded()
     if (!screen.queryByLabelText('Support type')) await showAdvanced()
     expect(screen.getByLabelText('Support type')).toHaveTextContent(/^Default/)
+    // The reopened dialog shows the last read's choices; Print waits for this open's.
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('supports')
@@ -2740,10 +2742,10 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await loaded()
     if (!screen.queryByLabelText('Print sequence')) await showAdvanced()
     expect(screen.getByLabelText('Print sequence')).toHaveTextContent('Default (template or process)')
-    // The reopened dialog reads its choices again; Print waits for them.
-    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled(), { timeout: 5000 })
+    // The reopened dialog shows the last read's choices; Print waits for this open's.
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await waitFor(() => expect(bodies).toHaveLength(1), { timeout: 5000 })
+    await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('print_sequence')
   })
 })
@@ -2958,6 +2960,36 @@ describe('PrintPicker · Projects', () => {
     expect(screen.queryByTestId('project-select')).toBeNull()
 
     // Print is held until the default (#3651) has seeded the project.
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ project_id: 2 })
+  })
+
+  it('holds Print for the default again when it is reopened, not on the last open’s answer', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderReopenable()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // The default is asked once the path is known, so a held registry read holds it.
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/printers', async () => {
+        await held
+        return HttpResponse.json(printersState())
+      }),
+      http.get('/api/v1/print/projects/default', () => HttpResponse.json({ project_id: 2, reason: 'settings' })),
+    )
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    await expect(
+      waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled(), { timeout: 500 }),
+    ).rejects.toThrow()
+
+    release()
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
