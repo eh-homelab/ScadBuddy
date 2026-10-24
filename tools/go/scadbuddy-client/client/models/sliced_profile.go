@@ -17,6 +17,10 @@ type SlicedProfile struct {
 	nozzle_diameters []string
 	// The plates property
 	plates []SlicedPlateable
+	// The prime_tower property
+	prime_tower SlicedProfile_SlicedProfile_prime_towerable
+	// The prime_tower_changed property
+	prime_tower_changed *bool
 	// The printer_model property
 	printer_model SlicedProfile_SlicedProfile_printer_modelable
 	// The printer_preset property
@@ -109,6 +113,92 @@ func (m *SlicedProfile_SlicedProfile_bed_type) SetSlicedProfileBedTypeMember1(va
 // SetString sets the string property value. Composed type representation for type string
 func (m *SlicedProfile_SlicedProfile_bed_type) SetString(value *string) {
 	m.string = value
+}
+
+// SlicedProfile_SlicedProfile_prime_tower composed type wrapper for classes bool, SlicedProfile_prime_towerMember1able
+type SlicedProfile_SlicedProfile_prime_tower struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type SlicedProfile_prime_towerMember1able
+	slicedProfile_prime_towerMember1 SlicedProfile_prime_towerMember1able
+}
+
+// NewSlicedProfile_SlicedProfile_prime_tower instantiates a new SlicedProfile_SlicedProfile_prime_tower and sets the default values.
+func NewSlicedProfile_SlicedProfile_prime_tower() *SlicedProfile_SlicedProfile_prime_tower {
+	m := &SlicedProfile_SlicedProfile_prime_tower{}
+	return m
+}
+
+// CreateSlicedProfile_SlicedProfile_prime_towerFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSlicedProfile_SlicedProfile_prime_towerFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSlicedProfile_SlicedProfile_prime_tower()
+	if parseNode != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSlicedProfile_prime_towerMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SlicedProfile_prime_towerMember1able); ok {
+				result.SetSlicedProfilePrimeTowerMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *SlicedProfile_SlicedProfile_prime_tower) GetBoolean() *bool {
+	return m.boolean
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SlicedProfile_SlicedProfile_prime_tower) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SlicedProfile_SlicedProfile_prime_tower) GetIsComposedType() bool {
+	return true
+}
+
+// GetSlicedProfilePrimeTowerMember1 gets the SlicedProfile_prime_towerMember1 property value. Composed type representation for type SlicedProfile_prime_towerMember1able
+// returns a SlicedProfile_prime_towerMember1able when successful
+func (m *SlicedProfile_SlicedProfile_prime_tower) GetSlicedProfilePrimeTowerMember1() SlicedProfile_prime_towerMember1able {
+	return m.slicedProfile_prime_towerMember1
+}
+
+// Serialize serializes information the current object
+func (m *SlicedProfile_SlicedProfile_prime_tower) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSlicedProfilePrimeTowerMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSlicedProfilePrimeTowerMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *SlicedProfile_SlicedProfile_prime_tower) SetBoolean(value *bool) {
+	m.boolean = value
+}
+
+// SetSlicedProfilePrimeTowerMember1 sets the SlicedProfile_prime_towerMember1 property value. Composed type representation for type SlicedProfile_prime_towerMember1able
+func (m *SlicedProfile_SlicedProfile_prime_tower) SetSlicedProfilePrimeTowerMember1(value SlicedProfile_prime_towerMember1able) {
+	m.slicedProfile_prime_towerMember1 = value
 }
 
 // SlicedProfile_SlicedProfile_printer_model composed type wrapper for classes SlicedProfile_printer_modelMember1able, string
@@ -377,6 +467,14 @@ type SlicedProfile_SlicedProfile_bed_typeable interface {
 	SetString(value *string)
 }
 
+type SlicedProfile_SlicedProfile_prime_towerable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetBoolean() *bool
+	GetSlicedProfilePrimeTowerMember1() SlicedProfile_prime_towerMember1able
+	SetBoolean(value *bool)
+	SetSlicedProfilePrimeTowerMember1(value SlicedProfile_prime_towerMember1able)
+}
+
 type SlicedProfile_SlicedProfile_printer_modelable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetSlicedProfilePrinterModelMember1() SlicedProfile_printer_modelMember1able
@@ -405,6 +503,8 @@ type SlicedProfile_SlicedProfile_processable interface {
 func NewSlicedProfile() *SlicedProfile {
 	m := &SlicedProfile{}
 	m.SetAdditionalData(make(map[string]any))
+	prime_tower_changedValue := false
+	m.SetPrimeTowerChanged(&prime_tower_changedValue)
 	return m
 }
 
@@ -472,6 +572,26 @@ func (m *SlicedProfile) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 		}
 		return nil
 	}
+	res["prime_tower"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSlicedProfile_SlicedProfile_prime_towerFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrimeTower(val.(SlicedProfile_SlicedProfile_prime_towerable))
+		}
+		return nil
+	}
+	res["prime_tower_changed"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrimeTowerChanged(val)
+		}
+		return nil
+	}
 	res["printer_model"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateSlicedProfile_SlicedProfile_printer_modelFromDiscriminatorValue)
 		if err != nil {
@@ -517,6 +637,18 @@ func (m *SlicedProfile) GetPlates() []SlicedPlateable {
 	return m.plates
 }
 
+// GetPrimeTower gets the prime_tower property value. The prime_tower property
+// returns a SlicedProfile_SlicedProfile_prime_towerable when successful
+func (m *SlicedProfile) GetPrimeTower() SlicedProfile_SlicedProfile_prime_towerable {
+	return m.prime_tower
+}
+
+// GetPrimeTowerChanged gets the prime_tower_changed property value. The prime_tower_changed property
+// returns a *bool when successful
+func (m *SlicedProfile) GetPrimeTowerChanged() *bool {
+	return m.prime_tower_changed
+}
+
 // GetPrinterModel gets the printer_model property value. The printer_model property
 // returns a SlicedProfile_SlicedProfile_printer_modelable when successful
 func (m *SlicedProfile) GetPrinterModel() SlicedProfile_SlicedProfile_printer_modelable {
@@ -557,6 +689,18 @@ func (m *SlicedProfile) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("plates", cast)
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("prime_tower", m.GetPrimeTower())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("prime_tower_changed", m.GetPrimeTowerChanged())
 		if err != nil {
 			return err
 		}
@@ -608,6 +752,16 @@ func (m *SlicedProfile) SetPlates(value []SlicedPlateable) {
 	m.plates = value
 }
 
+// SetPrimeTower sets the prime_tower property value. The prime_tower property
+func (m *SlicedProfile) SetPrimeTower(value SlicedProfile_SlicedProfile_prime_towerable) {
+	m.prime_tower = value
+}
+
+// SetPrimeTowerChanged sets the prime_tower_changed property value. The prime_tower_changed property
+func (m *SlicedProfile) SetPrimeTowerChanged(value *bool) {
+	m.prime_tower_changed = value
+}
+
 // SetPrinterModel sets the printer_model property value. The printer_model property
 func (m *SlicedProfile) SetPrinterModel(value SlicedProfile_SlicedProfile_printer_modelable) {
 	m.printer_model = value
@@ -629,12 +783,16 @@ type SlicedProfileable interface {
 	GetBedType() SlicedProfile_SlicedProfile_bed_typeable
 	GetNozzleDiameters() []string
 	GetPlates() []SlicedPlateable
+	GetPrimeTower() SlicedProfile_SlicedProfile_prime_towerable
+	GetPrimeTowerChanged() *bool
 	GetPrinterModel() SlicedProfile_SlicedProfile_printer_modelable
 	GetPrinterPreset() SlicedProfile_SlicedProfile_printer_presetable
 	GetProcess() SlicedProfile_SlicedProfile_processable
 	SetBedType(value SlicedProfile_SlicedProfile_bed_typeable)
 	SetNozzleDiameters(value []string)
 	SetPlates(value []SlicedPlateable)
+	SetPrimeTower(value SlicedProfile_SlicedProfile_prime_towerable)
+	SetPrimeTowerChanged(value *bool)
 	SetPrinterModel(value SlicedProfile_SlicedProfile_printer_modelable)
 	SetPrinterPreset(value SlicedProfile_SlicedProfile_printer_presetable)
 	SetProcess(value SlicedProfile_SlicedProfile_processable)
