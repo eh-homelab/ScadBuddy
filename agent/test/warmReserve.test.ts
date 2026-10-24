@@ -3,10 +3,11 @@ import type { Sql } from 'postgres'
 import { describe, expect, it, vi } from 'vitest'
 import type { HarnessRun } from '../src/harness/run.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
+import { TurnHost, type TurnHostDeps } from '../src/sessions/turnHost.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { RESERVATION_HOLD_MS, type WarmQuery, WarmSessions } from '../src/sessions/warm.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
-import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY } from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY, SHUTTING_DOWN_FAILURE } from '../src/temporal/session/names.js'
 
 // WarmSessions' places for AgentSession (spec 2026-10-13 §5.2): `reserve` is acquire_worker's,
 // `release` release_worker's. A full replica gives up its least recently used idle process or
@@ -208,6 +209,88 @@ describe('WarmSessions.reserve and release', () => {
     two.left()
     await expect(acquire({ sessionId: 'three' })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })
     one.left()
+  })
+
+  it('a kept home whose reservation lapsed re-reserves as its turn arrives: full of running turns, session_turn refuses NoCapacity and spawns nothing past the cap (#3443)', async () => {
+    const { warm, spawned, running, tick } = cache(2)
+    expect(warm.reserve('kept')).toBe('reserved')
+    // The session's place lapses (`warm_idle_seconds`) while the workflow keeps it as home, and
+    // other sessions' turns fill the cache.
+    tick(600_000)
+    const one = await running('one')
+    const two = await running('two')
+    // Nothing of the turn is read or written before the refusal: no database is reached.
+    const sql = (() => Promise.reject(new Error('the refused turn touched the database'))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
+    await expect(host.run({ sessionId: 'kept', turnId: 't1', attempt: 'run:0' }, control)).rejects.toMatchObject({ type: NO_CAPACITY })
+    expect(spawned.has('kept')).toBe(false)
+    expect(warm.size()).toBe(2)
+    expect(host.active).toBe(0)
+    // A slot that is idle again is given up for it: the next arrival takes its place.
+    two.left()
+    expect(warm.reserve('kept')).toBe('reserved')
+    await vi.waitFor(() => expect(spawned.get('two')?.closed()).toBe(true), { timeout: 5_000 })
+    expect(spawned.get('one')?.closed()).toBe(false)
+    one.left()
+  })
+
+  it('a placement that fails before its spawn gives back the place it reserved on arrival', async () => {
+    const { warm, spawned } = cache(1)
+    // The claim's read fails: the turn ends before anything is spawned.
+    const sql = (() => Promise.reject(new Error('the database is gone'))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
+    await expect(host.run({ sessionId: 'gone', turnId: 't1', attempt: 'run:0' }, control)).rejects.toThrow('the database is gone')
+    expect(spawned.has('gone')).toBe(false)
+    // Held for RESERVATION_HOLD_MS had it been kept: the one place is free at once.
+    expect(warm.reserve('next')).toBe('reserved')
+  })
+
+  it('a placement cut by a newer one of the same session never gives back the newer one`s place', async () => {
+    const { warm } = cache(1)
+    // Each claim waits until the test fails it: the older placement is still claiming when the newer arrives.
+    const claims: ((err: Error) => void)[] = []
+    const sql = (() => new Promise((_resolve, reject) => claims.push(reject))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const control = () => ({ heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const })
+    const older = host.run({ sessionId: 's', turnId: 't1', attempt: 'run:0' }, control())
+    await vi.waitFor(() => expect(claims).toHaveLength(1))
+    // The newer arrives (the same attempt id: the next turn's first placement in a run shares it) and cuts the older.
+    const newer = host.run({ sessionId: 's', turnId: 't2', attempt: 'run:0' }, control())
+    claims[0]!(new Error('the older claim failed'))
+    await expect(older).rejects.toThrow('the older claim failed')
+    await vi.waitFor(() => expect(claims).toHaveLength(2))
+    // The one place is still the newer placement's.
+    expect(warm.reserve('other')).toBe('full')
+    claims[1]!(new Error('the newer claim failed'))
+    await expect(newer).rejects.toThrow('the newer claim failed')
+    expect(warm.reserve('other')).toBe('reserved')
+  })
+
+  it('a draining replica refuses an arriving placement ShuttingDown, before it reserves or evicts anything', async () => {
+    const { warm, spawned, running } = cache(1)
+    const idle = await running('idle')
+    idle.left()
+    const sql = (() => Promise.reject(new Error('the refused turn touched the database'))) as unknown as Sql
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    host.drain()
+    const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
+    await expect(host.run({ sessionId: 'late', turnId: 't1', attempt: 'run:0' }, control)).rejects.toMatchObject({ type: SHUTTING_DOWN_FAILURE })
+    expect(spawned.get('idle')?.closed()).toBe(false)
+    expect(warm.size()).toBe(1)
+  })
+
+  it('unreserve gives back only a reservation: a session`s process stays', async () => {
+    const { warm, spawned, running } = cache(1)
+    const turn = await running('a')
+    warm.unreserve('a')
+    turn.left()
+    warm.unreserve('a')
+    expect(spawned.get('a')?.closed()).toBe(false)
+    expect(warm.size()).toBe(1)
+    // Still its place: another session takes it only by evicting the idle process.
+    expect(warm.reserve('a')).toBe('reserved')
   })
 
   it('a session with a process here keeps it, without a second place', async () => {

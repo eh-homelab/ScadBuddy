@@ -465,6 +465,11 @@ export class WarmSessions {
     return 'reserved'
   }
 
+  /** Gives back a place `reserve` promised that no process took (a placement that failed before its spawn); its process, if any, stays. */
+  unreserve(sessionId: string): void {
+    this.reserved.delete(sessionId)
+  }
+
   /** Frees the session's place here (`release_worker`, spec §5.2): its reservation, and its process, once no turn runs on it. */
   release(sessionId: string): Promise<void> {
     this.reserved.delete(sessionId)

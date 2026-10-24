@@ -20,6 +20,7 @@ import { sessionFinishActivities } from '../src/temporal/session/finishActivity.
 import type { FinishTurnInput, Message, OpenInputArgs, SessionStart, SessionTurnInput, SessionTurnResult } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
+  NO_CAPACITY,
   OPEN_INPUT_UPDATE,
   OWNER_CHANGED_SIGNAL,
   SESSION_GATE_ACTIVITIES as GATE,
@@ -599,6 +600,50 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('a kept home full as the turn arrives (NoCapacity) moves the turn at no cost to its placements, once; a home acquired for the turn costs one (#3443)', async () => {
+    const id = randomUUID()
+    const full = () => ApplicationFailure.retryable('every warm session on the replica is running a turn', NO_CAPACITY)
+    // t1: every home refuses, each acquired for it, so each refusal costs one of the three placements.
+    // t2: runs on the home it acquires, which t3 and t4 keep.
+    // t3: the kept home refuses once, and the move to the next home runs it.
+    // t4: the kept home refuses, then every home after: one free move, then the three placements.
+    let t3Refused = false
+    runTurn = async (input) => {
+      if (input.turnId === 't2') return { status: 'done', hostQueue: HOST }
+      if (input.turnId === 't3' && t3Refused) return { status: 'done', hostQueue: HOST }
+      if (input.turnId === 't3') t3Refused = true
+      throw full()
+    }
+    const placed = (turnId: string) => turns.filter((t) => t.turnId === turnId).map((t) => [t.attempt?.split(':')[1], t.continuation?.kind])
+    const next = async (turnId: string, outcomes: string[]) => {
+      await poll(async () => handleOf(id).query(TURN_QUERY), null)
+      await send(env.client, id, message(turnId))
+      const run = await runIdOf(id)
+      await poll(() => finished.map((f) => f.outcome), outcomes)
+      return run
+    }
+    await send(env.client, id, message('t1'))
+    await poll(() => finished.map((f) => f.outcome), ['failed'])
+    expect(finished[0]?.message).toContain('could not be placed on a worker')
+    expect(placed('t1')).toEqual([['0', undefined], ['1', 'restarted'], ['2', 'restarted']])
+    expect(acquired).toBe(3)
+    await next('t2', ['failed', 'done'])
+    expect(acquired).toBe(4)
+    await next('t3', ['failed', 'done', 'done'])
+    // Re-acquired after the kept home refused, the turn restarted from its transcript (nothing ran there).
+    expect(placed('t3')).toEqual([['0', undefined], ['1', 'restarted']])
+    expect(acquired).toBe(5)
+    const t4Run = await next('t4', ['failed', 'done', 'done', 'failed'])
+    // Four placements, never a loop: the kept home's refusal, then three on homes acquired for it.
+    expect(placed('t4')).toEqual([['0', undefined], ['1', 'restarted'], ['2', 'restarted'], ['3', 'restarted']])
+    expect(acquired).toBe(8)
+    expect(finished[3]?.message).toContain('could not be placed on a worker')
+    await poll(async () => handleOf(id).query(TURN_QUERY), null)
+    await record('full_home', id, t4Run)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('refuses open_input for a turn that is not running, `stale`', async () => {
     const id = randomUUID()
     await send(env.client, id, message('t1'))
@@ -636,7 +681,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,
