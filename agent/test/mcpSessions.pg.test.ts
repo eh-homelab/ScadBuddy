@@ -406,6 +406,37 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     await expect(res.text()).rejects.toThrow(/failed while answering/)
   })
 
+  it('does not take a live owner for gone after its own event loop stalled (#4552)', async () => {
+    // One process holds both replicas, so a stall delays every timer and every
+    // NOTIFY alike. When the loop comes back, the due liveness timers run before
+    // the sockets are read: measured as wall time since the last message heard,
+    // the stall alone looks like an owner (and a relaying replica) gone silent.
+    let reached!: () => void
+    const backendReached = new Promise<void>((r) => (reached = r))
+    backend.use(
+      http.get(`${BACKEND}/api/v1/models`, async () => {
+        reached()
+        await delay(BEAT_MS * 8)
+        return HttpResponse.json(MODELS)
+      }),
+    )
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    const id = sessionOf(client)
+    const pending = post(b, token, id, { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'list_models', arguments: {} } })
+    await backendReached
+    await sleep(BEAT_MS * 2)
+    // Blocked well past SILENT_AFTER_BEATS beats, with nothing gone.
+    const until = performance.now() + BEAT_MS * 6
+    while (performance.now() < until) {
+      // busy: the event loop runs nothing
+    }
+    const res = await pending
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('keychain')
+    expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(id)}`).toHaveLength(1)
+  })
+
   it('ends a relayed answer with an error when the owner dies mid-call', async () => {
     let reached!: () => void
     const backendReached = new Promise<void>((r) => (reached = r))

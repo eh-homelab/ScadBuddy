@@ -51,8 +51,35 @@ export const MCP_CHANNEL = 'scadbuddy_mcp'
 export const ACK_TIMEOUT_MS = 3_000
 /** How often an owner says it is still working on a relayed request. */
 export const BEAT_MS = 10_000
-/** Beats missed before the owner is taken for gone. */
+/**
+ * Beats missed before the owner is taken for gone. Counted in liveness checks
+ * that heard nothing, not in wall time since the last message: after an
+ * event-loop stall Node runs the due timers before it reads the sockets, so the
+ * messages that arrived meanwhile are not heard yet, and the stall alone would
+ * look like silence (#4552). The one late check counts once; the next comes
+ * after the backlog is read. Node does not fire an interval's missed runs.
+ */
 const SILENT_AFTER_BEATS = 3
+
+/** A liveness check run every beat: `heard()` on each message, `silent()` once SILENT_AFTER_BEATS checks in a row heard nothing. */
+function silence(): { heard: () => void; silent: () => boolean } {
+  let heard = true
+  let missed = 0
+  return {
+    heard: () => {
+      heard = true
+    },
+    silent: () => {
+      if (heard) {
+        heard = false
+        missed = 0
+        return false
+      }
+      missed += 1
+      return missed >= SILENT_AFTER_BEATS
+    },
+  }
+}
 /**
  * NOTIFY payloads are capped at 8000 bytes; a chunk whose whole payload, as
  * serialised, is past this goes in a row. Measured on the payload, not the
@@ -176,7 +203,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
   readonly #log: (message: string) => void
   readonly #waiting = new Map<string, Waiting>()
   /** Relayed requests this replica is running as owner, to cancel. */
-  readonly #running = new Map<string, { controller: AbortController; heard: number }>()
+  readonly #running = new Map<string, { controller: AbortController; heard: () => void }>()
   readonly #touched = new Map<string, number>()
   #owner: SessionOwner | undefined
   #lastSweep = 0
@@ -246,7 +273,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       let settled = false
       let acked = false
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
-      let lastHeard = Date.now()
+      const peer = silence()
       let ackTimer: NodeJS.Timeout | undefined
       let liveness: NodeJS.Timeout | undefined
       // Liveness both ways: the owner stops a request whose relaying replica
@@ -318,9 +345,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       signal.addEventListener('abort', onAbort, { once: true })
       this.#waiting.set(req, {
         chain: Promise.resolve(),
-        heard: () => {
-          lastHeard = Date.now()
-        },
+        heard: peer.heard,
         shutdown: () => {
           done()
           if (!settled) {
@@ -336,9 +361,9 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           clearTimeout(ackTimer)
           if (acked) return
           acked = true
-          lastHeard = Date.now()
+          peer.heard()
           liveness = setInterval(() => {
-            if (Date.now() - lastHeard > this.#beatMs * SILENT_AFTER_BEATS) void ownerGone()
+            if (peer.silent()) void ownerGone()
           }, this.#beatMs)
         },
         head: (status, headers) => {
@@ -425,7 +450,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const running = this.#running.get(header.req)
     if (running) {
       // As the owner: the relaying replica is still there, and still wants the answer.
-      if (header.t === 'beat') running.heard = Date.now()
+      if (header.t === 'beat') running.heard()
       return
     }
     const waiting = this.#waiting.get(header.req)
@@ -475,8 +500,8 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const to = body.from
     const req = header.req
     const controller = new AbortController()
-    const running = { controller, heard: Date.now() }
-    this.#running.set(req, running)
+    const relaying = silence()
+    this.#running.set(req, { controller, heard: relaying.heard })
     // One message at a time, so they commit, and so are heard, in order.
     let queue = Promise.resolve()
     /** A message could not be sent: the answer is incomplete, and ends as an error. */
@@ -494,7 +519,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const beat = setInterval(() => {
       // The relaying replica has gone silent: nobody will read the answer, and a
       // GET stream held for it would refuse the client's reconnect (409).
-      if (Date.now() - running.heard > this.#beatMs * SILENT_AFTER_BEATS) {
+      if (relaying.silent()) {
         controller.abort()
         return
       }
