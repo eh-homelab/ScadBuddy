@@ -289,7 +289,7 @@ def test_the_hand_picked_positions_notes_name_the_printer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#4586 review: over the LAN, `choose_nozzles` hands ``manual_for`` the printer as
-    the picker, as it does `rack_warnings`, never Bambuddy (#4630 review)."""
+    the picker, never Bambuddy (#4630, #4650 reviews)."""
     asked: list[dict[str, Any]] = []
 
     def recorded(*args: Any, **kwargs: Any) -> Any:
