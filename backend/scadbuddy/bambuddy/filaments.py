@@ -94,6 +94,8 @@ WarningKind = Literal[
     "hf-unsupported",
     "hf-mounted",
     "rack-unsafe-material",
+    # The slug is historical: over the LAN its message says "the printer" (#4586), and
+    # it is kept for clients that key on it (#4600 review).
     "rack-left-to-bambuddy",
     "rack-manual-partial",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).

@@ -302,12 +302,8 @@ def test_the_hand_picked_positions_notes_name_the_printer(
     choose_nozzles(
         plan, idle_status(), algorithm="bambuddy", manual_position=6, usage={}, spools={}
     )
-    [kwargs] = asked
-    _, notes = manual_for([], 6, "bambuddy", **kwargs)
-    assert [n.message for n in notes] == [
-        "Rack pick left to the printer: manual rack pick unused: this plate does not "
-        "print from the rack."
-    ]
+    # The wording each picker gives is `tests/rack/test_rank.py`'s (#4600 review).
+    assert asked == [{"picker": "the printer"}]
 
 
 def test_a_file_with_no_slice_info_has_no_plan() -> None:
