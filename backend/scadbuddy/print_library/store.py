@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -139,16 +139,18 @@ def _update_file(
 
 
 def _rows_of_output(
-    conn: Connection[DictRow], output_id: str, *, filed: bool = False, live: bool = False
+    conn: Connection[DictRow],
+    output_id: str,
+    which: Literal["every", "filed", "live filed"] = "every",
 ) -> list[NativeFile]:
-    """The rows naming the output, by id. Every one by default: filed, moved or trashed,
-    since a move clears ``filed`` and keeps ``output_id`` until `forget_output`. With
-    ``filed``, only its filed copies; a moved copy or one put in a folder of the user's
-    choosing (#4507) is not one. With ``live``, none in the trash."""
+    """The rows naming the output, by id. ``every``: filed, moved or trashed, since a
+    move clears ``filed`` and keeps ``output_id`` until `forget_output`. ``filed``: only
+    its filed copies, trashed or not; a moved copy or one put in a folder of the user's
+    choosing (#4507) is not one. ``live filed``: its filed copies not in the trash."""
     where = "output_id = %s"
-    if filed:
+    if which != "every":
         where += " AND filed"
-    if live:
+    if which == "live filed":
         where += " AND deleted_at IS NULL"
     rows = conn.execute(
         f"SELECT {_FILE_COLUMNS} FROM library_files WHERE {where} ORDER BY id".encode(),
@@ -350,7 +352,7 @@ class NativeLibraryStore:
 
     def filed_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
-            return _rows_of_output(conn, output_id, filed=True, live=True)
+            return _rows_of_output(conn, output_id, "live filed")
 
     def rows_for_output(self, output_id: str) -> list[NativeFile]:
         """Every row the output has, live or not; only the tests read it."""
@@ -359,7 +361,7 @@ class NativeLibraryStore:
 
     def filed_rows_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
-            return _rows_of_output(conn, output_id, filed=True)
+            return _rows_of_output(conn, output_id, "filed")
 
     def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
         """The output's live copy in ``folder_id``, if any; no lock, so a hint only."""
@@ -374,7 +376,7 @@ class NativeLibraryStore:
         and a filing never holds a connection while it waits on the pool for another."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
-            existing = _rows_of_output(conn, row.output_id or "", filed=True)
+            existing = _rows_of_output(conn, row.output_id or "", "filed")
             if existing:
                 return existing[0], False
             folder_id = _template_folder(conn, folder).id
