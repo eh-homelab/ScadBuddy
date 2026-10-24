@@ -371,24 +371,43 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
 
 
 class _OneRow:
-    """A registry of one row, ``Garage``, linked to no Bambuddy printer (#4516)."""
+    """A registry of one row, ``Garage``, linked to ``linked`` (no Bambuddy printer by
+    default, #4516)."""
+
+    def __init__(self, linked: int | None = None) -> None:
+        self.linked = linked
 
     def get(self, id: str) -> PrinterRow | None:
         now = datetime.now(UTC)
-        return PrinterRow(id=id, serial="S", name="Garage", created_at=now, updated_at=now)
+        return PrinterRow(
+            id=id,
+            serial="S",
+            name="Garage",
+            bambuddy_printer_id=self.linked,
+            created_at=now,
+            updated_at=now,
+        )
 
 
+@pytest.mark.parametrize(
+    ("linked", "why"),
+    [
+        (None, "Garage is not linked to Bambuddy printer 1."),
+        # #4577 review: re-linked to another Bambuddy printer since, the other refusal.
+        (2, "Garage is Bambuddy printer 2 now, not 1."),
+    ],
+)
 async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, linked: int | None, why: str
 ) -> None:
-    """#4551: a stored step naming a row unlinked from Bambuddy since is refused (#4516);
-    its row says to edit that file's step and pick the printer there. The refusal is
-    `_named_printer`'s own, carried as the run's refusal is, through the workflow's
-    problem document and back."""
+    """#4551: a stored step naming a row unlinked from Bambuddy since, or linked to
+    another, is refused (#4516); its row says to edit that file's step and pick the
+    printer there. The refusal is `_named_printer`'s own, carried as the run's refusal
+    is, through the workflow's problem document and back."""
 
     async def answers(*_: Any, **__: Any) -> Any:
         try:
-            await _named_printer("garage", 1, StoredSettings(), cast(PrinterStore, _OneRow()))
+            await _named_printer("garage", 1, StoredSettings(), cast(PrinterStore, _OneRow(linked)))
         except ApiError as error:
             _answered(AcceptAnswer(refusal=problem(error)))
         raise AssertionError("the named printer was not refused")
@@ -403,8 +422,7 @@ async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
     result = await print_batches._queue_one("b1", item, 0, *([None] * 6))  # type: ignore[arg-type]
     assert (result.status, result.detail) == (
         "refused",
-        "disagreeing printer: Garage is not linked to Bambuddy printer 1."
-        " Edit bracket.3mf and pick its printer again.",
+        f"disagreeing printer: {why} Edit bracket.3mf and pick its printer again.",
     )
 
 
