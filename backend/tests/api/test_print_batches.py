@@ -397,7 +397,7 @@ class _OneRow:
         (2, "Garage is Bambuddy printer 2 now, not 1."),
     ],
 )
-async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
+async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_edit(
     monkeypatch: pytest.MonkeyPatch, linked: int | None, why: str
 ) -> None:
     """#4551: a stored step naming a row unlinked from Bambuddy since, or linked to
