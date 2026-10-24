@@ -578,6 +578,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  Attachments (#4251, spec §6.2 "As built"): any file on an order or a line item,
+  `attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
+  `orders/attachments.py` `sniff`; only `INLINE` types are served as themselves, the rest
+  as downloads), uploaded through the claim store and the `order_attachment_add` kind (the
+  blob `attachment-<sha256>`, its `blob_refs` row written in the attachment's own
+  transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
+  (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
+  `ItemPicture.tsx`; mocks `src/mocks/features/orders/attachments.ts`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

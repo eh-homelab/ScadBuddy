@@ -123,6 +123,7 @@ function detail(order: Order): OrderDetail {
     charges,
     payments,
     shipments: shipmentsOf(order.id),
+    attachments: state.attachments.filter((a) => a.order_id === order.id),
     totals: { subtotal_minor: subtotal, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
   }
 }
@@ -157,7 +158,7 @@ export function withFilaments(found: OrderItem, filaments: Record<string, string
 }
 
 /** A transition: the lifecycle's rules, then the derivation, then the answer. */
-function transition<T>(request: Request, run: () => T) {
+export function transition<T>(request: Request, run: () => T) {
   try {
     return HttpResponse.json(run() as unknown as Record<string, unknown>)
   } catch (error) {

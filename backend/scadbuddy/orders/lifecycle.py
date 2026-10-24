@@ -34,6 +34,10 @@ from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
     Actor,
     AddressSnapshot,
+    Attachment,
+    AttachmentKind,
+    AttachmentPatch,
+    AttachmentRole,
     ChargeInput,
     ColourSlot,
     Fulfilment,
@@ -51,7 +55,15 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.pricing import Plate, Priced
 from scadbuddy.orders.reference import ResolvedReference
-from scadbuddy.orders.store import UNSET, Conn, OrderNotFoundError, OrderStore, UnsetType
+from scadbuddy.orders.store import (
+    UNSET,
+    Conn,
+    OrderNotFoundError,
+    OrderStore,
+    UnsetType,
+    item_subject,
+    order_subject,
+)
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -1141,6 +1153,171 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
         return shipment
+
+    # -- attachments (§6.2, #4251) ---------------------------------------------------------
+    #
+    # Records, not steps: a file may be added, captioned or removed in any state, on hold
+    # or after the order ended (a photo of the delivered object comes after close), and
+    # nothing here moves a status. A removal is the one thing a person may delete
+    # besides a draft item (Ruling 6), on the audit line.
+
+    def _attachment_of(self, conn: Conn, order: Order, attachment_id: str) -> Attachment:
+        found = self.store.attachment(attachment_id, conn=conn)
+        if found is None or found[0].order_id != order.id:
+            raise LifecycleError(
+                "attachment_not_found",
+                f"no attachment {attachment_id} of order {order.number}",
+                not_found=True,
+            )
+        return found[0]
+
+    def _subject_item(self, change: _Change, conn: Conn, attachment: Attachment) -> None:
+        if attachment.item_id is not None:
+            item = self.store.item(attachment.item_id, conn=conn)
+            if item is not None:
+                change.items.append((item, None))
+
+    def add_attachment(
+        self,
+        order_id: str,
+        item_id: str | None,
+        by: Actor,
+        *,
+        attachment_id: str,
+        kind: AttachmentKind,
+        role: AttachmentRole,
+        filename: str,
+        media_type: str,
+        size_bytes: int,
+        sha256: str,
+        blob_key: str,
+        caption: str,
+    ) -> Attachment:
+        """The row of a file already kept as ``blob_key``, on the order or one of its
+        items; the store holds the blob for it in the same transaction."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item = None if item_id is None else self._item_of(conn, order, item_id)
+            attachment = self.store.insert_attachment(
+                conn,
+                attachment_id=attachment_id,
+                order_id=order.id,
+                subject=order_subject(order.id) if item is None else item_subject(item.id),
+                kind=kind,
+                role=role,
+                filename=filename,
+                media_type=media_type,
+                size_bytes=size_bytes,
+                sha256=sha256,
+                blob_key=blob_key,
+                caption=caption,
+                created_by=by,
+            )
+            self._event(
+                conn,
+                order,
+                by,
+                "attachment.added",
+                attachment_id=attachment.id,
+                item_id=attachment.item_id,
+                role=attachment.role,
+            )
+            change = _Change(order)
+            self._subject_item(change, conn, attachment)
+        self._told(change)
+        return attachment
+
+    def edit_attachment(
+        self, order_id: str, attachment_id: str, patch: AttachmentPatch, by: Actor
+    ) -> Attachment:
+        """The caption and the role; a field left out stays. An image marked delivered
+        keeps its mark whatever its role becomes."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            before = self._attachment_of(conn, order, attachment_id)
+            attachment = self.store.update_attachment(
+                conn,
+                before.id,
+                caption=UNSET if patch.caption is None else patch.caption,
+                role=UNSET if patch.role is None else patch.role,
+            )
+            if attachment.role != before.role:
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "attachment.role",
+                    attachment_id=attachment.id,
+                    from_role=before.role,
+                    to=attachment.role,
+                )
+            change = _Change(order)
+            self._subject_item(change, conn, attachment)
+        self._told(change)
+        return attachment
+
+    def remove_attachment(self, order_id: str, attachment_id: str, by: Actor) -> None:
+        """A mis-upload (Ruling 6): the row goes, and with it its hold on the file and
+        the item's delivered mark when it was this one."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            attachment = self._attachment_of(conn, order, attachment_id)
+            item = (
+                None
+                if attachment.item_id is None
+                else self.store.item(attachment.item_id, conn=conn)
+            )
+            delivered = item is not None and item.delivered_attachment_id == attachment.id
+            self.store.delete_attachment(conn, attachment.id)
+            self._event(
+                conn,
+                order,
+                by,
+                "attachment.removed",
+                attachment_id=attachment.id,
+                item_id=attachment.item_id,
+                filename=attachment.filename,
+                sha256=attachment.sha256,
+                was_delivered=delivered,
+            )
+            change = _Change(order)
+            self._subject_item(change, conn, attachment)
+        self._told(change)
+
+    def set_delivered(
+        self, order_id: str, item_id: str, attachment_id: str | None, by: Actor
+    ) -> OrderItem:
+        """Mark one of the item's own image attachments as what was actually delivered,
+        or with None clear the mark."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item = self._item_of(conn, order, item_id)
+            if attachment_id is not None:
+                found = self.store.attachment(attachment_id, conn=conn)
+                if found is None or found[0].subject != item_subject(item.id):
+                    raise LifecycleError(
+                        "attachment_id",
+                        f"attachment {attachment_id} is not attached to this item",
+                        unprocessable=True,
+                    )
+                if found[0].kind != "image":
+                    raise LifecycleError(
+                        "attachment_id",
+                        f"attachment {attachment_id} is not an image",
+                        unprocessable=True,
+                    )
+            if item.delivered_attachment_id != attachment_id:
+                item = self.store.set_delivered(conn, item.id, attachment_id)
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "item.delivered",
+                    item_id=item.id,
+                    attachment_id=attachment_id,
+                )
+        self._told(_Change(order, [(item, None)]))
+        return item
 
 
 def reap_quote_holds(refs: BlobRefs, store: OrderStore, *, grace: timedelta = QUOTE_TIMEOUT) -> int:
