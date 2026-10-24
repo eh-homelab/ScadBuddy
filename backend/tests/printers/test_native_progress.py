@@ -175,14 +175,6 @@ async def test_unreadable_runs_read_as_no_lan_print() -> None:
 async def test_a_run_read_already_is_not_read_again() -> None:
     """#4540 review: a progress route reads the newest run once, for its failure and its
     LAN print; `given_run` reads no run."""
-    calls = 0
-
-    async def latest(run_subject: str) -> PrintRun | None:
-        nonlocal calls
-        calls += 1
-        return None
-
-    assert calls == 0  # ``latest`` is the route's reader, never called.
     lan = LanProgress(given_run(_run(LAN_RESULT)), _Rows(), _Reports(report(gcode_state="FINISH")))  # type: ignore[arg-type]
     progress = await lan.read("o" * 32)
     assert progress is not None and progress.stage == "done"
@@ -231,6 +223,25 @@ async def test_a_run_read_across_its_event_is_not_kept() -> None:
     store = _CountingRuns(_run(LAN_RESULT))
     recent = RecentRuns(store, ttl=2.0, clock=lambda: 0.0)  # type: ignore[arg-type]
     store.during = lambda: recent.heard(PrintRunEvent(output_id="o" * 32, slug="s", run_id="r2"))
+    await recent.latest("o" * 32)
+    store.during = None
+    await recent.latest("o" * 32)
+    assert store.calls == 2
+
+
+async def test_a_run_read_across_its_event_is_not_kept_however_many_subjects_were_heard() -> None:
+    """#4566 review: once ``capacity`` subjects had been heard, `heard` cleared every
+    subject's count, so a read that spanned its subject's event could find the count it
+    started from and keep the run before it."""
+    store = _CountingRuns(_run(LAN_RESULT))
+    recent = RecentRuns(store, ttl=2.0, clock=lambda: 0.0, capacity=1)  # type: ignore[arg-type]
+    recent.heard(PrintRunEvent(output_id="o" * 32, slug="s", run_id="r1"))
+
+    def events() -> None:
+        recent.heard(PrintRunEvent(output_id="p" * 32, slug="s", run_id="r2"))
+        recent.heard(PrintRunEvent(output_id="o" * 32, slug="s", run_id="r3"))
+
+    store.during = events
     await recent.latest("o" * 32)
     store.during = None
     await recent.latest("o" * 32)

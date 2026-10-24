@@ -15,8 +15,8 @@ import psycopg
 import pytest
 import pytest_asyncio
 
+from scadbuddy.api import deps as deps_module
 from scadbuddy.api.deps import build_state
-from scadbuddy.bambuddy.runs import RecentRuns
 from scadbuddy.core import pg_events
 from scadbuddy.core.events import (
     PG_CHANNEL,
@@ -41,6 +41,7 @@ from scadbuddy.render.jobs import JobResult
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.projection import JobProjection
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.support.recent_runs import assert_hears, record_recent_runs
 
 #: Well inside this, or it is not "at once".
 PROMPTLY = 5.0
@@ -565,11 +566,28 @@ def test_a_database_url_selects_the_postgres_bus_on_the_projection_s_listener(
     assert state.events.listener is projection.pg_listener
     assert state.events.retention == EventLogRetention(seconds=60, rows=10)
     assert PG_CHANNEL in projection.pg_listener.channels
-    # #4541: a subject's print.run drops the follow's kept newest run.
-    assert any(
-        getattr(listener, "__func__", None) is RecentRuns.heard
-        for listener in state.events.local._listeners
+
+
+@pytest.mark.requires_postgres
+async def test_a_print_run_through_the_apps_bus_drops_the_follows_kept_run(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4541: a subject's print.run drops the follow's kept newest run."""
+    built = record_recent_runs(monkeypatch, deps_module)
+    state = build_state(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
     )
+    [recent] = built
+    events = state.events
+    assert isinstance(events, PgNotifyEventBus)
+    _migrated(pg_conninfo)
+    await events.start()
+    try:
+        await assert_hears(recent, events)
+    finally:
+        await events.aclose()
 
 
 @pytest.mark.parametrize("field", ["event_log_retention_seconds", "event_log_retention_rows"])

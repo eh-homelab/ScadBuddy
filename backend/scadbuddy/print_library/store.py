@@ -141,6 +141,7 @@ def _update_file(
 def _rows_of_output(
     conn: Connection[DictRow],
     output_id: str,
+    *,
     which: Literal["every", "filed", "live filed"] = "every",
 ) -> list[NativeFile]:
     """The rows naming the output, by id. ``every``: filed, moved or trashed, since a
@@ -352,7 +353,7 @@ class NativeLibraryStore:
 
     def filed_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
-            return _rows_of_output(conn, output_id, "live filed")
+            return _rows_of_output(conn, output_id, which="live filed")
 
     def rows_for_output(self, output_id: str) -> list[NativeFile]:
         """Every row the output has, live or not; only the tests read it."""
@@ -361,7 +362,7 @@ class NativeLibraryStore:
 
     def filed_rows_for_output(self, output_id: str) -> list[NativeFile]:
         with self._pool.connection() as conn:
-            return _rows_of_output(conn, output_id, "filed")
+            return _rows_of_output(conn, output_id, which="filed")
 
     def live_copy_in_folder(self, output_id: str, folder_id: int) -> NativeFile | None:
         """The output's live copy in ``folder_id``, if any; no lock, so a hint only."""
@@ -376,7 +377,7 @@ class NativeLibraryStore:
         and a filing never holds a connection while it waits on the pool for another."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_output(conn, row.output_id or "")
-            existing = _rows_of_output(conn, row.output_id or "", "filed")
+            existing = _rows_of_output(conn, row.output_id or "", which="filed")
             if existing:
                 return existing[0], False
             folder_id = _template_folder(conn, folder).id
