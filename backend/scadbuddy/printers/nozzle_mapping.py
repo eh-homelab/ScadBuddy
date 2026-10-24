@@ -327,7 +327,9 @@ def choose_nozzles(
         return NozzleChoice(mapping=None)
     manual, notes = manual_for(groups, manual_position, algorithm)
     picks = rank_rack(groups, status.nozzle_rack, algorithm, usage, manual)
-    found = rank_warnings(groups, status.nozzle_rack, algorithm, picks, manual)
+    found = rank_warnings(
+        groups, status.nozzle_rack, algorithm, picks, manual, picker="The printer"
+    )
     if algorithm == "bambuddy" and len(picks) < len(groups):
         # Nothing is sent, the hand-picked position included, so ``manual_for``'s "group
         # N got position P" does not hold (#4545).
@@ -340,6 +342,8 @@ def choose_nozzles(
                     "printer picks for all of them or none.",
                 )
             ]
+            # Said once: rack_warnings' "does not fit …, so it was not used" is this.
+            found = [note for note in found if note.kind != "rack-manual-partial"]
         return NozzleChoice(mapping=None, warnings=[*notes, *found], declined=True)
     mapping = nozzle_mapping(
         plan.slot_groups,
