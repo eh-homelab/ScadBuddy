@@ -64,6 +64,7 @@ class FakeWorld:
         self.fail = fail  # a file whose render fails
         self.activities_py = activities_py
         self.pieces: list[PieceRequest] = []
+        self.cached_piece_calls = 0
         self.projections: list[Projection] = []
         self.outputs: list[OutputRequest] = []
         self.calls: list[TemplateCall] = []
@@ -92,6 +93,7 @@ class FakeWorld:
 
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
+        self.cached_piece_calls += 1
         self.pieces.append(req)
         if req.file == self.fail:
             raise ApplicationError(

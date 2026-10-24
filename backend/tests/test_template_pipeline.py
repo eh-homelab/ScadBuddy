@@ -812,5 +812,5 @@ async def test_a_job_without_a_revision_looks_nothing_up_and_starts_its_child() 
     ]
     assert world.final().state == "done"
     assert children == [f"piece-{world.pieces[0].piece_key}"]
-    assert len(world.pieces) == 1  # the child's lookup only
+    assert world.cached_piece_calls == 1  # the child's lookup only
     assert "core_patch" not in markers
