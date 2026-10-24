@@ -270,6 +270,16 @@ async def library_filaments(
         try:
             held = await fetched()
             if held is not None:
+                if downloads is not None and is_sha256(file.file_hash):
+                    # As the spool keeps its download (#2788): a later preview of these
+                    # bytes reads them here (#4562 review). Best effort, as there.
+                    assert file.file_hash is not None
+                    try:
+                        await asyncio.to_thread(downloads.put, file.file_hash, held)
+                    except OSError:
+                        logger.warning(
+                            "could not keep a library file", extra={"sha256": file.file_hash}
+                        )
                 return await _keep_filaments(cache, file, io.BytesIO(held), budget)
         except MemoryError:
             # As the spool's below: read from disk instead (#4553 review).

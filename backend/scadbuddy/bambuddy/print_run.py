@@ -105,6 +105,7 @@ from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     OutputSource,
     PrintSource,
+    ReadOutOfMemoryError,
     SharedFilamentReader,
     bambuddy_client,
 )
@@ -999,10 +1000,14 @@ async def check_print(
         return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     try:
         laid_out = await laying_out
-    except BaseException:
+    except BaseException as error:
         if reading is not None:
             reading.cancel()
             await asyncio.gather(reading, return_exceptions=True)
+        if isinstance(error, MemoryError):
+            # The file too large to hold here (#4562 review): refused as a read of it is,
+            # saying how to bound it, never a 500.
+            return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     inventory = await reading if reading is not None else None
     nozzle_plan = (
