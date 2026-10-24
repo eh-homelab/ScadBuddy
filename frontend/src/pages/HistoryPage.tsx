@@ -634,7 +634,6 @@ function OutputRow({
                   placeholder={shortId(output.id)}
                   onChange={(event) => setNaming(event.target.value)}
                   maxLength={200}
-                  autoFocus
                   className="h-7 min-w-32 flex-1"
                 />
                 <Button size="sm" type="submit" disabled={renaming}>
@@ -655,7 +654,7 @@ function OutputRow({
             </p>
           )}
           {/* #4491 — each fact on one line, the line wrapping between them. */}
-          <p className="sb-num mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+          <p className="sb-num mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground" data-testid="output-facts">
             <span className="whitespace-nowrap">
               {output.bbox_mm ? formatBbox(output.bbox_mm, unit) : 'No dimensions recorded'}
             </span>
@@ -757,8 +756,8 @@ function OutputRow({
               align="end"
               className="w-auto min-w-40"
               onCloseAutoFocus={(event) => {
-                // #4520 — not back to the ⋯ button: the closing menu took the focus from the
-                // field's autoFocus, so give it back here, once the menu has gone.
+                // #4520 — the one way the field gets the focus: not back to the ⋯ button, and
+                // not autoFocus, which the closing menu took back and dropped on <body>.
                 if (!toNameField.current) return
                 toNameField.current = false
                 event.preventDefault()

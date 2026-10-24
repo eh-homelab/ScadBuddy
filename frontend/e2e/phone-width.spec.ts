@@ -156,10 +156,10 @@ async function cardOverlaps(page: Page): Promise<string[]> {
     const out = []
     for (const card of document.querySelectorAll('li:has([data-testid="output-actions"])')) {
       const summary = card.querySelector('[data-testid="output-summary"]')
-      const facts = summary && summary.querySelector('p.sb-num')
+      const facts = summary && summary.querySelector('[data-testid="output-facts"]')
       // A renamed hook would otherwise surface as a TypeError on null from inside evaluate.
       if (!summary || !summary.firstElementChild || !facts) {
-        out.push('a card without ' + (summary ? 'its size line (p.sb-num)' : 'output-summary'))
+        out.push('a card without ' + (summary ? 'its size line (output-facts)' : 'output-summary'))
         continue
       }
       const parts = [
@@ -259,7 +259,7 @@ test.describe('History cards at phone widths (#4491)', () => {
         }
       }
       // #4524 — and the size line's links: Last print, queued #… and in library #….
-      const facts = await page.getByTestId('output-summary').locator('p.sb-num a').all()
+      const facts = await page.getByTestId('output-facts').locator('a').all()
       expect(facts.length).toBeGreaterThanOrEqual(2)
       for (const link of facts) {
         expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(40)
@@ -279,7 +279,8 @@ test.describe('History cards at phone widths (#4491)', () => {
       await page.evaluate(`(async () => {
         const outputs = await (await fetch('/api/v1/models/name-keychain/outputs')).json()
         const gone = outputs.find((o) => o.name === ${JSON.stringify(long)})
-        await fetch('/api/v1/outputs/' + gone.id, { method: 'DELETE' })
+        const deleted = await fetch('/api/v1/outputs/' + gone.id, { method: 'DELETE' })
+        if (!deleted.ok) throw new Error('delete failed: ' + deleted.status)
       })()`)
       await page.getByRole('button', { name: 'Save' }).click()
       await expect(page.getByTestId('output-rename-error')).toHaveText('Output not found')
