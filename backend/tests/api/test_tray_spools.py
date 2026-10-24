@@ -263,6 +263,10 @@ def test_the_overlay_names_a_stale_provider(client: TestClient, lan_printer: str
         [snapshot],
         datetime.now(UTC) - timedelta(minutes=31),
     )
+    # With no Bambuddy configured there is no one to name (#4601).
+    assert "bambuddy" not in _overlay(client, lan_printer).stale
+    put = client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    assert put.status_code == 200, put.text
     overlay = _overlay(client, lan_printer)
     assert "bambuddy" in overlay.stale and _tray(overlay, 0, 0).records == {}
 

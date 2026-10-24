@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -435,3 +436,20 @@ async def with_lan_printers(
         return view
     rows = await lan_printers(settings, printers.store, printers.reports)
     return view.model_copy(update={"lan_printers": rows})
+
+
+@asynccontextmanager
+async def offering_lan_printers(
+    settings: StoredSettings, printers: Printers | None
+) -> AsyncIterator[None]:
+    """A dialog read of Bambuddy's that fails names, on its problem, the registry
+    printers a run reaches natively (``lan_printers``, #4601): the dialog then offers
+    them in place of the read it could not make, rather than only its Retry."""
+    try:
+        yield
+    except ApiError as error:
+        if native_backends(settings) and printers is not None:
+            rows = await lan_printers(settings, printers.store, printers.reports)
+            if rows:
+                error.extensions["lan_printers"] = rows
+        raise

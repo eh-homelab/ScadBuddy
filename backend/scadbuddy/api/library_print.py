@@ -66,7 +66,12 @@ from scadbuddy.api.printing import (
 )
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
-from scadbuddy.bambuddy.choices import ChoicesView, choices_for, with_lan_printers
+from scadbuddy.bambuddy.choices import (
+    ChoicesView,
+    choices_for,
+    offering_lan_printers,
+    with_lan_printers,
+)
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for, maybe_client
 from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
@@ -1136,7 +1141,7 @@ async def get_library_choices(
             rack=rack,
         )
         return await with_lan_printers(native_view, settings, printers)
-    async with client_for(settings) as client:
+    async with offering_lan_printers(settings, printers), client_for(settings) as client:
         files = served_reads(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
         source = LibrarySource.load(

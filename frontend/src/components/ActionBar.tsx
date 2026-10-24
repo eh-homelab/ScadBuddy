@@ -197,8 +197,12 @@ export function ActionBar({
   const settled = backends.data !== undefined || backends.error !== undefined
   // The one rule for a page with no printer (`listsNativeFolders`); the dialog's is per printer.
   const nativeLibrary = listsNativeFolders(backends.data)
-  /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
-  const list = useProjectList(undefined, settled, nativeLibrary)
+  /**
+   * Fetched once here and shared by both pickers, so the dialog does not list it again.
+   * Bambuddy's projects only once a picker opens (#4601): a page load on the hot path asks
+   * Bambuddy nothing. ScadBuddy's own folders are read at once, as they ask it nothing.
+   */
+  const list = useProjectList(undefined, settled, nativeLibrary, !nativeLibrary)
   // Loading until it is read, settings first: a list not yet asked for is not an empty one.
   const projects = useMemo(() => (settled ? list : { ...list, loading: true }), [settled, list])
   const listed = projects.choices?.projects
@@ -240,7 +244,10 @@ export function ActionBar({
    * Where the picker opens: the pair's project, else the model's own with no preset (the
    * project its content is in, #3651), else the project Settings names as the default.
    */
-  const settingsDefault = stillListed(projects.choices?.last_project_id ?? null)
+  // Settings' own copy until the list is read (#4601): the list is read lazily now.
+  const settingsDefault = stillListed(
+    projects.choices?.last_project_id ?? backends.data?.last_project_id ?? null,
+  )
   const opensOn = remembered ?? (preset ? rememberedFor(null) : null) ?? settingsDefault
   /** What the model is called in the confirmation: the preset in use, else the model. */
   const subject = preset?.name ?? model?.name ?? slug

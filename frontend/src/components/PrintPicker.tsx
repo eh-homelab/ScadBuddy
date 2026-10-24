@@ -401,6 +401,11 @@ export function PrintPicker({
    */
   const sentPrinterId = lanOnly.some((row) => row.id === registryPrinter) ? null : printerId
   const { askRegistry } = picker
+  /** #4601 — the registry rows a failed read's problem says a run reaches natively. */
+  const offeredRows = useMemo(
+    () => (loadError ? registryRows.filter((row) => picker.offeredLan.includes(row.id)) : NO_ROWS),
+    [loadError, registryRows, picker.offeredLan],
+  )
   /**
    * No Bambuddy printer to open on, and one the LAN prints to: open on that one, once
    * per open and only while the server's own opening stands. A printer chosen since
@@ -646,6 +651,12 @@ export function PrintPicker({
    * its project.
    */
   const ownProjects = useProjectList(undefined, open && !project && pathKnown, native)
+  // #4601 — the page's list is read lazily: a dialog on Bambuddy's path files into a
+  // project and names it, so it asks for the list; a native one (D6) never does.
+  const requestPageList = project?.list?.request
+  useEffect(() => {
+    if (open && pathKnown && requestPageList) requestPageList()
+  }, [open, pathKnown, requestPageList])
   /**
    * #3651 — where the dialog opens: the one project all of the content is in already,
    * else the Settings default, else none. Asked on each open of a new source;
@@ -1515,6 +1526,21 @@ export function PrintPicker({
               <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={picker.reload}>
                 Retry
               </Button>
+              {/* #4601 — Bambuddy's read failed, but a printer a run reaches over the LAN
+                  needs none of it: the server named those, and one is a click away. */}
+              {offeredRows.map((row) => (
+                <Button
+                  key={row.id}
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  className="h-auto px-0"
+                  data-testid={`print-over-lan-${row.id}`}
+                  onClick={() => askRegistry(row.id)}
+                >
+                  Print on {row.name} over the LAN
+                </Button>
+              ))}
             </div>
           )}
 

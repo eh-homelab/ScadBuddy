@@ -27,6 +27,11 @@ export interface ProjectList {
   rereadFor: (projectId: number) => void
   /** A project just created, put at the head of the list without re-reading it. */
   add: (project: ProjectView) => void
+  /**
+   * #4601 — asks for the first read of a `lazy` list: what a picker calls as it opens.
+   * Nothing once asked, and nothing for a list read on its own.
+   */
+  request: () => void
 }
 
 /**
@@ -34,14 +39,19 @@ export interface ProjectList {
  * `onLoaded`, so the parent can seed its value. `enabled` false fetches nothing, for a
  * picker handed a list by its parent. `native` (#3818, plan 2026-10-18 D6) reads
  * ScadBuddy's own library folders instead, with no projects, and asks Bambuddy nothing.
+ * `lazy` (#4601) reads nothing until `request()`: Bambuddy's projects are asked for when
+ * a picker opens, never by a page load on the hot path. Not loading until then: a list
+ * nobody asked for is shown as no list, not as one on its way.
  */
 export function useProjectList(
   onLoaded?: (projectId: number | null) => void,
   enabled = true,
   native = false,
+  lazy = false,
 ): ProjectList {
   const [choices, setChoices] = useState<ProjectChoices | null>(null)
-  const [loading, setLoading] = useState(enabled)
+  const [wanted, setWanted] = useState(!lazy)
+  const [loading, setLoading] = useState(enabled && !lazy)
   const [error, setError] = useState<string | null>(null)
 
   /**
@@ -81,8 +91,9 @@ export function useProjectList(
   }, [native])
 
   useEffect(() => {
-    if (enabled) void fetchList(true)
-  }, [enabled, fetchList])
+    if (enabled && (wanted || !lazy)) void fetchList(true)
+  }, [enabled, wanted, lazy, fetchList])
+  const request = useCallback(() => setWanted(true), [])
 
   /** A re-read in flight, which a second caller joins rather than starting another. */
   const inFlight = useRef<Promise<void> | null>(null)
@@ -119,8 +130,8 @@ export function useProjectList(
   }, [])
 
   return useMemo(
-    () => ({ choices, loading, error, reload, retry, rereadFor, add }),
-    [choices, loading, error, reload, retry, rereadFor, add],
+    () => ({ choices, loading, error, reload, retry, rereadFor, add, request }),
+    [choices, loading, error, reload, retry, rereadFor, add, request],
   )
 }
 

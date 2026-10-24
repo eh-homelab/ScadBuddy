@@ -1177,6 +1177,7 @@ async def _native_check(
         laid_out=laid_out,
         nozzle_plan=nozzle_plan,
         inventory=inventory,
+        picker="the printer",
     )
     try:
         _check_manual_pick(request, prepared.printer_status, laid_out=laid_out)
@@ -1458,6 +1459,7 @@ async def rack_preview(
     laid_out: bool,
     nozzle_plan: NozzlePlan | None = None,
     inventory: Inventory | None = None,
+    picker: str = "Bambuddy",
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
     the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
@@ -1467,7 +1469,8 @@ async def rack_preview(
     rack side, unless ScadBuddy's nozzle plan (#2166) says which do: then only those
     on the rack side count. Advisory: a failure previews nothing. ``inventory`` is the
     check's own read, reused so a check reads the spools once (#2936); without it the
-    spools are read here."""
+    spools are read here. ``picker`` is who picks what the ranking leaves: "the printer"
+    on a native run (#4601), which no Bambuddy picks for."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     rack_letter = side_of(RACK_SIDE)
@@ -1502,7 +1505,9 @@ async def rack_preview(
         manual = {0: request.rack_position} if request.rack_position is not None else {}
         picks = rank_rack([group], status.nozzle_rack, algorithm, usage, manual)
         options = candidates_for(group, status.nozzle_rack, algorithm, usage)
-        warnings = rack_warnings([group], status.nozzle_rack, algorithm, picks, manual)
+        warnings = rack_warnings(
+            [group], status.nozzle_rack, algorithm, picks, manual, picker=picker
+        )
     except Exception as exc:
         # Never str(exc): an error's text can carry a serial (§7).
         logger.warning(
@@ -1834,9 +1839,10 @@ async def first_native_route(
     reports: PrinterReportStore | None,
 ) -> RunRoute | None:
     """The :class:`RunRoute` of the first registry row a run reaches natively (D2), or
-    ``None``: where a dialog opens with no Bambuddy configured and no printer named
-    (#3818 tier A, AC2). The rows are read once, and each row's report at most once; a
-    row a run could not start on now (no report, a stale one) is passed over."""
+    ``None``: where a dialog opens with no printer named, Bambuddy configured or not
+    (#3818 tier A, AC1 and AC2, #4601). The rows are read once, and each row's report at
+    most once; a row a run could not start on now (no report, a stale one) is passed
+    over."""
     if printers is None or not native_backends(settings):
         return None
     for row in await asyncio.to_thread(printers.list):

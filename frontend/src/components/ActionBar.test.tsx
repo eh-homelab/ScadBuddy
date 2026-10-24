@@ -508,6 +508,27 @@ describe('ActionBar destinations on the hot path', () => {
     }
   })
 
+  it("asks Bambuddy for its projects only once the picker opens (#4601)", async () => {
+    const asked: string[] = []
+    const listener = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/print/projects') asked.push(`${url.pathname}${url.search}`)
+    }
+    server.events.on('request:start', listener)
+    try {
+      const { user } = setup()
+      const picker = await screen.findByTestId('customize-project-select')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      // A Bambuddy URL is set (the default mock): the page load lists nothing of it.
+      expect(asked).toEqual([])
+      await user.click(picker)
+      await waitFor(() => expect(asked).toEqual(['/api/v1/print/projects']))
+      expect(await screen.findByTestId('customize-project-select-list')).toBeInTheDocument()
+    } finally {
+      server.events.removeListener('request:start', listener)
+    }
+  })
+
   it("takes the page's Settings read in place of its own", async () => {
     setHotPath(true)
     const read = vi.spyOn(api, 'getSettings')
