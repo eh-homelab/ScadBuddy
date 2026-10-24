@@ -254,10 +254,10 @@ LAN_UPLOAD_TIMEOUT = timedelta(minutes=10)
 #: name, since the printer moves a started upload away (Task 7's measurement), and
 #: ``lan_print`` finds a start an earlier attempt did take rather than send it again.
 LAN_START_ATTEMPTS = 3
-#: One ``lan_print``: its report read, its wait for the start, and a margin. No patch
-#: is needed for it: no released build ran ``lan_print``, and it is 60 s, as ``SHORT``
-#: was, so a history recorded on this branch's first build schedules the same.
-LAN_PRINT_TIMEOUT = timedelta(seconds=LAN_PROBE_TIMEOUT + LAN_START_WAIT + 15)
+#: One ``lan_print``: its report read, its wait for the start, and a margin for its two
+#: MQTT connects (90 s). No patch is needed: no released build ran ``lan_print``, so no
+#: recorded history schedules it.
+LAN_PRINT_TIMEOUT = timedelta(seconds=LAN_PROBE_TIMEOUT + LAN_START_WAIT + 45)
 
 
 def _sliced_by(
