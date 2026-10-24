@@ -1395,6 +1395,27 @@ def test_a_check_whose_fetch_runs_out_of_memory_is_refused_saying_how_to_bound_i
 
 
 @respx.mock
+def test_a_check_that_runs_out_of_memory_in_its_preparation_is_refused_too(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4576 review: a read in `prepare_run` that runs out of memory is refused as the
+    layout's own read is, not re-raised as a 500 by its `except BaseException`."""
+    configure(client)
+    library_file(89)
+    run_routes()
+
+    async def out_of_memory(*args: Any, **kwargs: Any) -> None:
+        raise MemoryError
+
+    monkeypatch.setattr(print_run, "prepare_run", out_of_memory)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
+
+
+@respx.mock
 def test_a_check_of_a_file_too_large_to_fetch_still_reads_its_slots_from_the_file(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

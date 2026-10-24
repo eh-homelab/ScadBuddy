@@ -993,6 +993,10 @@ async def check_print(
         await asyncio.gather(*early, return_exceptions=True)
         if isinstance(error, RunRefusalError):
             return PrintCheck(errors=[error.detail])
+        if isinstance(error, MemoryError):
+            # As the layout's read below (#4576 review): a read of the file that runs out
+            # of memory is the check's refusal, never a 500.
+            return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     if laying_out is None:
         # Queued as it is, never refused (#2671): what to set right first is a warning,

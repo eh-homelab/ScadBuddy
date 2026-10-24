@@ -39,7 +39,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, TypeGuard
 
 from scadbuddy.core.tracing import span
 
@@ -59,7 +59,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CHUNK = 1024 * 1024
 
 
-def is_sha256(value: str | None) -> bool:
+def is_sha256(value: str | None) -> TypeGuard[str]:
     return value is not None and _SHA256.fullmatch(value) is not None
 
 
