@@ -1043,7 +1043,10 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
 
 
 def _plate_geometry(
-    archive: zipfile.ZipFile, names: Sequence[str], entries: Mapping[str, bytes]
+    archive: zipfile.ZipFile,
+    names: Sequence[str],
+    entries: Mapping[str, bytes],
+    unprinted: frozenset[str] = frozenset(),
 ) -> tuple[np.ndarray, frozenset[int]]:
     """The ``(2, 3)`` box of the object files ``names``, read back out of an archive
     whose entries' bytes are ``entries``, and the filaments their painting uses
@@ -1057,16 +1060,26 @@ def _plate_geometry(
     :func:`replate_3mf` correct for files written before plates were per printer.
     A file this writer wrote is read by pattern (:func:`_written_extents`, #2877);
     any other is parsed.
+
+    The files in ``unprinted`` are parts that print nothing (a negative part, #4061).
+    They count for the box's X and Y, as Arrange's `footprint_box` counts a cut's
+    reach, but not for its low Z: the object sits on the bed by what prints, and a cut
+    may reach below it, as Bambu Studio places it. Library file 2440's cat, set on its
+    bottom hole's lowest point, floated 5.92 mm and failed the slicer's toolpath stage.
     """
     lows: list[np.ndarray] = []
     highs: list[np.ndarray] = []
+    floors: list[float] = []
     painted: set[int] = set()
     for name in names:
+        printed = name not in unprinted
         written = _written_extents(entries[name])
         if written is not None:
             box, codes = written
             lows.append(box[0])
             highs.append(box[1])
+            if printed:
+                floors.append(float(box[0][2]))
             painted.update(codes)
             continue
         for mesh in parse_model(archive, name).meshes.values():
@@ -1074,12 +1087,17 @@ def _plate_geometry(
             if points.size:
                 lows.append(points.min(axis=0))
                 highs.append(points.max(axis=0))
+                if printed:
+                    floors.append(float(points[:, 2].min()))
             for code in set(mesh.paint or ()):
                 if code:
                     painted.update(states(code))
     if not lows:
         raise ValueError("the 3MF has no object geometry to place")
-    return np.array([np.min(lows, axis=0), np.max(highs, axis=0)]), frozenset(painted)
+    low = np.min(lows, axis=0)
+    if floors:
+        low[2] = min(floors)
+    return np.array([low, np.max(highs, axis=0)]), frozenset(painted)
 
 
 @dataclass(frozen=True)
@@ -1095,6 +1113,9 @@ class LaidOutPlate:
     #: The extruders its parts print with, where ``model_settings.config`` states them;
     #: ``None`` when it does not. A painting's filaments are not among them.
     extruders: frozenset[int] | None = None
+    #: Its object files whose part prints nothing (a ``negative_part``, #4061), as
+    #: ``model_settings.config`` states each part's subtype.
+    unprinted: frozenset[str] = frozenset()
 
 
 def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
@@ -1108,11 +1129,15 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
     names = set(archive.namelist())
     root = parse_model(archive, ROOT_MODEL_NAME).root
     components: dict[str, tuple[str, ...]] = {}
+    #: Each object's component files by the component's ``objectid``, which is the
+    #: ``model_settings.config`` part id that states its subtype.
+    parts: dict[tuple[str, str], str] = {}
     for obj in root.iter(f"{{{CORE_NS}}}object"):
-        paths = tuple(
-            (component.get(f"{{{PRODUCTION_NS}}}path") or "").lstrip("/")
-            for component in obj.iter(f"{{{CORE_NS}}}component")
-        )
+        paths = []
+        for component in obj.iter(f"{{{CORE_NS}}}component"):
+            path = (component.get(f"{{{PRODUCTION_NS}}}path") or "").lstrip("/")
+            paths.append(path)
+            parts[(obj.get("id", ""), component.get("objectid", ""))] = path
         components[obj.get("id", "")] = tuple(path for path in paths if path in names)
     items = [item.get("objectid", "") for item in root.iter(f"{{{CORE_NS}}}item")]
     if not items:
@@ -1120,9 +1145,16 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
 
     plates: list[tuple[int, tuple[str, ...]]] = []
     extruders: dict[str, set[int]] = {}
+    unprinted: set[str] = set()
     if MODEL_SETTINGS_NAME in names:
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
         for obj in config.iter("object"):
+            unprinted.update(
+                cut
+                for part in obj.findall("part")
+                if part.get("subtype", "normal_part") != "normal_part"
+                and (cut := parts.get((obj.get("id", ""), part.get("id", "")))) is not None
+            )
             stated = {
                 _metadata(part).get("extruder", "")
                 for part in obj.findall("part")
@@ -1147,6 +1179,12 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
             frozenset().union(*(extruders[i] for i in ids))
             if all(i in extruders for i in ids)
             else None,
+            frozenset(
+                path
+                for object_id in ids
+                for path in components.get(object_id, ())
+                if path in unprinted
+            ),
         )
         for index, ids in sorted(plates)
     ]
@@ -1198,7 +1236,7 @@ def replate_3mf(
         laid_out = laid_out_plates(archive)
         contents = dict(entries)
         geometry = {
-            each.assembly_id: _plate_geometry(archive, each.object_files, contents)
+            each.assembly_id: _plate_geometry(archive, each.object_files, contents, each.unprinted)
             for each in laid_out
             if each.object_files
         }
