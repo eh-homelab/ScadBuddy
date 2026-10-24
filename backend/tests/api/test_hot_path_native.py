@@ -1,5 +1,7 @@
-"""AC1 of the hot path without Bambuddy (#3818 tier A, plan 2026-10-18 Task 9): with
-Bambuddy configured, a native run makes no Bambuddy call from render to follow.
+"""AC1 and AC2 of the hot path without Bambuddy (#3818 tier A, plan 2026-10-18 Tasks 9
+and 10): with Bambuddy configured, a native run makes no Bambuddy call from render to
+follow; with no ``bambuddy_url`` at all, the same run and the dialog's reads still
+answer, and only the routes that are Bambuddy's by nature say Settings has none.
 
 The app runs on the hot path's backends (D2: the S3 store, the native library and the
 native slicer, the fake slicer in the Rust worker's place); its one printer is a
@@ -95,6 +97,7 @@ def tray_profiles(root: Path) -> Path:
 
 @pytest.fixture
 def native_app(
+    request: pytest.FixtureRequest,
     model: str,
     settings: Settings,
     s3: S3Settings,
@@ -102,7 +105,8 @@ def native_app(
     tmp_path: Path,
     two_colours: None,
 ) -> Iterator[TestClient]:
-    """The app on the hot path's backends, with Bambuddy configured (`configure`)."""
+    """The app on the hot path's backends, with Bambuddy configured (`configure`), or,
+    parametrised ``False`` (``indirect``), with no ``bambuddy_url`` at all (AC2)."""
     profiles = tray_profiles(tmp_path / "profiles")
     app_settings = _settings(settings, s3, kek_file, profiles, library_backend="native")
     with respx.mock(assert_all_called=False) as router:
@@ -110,7 +114,10 @@ def native_app(
         # answered by nothing outside the window, so a call there fails too.
         router.route(host="127.0.0.1").pass_through()
         with TestClient(create_app(app_settings)) as client:
-            configure(client)
+            if getattr(request, "param", True):
+                configure(client)
+            else:
+                assert _state(client).settings_store.load().bambuddy_url is None
             yield client
 
 
@@ -361,3 +368,109 @@ def test_a_stale_report_runs_the_bambuddy_path(
     with pytest.raises(BambuddyCalledError) as called, forbid_bambuddy(spans, BASE):
         native_app.get(f"/api/v1/print/outputs/{output}/choices", params={"printer": row.id})
     assert "GET /api/v1/printers/" in str(called.value)
+
+
+#: The app with no ``bambuddy_url`` (AC2), for `native_app`'s indirect parametrisation.
+NO_BAMBUDDY = pytest.mark.parametrize("native_app", [False], indirect=True, ids=["no-url"])
+
+
+def _library_dialog_and_run(client: TestClient, row: str, file_id: int) -> dict[str, Any]:
+    """The library-file dialog's reads and run on ``file_id``, a native library file,
+    for the registry row ``row``; the run's end."""
+    base = f"/api/v1/print/library/{file_id}"
+    choices = client.get(f"{base}/choices", params={"printer": row})
+    assert choices.status_code == 200, choices.text
+    assert row in choices.json()["lan_printers"]
+    filaments = client.get(f"{base}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    assert filaments.json()["source"] == "trays"
+    body = run_body(row, filaments.json())
+    checked = client.post(f"{base}/check", json=body)
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["errors"] == [], checked.json()
+    started = client.post(f"{base}/run", json=body, headers=press())
+    assert started.status_code == 202, started.text
+    run = follow_run(client, started.json()["id"], timeout=120)
+    progress = client.get(f"{base}/progress")
+    assert progress.status_code == 200, progress.text
+    return run
+
+
+@NO_BAMBUDDY
+@pytest.mark.parametrize("bambuddy_printer_id", [None, 1], ids=["lan-only", "both-links"])
+def test_a_native_run_without_bambuddy(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    bambuddy_printer_id: int | None,
+) -> None:
+    """AC2: no ``bambuddy_url``, and the output's dialog, its background slice, the run,
+    the follow, the printers strip and the native destinations all answer; then the
+    run's copy, a native library file, is opened and printed from the library dialog.
+    A client built anywhere on the way is `client_for`'s 409, which fails the read or
+    the run. A row that also links a Bambuddy printer is native all the same."""
+    row = lan_row(native_app, fake_lan, bambuddy_printer_id=bambuddy_printer_id)
+    overlay(native_app)
+
+    with forbid_bambuddy(spans, BASE):
+        output, choices, filaments, run = _dialog_and_run(native_app, model, row)
+        assert run["status"] == "succeeded", run
+        progress = follow_until_settled(native_app, output)
+        now = native_app.get("/api/v1/print/printers/now")
+        assert now.status_code == 200, now.text
+        projects = native_app.get("/api/v1/print/projects", params={"native": "true"})
+        assert projects.status_code == 200, projects.text
+        library_run = _library_dialog_and_run(native_app, row, run["result"]["library_file_id"])
+
+    assert (progress["route"], progress["stage"]) == ("lan", "done"), progress
+    assert row in choices["lan_printers"]
+    assert filaments["source"] == "trays"
+    assert run["result"]["path"] == "native"
+    assert library_run["status"] == "succeeded", library_run
+    assert library_run["result"]["path"] == "native"
+
+
+@NO_BAMBUDDY
+def test_the_dialog_reads_answer_without_bambuddy(
+    native_app: TestClient, model: str, fake_lan: FakeLan
+) -> None:
+    """AC2: with no ``bambuddy_url``, an output never printed has no progress (not a
+    409); the dialog's first reads, which name no printer, open on the registry row a
+    run reaches natively (`opening_route`); and a check naming no printer has nothing
+    to judge."""
+    row = lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    progress = native_app.get(f"/api/v1/print/outputs/{output}/progress")
+    assert progress.status_code == 200, progress.text
+    assert progress.json() is None
+    choices = native_app.get(f"/api/v1/print/outputs/{output}/choices")
+    assert choices.status_code == 200, choices.text
+    assert (choices.json()["printer_id"], choices.json()["lan_printers"]) == (None, [row])
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments")
+    assert filaments.status_code == 200, filaments.text
+    assert filaments.json()["source"] == "trays"
+    # The check judges the body alone; one naming no printer has nothing to judge.
+    checked = native_app.post(
+        f"/api/v1/print/outputs/{output}/check",
+        json={
+            "copies": 1,
+            "filament_plan": {"slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+        },
+    )
+    assert checked.status_code == 200, checked.text
+
+
+@NO_BAMBUDDY
+@pytest.mark.parametrize(
+    "path",
+    ["/api/v1/print/printers/1/camera", "/api/v1/farm/inventory", "/api/v1/print/projects"],
+    ids=["camera", "inventory", "projects"],
+)
+def test_bambuddy_only_routes_still_say_why(native_app: TestClient, path: str) -> None:
+    """A route that is Bambuddy's by nature keeps `client_for`'s 409 naming Settings."""
+    response = native_app.get(path)
+    assert response.status_code == 409, response.text
+    assert "set one in Settings" in response.json()["detail"]

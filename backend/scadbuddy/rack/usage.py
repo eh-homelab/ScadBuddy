@@ -652,6 +652,10 @@ def settle_hook(
                 extra={"subject": subject.key, "error": type(exc).__name__},
             )
             raise
+        if not settings.bambuddy_url:
+            # No Bambuddy, so no archive of its to read: a LAN print links none, and its
+            # follow builds no client (#3818 tier A, D3, AC2).
+            return
         async with client_for(settings) as client:
             await record_settled(subject, client=client, links=links, store=store)
 

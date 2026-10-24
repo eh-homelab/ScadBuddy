@@ -22,7 +22,7 @@ from typing import Literal, Protocol
 import psycopg
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.linking import link_by_hash, link_item, scan_library_by_hash
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
+from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,26 @@ QUEUED_THEN_FAILED_FIX = (
 
 #: A run that failed before queueing anything (#1049): nothing reached Bambuddy's queue.
 RUN_FAILED_FIX = "Nothing was queued. Fix what it says, then print again."
+
+
+def queue_url(settings: StoredSettings) -> str:
+    """Where a browser finds Bambuddy's queue, for a run that failed before it queued;
+    ``""`` with no Bambuddy configured, as a LAN print's progress has (#3818 tier A, AC2):
+    such a failure is a native run's, and its progress needs no client."""
+    if not settings.bambuddy_url:
+        return ""
+    return BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
+
+
+def queued_on_bambuddy(meta: OutputMeta) -> bool:
+    """Whether ``meta``'s last print went to Bambuddy's queue, the one route
+    :func:`progress_for` reads from Bambuddy: anything else is never printed there, and
+    reads as ``None`` with no client built."""
+    route = meta.print_route
+    if route is None and meta.queue_item_id is not None:
+        # Records written before #89 carry no route; a queue item is this route's.
+        route = "slice_queue"
+    return route == "slice_queue"
 
 
 def from_failed_run(detail: str, *, bambuddy_url: str) -> PrintProgress:
@@ -421,11 +442,7 @@ async def progress_for(
     """
     if lan is not None and (native := await lan.read(meta.id)) is not None:
         return native
-    route = meta.print_route
-    if route is None and meta.queue_item_id is not None:
-        # Records written before #89 carry no route; a queue item is this route's.
-        route = "slice_queue"
-    if route != "slice_queue":
+    if not queued_on_bambuddy(meta):
         return None
     url = client.config.web_url(QUEUE_PATH)
     linker = (
