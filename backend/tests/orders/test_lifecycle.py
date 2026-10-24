@@ -1027,3 +1027,81 @@ def test_the_reaper_drops_what_the_rules_say(shop: Shop) -> None:
         _age(shop, holder, old)
     assert reap_quote_holds(refs, shop.rows, grace=grace) == 4
     assert _holders(shop) == {"no-row-young", newest.id, kept.id}
+
+
+# -- undo (§3.5 "Undo", #4251): a reopen holds its standing quotes' files again ---------
+
+
+def _held_keys(shop: Shop) -> dict[str, set[str]]:
+    assert shop.refs is not None
+    with shop.refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT holder_id, key FROM blob_refs WHERE holder_kind = %s", (QUOTE_HOLDER,)
+        ).fetchall()
+    held: dict[str, set[str]] = {}
+    for row in rows:
+        held.setdefault(row["holder_id"], set()).add(row["key"])
+    return held
+
+
+def test_reopening_an_item_holds_its_standing_quotes_files_again(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    older = _slice_quote(shop, order, item, key="quote-older")
+    accepted = _slice_quote(shop, order, item, key="quote-accepted")
+    shop.lifecycle.accept_quote(order.id, item.id, accepted.id, BY)
+    newest = _slice_quote(shop, order, item, key="quote-newest")
+    standing = {accepted.id, newest.id}
+    assert set(_held_keys(shop)) == standing
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    assert _held_keys(shop) == {}
+
+    shop.lifecycle.reopen_item(order.id, item.id, BY)
+    # The accepted quote and the newest unaccepted one, each by every plate's key and its
+    # own sliced file; never the older quote that no longer stands.
+    assert _held_keys(shop) == {
+        accepted.id: {"quote-a", "quote-accepted"},
+        newest.id: {"quote-a", "quote-newest"},
+    }
+    assert older.id not in _held_keys(shop)
+
+
+def test_reopening_a_cancelled_order_holds_its_quotes_files_again(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item, key="quote-one")
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    shop.lifecycle.cancel_order(order.id, BY)
+    assert _held_keys(shop) == {}
+    reopened = shop.lifecycle.reopen_order(order.id, BY)
+    assert reopened.status == "quoted"
+    assert shop.get_item(item).status == "approved"
+    assert _held_keys(shop) == {quote.id: {"quote-a", "quote-one"}}
+
+
+def test_reopening_a_closed_order_holds_its_quotes_files_again(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item, key="quote-closed")
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    shop.fulfilled(order, shop.get_item(item))
+    shop.shipped(order, shop.get_item(item))
+    shop.lifecycle.close_order(order.id, BY)
+    assert _held_keys(shop) == {}
+    assert shop.lifecycle.reopen_order(order.id, BY).status == "shipped"
+    assert _held_keys(shop) == {quote.id: {"quote-a", "quote-closed"}}
+    # A reaper pass keeps them: every holder names a standing quote again.
+    assert reap_quote_holds(shop.refs, shop.rows, grace=timedelta(0)) == 0  # type: ignore[arg-type]
+    assert set(_held_keys(shop)) == {quote.id}
+
+
+def test_a_refused_reopen_takes_no_hold(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    _slice_quote(shop, order, item, key="quote-open")
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.reopen_order(order.id, BY)
+    assert refused.value.slug == "order_not_ended"
+    assert _held_keys(shop) == {}

@@ -280,21 +280,12 @@ class Lifecycle:
             except Exception:
                 logger.exception("could not release a quote's sliced file", extra={"id": quote_id})
 
-    def _hold(self, quotes: Iterable[Quote]) -> None:
+    def _hold(self, conn: Conn, quotes: Iterable[Quote]) -> None:
         """Take the holders §3.4 keeps again for quotes that stand once more (a reopened
-        item or order), after the commit that reopened them. A sliced file the sweep took
-        meanwhile stays gone: the hold keeps nothing, and the item needs a new quote."""
-        if self.refs is None:
-            return
-        for quote in quotes:
-            keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
-            for key in sorted(k for k in keys if isinstance(k, str) and k):
-                try:
-                    self.refs.add(key, QUOTE_HOLDER, quote.id)
-                except Exception:
-                    logger.exception(
-                        "could not hold a reopened quote's file", extra={"id": quote.id}
-                    )
+        item or order), in the reopen's own transaction, so a reopen never commits
+        without them; a rollback leaves none. A sliced file the sweep took meanwhile
+        stays gone: the hold keeps nothing, and the item needs a new quote."""
+        self.store.hold_quote_files(conn, QUOTE_HOLDER, list(quotes))
 
     def _standing(self, conn: Conn, item_id: str) -> list[Quote]:
         """The quotes §3.4 keeps a file for: the accepted one and the newest unaccepted."""
@@ -682,13 +673,15 @@ class Lifecycle:
                 reopened=True,
                 items=[item.id for item, _ in restored],
             )
-            held = [
-                quote
-                for item in items
-                if item.status != "cancelled"
-                for quote in self._standing(conn, item.id)
-            ]
-        self._hold(held)
+            self._hold(
+                conn,
+                (
+                    quote
+                    for item in items
+                    if item.status != "cancelled"
+                    for quote in self._standing(conn, item.id)
+                ),
+            )
         self._told(_Change(reopened, restored))
         return reopened
 
@@ -718,8 +711,7 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status=status)
             self._event(conn, order, by, "item.reopened", item_id=item.id, to=status)
             order = self._rederive(conn, order, by)
-            held = self._standing(conn, item.id)
-        self._hold(held)
+            self._hold(conn, self._standing(conn, item.id))
         self._told(_Change(order, [(item, None)]))
         return item
 

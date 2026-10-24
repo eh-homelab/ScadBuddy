@@ -377,9 +377,16 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
       }
       footer={
         item.status === 'cancelled' && !ENDED.has(order.status) ? (
-          <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
-            Reopen item
-          </Button>
+          editable || item.quotes.some((q) => q.accepted) ? (
+            <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
+              Reopen item
+            </Button>
+          ) : (
+            // `item_not_priced`: an accepted order takes back a priced item only.
+            <p className="text-xs text-muted-foreground" data-testid="reopen-unpriced">
+              This item had no accepted price, so it can't come back into an accepted order.
+            </p>
+          )
         ) : (
           !settled &&
           !ENDED.has(order.status) && (

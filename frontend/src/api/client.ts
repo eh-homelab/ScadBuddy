@@ -2055,7 +2055,8 @@ export const api = {
   holdOrder: (id: string) => request<Order>(`/orders/${seg(id)}/hold`, { method: 'POST' }),
   releaseOrder: (id: string) => request<Order>(`/orders/${seg(id)}/release`, { method: 'POST' }),
   closeOrder: (id: string) => request<Order>(`/orders/${seg(id)}/close`, { method: 'POST' }),
-  /** Undoes a close: the order takes the status its items and shipments give it again. */
+  /** Undoes a close or a cancel: a closed order takes the status its items and shipments
+   * give it again; a cancelled one the status it was cancelled from, with the items it took. */
   reopenOrder: (id: string) => request<Order>(`/orders/${seg(id)}/reopen`, { method: 'POST' }),
   addPayment: (id: string, body: PaymentCreate) =>
     request<Payment>(`/orders/${seg(id)}/payments`, { method: 'POST', body: JSON.stringify(body) }),

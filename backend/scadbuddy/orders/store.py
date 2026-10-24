@@ -774,6 +774,19 @@ class OrderStore:
             raise OrderNotFoundError(order_id)
         return Order.model_validate(row)
 
+    def hold_quote_files(self, conn: Conn, holder_kind: str, quotes: Sequence[Quote]) -> None:
+        """Hold each quote's sliced files (every plate's ``blob_key`` and its
+        ``sliced_blob_key``) under ``(holder_kind, <quote id>)``, in the caller's
+        transaction: a rollback leaves no hold, and a commit leaves every one."""
+        for quote in quotes:
+            keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
+            for key in sorted(k for k in keys if isinstance(k, str) and k):
+                conn.execute(
+                    "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                    " ON CONFLICT DO NOTHING",
+                    (key, holder_kind, quote.id),
+                )
+
     def reopen_order_row(self, conn: Conn, order_id: str, status: OrderStatus) -> Order:
         """A closed or cancelled order back to ``status``, its ``closed_at`` and
         ``cancelled_at`` cleared."""

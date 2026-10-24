@@ -86,4 +86,25 @@ describe('undoing an archive, a close and a cancel', () => {
     expect(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByText('not accepted')).toBeInTheDocument()
     expect(screen.queryByTestId('order-unpriced')).not.toBeInTheDocument()
   })
+
+  it('says why a cancelled item without an accepted price stays out of an accepted order', async () => {
+    const { user } = order(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    // Price it but leave the quote unaccepted, cancel it, then accept the order without it.
+    await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    await user.type(within(drawer).getByLabelText(/Price per unit/), '5')
+    await user.click(within(drawer).getByRole('button', { name: 'Record only' }))
+    await user.click(await within(drawer).findByRole('button', { name: 'Cancel item' }))
+    await waitFor(() => expect(state.items.find((i) => i.id === ITEM_DRAFT)?.status).toBe('cancelled'))
+    const target = state.orders.find((o) => o.id === ORDER_DRAFT)
+    if (target) target.status = 'accepted'
+    await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+    await user.click(screen.getByRole('button', { name: 'Put on hold' }))
+    await user.click(screen.getByRole('button', { name: 'Release hold' }))
+    await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))
+    const again = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(await within(again).findByTestId('reopen-unpriced')).toBeInTheDocument()
+    expect(within(again).queryByRole('button', { name: 'Reopen item' })).not.toBeInTheDocument()
+  })
 })
