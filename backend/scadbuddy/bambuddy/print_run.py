@@ -136,7 +136,7 @@ from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL, require_native_folder
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies
-from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.lan_models import LanReport, LanStarted
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import is_fresh, status_from_report
 from scadbuddy.rack.rank import (
@@ -375,11 +375,13 @@ class PrintRunResult(BaseModel):
     #: rack (#836). A pick can go stale before the print starts; that shows in progress,
     #: not here (spec §10).
     rack_picks: list[RackSentPick] = Field(default_factory=list)
-    #: How the run reached its printer (#3818): ``bambuddy`` through Bambuddy's queue, as
-    #: every run queued today does (`_queued`); ``native`` over the LAN once plan 3a
-    #: Task 9's LAN branch reports its own. The dialog's "sent over the LAN" reads this,
-    #: never its own guess at the path.
+    #: How the run reached its printer (#3818): ``bambuddy`` through Bambuddy's queue;
+    #: ``native`` over the LAN (plan 3a Task 9), with ``bambuddy_url`` ``None``. The
+    #: dialog's "sent over the LAN" reads this, never its own guess at the path.
     path: RunPath = "bambuddy"
+    #: Each plate the printer took over the LAN, by the ``subtask_name`` the native
+    #: follow reads its progress by (`printers/progress.py`).
+    lan: list[LanStarted] = Field(default_factory=list)
 
 
 def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
@@ -1447,9 +1449,11 @@ def native_runs(settings: StoredSettings, request: PrintRunRequest | None = None
     """Whether a run is on the native path at all (#3818 tier A, D2): there its project
     is refused, none is resolved, and its folder is ScadBuddy's own (Task 5, D6).
 
-    Plan 3a Task 9 decides it from ``hot_path_native``; until then every run is
-    Bambuddy's. `PrintDeps.native_run` defaults to it and the dialog's
-    `ChoicesView.lan_printers` is read from it, so the two never disagree."""
+    The hot-path plan's Task 9 decides it from ``hot_path_native``; until then every
+    run is Bambuddy's, and ``print_check`` takes a row whose own path is the LAN through
+    Bambuddy too, so 3a Task 9's LAN branch is reached only where this is true.
+    `PrintDeps.native_run` defaults to it and the dialog's `ChoicesView.lan_printers` is
+    read from it, so the two never disagree."""
     return False
 
 
@@ -1459,7 +1463,7 @@ async def lan_printers(
     reports: PrinterReportStore | None,
 ) -> list[str]:
     """The registry rows a run would reach over the LAN (#3818): those `run_path` puts on
-    the native path, once `native_runs` puts runs there. None until plan 3a Task 9, so
+    the native path, once `native_runs` puts runs there. None until hot-path Task 9, so
     the dialog keeps its project, Bambuddy's folders and "queued" for every printer."""
     if printers is None or not native_runs(settings):
         return []
@@ -2548,6 +2552,10 @@ def _queued(
     first plate's; every plate's queue items are listed.
     """
     first = outcomes[0]
+    lan = [outcome.lan for outcome in outcomes if outcome.lan is not None]
+    if lan:
+        # Over the LAN: nothing is on Bambuddy's queue to link to.
+        config = None
     return PrintRunResult(
         library_file_id=library_file_id,
         slice_job_id=first.slice_job_id,
@@ -2560,6 +2568,8 @@ def _queued(
         folder_id=folder_id,
         bambuddy_url=config.web_url(QUEUE_PATH) if config is not None else None,
         rack_picks=rack_picks,
+        path="native" if lan else "bambuddy",
+        lan=lan,
     )
 
 

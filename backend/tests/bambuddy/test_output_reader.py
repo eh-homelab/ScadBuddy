@@ -4,16 +4,22 @@ that is restarting, the SPA's fallback page, a 404 that is not the API's problem
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from scadbuddy.bambuddy.output_reader import RemoteOutputs
-from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
+from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, RemoteBlobs, RemoteOutputs
+from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.secrets import kek_from_base64
 from scadbuddy.library.outputs import OutputNotFoundError
+from scadbuddy.slicing.transfer import INTERNAL_BLOBS, TRANSFER_HEADER
+from scadbuddy.slicing.transfer_token import transfer_key, verify
 
 OUTPUT = "a" * 32
+KEK = kek_from_base64(base64.b64encode(b"\x21" * 32).decode())
 INDEX_HTML = b"<!doctype html><html><body>ScadBuddy</body></html>"
 
 
@@ -83,3 +89,61 @@ def test_the_spa_fallback_page_is_an_error_not_data() -> None:
         asyncio.run(reader(answer).get(OUTPUT))
     with pytest.raises(httpx.HTTPError):
         asyncio.run(reader(answer).model_3mf(OUTPUT))
+
+
+# --- RemoteBlobs: a LAN print's sliced blob through the internal route (plan 3a Task 9) --
+
+
+def _blobs(answer: Callable[[httpx.Request], httpx.Response]) -> RemoteBlobs:
+    http = httpx.AsyncClient(base_url="http://api", transport=httpx.MockTransport(answer))
+    return RemoteBlobs("http://api", KEK, client=http)
+
+
+async def _read(blobs: RemoteBlobs, key: str) -> bytes:
+    return b"".join([chunk async for chunk in blobs.stream(key)])
+
+
+def test_a_blob_is_read_with_a_token_for_its_one_key() -> None:
+    key = "slice-" + "b" * 64
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=b"sliced")
+
+    assert asyncio.run(_read(_blobs(answer), key)) == b"sliced"
+    [request] = seen
+    assert request.url.path == f"{INTERNAL_BLOBS}/{key}"
+    token = verify(
+        transfer_key(KEK),
+        request.headers[TRANSFER_HEADER],
+        method="GET",
+        blob_key=key,
+        now=datetime.now(UTC),
+    )
+    assert token.blob_key == key
+
+
+def test_the_apis_404_is_a_missing_blob() -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={"title": "Not Found", "status": 404, "detail": "gone"},
+            headers={"content-type": PROBLEM_MEDIA_TYPE},
+        )
+
+    with pytest.raises(BlobMissingAnswerError):
+        asyncio.run(_read(_blobs(answer), "slice-x"))
+
+
+def test_a_refused_token_is_the_apis_problem() -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"title": "Forbidden", "status": 403, "detail": "transfer refused"},
+            headers={"content-type": PROBLEM_MEDIA_TYPE},
+        )
+
+    with pytest.raises(ApiError) as raised:
+        asyncio.run(_read(_blobs(answer), "slice-x"))
+    assert raised.value.status == 403

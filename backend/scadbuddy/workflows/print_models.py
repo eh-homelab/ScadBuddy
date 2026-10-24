@@ -9,9 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
+from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
@@ -40,6 +41,11 @@ SLICE_LOST = "PrintSliceLost"
 #: has when its plate is queued (#2955): nothing was queued, so the workflow slices the
 #: plate again and queues that.
 SLICE_GONE = "PrintSliceGone"
+#: A LAN start that may not have been taken (plan 2026-10-16 Task 9): the printer could
+#: not be reached, or did not report the plate within `LAN_START_WAIT`. The workflow
+#: uploads again under a new name and starts again; ``lan_print`` first looks for the
+#: plate in the printer's report, so a start it did take is not sent twice.
+LAN_UNSURE = "PrintLanUnsure"
 
 
 class SourceSpec(BaseModel):
@@ -201,3 +207,56 @@ class FailInput(BaseModel):
     #: The row says the run began queueing, but it stopped before any ``POST /queue/``:
     #: the record clears that (review #1316 (8) 2).
     unqueued: bool = False
+
+
+#: The native LAN branch's activities (plan 2026-10-16 Task 9), on the print worker's
+#: queue: the sliced 3MF onto the printer over FTPS, then ``print.project_file``.
+LAN_UPLOAD_ACTIVITY = "lan_upload"
+LAN_PRINT_ACTIVITY = "lan_print"
+
+
+class SlicedSource(BaseModel):
+    """Where a plate's sliced 3MF is read from: a library file, or the native slicer's
+    blob (plan 2026-10-16-native-slicer-rust-worker), read through the API's internal
+    blob route. Exactly one is set."""
+
+    library_file_id: int | None = None
+    blob_key: str | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> SlicedSource:
+        if (self.library_file_id is None) == (self.blob_key is None):
+            raise ValueError("a sliced source is a library file or a blob, exactly one")
+        return self
+
+
+class LanUploadInput(BaseModel):
+    run_id: str
+    #: The registry row (`PrinterRow.id`); its access code is opened in the activity.
+    printer: str
+    sliced: SlicedSource
+    #: In `lan.UPLOAD_DIR`; a new one per start attempt, since the printer moves a
+    #: started upload away (Task 7's measurement).
+    remote_name: str
+
+
+class LanUploaded(BaseModel):
+    remote_name: str
+    md5: str
+    bytes: int
+    #: The project's filament slots, read from the 3MF (`ams_mapping`'s count).
+    filament_count: int = 1
+
+
+class LanPrintInput(BaseModel):
+    printer: str
+    uploaded: LanUploaded
+    plate_id: int
+    subtask_name: str
+    #: The trays chosen per slot; ``lan_print`` maps them (`printers/ams_mapping.py`)
+    #: against the report it reads as it starts, which says whether there is an AMS and
+    #: a second nozzle.
+    plan: FilamentPlan
+    bed_type: str = "auto"
+    timelapse: bool = False
+    layer_inspect: bool = True

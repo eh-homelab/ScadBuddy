@@ -51,10 +51,14 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.bambuddy.subject import PrintSubject
     from scadbuddy.library.outputs import PlateSend
+    from scadbuddy.printers.lan_models import LanStarted
     from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
         FAILED,
+        LAN_PRINT_ACTIVITY,
+        LAN_UNSURE,
+        LAN_UPLOAD_ACTIVITY,
         PRINT_RUN_WORKFLOW,
         REFUSED,
         SLICE_GONE,
@@ -69,10 +73,14 @@ with workflow.unsafe.imports_passed_through():
         FailInput,
         FinishInput,
         InsertInput,
+        LanPrintInput,
+        LanUploaded,
+        LanUploadInput,
         NativeSliced,
         PlanInput,
         PrintRunInput,
         RecordInput,
+        SlicedSource,
         SlicedUploadInput,
         SliceRunInput,
         SliceStartInput,
@@ -233,6 +241,17 @@ REUSED_GONE_PATCH = "print-slice-again-when-reused-gone"
 #: ``print_slice_start`` and ``print_slice_wait``. Only a run planned native asks, so
 #: no Bambuddy run's history records it.
 NATIVE_SLICER_PATCH = "native-slicer"
+#: ``workflow.patched`` id of a plate printed over the LAN (plan 2026-10-16 Task 9):
+#: ``lan_upload`` and ``lan_print`` in place of ``print_enqueue``. Only a run planned on
+#: the native path asks, so no recorded run's history does.
+NATIVE_PATCH = "native-print"
+#: One upload of a sliced 3MF to the printer, beating.
+LAN_UPLOAD_TIMEOUT = timedelta(minutes=10)
+#: How many times a plate is uploaded and started when its start may not have been
+#: taken (``LAN_UNSURE``, or ``lan_print`` timed out): each attempt uploads under a new
+#: name, since the printer moves a started upload away (Task 7's measurement), and
+#: ``lan_print`` finds a start an earlier attempt did take rather than send it again.
+LAN_START_ATTEMPTS = 3
 
 
 def _sliced_by(
@@ -530,6 +549,25 @@ class PrintRunWorkflow:
                 self.enqueue_unstarted = self.cancel_absorbed
                 self._stop_if_cancelled()
                 self.enqueue_attempted = True
+            if planned.path == "native" and workflow.patched(NATIVE_PATCH):
+                lan = await self._start_lan(
+                    input, accepted, planned, plate, sliced, native, last=index == last
+                )
+                outcome = QueueOutcome(
+                    slice_job_id=job_id,
+                    sliced_library_file_id=sliced,
+                    preset_key=preset_key,
+                    native_slice_id=native.slice_id if native is not None else None,
+                    sliced_blob_key=native.sliced_blob_key if native is not None else None,
+                    queue_item_ids=[],
+                    printer_id=planned.printer_id,
+                    lan=lan,
+                )
+                outcomes.append(outcome)
+                sent = await self._record_plate(
+                    accepted, planned, plate, outcome, sent, index, last
+                )
+                continue
             enqueue = workflow.start_activity(
                 "print_enqueue",
                 EnqueueInput(
@@ -590,28 +628,7 @@ class PrintRunWorkflow:
             )
             outcomes.append(outcome)
             queued.append(queued_plate)
-            record = workflow.start_activity(
-                "print_record",
-                RecordInput(
-                    source=accepted.source,
-                    library_file_id=planned.library_file_id,
-                    plate_id=plate.plate_id,
-                    outcome=outcome,
-                    project_id=planned.project_id,
-                    sent=sent,
-                    run_id=accepted.run.id,
-                ),
-                result_type=list[PlateSend],
-                start_to_close_timeout=SHORT,
-                retry_policy=BOUNDED_RETRY,
-            )
-            # Once the last plate is queued, a cancel waits for the rest and the run
-            # still ends succeeded, as the insert is shielded (review #1316 1).
-            sent = await (
-                self._shielded(record) if index == last else self._shielded(record, PLATES_PATCH)
-            )
-            if index != last:
-                self._stop_if_cancelled()
+            sent = await self._record_plate(accepted, planned, plate, outcome, sent, index, last)
         result: PrintRunResult = await self._shielded(
             workflow.start_activity(
                 "print_finish",
@@ -652,6 +669,116 @@ class PrintRunWorkflow:
             ):
                 await self._follow(PrintSubject.library(source.file_id).run_subject)
         return finished
+
+    async def _record_plate(
+        self,
+        accepted: Accepted,
+        planned: PlannedRun,
+        plate: PlatePlan,
+        outcome: QueueOutcome,
+        sent: list[PlateSend],
+        index: int,
+        last: int,
+    ) -> list[PlateSend]:
+        """``print_record`` of one plate as soon as it is queued or started."""
+        record = workflow.start_activity(
+            "print_record",
+            RecordInput(
+                source=accepted.source,
+                library_file_id=planned.library_file_id,
+                plate_id=plate.plate_id,
+                outcome=outcome,
+                project_id=planned.project_id,
+                sent=sent,
+                run_id=accepted.run.id,
+            ),
+            result_type=list[PlateSend],
+            start_to_close_timeout=SHORT,
+            retry_policy=BOUNDED_RETRY,
+        )
+        # Once the last plate is queued, a cancel waits for the rest and the run
+        # still ends succeeded, as the insert is shielded (review #1316 1).
+        recorded: list[PlateSend] = await (
+            self._shielded(record) if index == last else self._shielded(record, PLATES_PATCH)
+        )
+        if index != last:
+            self._stop_if_cancelled()
+        return recorded
+
+    async def _start_lan(
+        self,
+        input: PrintRunInput,
+        accepted: Accepted,
+        planned: PlannedRun,
+        plate: PlatePlan,
+        sliced: int,
+        native: NativeSliced | None,
+        *,
+        last: bool,
+    ) -> LanStarted:
+        """Upload the sliced plate to the printer and start it (`NATIVE_PATCH`). A start
+        that may not have been taken is uploaded again under a new name and started
+        again, up to `LAN_START_ATTEMPTS`; ``lan_print`` reads the report first, so one
+        that was taken is not sent twice. The start is shielded as ``print_enqueue`` is:
+        a cancel cannot take back a ``project_file`` in flight."""
+        source = (
+            SlicedSource(blob_key=native.sliced_blob_key)
+            if native is not None
+            else SlicedSource(library_file_id=sliced)
+        )
+        stem = f"scadbuddy-{accepted.run.id[:8]}-p{plate.plate_id}"
+        options = planned.options
+        attempt = 1
+        while True:
+            remote = f"{stem}.3mf" if attempt == 1 else f"{stem}-{attempt}.3mf"
+            uploaded = await workflow.execute_activity(
+                LAN_UPLOAD_ACTIVITY,
+                LanUploadInput(
+                    run_id=accepted.run.id,
+                    printer=planned.printer,
+                    sliced=source,
+                    remote_name=remote,
+                ),
+                result_type=LanUploaded,
+                start_to_close_timeout=LAN_UPLOAD_TIMEOUT,
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=BOUNDED_RETRY,
+            )
+            start = workflow.start_activity(
+                LAN_PRINT_ACTIVITY,
+                LanPrintInput(
+                    printer=planned.printer,
+                    uploaded=uploaded,
+                    plate_id=plate.plate_id,
+                    subtask_name=stem,
+                    plan=input.request.filament_plan,
+                    # The plate's type is in its sliced G-code already; "auto" is what the
+                    # measured start sent (Task 7).
+                    bed_type="auto",
+                    timelapse=bool(options.timelapse),
+                    layer_inspect=options.layer_inspect is not False,
+                ),
+                result_type=LanStarted,
+                start_to_close_timeout=SHORT,
+                retry_policy=ONCE,
+            )
+            try:
+                return await (
+                    self._shielded(start) if last else self._shielded(start, PLATES_PATCH)
+                )
+            except ActivityError as error:
+                cause = error.cause
+                unsure = isinstance(cause, TemporalTimeoutError) or (
+                    isinstance(cause, ApplicationError) and cause.type == LAN_UNSURE
+                )
+                if not unsure or attempt >= LAN_START_ATTEMPTS:
+                    raise
+            workflow.logger.warning(
+                "a LAN start may not have been taken; uploading and starting it again",
+                extra={"plate_id": plate.plate_id, "attempt": attempt},
+            )
+            self._stop_if_cancelled()
+            attempt += 1
 
     async def _follow(self, output_id: str) -> None:
         """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives

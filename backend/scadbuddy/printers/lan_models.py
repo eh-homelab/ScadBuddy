@@ -33,3 +33,12 @@ class ProjectFile(BaseModel):
     timelapse: bool = False
     layer_inspect: bool = True
     md5: str
+
+
+class LanStarted(BaseModel):
+    """A plate the printer took over the LAN (plan 2026-10-16 Task 9): the
+    ``subtask_name`` its reports carry while it runs it, which the native follow reads
+    its progress by, and when the start was seen."""
+
+    subtask_name: str
+    started_at: datetime

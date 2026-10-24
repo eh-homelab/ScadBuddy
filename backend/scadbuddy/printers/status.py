@@ -73,6 +73,13 @@ def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def print_error_text(code: int) -> str:
+    """A report's ``print_error`` as Bambu's apps show it: eight hex digits split in
+    two, ``0500_C010``."""
+    text = f"{code & 0xFFFFFFFF:08X}"
+    return f"{text[:4]}_{text[4:]}"
+
+
 def _text(value: Any) -> str:
     """``value`` when it is a string, else ``""``: a mistyped field reads as absent."""
     return value if isinstance(value, str) else ""

@@ -7,7 +7,7 @@ from typing import Any
 from temporalio.exceptions import ActivityError, ApplicationError
 
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRunError
-from scadbuddy.workflows.print_models import FAILED, REFUSED, SLICE_LOST
+from scadbuddy.workflows.print_models import FAILED, LAN_UNSURE, REFUSED, SLICE_LOST
 
 #: An operation's unexpected failure (#1053): it names no kind, unlike a print run's.
 OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; see its logs."
@@ -66,12 +66,13 @@ def operation_lost(where: str) -> PrintRunError:
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:
-    """The problem an activity reported (``REFUSED``/``FAILED``/``SLICE_LOST`` details), else the
-    unexpected failure's: never the exception's own text, which may say anything."""
+    """The problem an activity reported (``REFUSED``/``FAILED``/``SLICE_LOST``/``LAN_UNSURE``
+    details), else the unexpected failure's: never the exception's own text, which may
+    say anything."""
     cause = error.cause if isinstance(error, ActivityError) else error
     if (
         isinstance(cause, ApplicationError)
-        and cause.type in (REFUSED, FAILED, SLICE_LOST)
+        and cause.type in (REFUSED, FAILED, SLICE_LOST, LAN_UNSURE)
         and cause.details
     ):
         detail: Any = cause.details[0]

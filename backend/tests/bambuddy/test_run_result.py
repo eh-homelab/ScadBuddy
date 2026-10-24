@@ -78,7 +78,7 @@ class _Unread:
 def test_a_native_row_reports_bambuddys_path_while_no_run_is_native() -> None:
     settings = StoredSettings()
     row = _both_links_native()
-    # The row's own path is the LAN, but no run takes it before plan 3a Task 9.
+    # The row's own path is the LAN, but no run takes it until hot-path Task 9.
     assert run_path(row, None, now=datetime.now(UTC)) == "native"
     assert native_runs(settings) is False
     rows = _Rows()

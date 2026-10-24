@@ -53,7 +53,12 @@ from scadbuddy.api.outputs import (
     native_outputs_for_files,
     read_plain_files,
 )
-from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
+from scadbuddy.api.printing import (
+    PRINT_RUN_PROBLEMS,
+    accept_run,
+    failed_before_queueing,
+    lan_reads,
+)
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for, with_lan_printers
@@ -1292,6 +1297,7 @@ async def get_library_progress(
     observer: PrintProgressDep,
     follows: FollowsDep,
     state: StateDep,
+    registry: PrintersDep,
 ) -> PrintProgress | None:
     """As ``/print/outputs/{id}/progress`` (#1751): the file's newest run, its queue
     items read off Bambuddy until it is ``settled``. ``null`` when ScadBuddy never
@@ -1305,7 +1311,9 @@ async def get_library_progress(
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await library_progress(client, subject, links, uploads=uploads)
+            progress = await library_progress(
+                client, subject, links, uploads=uploads, lan=lan_reads(state, registry)
+            )
     observer.observe_subject(key, library_slug(subject), progress)
     # As an output's: a print someone is looking at that is still moving is followed.
     if progress is not None and not progress.settled:
