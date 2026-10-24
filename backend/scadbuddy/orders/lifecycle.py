@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
+from scadbuddy.orders.attachments import SHOWN_IMAGES
 from scadbuddy.orders.models import (
     Actor,
     AddressSnapshot,
@@ -725,6 +726,23 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._item_of(conn, order, item_id)
+            # Its files go with it, each on the audit line, and with them their holds
+            # on the blobs: nothing could show or remove an item's file once the item
+            # is gone. A refusal below rolls this back.
+            for attachment in self.store.attachments(order.id, conn=conn):
+                if attachment.item_id == item.id:
+                    self.store.delete_attachment(conn, attachment.id)
+                    self._event(
+                        conn,
+                        order,
+                        by,
+                        "attachment.removed",
+                        attachment_id=attachment.id,
+                        item_id=item.id,
+                        filename=attachment.filename,
+                        sha256=attachment.sha256,
+                        was_delivered=item.delivered_attachment_id == attachment.id,
+                    )
             if not self.store.delete_draft_item(conn, item.id):
                 raise LifecycleError(
                     "item_not_draft",
@@ -1287,8 +1305,8 @@ class Lifecycle:
     def set_delivered(
         self, order_id: str, item_id: str, attachment_id: str | None, by: Actor
     ) -> OrderItem:
-        """Mark one of the item's own image attachments as what was actually delivered,
-        or with None clear the mark."""
+        """Mark one of the item's own image attachments, one a browser draws, as what
+        was actually delivered, or with None clear the mark."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._item_of(conn, order, item_id)
@@ -1300,10 +1318,12 @@ class Lifecycle:
                         f"attachment {attachment_id} is not attached to this item",
                         unprocessable=True,
                     )
-                if found[0].kind != "image":
+                if found[0].kind != "image" or found[0].media_type not in SHOWN_IMAGES:
                     raise LifecycleError(
                         "attachment_id",
-                        f"attachment {attachment_id} is not an image",
+                        f"attachment {attachment_id} is not an image a browser shows"
+                        " (PNG, JPEG, WebP, GIF or AVIF), so it cannot stand as the item's"
+                        " picture",
                         unprocessable=True,
                     )
             if item.delivered_attachment_id != attachment_id:

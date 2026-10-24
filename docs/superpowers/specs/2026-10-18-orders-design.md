@@ -446,8 +446,10 @@ run under). `role` adds `reference` (the customer's sketch, logo or drawing) and
 `(attachment, <id>)` is written and deleted **in the attachment row's own transaction**
 (as `slicing/store.py` does), not before it as §3.4's quote holds are: the blob was
 written and touched just before, so the blob sweep's grace keeps it until both commit,
-and no reaper is needed. Adding, captioning and removing are records, not steps: allowed
-in every state, on hold and after close. `order_items.delivered_attachment_id` (`ON DELETE
+and no reaper is needed. `subject` has no foreign key, so deleting a draft item removes
+its attachments and their holds in the same transaction, each on the audit line. Adding,
+captioning and removing are records, not steps: allowed in every state, on hold and after
+close. Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE
 SET NULL`) names the item's image a person marked as what was actually delivered; the
 order page shows it as the item's picture, before it the item's output's thumbnail, then
 its template's.

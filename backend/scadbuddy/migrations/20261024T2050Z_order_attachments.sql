@@ -5,6 +5,10 @@
 -- `blob_refs` row `(attachment, <id>)` for as long as this row stands, so the blob
 -- sweep never takes them. `subject` says what the file is attached to; `order_id` is
 -- the order it belongs to either way, so an order's whole list is one index read.
+-- `subject` is text, with no foreign key to `order_items`: the lifecycle
+-- (`orders/lifecycle.py`) is the one writer, and the only guard that an
+-- `order_item:<id>` subject names an item of this `order_id`, and it removes an item's
+-- attachments (and their holds) in the transaction that deletes a draft item.
 CREATE TABLE attachments (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
   order_id text NOT NULL REFERENCES orders (id) ON DELETE CASCADE,

@@ -351,15 +351,11 @@ async def get_attachment_thumbnail(
             status.HTTP_404_NOT_FOUND, f"the file of attachment {attachment_id!r} is gone"
         )
     # The media routes' decode budget, shared, so photos here never starve a gallery.
-    app_state = request.app.state
-    decodes: asyncio.Semaphore | None = getattr(app_state, "thumbnail_decodes", None)
-    if decodes is None:
-        decodes = asyncio.Semaphore(media_api.MAX_CONCURRENT_THUMBNAILS)
-        app_state.thumbnail_decodes = decodes
+    decodes = media_api.decode_slots(request)
 
     def shrink() -> bytes | None:
         with path.open("rb") as handle:
-            return media_api._shrink(handle, media_api.CARD_SIDE)
+            return media_api.shrink(handle, media_api.CARD_SIDE)
 
     async with decodes:
         small = await asyncio.to_thread(shrink)

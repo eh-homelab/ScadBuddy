@@ -197,7 +197,11 @@ def test_an_items_image_is_marked_as_delivered(client: TestClient) -> None:
     on_order = attach(client, order["id"], png((10, 10)), "box.png", role="packed").json()
     elsewhere = attach(client, order["id"], png((20, 20)), "x.png", item_id=other["id"]).json()
 
-    for wrong in (pdf["id"], on_order["id"], elsewhere["id"], "nothing"):
+    # An iPhone's photo is an image, but no browser draws it, so it cannot be the picture.
+    heic = b"\0\0\0\x18ftypheic\0\0\0\0" + b"\0" * 32
+    phone = attach(client, order["id"], heic, "IMG_0001.HEIC", item_id=item["id"]).json()
+    assert (phone["kind"], phone["media_type"]) == ("image", "image/heic")
+    for wrong in (pdf["id"], on_order["id"], elsewhere["id"], phone["id"], "nothing"):
         refused = client.put(delivered, json={"attachment_id": wrong})
         assert refused.status_code == 422, wrong
         assert refused.json()["errors"][0]["loc"] == ["body", "attachment_id"]
@@ -283,3 +287,47 @@ def test_caption_and_role_are_edited_and_refusals_are_answered(client: TestClien
     # A closed or cancelled order still takes a file: a record, never a step.
     assert client.post(f"/api/v1/orders/{order['id']}/cancel").status_code == 200
     assert attach(client, order["id"], PDF, "after.pdf").status_code == 200
+
+
+def test_deleting_a_draft_item_removes_its_files_and_their_holds(client: TestClient) -> None:
+    order, item = shop(client)
+    on_order = attach(client, order["id"], PDF, "brief.pdf").json()
+    photo = attach(client, order["id"], png((32, 32)), "mock.png", item_id=item["id"]).json()
+    sketch = attach(client, order["id"], PDF + b"x", "sketch.pdf", item_id=item["id"]).json()
+    marked = client.put(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/delivered",
+        json={"attachment_id": photo["id"]},
+    )
+    assert marked.status_code == 200, marked.text
+
+    assert client.delete(f"/api/v1/orders/{order['id']}/items/{item['id']}").status_code == 204
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    assert [a["id"] for a in detail["attachments"]] == [on_order["id"]]
+    assert holders(client) == {on_order["id"]: f"attachment-{on_order['sha256']}"}
+    removed = [
+        e["detail"]
+        for e in client.get(f"/api/v1/orders/{order['id']}/events").json()
+        if e["kind"] == "attachment.removed"
+    ]
+    assert [(e["attachment_id"], e["was_delivered"]) for e in removed] == [
+        (photo["id"], True),
+        (sketch["id"], False),
+    ]
+
+
+def test_an_item_past_draft_keeps_its_files_when_its_delete_is_refused(
+    client: TestClient,
+) -> None:
+    order, item = shop(client)
+    kept = attach(client, order["id"], PDF, "spec.pdf", item_id=item["id"]).json()
+    quoted = client.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/quotes",
+        json={"unit_price_minor": 100, "label": "typed"},
+    )
+    assert quoted.status_code == 201, quoted.text
+    refused = client.delete(f"/api/v1/orders/{order['id']}/items/{item['id']}")
+    assert refused.status_code == 409
+    assert refused.json()["type"] == PROBLEMS + "item_not_draft"
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    assert [a["id"] for a in detail["attachments"]] == [kept["id"]]
+    assert holders(client) == {kept["id"]: f"attachment-{kept['sha256']}"}

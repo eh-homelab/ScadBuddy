@@ -9,6 +9,8 @@ import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './st
  * it, served back as it was sent, and an item's image marked as what was delivered.
  */
 
+/** `orders/attachments.py` `SHOWN_IMAGES`: what may stand as an item's picture. */
+const SHOWN_IMAGES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'])
 const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
 
 /** `orders/attachments.py` `sniff`, over the first bytes. */
@@ -174,7 +176,9 @@ export const handlers = [
       if (id !== null) {
         const attachment = state.attachments.find((a) => a.id === id)
         if (!attachment || attachment.subject !== `order_item:${item.id}`) return fieldProblem(request, 'attachment_id', `attachment ${id} is not attached to this item`)
-        if (attachment.kind !== 'image') return fieldProblem(request, 'attachment_id', `attachment ${id} is not an image`)
+        if (attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) {
+          return fieldProblem(request, 'attachment_id', `attachment ${id} is not an image a browser shows (PNG, JPEG, WebP, GIF or AVIF), so it cannot stand as the item's picture`)
+        }
       }
       if ((item.delivered_attachment_id ?? null) !== id) {
         item.delivered_attachment_id = id
