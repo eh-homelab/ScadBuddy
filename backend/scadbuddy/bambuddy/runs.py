@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -570,7 +571,9 @@ def given_run(run: PrintRun | None) -> LatestRun:
 class RecentRuns:
     """`PrintRunStore.latest_for_output`, kept per subject for ``ttl`` seconds: a follow's
     tick asks for the newest failure and the LAN print (plan 2026-10-16 Task 9) of one
-    subject within it, and they share one query."""
+    subject within it, and they share one query. A subject's ``print.run`` event drops
+    its kept run (`heard`, an `EventBus` listener), so a tick just after a retry reads
+    the new run rather than the one before it (#4541)."""
 
     def __init__(
         self,
@@ -585,17 +588,37 @@ class RecentRuns:
         self.clock = clock
         self.capacity = capacity
         self._kept: dict[str, tuple[float, PrintRun | None]] = {}
+        # `heard` runs on the publishing thread, `latest` on the loop.
+        self._lock = threading.Lock()
+        #: Per subject, how many of its ``print.run`` events were heard: a read that
+        #: spans one may answer the run before it, so it is not kept.
+        self._heard: dict[str, int] = {}
 
     async def latest(self, run_subject: str) -> PrintRun | None:
         now = self.clock()
-        kept = self._kept.get(run_subject)
-        if kept is not None and now - kept[0] < self.ttl:
-            return kept[1]
+        with self._lock:
+            kept = self._kept.get(run_subject)
+            if kept is not None and now - kept[0] < self.ttl:
+                return kept[1]
+            heard = self._heard.get(run_subject, 0)
         run = await self.runs.latest_for_output(run_subject)
-        if len(self._kept) >= self.capacity:
-            self._kept = {k: v for k, v in self._kept.items() if now - v[0] < self.ttl}
-        self._kept[run_subject] = (now, run)
+        with self._lock:
+            if self._heard.get(run_subject, 0) != heard:
+                return run
+            if len(self._kept) >= self.capacity:
+                self._kept = {k: v for k, v in self._kept.items() if now - v[0] < self.ttl}
+            self._kept[run_subject] = (now, run)
         return run
+
+    def heard(self, event: Event) -> None:
+        """Drop the kept run of a ``print.run`` event's subject."""
+        if not isinstance(event, PrintRunEvent):
+            return
+        with self._lock:
+            self._kept.pop(event.output_id, None)
+            if len(self._heard) >= self.capacity:
+                self._heard.clear()
+            self._heard[event.output_id] = self._heard.get(event.output_id, 0) + 1
 
 
 async def read_latest(latest: LatestRun, run_subject: str) -> PrintRun | None:
