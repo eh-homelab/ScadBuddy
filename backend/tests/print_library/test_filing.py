@@ -46,7 +46,9 @@ async def test_a_retried_filing_after_the_copy_was_trashed_files_none(
     native: NativeLibrary, three_mf: Path
 ) -> None:
     """A trashed filed copy still counts as filed, so a retry after the user trashed it
-    does not file it again; the trashed copy is the answer (#4120)."""
+    does not file it again; the trashed copy is the answer (#4120). So the caller gets
+    back a row with ``deleted_at`` set, and that is intended, not a bug: the user threw
+    the copy away, and a retry must not put it back."""
     meta = _meta("f" * 32)
     first = await file_output(native, meta, three_mf, "Name Sign")
     assert [f.id for f in await native.trash([first.id])] == [first.id]
