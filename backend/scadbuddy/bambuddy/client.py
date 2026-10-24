@@ -1533,6 +1533,22 @@ async def client_for(settings: StoredSettings) -> AsyncIterator[BambuddyClient]:
         yield client
 
 
+@asynccontextmanager
+async def maybe_client(
+    settings: StoredSettings, *, native: bool
+) -> AsyncIterator[BambuddyClient | None]:
+    """``None`` on a native run (#3818 tier A, plan 2026-10-18 D3), else
+    :func:`client_for`'s client: a native run never builds one, so "never waits on
+    Bambuddy" is a type the print path's entry points carry. A run on Bambuddy's path
+    with no URL configured is still :func:`client_for`'s 409 here, at its entry, rather
+    than a ``None`` its every read would then trip on."""
+    if native:
+        yield None
+        return
+    async with client_for(settings) as client:
+        yield client
+
+
 #: Reads a process preset's values (#717); :func:`read_once` makes one that reads each
 #: preset at most once.
 ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]

@@ -6,9 +6,10 @@ from `hot_path_native`); here a test sets it."""
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -33,11 +34,16 @@ from scadbuddy.print_library.copies import (
 )
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.remote import RemoteLibrary
+from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.store.bambuddy import folder_name
 from scadbuddy.workflows import print_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import REFUSED, CheckInput
 from tests.api.test_library_native import _native, _native_settings
+from tests.conftest import PgPool
+from tests.printers.conftest import KEK
 from tests.support.no_bambuddy import forbid_bambuddy
 from tests.test_print_workflow import run_input
 
@@ -130,9 +136,42 @@ def test_the_print_worker_reads_folders_and_makes_the_template_folder(
     assert refused.status == 422
 
 
-def _activities(native: Any, **settings: Any) -> PrintActivities:
+@dataclass
+class Registry:
+    """A registry with one row the LAN reaches, set to print natively, its report fresh:
+    the row a native check decides on (`run_route`)."""
+
+    printers: PrinterStore
+    reports: PrinterReportStore
+    row: str
+
+
+@pytest.fixture
+def registry(pg_pool: PgPool) -> Registry:
+    printers = PrinterStore(pg_pool, KEK)
+    reports = PrinterReportStore(pg_pool)
+    row = printers.create(PrinterCreate(serial="01P00A0000000DD", name="Garage", model="H2C"))
+    printers.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
+    )
+    printers.patch(row.id, PrinterPatch(preferred_path="native"))
+    reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
+    return Registry(printers, reports, row.id)
+
+
+#: The hot path's stored backends (plan 2026-10-18 D2).
+HOT_PATH: dict[str, Any] = {
+    "slicer_backend": "native",
+    "library_backend": "native",
+    "store_backend": "s3",
+}
+
+
+def _activities(native: Any, registry: Registry, **settings: Any) -> PrintActivities:
     unused: Any = None
-    store: Any = SimpleNamespace(load=lambda: StoredSettings(bambuddy_url=BAMBUDDY, **settings))
+    store: Any = SimpleNamespace(
+        load=lambda: StoredSettings(bambuddy_url=BAMBUDDY, **HOT_PATH, **settings)
+    )
     return PrintActivities(
         PrintDeps(
             settings_store=store,
@@ -142,7 +181,10 @@ def _activities(native: Any, **settings: Any) -> PrintActivities:
             store=unused,
             observer=unused,
             library=native,
-            native_run=lambda settings, request: True,
+            # The image's profiles a native check resolves against (D5); never read here.
+            native=cast(Any, SimpleNamespace(profiles=unused)),
+            printers=registry.printers,
+            reports=registry.reports,
         )
     )
 
@@ -155,12 +197,14 @@ def _check(request: PrintRunRequest, **source: Any) -> CheckInput:
     return CheckInput(input=run, started_at=datetime.now(UTC))
 
 
-async def test_a_project_on_a_native_run_is_refused_before_anything() -> None:
-    request = run_input().request.model_copy(update={"project_id": 5})
+async def test_a_project_on_a_native_run_is_refused_before_anything(registry: Registry) -> None:
+    request = run_input().request.model_copy(
+        update={"project_id": 5, "printer": registry.row, "printer_id": None}
+    )
     with respx.mock(assert_all_called=False) as router:
         bambuddy = router.route(host="bambuddy.test").respond(500)
         with pytest.raises(ApplicationError) as raised:
-            await ActivityEnvironment().run(_activities(object()).check, _check(request))
+            await ActivityEnvironment().run(_activities(object(), registry).check, _check(request))
     assert raised.value.type == REFUSED
     problem = raised.value.details[0]
     assert (problem.status, problem.detail) == (422, NATIVE_PROJECT_REFUSAL)
@@ -168,7 +212,7 @@ async def test_a_project_on_a_native_run_is_refused_before_anything() -> None:
 
 
 async def test_a_native_check_resolves_no_project_and_checks_the_native_folder(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, registry: Registry
 ) -> None:
     """``last_project_id`` is ignored, `resolve_project` (a Bambuddy read) is never
     called, and `prepare_run` is given the native library to check the folder in."""
@@ -187,15 +231,18 @@ async def test_a_native_check_resolves_no_project_and_checks_the_native_folder(
     monkeypatch.setattr(print_activities, "resolve_project", no_resolve)
     monkeypatch.setattr(print_activities, "prepare_run", stop)
     library = object()
-    activities = _activities(library, last_project_id=9)
+    activities = _activities(library, registry, last_project_id=9)
     monkeypatch.setattr(activities, "_source", source)
-    request = run_input().request.model_copy(update={"folder_id": 1_000_000_123})
+    request = run_input().request.model_copy(
+        update={"folder_id": 1_000_000_123, "printer": registry.row, "printer_id": None}
+    )
     run = _check(request, kind="library", file_id=1_000_000_001, output_id=None)
     with pytest.raises(ApplicationError):
         await ActivityEnvironment().run(activities.check, run)
 
     assert seen["project"].project_id is None
     assert seen["native"] is library
+    assert (seen["route"].row.id, seen["route"].native) == (registry.row, True)
 
 
 async def test_prepare_run_on_native_checks_the_folder_natively(
@@ -206,7 +253,7 @@ async def test_prepare_run_on_native_checks_the_folder_natively(
     request = PrintRunRequest.model_validate({**_REQUEST, "folder_id": 7})
     with pytest.raises(ApiError) as refused:
         await print_run.prepare_run(
-            None,  # type: ignore[arg-type]  # never read: the folder is refused first
+            None,  # never read: the folder is refused first
             None,  # type: ignore[arg-type]
             StoredSettings(),
             request,

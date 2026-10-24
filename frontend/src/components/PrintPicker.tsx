@@ -368,10 +368,10 @@ export function PrintPicker({
   const registryRows = registry.data ?? NO_ROWS
   /**
    * #3818 — the hot path (plan 2026-10-18 D2): a printer the server says a run reaches
-   * over the LAN (`ChoicesView.lan_printers`, from `print_run.py` `native_runs` and
-   * `run_path`) is printed to with no Bambuddy call. The dialog never works the path out
-   * itself: until plan 3a Task 9 the server lists none, and every run is Bambuddy's. A
-   * LAN-only row is chosen by its id (`askRegistry`), the one way to name a printer only
+   * over the LAN (`ChoicesView.lan_printers`, from `printers/hot_path.py` `hot_path_native`
+   * and each row's path) is printed to with no Bambuddy call. The dialog never works the
+   * path out itself: on Bambuddy's backends the server lists none, and every run is
+   * Bambuddy's. A LAN-only row is chosen by its id (`askRegistry`), the one way to name a printer only
    * the LAN reaches, and every dialog read names it as `printer`.
    */
   const lanIds = choices?.lan_printers ?? NO_IDS
@@ -388,8 +388,16 @@ export function PrintPicker({
   // Only a row the LAN reaches and Bambuddy does not: one just created by serial reaches
   // neither, and one linked to a Bambuddy printer is that printer's entry (#4340 review M3).
   const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
-  /** #3818 — of those, the ones the server says a run reaches: choosable (none until Task 9). */
+  /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
+  /**
+   * #3818 Task 9 — the `printer_id` every run, check and preview body sends: none beside a
+   * LAN-only row, which links no Bambuddy printer. `registryPrinter` is `registryAsked`
+   * first, so while the view still shows the Bambuddy printer's read the old id would ride
+   * along with the asked row, and the server refuses that pair (422) rather than print on
+   * the Bambuddy printer.
+   */
+  const sentPrinterId = lanOnly.some((row) => row.id === registryPrinter) ? null : printerId
   const { askRegistry } = picker
   /**
    * No Bambuddy printer to open on, and one the LAN prints to: open on that one, once
@@ -794,7 +802,7 @@ export function PrintPicker({
   const runPrint = useRunPrint({
     source,
     choices,
-    printerId,
+    printerId: sentPrinterId,
     registryPrinter,
     selection: { ...selection, plate },
     plan,
@@ -1023,13 +1031,8 @@ export function PrintPicker({
   const checkRequest: PrintRunRequest | null =
     choices && printChoices && !noPlate
       ? {
-          // Task 9 note (#3818): `registryPrinter` is `registryAsked` first, so a LAN row
-          // asked for while the view still shows the Bambuddy printer's read pairs that
-          // row with the old `printer_id`, which `prepare_run` refuses as a mismatch until
-          // the read lands. Unreachable while the server lists no LAN printer; once a LAN-only
-          // row is choosable, send `printer_id: null` beside an asked row.
           ...(registryPrinter ? { printer: registryPrinter } : {}),
-          printer_id: printerId,
+          printer_id: sentPrinterId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
           ...plateFields(plate),
@@ -1256,7 +1259,7 @@ export function PrintPicker({
   function stepChoice(): BatchStepChoice | null {
     if (!batch || !printChoices) return null
     const request = printRunBody({
-      printerId,
+      printerId: sentPrinterId,
       registryPrinter,
       plan,
       printChoices,

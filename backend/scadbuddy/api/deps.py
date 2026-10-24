@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     PrintProgress,
     ProgressObserver,
+    lan_first,
     library_progress,
     progress_for,
 )
@@ -403,22 +404,29 @@ def _build_core(settings: Settings) -> AppState:
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # The follow links archives too (#306), so a print nobody watches is found.
-        async with client_for(settings_store.load()) as client:
-            return await progress_for(
-                client,
-                meta,
-                uploads=uploads,
-                # Load-bearing for the rack settle hook (#836): without ``links=`` a fast
-                # print's archive is never linked, so its rack use goes uncounted, and
-                # no test catches it (the P3 settle test builds its own reader).
-                links=print_links,
-                lan=lan,
-            )
+        async def bambuddy() -> PrintProgress | None:
+            async with client_for(settings_store.load()) as client:
+                return await progress_for(
+                    client,
+                    meta,
+                    uploads=uploads,
+                    # Load-bearing for the rack settle hook (#836): without ``links=`` a
+                    # fast print's archive is never linked, so its rack use goes
+                    # uncounted, and no test catches it (the P3 settle test builds its
+                    # own reader).
+                    links=print_links,
+                )
+
+        # A LAN print's follow builds no client (plan 2026-10-18 D3).
+        return await lan_first(lan, meta.id, bambuddy)
 
     async def read_library(subject: PrintSubject) -> PrintProgress | None:
         # A library print is linked by its sends (#1073).
-        async with client_for(settings_store.load()) as client:
-            return await library_progress(client, subject, print_links, uploads=uploads, lan=lan)
+        async def bambuddy() -> PrintProgress | None:
+            async with client_for(settings_store.load()) as client:
+                return await library_progress(client, subject, print_links, uploads=uploads)
+
+        return await lan_first(lan, subject.run_subject, bambuddy)
 
     return AppState(
         settings=settings,

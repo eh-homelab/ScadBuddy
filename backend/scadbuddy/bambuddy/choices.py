@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastapi import status as http
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import (
@@ -36,17 +37,26 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
 )
-from scadbuddy.bambuddy.print_run import filament_options, lan_printers, native_runs, read_status
+from scadbuddy.bambuddy.print_run import (
+    NATIVE_SLICER_UNAVAILABLE,
+    RunRoute,
+    filament_options,
+    lan_printers,
+    read_status,
+)
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.printers.hot_path import native_backends
+from scadbuddy.printers.models import PrinterRow
 from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
+from scadbuddy.spools.models import Overlay
 
 if TYPE_CHECKING:
     from scadbuddy.printers.component import Printers
@@ -243,6 +253,33 @@ async def _choices(
         last = settled(plate)
         filaments = settled(read)
         status = reading.result()
+    return _view(
+        settings,
+        catalogue,
+        ready,
+        filaments,
+        printers=printers,
+        printer_id=printer_id,
+        status=status,
+        last=last,
+        model=next((row.model for row in printers if row.id == printer_id), None),
+        remembered=remembered,
+    )
+
+
+def _view(
+    settings: StoredSettings,
+    catalogue: Catalogue,
+    ready: PrintSource,
+    filaments: FilamentOptions,
+    *,
+    printers: list[Printer],
+    printer_id: int | None,
+    status: PrinterStatus | None,
+    last: str | None,
+    model: str | None,
+    remembered: ModelPrintChoices | None,
+) -> ChoicesView:
     processes = {
         size: sorted(
             {
@@ -258,7 +295,6 @@ async def _choices(
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)
         or DEFAULT_BED
     )
-    model = next((row.model for row in printers if row.id == printer_id), None)
     bed_types = list(bed_types_for(model))
     return ChoicesView(
         printer_id=printer_id,
@@ -285,6 +321,58 @@ async def _choices(
         ),
         rack_algorithm=settings.rack_algorithm(printer_id),
         sliced=(ready.sliced_profile or SlicedProfile()) if ready.is_sliced else None,
+    )
+
+
+async def native_choices_for(
+    source: PrintSource,
+    settings: StoredSettings,
+    route: RunRoute,
+    *,
+    remembered: ModelPrintChoices | None,
+    profiles: Profiles | None,
+    rows: list[PrinterRow],
+    overlay: Overlay | None,
+    provider_labels: Mapping[str, str],
+    rack: RackUsage | None = None,
+) -> ChoicesView:
+    """:func:`choices_for` on a native run (#3818 tier A, plan 2026-10-18 D2-D5), with no
+    Bambuddy call: the printers are the registry's ``rows`` that link one, the status is
+    ``route``'s from the printer's LAN report (D4), the presets the image's (D5) and the
+    filaments the loaded trays with ``overlay`` over them (D1). No plate is preselected
+    from Bambuddy's archives: the remembered one is, as when those are unreadable."""
+    if profiles is None:
+        raise ApiError(http.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
+    assert route.row is not None and route.status is not None, "a native route is a report's"
+    status = route.status
+    ready = source
+    catalogue = await catalogue_for(None, native=profiles)
+    filaments = await filament_options(
+        None,
+        ready,
+        printer_id=route.printer_id,
+        trays_from=status,
+        overlay=overlay,
+        provider_labels=provider_labels,
+    )
+    if route.printer_id is not None:
+        await record_seen(rack, route.printer_id, status)
+    printers = [
+        Printer(id=row.bambuddy_printer_id, name=row.name, model=row.model)
+        for row in rows
+        if row.bambuddy_printer_id is not None and row.bambuddy_active
+    ]
+    return _view(
+        settings,
+        catalogue,
+        ready,
+        filaments,
+        printers=printers,
+        printer_id=route.printer_id,
+        status=status,
+        last=None,
+        model=route.row.model,
+        remembered=remembered,
     )
 
 
@@ -343,8 +431,8 @@ async def with_lan_printers(
     view: ChoicesView, settings: StoredSettings, printers: Printers | None
 ) -> ChoicesView:
     """``view`` with the registry printers a run would reach over the LAN (#3818)."""
-    if not native_runs(settings) or printers is None:
-        # Nothing on the native path: the registry is not read (none until Task 9).
+    if not native_backends(settings) or printers is None:
+        # No run is native on these backends (D2): the registry is not read.
         return view
     rows = await lan_printers(settings, printers.store, printers.reports)
     return view.model_copy(update={"lan_printers": rows})

@@ -69,6 +69,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from fastapi import status as http
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -100,6 +101,7 @@ from scadbuddy.bambuddy.models import (
     SpoolAssignment,
 )
 from scadbuddy.bambuddy.trays import tray_label, tray_material_colour, tray_of_spool_id
+from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import FilamentMap
 
 #: ``NozzleVolumeType`` as Bambu Studio numbers it (``PrintConfig.cpp``).
@@ -350,7 +352,7 @@ def plan_inputs(
 
 
 async def plan_for(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     status: PrinterStatus | None,
     printer_id: int,
     plan: FilamentPlan,
@@ -363,6 +365,13 @@ async def plan_for(
     plan."""
     if _offered_sides(status, nozzles) is None or not plan.slots:
         return None
-    spools, assignments = inventory if inventory is not None else await read_inventory(client)
+    if inventory is None:
+        if client is None:
+            raise ApiError(
+                http.HTTP_500_INTERNAL_SERVER_ERROR,
+                "the inventory is Bambuddy's, and a native run has no client to read it",
+            )
+        inventory = await read_inventory(client)
+    spools, assignments = inventory
     inputs = plan_inputs(plan, spools, assignments, status, printer_id)
     return plan_nozzles(status, nozzles, inputs, by_hand)

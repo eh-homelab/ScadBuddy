@@ -42,6 +42,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     PrintProgress,
     ProgressObserver,
+    lan_first,
     library_progress,
     progress_for,
 )
@@ -988,7 +989,7 @@ class ApiUrlMissingError(ValueError):
     pass
 
 
-async def _given(library: LibraryReads) -> LibraryReads | None:
+async def _given(library: RemoteLibrary) -> RemoteLibrary | None:
     return library
 
 
@@ -1032,13 +1033,19 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # As the API's: the follow links archives too (#306), which the rack's settle
-        # hook needs (#836).
-        async with client_for(settings_store.load()) as client:
-            return await progress_for(client, meta, uploads=uploads, links=links, lan=lan)
+        # hook needs (#836). A LAN print's follow builds no client (plan 2026-10-18 D3).
+        async def bambuddy() -> PrintProgress | None:
+            async with client_for(settings_store.load()) as client:
+                return await progress_for(client, meta, uploads=uploads, links=links)
+
+        return await lan_first(lan, meta.id, bambuddy)
 
     async def read_library(subject: PrintSubject) -> PrintProgress | None:
-        async with client_for(settings_store.load()) as client:
-            return await library_progress(client, subject, links, uploads=uploads, lan=lan)
+        async def bambuddy() -> PrintProgress | None:
+            async with client_for(settings_store.load()) as client:
+                return await library_progress(client, subject, links, uploads=uploads)
+
+        return await lan_first(lan, subject.run_subject, bambuddy)
 
     follower = Follower(
         outputs=outputs,
@@ -1062,6 +1069,10 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         library=partial(_given, library),
         native_slices=NativeSliceStore(pool),
         native=native,
+        # A native printer's background slice is decided on its registry row, as the
+        # run is (plan 2026-10-18 D2).
+        printers=printers,
+        reports=reports,
     )
     printing = PrintActivities(
         PrintDeps(

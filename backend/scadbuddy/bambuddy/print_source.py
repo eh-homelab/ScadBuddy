@@ -117,7 +117,12 @@ class PrintSource(Protocol):
         overrides; none for a file ScadBuddy did not render."""
         ...
 
-    async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
+    async def plate_ids(self, client: BambuddyClient | None) -> list[int]: ...
+
+    @property
+    def native(self) -> NativeCopies | None:
+        """ScadBuddy's own library, which a native run's copy goes into (#3818 tier A)."""
+        ...
 
     @property
     def slices_whole_file(self) -> bool:
@@ -157,20 +162,20 @@ class PrintSource(Protocol):
         which prints as it is."""
         ...
 
-    async def fetched_3mf(self, client: BambuddyClient) -> bytes | None:
+    async def fetched_3mf(self, client: BambuddyClient | None) -> bytes | None:
         """:meth:`fetch_3mf`, read once for the source and kept: what a check that also
         reads the file (#956) reads, rather than download it again (#2976)."""
         ...
 
-    async def states_nozzles(self, client: BambuddyClient) -> bool:
+    async def states_nozzles(self, client: BambuddyClient | None) -> bool:
         """Whether the file sliced states the side the slicer may use (#834) and each
         side's flow (#484), as chosen: anything but a 3MF nothing can be stated into
         (:func:`~scadbuddy.bambuddy.send.nozzles_stated`)."""
         ...
 
-    async def file_to_read(self, client: BambuddyClient) -> ReadFile: ...
+    async def file_to_read(self, client: BambuddyClient | None) -> ReadFile: ...
 
-    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+    async def file_read_already(self, client: BambuddyClient | None) -> ReadFile | None:
         """:meth:`file_to_read` when Bambuddy has it without an upload, else ``None``:
         what the print check reads slots from, since it uploads nothing (#1050)."""
         ...
@@ -228,6 +233,14 @@ def _misuse(message: str) -> ApiError:
     non-retryable (`raised_as`), so it fails the run once rather than being retried to
     the end of the policy as a `TypeError` would (#4312 review M6)."""
     return ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, message)
+
+
+def bambuddy_client(client: BambuddyClient | None) -> BambuddyClient:
+    """``client`` where only Bambuddy can answer: a native run builds none (#3818 tier A,
+    plan 2026-10-18 D3), so reaching here on one is a caller's mistake (`_misuse`)."""
+    if client is None:
+        raise _misuse("a Bambuddy read was reached on a native run, which has no client")
+    return client
 
 
 MAX_RECORDED_SLICES = 3
@@ -378,10 +391,10 @@ class PrintPipeline:
         assert self.settings is not None, "a source that reads or prints needs the settings"
         return self.uploads, self.settings
 
-    async def states_nozzles(self: _Fetching, client: BambuddyClient) -> bool:
+    async def states_nozzles(self: _Fetching, client: BambuddyClient | None) -> bool:
         return (await PrintPipeline._fetch(self, client)).stated
 
-    async def fetched_3mf(self: _Fetching, client: BambuddyClient) -> bytes | None:
+    async def fetched_3mf(self: _Fetching, client: BambuddyClient | None) -> bytes | None:
         return (await PrintPipeline._fetch(self, client)).payload
 
     async def recorded_slice(
@@ -442,15 +455,17 @@ class PrintPipeline:
             await _forget_slice(uploads, self.subject.run_subject, sliced.id)
         return None
 
-    async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:
+    async def file_to_read(self: _Fetching, client: BambuddyClient | None) -> ReadFile:
         uploads, settings = PrintPipeline._stores(self)
-        copy = await copy_to_read(client, uploads, PrintPipeline._printable(self, client), settings)
+        copy = await copy_to_read(
+            bambuddy_client(client), uploads, PrintPipeline._printable(self, client), settings
+        )
         return ReadFile(copy.id, own_colours=list(self.colours) if copy.recolored else None)
 
-    async def file_read_already(self: _Fetching, client: BambuddyClient) -> ReadFile | None:
+    async def file_read_already(self: _Fetching, client: BambuddyClient | None) -> ReadFile | None:
         uploads, settings = PrintPipeline._stores(self)
         copy = await recorded_copy_to_read(
-            client, uploads, PrintPipeline._printable(self, client), settings
+            bambuddy_client(client), uploads, PrintPipeline._printable(self, client), settings
         )
         if copy is None:
             return None
@@ -719,14 +734,14 @@ class OutputSource(PrintPipeline):
     def sliced_profile(self) -> SlicedProfile | None:
         return None
 
-    async def plate_ids(self, client: BambuddyClient) -> list[int]:
+    async def plate_ids(self, client: BambuddyClient | None) -> list[int]:
         payload = await self._own_3mf()
         return [plate.index for plate in plates_of(io.BytesIO(payload))]
 
     async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None:
         return await self._own_3mf()
 
-    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+    async def file_to_read(self, client: BambuddyClient | None) -> ReadFile:
         """The slots are the output's own 3MF's (#2720): reading them needs no copy in
         Bambuddy, whose upload (the 3MF laid out for the printer) kept an output's first
         dialog waiting ~20 s. Every copy of the output has the same slots. Only a 3MF
@@ -735,7 +750,7 @@ class OutputSource(PrintPipeline):
             return ReadFile(None)
         return await PrintPipeline.file_to_read(self, client)
 
-    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+    async def file_read_already(self, client: BambuddyClient | None) -> ReadFile | None:
         if await self.read_local() is not None:
             return ReadFile(None)
         return await PrintPipeline.file_read_already(self, client)
@@ -1001,17 +1016,17 @@ class LibrarySource(PrintPipeline):
     def _reads(self, client: BambuddyClient | None) -> LibraryReads:
         return reads_of(self.files, client)
 
-    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+    async def file_to_read(self, client: BambuddyClient | None) -> ReadFile:
         """A native file's slots read from the file itself need no copy in Bambuddy (as
         an output's, #2720); one with no 3MF to upload is read from its raw copy."""
         if self.origin_id is None:
             if self.local is not None:
                 return ReadFile(None)
             if (await PrintPipeline._fetch(self, client)).payload is None:
-                return ReadFile(await self.raw_copy(client, None))
+                return ReadFile(await self.raw_copy(bambuddy_client(client), None))
         return await PrintPipeline.file_to_read(self, client)
 
-    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+    async def file_read_already(self, client: BambuddyClient | None) -> ReadFile | None:
         if self.origin_id is None and self.local is not None:
             return ReadFile(None)
         return await PrintPipeline.file_read_already(self, client)
@@ -1046,7 +1061,7 @@ class LibrarySource(PrintPipeline):
             write=write,
         )
 
-    async def plate_ids(self, client: BambuddyClient) -> list[int]:
+    async def plate_ids(self, client: BambuddyClient | None) -> list[int]:
         return list(self.plates)
 
     async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None:

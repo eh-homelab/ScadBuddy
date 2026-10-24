@@ -26,7 +26,7 @@ from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for, maybe_client
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
     SliceLostError,
@@ -39,24 +39,28 @@ from scadbuddy.bambuddy.output_reader import OutputNaming, OutputReader, invalid
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
+    NATIVE_SLICER_UNAVAILABLE,
     PlannedRun,
     PreparedPlates,
     PrintRunRequest,
     PrintRunResult,
     QueuedPlate,
     ResolvedProject,
+    RunPath,
     RunRefusalError,
+    ensured_route,
     finish_run,
-    native_runs,
     plan_run,
     prepare_run,
     queue_plate,
     resolve_project,
+    run_route,
 )
 from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     OutputSource,
     PrintSource,
+    bambuddy_client,
     given_filaments,
 )
 from scadbuddy.bambuddy.progress import ProgressObserver
@@ -70,9 +74,11 @@ from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, reads_for
+from scadbuddy.printers.hot_path import hot_path_native, native_backends
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsage
+from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.start import NativeSliceStarter
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -166,9 +172,10 @@ class PrintDeps:
     #: The native slicer's starter (plan 2026-10-16 Task 13): ``print_plan`` keys a
     #: reprint's reuse by it. ``None`` outside the image, where a native run is a 503.
     native: NativeSliceStarter | None = None
-    #: Whether a run is on the native path (#3818 tier A, D2): `native_runs`, which the
+    #: Whether a run whose row resolved to a path is native (#3818 tier A, D2):
+    #: `hot_path_native`, read per run from the settings as they are then, which the
     #: dialog's `ChoicesView.lan_printers` is read from too; a test may set its own.
-    native_run: Callable[[StoredSettings, PrintRunRequest], bool] = native_runs
+    native_run: Callable[[StoredSettings, RunPath], bool] = hot_path_native
     #: The printer registry and its LAN reports (#3823, plan 2026-10-16 Task 8): the
     #: check names the run's row and chooses its path. ``None`` runs as before it.
     printers: PrinterStore | None = None
@@ -211,7 +218,7 @@ class PrintActivities:
         return self.d.settings_store.load()
 
     async def _source(
-        self, client: BambuddyClient, spec: SourceSpec, settings: StoredSettings
+        self, client: BambuddyClient | None, spec: SourceSpec, settings: StoredSettings
     ) -> PrintSource:
         if spec.kind == "library":
             assert spec.file_id is not None
@@ -243,6 +250,14 @@ class PrintActivities:
             native=self.d.library,
         )
 
+    async def _title(self, spec: SourceSpec) -> str | None:
+        """An output's template title, which names the native folder its copy is filed in
+        (D6); none for a library file, whose copy goes to the top level."""
+        if spec.kind != "output" or spec.output_id is None:
+            return None
+        meta = await require(self.d.outputs, spec.output_id)
+        return (await self.d.outputs.naming(meta)).title
+
     async def _recording_source(self, spec: SourceSpec) -> PrintSource:
         """The source as recording and remembering need it. Neither reads anything of a
         library file, nor the settings, so nothing is read back from Bambuddy for one: a
@@ -264,18 +279,50 @@ class PrintActivities:
             raise ApplicationError(UNWAITED.detail, UNWAITED, type=REFUSED, non_retryable=True)
         settings = self._settings()
         spec = input.source
-        native = self.d.native_run(settings, input.request)
+        request = input.request
         try:
+            # The row and its path first, from the registry alone (D2, D3): whether the
+            # run builds a Bambuddy client at all is decided by it.
+            route = await run_route(
+                settings,
+                self.d.printers,
+                self.d.reports,
+                printer=request.printer,
+                printer_id=request.printer_id,
+                decide=self.d.native_run,
+            )
+            if route.row is None and route.printer_id is not None and native_backends(settings):
+                # A printer the registry has no row for yet: its row is made (or a
+                # LAN-linked one merged) first, so its first run takes that row's path.
+                async with client_for(settings) as client:
+                    route = await ensured_route(
+                        client,
+                        settings,
+                        self.d.printers,
+                        self.d.reports,
+                        route,
+                        decide=self.d.native_run,
+                    )
+            native = route.native
             if native:
                 # D6: refused before anything is read or recorded.
-                if input.request.project_id is not None:
+                if request.project_id is not None:
                     raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, NATIVE_PROJECT_REFUSAL)
                 if self.d.library is None:
                     raise ApiError(
                         status.HTTP_503_SERVICE_UNAVAILABLE,
                         "a native print needs ScadBuddy's own library, which does not serve",
                     )
-            async with client_for(settings) as client:
+                if spec.kind == "library" and not is_native_id(spec.file_id or 0):
+                    # A Bambuddy-range file has no native copy to read (the misuse guards'
+                    # 500 further on): refused here, as the request's mistake.
+                    raise ApiError(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        f"Library file {spec.file_id} is in Bambuddy's library, which a"
+                        " print over the LAN does not read. Print it from ScadBuddy's own"
+                        " library, or set the printer's path to Bambuddy.",
+                    )
+            async with maybe_client(settings, native=native) as client:
                 # An output's naming, which names its copy below; none for a library file.
                 naming: OutputNaming | None = None
                 if spec.kind == "output":
@@ -293,7 +340,7 @@ class PrintActivities:
                 project = ResolvedProject(
                     project_id=None
                     if native
-                    else await resolve_project(client, input.request, settings)
+                    else await resolve_project(bambuddy_client(client), request, settings)
                 )
                 if naming is not None:
                     spec = spec.model_copy(
@@ -307,24 +354,39 @@ class PrintActivities:
                     client,
                     source,
                     settings,
-                    input.request,
+                    request,
                     rack=self.d.rack,
                     project=project,
                     native=self.d.library if native else None,
                     printers=self.d.printers,
                     reports=self.d.reports,
+                    catalogue=self._native_catalogue() if native else None,
+                    route=route,
                 )
                 checked = PreparedPlates.of(prepared)
                 if checked.path == "native" and not native:
-                    # Until native runs are on (hot-path plan Task 9), a row whose own
-                    # path is the LAN still prints through Bambuddy, as before Task 9.
+                    # The row's own path is the LAN, but the stored backends are not the
+                    # hot path's (D2): it prints through Bambuddy, as before Task 9.
                     checked = checked.model_copy(update={"path": "bambuddy"})
                 if checked.path == "native":
-                    _one_lan_print(checked.plate_ids, input.request)
+                    _one_lan_print(checked.plate_ids, request)
                     checked = checked.model_copy(update={"lan_start": True})
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
         return Checked(source=spec, prepared=checked)
+
+    def _native_catalogue(self) -> Callable[[], Coroutine[Any, Any, Any]]:
+        """The image's presets, which a native run resolves against (D5); a 503 where
+        the image's profiles are not installed."""
+        starter = self.d.native
+        if starter is None:
+            raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
+        profiles = starter.profiles
+
+        async def read() -> Any:
+            return await catalogue_for(None, native=profiles)
+
+        return read
 
     @activity.defn(name="print_insert")
     async def insert(self, input: InsertInput) -> PrintRun:
@@ -348,8 +410,10 @@ class PrintActivities:
     async def plan(self, input: PlanInput) -> PlannedRun:
         """The upload and every plate resolved; nothing sliced yet."""
         settings = self._settings()
+        # The check's decision (`lan_start`, D2): a native run builds no client (D3).
+        native = input.accepted.prepared.lan_start
         try:
-            async with client_for(settings) as client:
+            async with maybe_client(settings, native=native) as client:
                 source = await self._source(client, input.accepted.source, settings)
                 planned = await heartbeating(
                     plan_run(
@@ -359,6 +423,7 @@ class PrintActivities:
                         input.input.request,
                         input.accepted.prepared,
                         native=self.d.native,
+                        title=await self._title(input.accepted.source) if native else None,
                     )
                 )
                 if planned.lan_start and planned.copies > 1:
