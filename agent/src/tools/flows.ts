@@ -96,7 +96,8 @@ export const flowTools: Tool[] = [
       'approvals (omit for the global setting). With `inputs_schema`, each run takes typed inputs, which the ' +
       "script reads with `inputs()` (a TypedDict `FlowInputs`, defaults filled in); a 422 lists the schema's " +
       'problems with `file` inputs.json. `trigger()` returns the event a flow trigger started the run on ' +
-      "({kind: 'model.changed', slug, commit} or {kind: 'render.finished', slug, job_id}), or None.",
+      "({kind: 'model.changed', slug, commit}, {kind: 'render.finished', slug, job_id}, or " +
+      "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}; narrow by `kind`), or None.",
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),

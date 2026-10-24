@@ -9,7 +9,7 @@ import asyncio
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -18,7 +18,12 @@ from temporalio.client import Client, ScheduleActionStartWorkflow, ScheduleOverl
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import flow_triggers as routes
-from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR, transactional_events
+from scadbuddy.bambuddy.follow import Follower
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_run import PrintRunResult
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import EventBus, JobEvent, VersionCommitted
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.fire import ensure_trigger_schedules
@@ -659,7 +664,9 @@ READS_EVENT = script(
     "    return 'none'",
     "if t['kind'] == 'model.changed':",
     "    return [t['kind'], t['slug'], t['commit']]",
-    "return [t['kind'], t['slug'], t['job_id']]",
+    "if t['kind'] == 'render.finished':",
+    "    return [t['kind'], t['slug'], t['job_id']]",
+    "return [t['kind'], t['slug'], t['run_id']]",
 )
 
 
@@ -688,6 +695,100 @@ def test_a_run_reads_the_event_that_started_it(
     assert results[changed["id"]] == "result: ['model.changed', 'box', 'c9']"
     assert results[rendered["id"]] == "result: ['render.finished', 'lid', 'j9']"
     assert results[scheduled["id"]] == "result: 'none'"
+
+
+READS_PRINT = script(
+    "t = await trigger()",
+    "if t is not None and (t['kind'] == 'print.finished' or t['kind'] == 'print.failed'):",
+    "    return [t['kind'], t['slug'], t['run_id'], t['output_id']]",
+    "return 'none'",
+)
+
+
+@pytest.mark.usefixtures("triggers")
+def test_one_print_failing_on_two_replicas_starts_one_print_failed_run(
+    app: FastAPI, client: TestClient
+) -> None:
+    """#2665: two replicas follow one print to its failed settle. Its outcome is recorded
+    once, so one ``print.outcome`` is heard, and it fires ``print.failed``'s trigger once
+    and ``print.finished``'s not at all."""
+    state = getattr(app.state, STATE_ATTR)
+    subject = PrintSubject.library(7)
+    runs = state.print_runs.store
+
+    async def queue_the_print() -> None:
+        await runs.insert_accepted(
+            "pr1",
+            subject=subject,
+            key="k-pr1",
+            slug="library-7",
+            workflow_id="print-pr1",
+            workflow_run_id="w1",
+            retention=None,
+        )
+        await runs.succeed(
+            "pr1", "library-7", PrintRunResult(library_file_id=7, copies=1, queue_item_ids=[51])
+        )
+
+    asyncio.run(queue_the_print())
+    definition = register(client, READS_PRINT)
+    failed = create(
+        client,
+        definition["id"],
+        schedule=None,
+        event={"kind": "print.failed", "slug": "library-7"},
+    )
+    finished = create(client, definition["id"], schedule=None, event={"kind": "print.finished"})
+    read = PrintProgress(
+        route="slice_queue",
+        stage="failed",
+        settled=True,
+        queue_item_id=51,
+        error_message="Nozzle clog",
+        bambuddy_url="http://bambuddy.test/queue",
+    )
+
+    async def read_library(_: PrintSubject) -> PrintProgress:
+        return read
+
+    async def no_output(_: Any) -> None:
+        raise AssertionError("an output read")
+
+    def replica() -> Follower:
+        return Follower(
+            outputs=cast(Any, None),
+            observer=ProgressObserver(None),
+            read=no_output,
+            read_library=read_library,
+            events=None,
+            record_outcome=PrintOutcomeStore(
+                state.projection.pool, transactional_events(state.events)
+            ).record,
+        )
+
+    async def both() -> list[str]:
+        replicas = [replica(), replica()]
+        return list(
+            await asyncio.gather(
+                *(r.follow(subject.run_subject, r.now(), read_now=True) for r in replicas)
+            )
+        )
+
+    assert asyncio.run(both()) == ["settled", "settled"]
+    fired = decided(client, failed["id"], 1)
+    assert fired["outcome"] == "started", fired
+    assert fired["event"] == {
+        "kind": "print.failed",
+        "slug": "library-7",
+        "run_id": "pr1",
+        "output_id": "library:7",
+        "printer": None,
+    }
+    run = until(client, fired["run_id"], lambda v: v["status"] == "succeeded")
+    assert run["run"]["result"] == "result: ['print.failed', 'library-7', 'pr1', 'library:7']"
+    time.sleep(1)
+    assert len(view(client, failed["id"])["fires"]) == 1
+    assert view(client, finished["id"])["fires"] == []
 
 
 @pytest.mark.usefixtures("triggers")
