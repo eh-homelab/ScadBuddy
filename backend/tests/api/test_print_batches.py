@@ -61,7 +61,8 @@ def _no_background_prune(monkeypatch: pytest.MonkeyPatch) -> None:
     """The app's prune Schedule runs once at boot whatever the sweep interval, and its
     claims sweep prunes the batches on this test's schema at any point of the test
     (#4639): it pruned the batch a test had aged before the test's own prune could, and
-    deadlocked with an outcome. These tests run the prune themselves."""
+    deadlocked with an outcome. These tests run the prune themselves. The stub is the
+    claims sweep's too, so no test here may rely on claims being swept (#4640 review)."""
 
     async def no_sweep(_state: object) -> None:
         return None
