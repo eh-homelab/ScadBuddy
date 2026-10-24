@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -186,6 +187,38 @@ if TYPE_CHECKING:
     from scadbuddy.slicing.start import NativeSliceStarter
 
 logger = logging.getLogger(__name__)
+
+#: How often a check that runs out of memory logs its traceback, per subject (#4632):
+#: the dialog checks again on every change, so a file too large to hold here would log
+#: the same stack each time. Between two, it logs one line.
+OUT_OF_MEMORY_TRACEBACK_INTERVAL = 600.0
+#: When each subject's last traceback was logged, by `time.monotonic()`.
+_out_of_memory_logged: dict[str, float] = {}
+#: What those times are read from; a test sets its own.
+_clock = time.monotonic
+
+
+def _log_out_of_memory(subject: str, where: str) -> None:
+    """Log a check's `MemoryError` (#4598): with its traceback at most once per
+    :data:`OUT_OF_MEMORY_TRACEBACK_INTERVAL` per subject, else one line. Called inside
+    the ``except``, so the traceback is the error being handled."""
+    now = _clock()
+    last = _out_of_memory_logged.get(subject)
+    traceback = last is None or now - last >= OUT_OF_MEMORY_TRACEBACK_INTERVAL
+    if traceback:
+        _out_of_memory_logged[subject] = now
+    logger.warning(
+        "print check ran out of memory %s",
+        where,
+        extra={"subject": subject, "traceback_logged": traceback},
+        exc_info=traceback,
+    )
+
+
+def forget_out_of_memory_logs() -> None:
+    """Forget when each traceback was logged: each test starts with none."""
+    _out_of_memory_logged.clear()
+
 
 #: The three rack fallbacks that swallow an exception and log only its type (§7). Named
 #: so the test guard reads these, not copies of them (#1081, #1086 review).
@@ -1000,7 +1033,7 @@ async def check_print(
             # As the layout's read below (#4576 review): a read of the file that runs out
             # of memory is the check's refusal, never a 500. Logged, as the allocation
             # that failed may not have been a read of the file.
-            logger.warning("print check ran out of memory preparing the run", exc_info=True)
+            _log_out_of_memory(source.subject.key, "preparing the run")
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     if laying_out is None:
@@ -1016,7 +1049,7 @@ async def check_print(
         if isinstance(error, MemoryError):
             # The file too large to hold here (#4562 review): refused as a read of it is,
             # saying how to bound it, never a 500.
-            logger.warning("print check ran out of memory laying out the file", exc_info=True)
+            _log_out_of_memory(source.subject.key, "laying out the file")
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     inventory = await reading if reading is not None else None

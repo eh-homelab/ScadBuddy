@@ -271,6 +271,7 @@ class _Fetching(Protocol):
     native: NativeCopies | None
     _fetching: asyncio.Future[_Fetched] | None
     _waiting: int
+    _fetch_client: BambuddyClient | None
 
     async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None: ...
 
@@ -375,6 +376,10 @@ class PrintPipeline:
     )
     #: How many readers wait on :attr:`_fetching`: the last to go away stops it.
     _waiting: int = field(default=0, init=False, repr=False, compare=False)
+    #: The client :attr:`_fetching` runs on: every reader must hand in the same one.
+    _fetch_client: BambuddyClient | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     async def _fetch(self: _Fetching, client: BambuddyClient | None) -> _Fetched:
         """:meth:`fetch_3mf`, made once per source and shared. Any failure is kept as its
@@ -385,12 +390,17 @@ class PrintPipeline:
         A fetch whose every reader was cancelled (a check refused first) is stopped, and
         the next reader starts anew.
 
-        The fetch runs on the first reader's ``client``, which must outlive it: every
-        caller today hands in the one client of its request or activity."""
+        The fetch runs on the first reader's ``client``, which must outlive it, so every
+        reader must hand in that same client (asserted): every caller today hands in the
+        one client of its request or activity."""
         fetching = self._fetching
         if fetching is None:
             fetching = asyncio.ensure_future(_fetch_once(self, client))
             self._fetching = fetching
+            self._fetch_client = client
+        # The contract above, checked: a reader with a client of its own could see the
+        # fetch fail when the first reader's client closed (#4623 review).
+        assert client is self._fetch_client, "every reader of a source shares its client"
         self._waiting += 1
         try:
             # Shielded: one reader cancelled does not cancel the fetch the others wait on.
