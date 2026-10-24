@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import re
 import shutil
@@ -42,6 +43,7 @@ from scadbuddy.bambuddy.filaments3mf import (
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_source import (
     SLICED_TYPE,
+    FetchedBytes,
     LibrarySource,
     ReadOutOfMemoryError,
     SpoolFullError,
@@ -242,11 +244,15 @@ async def library_filaments(
     budget: ReadBudget | None = None,
     downloads: DownloadCache | None = None,
     files: LibraryReads | None = None,
+    *,
+    fetched: FetchedBytes | None = None,
 ) -> LocalFilaments | None:
     """The filament slots of library file ``file``, read from the file itself (#2550):
     from the cache when its preview, or an earlier read, fetched the same bytes, else
-    from a download of it. ``None`` for a file ScadBuddy cannot read them from (not a
-    3MF, unreadable, too large for the volume), which Bambuddy is then asked about."""
+    from ``fetched``, a download the caller makes anyway (the check's, #4495), else from
+    a download of it; a read is cached either way. ``None`` for a file ScadBuddy cannot
+    read them from (not a 3MF, unreadable, too large for the volume), which Bambuddy is
+    then asked about."""
     file_type = (file.file_type or "").lower()
     if file_type not in ("3mf", SLICED_TYPE):
         return None
@@ -260,6 +266,18 @@ async def library_filaments(
         if cached is not None:
             await asyncio.to_thread(_hit, path)
             return cached
+    if fetched is not None and file_type == "3mf":
+        try:
+            held = await fetched()
+            if held is not None:
+                return await _keep_filaments(cache, file, io.BytesIO(held), budget)
+        except MemoryError:
+            # As the spool's below: read from disk instead (#4553 review).
+            logger.warning(
+                "could not hold the library file to read its filament slots",
+                extra={"library_file_id": file.id},
+            )
+        # Not held (past MAX_DOWNLOAD_BYTES, or out of memory): read from disk.
     source = LibrarySource(
         file_id=file.id,
         colours=[],

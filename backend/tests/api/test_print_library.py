@@ -1353,6 +1353,27 @@ def test_a_library_files_check_fetches_the_file_once(
 
 
 @respx.mock
+def test_a_checks_slots_are_cached_so_a_check_refused_early_downloads_nothing(
+    client: TestClient,
+) -> None:
+    """#4553 review: the slots read from the check's fetch are cached, and a later check
+    reads them there, so one that ends before it fetches (no printer) downloads nothing,
+    as before #4495."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    run_routes()
+
+    first = client.post("/api/v1/print/library/89/check", json=body())
+    assert first.status_code == 200, first.text
+    assert download.call_count == 1
+
+    unprinted = client.post("/api/v1/print/library/89/check", json={**body(), "printer_id": None})
+    assert unprinted.status_code == 200, unprinted.text
+    assert download.call_count == 1
+
+
+@respx.mock
 def test_a_check_of_a_file_too_large_to_fetch_still_reads_its_slots_from_the_file(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

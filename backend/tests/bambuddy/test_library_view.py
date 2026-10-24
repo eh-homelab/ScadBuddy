@@ -297,6 +297,46 @@ async def test_every_read_of_one_files_bytes_downloads_it_once(
 
 
 @respx.mock
+async def test_slots_are_read_from_a_callers_fetch_and_cached(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4495, #4553 review: on a miss the slots are read from the bytes the caller
+    fetched, with no download of their own, and cached for the next read."""
+    content = two_colour_3mf(tmp_path)
+    download = library_file(7, content)
+    file = await bambuddy.library_file(7)
+
+    async def fetched() -> bytes:
+        return content
+
+    cache = tmp_path / "cache"
+    assert await library_filaments(bambuddy, cache, file, fetched=fetched)
+    assert not download.called
+
+    async def unread() -> bytes:
+        raise AssertionError("the cached slots are read before any fetch")
+
+    assert await library_filaments(bambuddy, cache, file, fetched=unread)
+    assert not download.called
+
+
+@respx.mock
+async def test_a_fetch_out_of_memory_reads_the_slots_from_disk(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4553 review: as the spool's own, a fetch that runs out of memory is not the
+    read's failure; the file is downloaded to disk and read there."""
+    download = library_file(7, two_colour_3mf(tmp_path))
+    file = await bambuddy.library_file(7)
+
+    async def out_of_memory() -> bytes:
+        raise MemoryError
+
+    assert await library_filaments(bambuddy, tmp_path / "cache", file, fetched=out_of_memory)
+    assert download.call_count == 1
+
+
+@respx.mock
 async def test_bytes_that_are_not_the_stated_hash_are_read_but_never_kept(
     bambuddy: BambuddyClient, tmp_path: Path
 ) -> None:
