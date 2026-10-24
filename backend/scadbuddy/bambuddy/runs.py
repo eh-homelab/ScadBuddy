@@ -590,9 +590,11 @@ class RecentRuns:
         self._kept: dict[str, tuple[float, PrintRun | None]] = {}
         # `heard` runs on the publishing thread, `latest` on the loop.
         self._lock = threading.Lock()
-        #: Per subject, how many of its ``print.run`` events were heard: a read that
-        #: spans one may answer the run before it, so it is not kept.
-        self._heard: dict[str, int] = {}
+        #: How many ``print.run`` events were heard, of any subject: a read that spans
+        #: one may answer the run before it, so it is not kept. One counter, not one per
+        #: subject, so nothing has to be evicted to bound it, and no eviction can make a
+        #: read that spanned an event look as if it had not (#4566 review).
+        self._heard = 0
 
     async def latest(self, run_subject: str) -> PrintRun | None:
         now = self.clock()
@@ -600,10 +602,10 @@ class RecentRuns:
             kept = self._kept.get(run_subject)
             if kept is not None and now - kept[0] < self.ttl:
                 return kept[1]
-            heard = self._heard.get(run_subject, 0)
+            heard = self._heard
         run = await self.runs.latest_for_output(run_subject)
         with self._lock:
-            if self._heard.get(run_subject, 0) != heard:
+            if self._heard != heard:
                 return run
             if len(self._kept) >= self.capacity:
                 self._kept = {k: v for k, v in self._kept.items() if now - v[0] < self.ttl}
@@ -616,9 +618,7 @@ class RecentRuns:
             return
         with self._lock:
             self._kept.pop(event.output_id, None)
-            if len(self._heard) >= self.capacity:
-                self._heard.clear()
-            self._heard[event.output_id] = self._heard.get(event.output_id, 0) + 1
+            self._heard += 1
 
 
 async def read_latest(latest: LatestRun, run_subject: str) -> PrintRun | None:

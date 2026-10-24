@@ -26,7 +26,6 @@ from scadbuddy import worker as worker_module
 from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
-from scadbuddy.bambuddy.runs import RecentRuns
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import OperationKind
@@ -51,6 +50,7 @@ from scadbuddy.workflows.operation_models import (
 )
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.slicing.conftest import PROFILES
+from tests.support.recent_runs import assert_hears, record_recent_runs
 from tests.support.temporal import temporal_client
 from tests.test_worker import _healthy
 
@@ -142,14 +142,24 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
         assert print_deps.printers is not None and print_deps.reports is not None
-        # #4541: a subject's print.run drops the follow's kept newest run.
-        assert any(
-            getattr(listener, "__func__", None) is RecentRuns.heard
-            for listener in deps.events.local._listeners
-        )
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()
+
+
+@pytest.mark.requires_postgres
+async def test_a_print_run_through_the_workers_bus_drops_the_follows_kept_run(
+    pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4541: a subject's print.run drops the follow's kept newest run."""
+    built = record_recent_runs(monkeypatch, worker_module)
+    deps = await asyncio.to_thread(build_print_deps, print_settings(pg_conninfo, tmp_path))
+    try:
+        [recent] = built
+        await deps.events.start()
+        await assert_hears(recent, deps.events)
+    finally:
+        await deps.aclose()
 
 
 class Library:
