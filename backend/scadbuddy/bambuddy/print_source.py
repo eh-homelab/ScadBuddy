@@ -377,10 +377,16 @@ class PrintPipeline:
     _waiting: int = field(default=0, init=False, repr=False, compare=False)
 
     async def _fetch(self: _Fetching, client: BambuddyClient | None) -> _Fetched:
-        """:meth:`fetch_3mf`, made once per source and shared. Its failure is kept as its
-        answer: a fetch that ran out of memory (#4571 review) fails every reader at once,
-        never downloads the file again to run out again. A fetch whose every reader was
-        cancelled (a check refused first) is stopped, and the next reader starts anew."""
+        """:meth:`fetch_3mf`, made once per source and shared. Any failure is kept as its
+        answer, not only running out of memory (#4571 review: every reader fails at once,
+        and none downloads the file again to run out again): a transient Bambuddy error
+        fails every later reader too. That holds because a source is built per request or
+        activity attempt; one reused across attempts would need a failure to be retried.
+        A fetch whose every reader was cancelled (a check refused first) is stopped, and
+        the next reader starts anew.
+
+        The fetch runs on the first reader's ``client``, which must outlive it: every
+        caller today hands in the one client of its request or activity."""
         fetching = self._fetching
         if fetching is None:
             fetching = asyncio.ensure_future(_fetch_once(self, client))

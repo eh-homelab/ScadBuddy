@@ -288,7 +288,7 @@ def _load(path: Path) -> tuple[float, Catalogue] | None:
     """The kept catalogue and its age in seconds; ``None`` when there is none to read.
 
     A file that cannot be read when this process holds what it last read of it (parsed
-    here, or read fresh and kept, :func:`_hold`) answers that, its age unknown and so
+    here, or read fresh, :func:`_hold`) answers that, its age unknown and so
     past :data:`CATALOGUE_TTL`, so the open reads again behind it (#4528): a check on
     prod waited seconds on a fresh read with the file on the shared volume."""
     try:
@@ -318,9 +318,25 @@ def _load(path: Path) -> tuple[float, Catalogue] | None:
 
 def _hold(path: Path, catalogue: Catalogue) -> None:
     """Hold ``catalogue``, just read fresh, as this process's last read of ``path``
-    (#4528). Under no file's mtime, so the next open that reads the file parses it."""
+    (#4528), under the mtime its file has now: once kept, the file it wrote, so the next
+    open does not parse it back; not kept, the older file left there (#4623 review), so
+    the fresh read is what answers until a refresh replaces that file; no file, none.
+    Another replica that renames its own read in between is held under ours, which is
+    the same catalogue read at the same time."""
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = -1
     _parsed.clear()
-    _parsed[path] = (-1, catalogue)
+    _parsed[path] = (mtime, catalogue)
+
+
+async def _keep_and_hold(path: Path, catalogue: Catalogue) -> None:
+    """:func:`_keep`, then :func:`_hold` whether or not the keep failed."""
+    try:
+        await asyncio.to_thread(_keep, path, catalogue)
+    finally:
+        await asyncio.to_thread(_hold, path, catalogue)
 
 
 def _keep(path: Path, catalogue: Catalogue) -> None:
@@ -370,9 +386,8 @@ async def _first_read(config: BambuddyConfig, path: Path) -> Catalogue:
         return kept[1]
     async with BambuddyClient(config) as client:
         catalogue = await _catalogue(client)
-    _hold(path, catalogue)
     try:
-        await asyncio.to_thread(_keep, path, catalogue)
+        await _keep_and_hold(path, catalogue)
     except OSError as error:
         # Kept or not, these opens have their catalogue.
         logger.warning("could not keep the preset catalogue", extra={"error": type(error).__name__})
@@ -394,8 +409,7 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
     try:
         async with BambuddyClient(config) as client:
             catalogue = await _catalogue(client)
-        _hold(path, catalogue)
-        await asyncio.to_thread(_keep, path, catalogue)
+        await _keep_and_hold(path, catalogue)
     except Exception as error:
         # Nothing awaits this task, so whatever fails ends here, and only by its type:
         # a pydantic error quotes Bambuddy's body (#3446).
