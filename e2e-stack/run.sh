@@ -83,9 +83,9 @@ down() {
 }
 finish() {
   status=$?
-  # A failed spec has saved the stack's logs beside its results; anything else that
-  # failed (a build, `up`, the seed) shows them here.
-  if [ "$status" -ne 0 ] && [ "$up" = 1 ] && [ "${failed:-0}" = 0 ]; then
+  # A failed spec of the stack still up has saved its logs beside its results; anything
+  # else that failed on it (a build, `up`, the seed) shows them here.
+  if [ "$status" -ne 0 ] && [ "$up" = 1 ] && [ "${logs_saved:-0}" = 0 ]; then
     "${compose[@]}" ps -a || true
     "${compose[@]}" logs --tail 300 app slicer printer bambuddy >"$state/stack.log" 2>&1 || true
     echo "--- the stack's last logs ($state/stack.log)"
@@ -123,6 +123,8 @@ for index in "${!modes[@]}"; do
   echo "=== hot path, bambuddy_url ${current}"
   down
   up=1
+  # Per mode: this stack's logs are not saved yet, whatever an earlier mode's did.
+  logs_saved=0
   "${compose[@]}" up -d --wait --wait-timeout 300
   "$here/seed.sh" "$current" >/dev/null
 
@@ -134,6 +136,8 @@ for index in "${!modes[@]}"; do
       pnpm exec playwright test e2e/real-hot-path.spec.ts --output "test-results/hot-path-${current}"
   ); then
     results+=("${current}: passed")
+    # Nothing failed on this stack: an earlier mode's failure is no reason to dump it.
+    logs_saved=1
   else
     results+=("${current}: FAILED")
     failed=1
@@ -141,6 +145,7 @@ for index in "${!modes[@]}"; do
     mkdir -p "$repo/frontend/test-results/hot-path-${current}"
     "${compose[@]}" logs app slicer printer bambuddy \
       >"$repo/frontend/test-results/hot-path-${current}/stack.log" 2>&1 || true
+    logs_saved=1
     echo "--- recorded by the recorder:"
     curl --silent http://127.0.0.1:18000/__recorded || true
     echo

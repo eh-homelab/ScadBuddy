@@ -136,10 +136,10 @@ if [ "$mode" = recorder ]; then
   refreshed=""
   for _ in $(seq 1 60); do
     refreshed="$(psql_value "SELECT count(*) FROM spool_provider_refreshes WHERE provider = 'bambuddy' AND refreshed_at > '${since}'")"
-    [ "$refreshed" = 1 ] && break
+    [ "${refreshed:-0}" -ge 1 ] && break
     sleep 1
   done
-  if [ "$refreshed" != 1 ]; then
+  if [ "${refreshed:-0}" -lt 1 ]; then
     echo "seed($mode): no bambuddy refresh recorded since ${since}:" >&2
     psql_value "SELECT * FROM spool_provider_refreshes" >&2 || true
     exit 1
