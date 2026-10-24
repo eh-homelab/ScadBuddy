@@ -48,11 +48,14 @@ export function fromWorkspace(inline: string): string {
   )
 }
 
+/** How a binary file reaches the workspace, since no tool takes its bytes (#2510). */
+export const BYTES_NEVER_AN_ARGUMENT =
+  "Bytes are never an argument: a binary file reaches the workspace by the user's upload in the assistant panel, " +
+  'http_request `save_to_workspace`, or workspace_save.'
+
 /** The sentence each binary upload tool's description ends with: a workspace file is the only way in (#2510). */
 export const FROM_WORKSPACE_ONLY =
-  ' Give `workspace_path` with its `workspace_sha256`: the file in your workspace to send. Bytes are never an ' +
-  "argument: a binary file reaches the workspace by the user's upload in the assistant panel, http_request " +
-  '`save_to_workspace`, or workspace_save.'
+  ' Give `workspace_path` with its `workspace_sha256`: the file in your workspace to send. ' + BYTES_NEVER_AN_ARGUMENT
 
 type Choice<T> = { inline: T } | { workspace: { path: string; sha256: string } }
 

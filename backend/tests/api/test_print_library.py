@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import time
 import zipfile
 from collections.abc import AsyncIterator
@@ -1374,7 +1375,7 @@ def test_a_checks_slots_are_cached_so_a_check_refused_early_downloads_nothing(
 
 @respx.mock
 def test_a_check_whose_fetch_runs_out_of_memory_is_refused_saying_how_to_bound_it(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#4562 review: the check's own fetch (its layout read) running out of memory is the
     check's refusal, as a library file's read is, never an unhandled 500. #4571 review:
@@ -1391,19 +1392,23 @@ def test_a_check_whose_fetch_runs_out_of_memory_is_refused_saying_how_to_bound_i
 
     monkeypatch.setattr(LibrarySource, "fetch_3mf", out_of_memory)
 
-    check = client.post("/api/v1/print/library/89/check", json=body())
+    with caplog.at_level(logging.WARNING, logger=print_run.logger.name):
+        check = client.post("/api/v1/print/library/89/check", json=body())
 
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
     assert fetches == [89]
+    [logged] = [r for r in caplog.records if "ran out of memory" in r.getMessage()]
+    assert logged.exc_info is not None and logged.exc_info[0] is MemoryError
 
 
 @respx.mock
 def test_a_check_that_runs_out_of_memory_in_its_preparation_is_refused_too(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#4576 review: a read in `prepare_run` that runs out of memory is refused as the
-    layout's own read is, not re-raised as a 500 by its `except BaseException`."""
+    layout's own read is, not re-raised as a 500 by its `except BaseException`. It is
+    logged with its traceback (#4587 review): the allocation may not have been a read."""
     configure(client)
     library_file(89)
     run_routes()
@@ -1413,10 +1418,13 @@ def test_a_check_that_runs_out_of_memory_in_its_preparation_is_refused_too(
 
     monkeypatch.setattr(print_run, "prepare_run", out_of_memory)
 
-    check = client.post("/api/v1/print/library/89/check", json=body())
+    with caplog.at_level(logging.WARNING, logger=print_run.logger.name):
+        check = client.post("/api/v1/print/library/89/check", json=body())
 
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
+    [logged] = [r for r in caplog.records if "ran out of memory" in r.getMessage()]
+    assert logged.exc_info is not None and logged.exc_info[0] is MemoryError
 
 
 @respx.mock

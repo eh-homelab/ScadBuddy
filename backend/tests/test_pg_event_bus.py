@@ -549,6 +549,8 @@ def _jobs(events: list[Event]) -> list[tuple[str, str]]:
 def test_a_database_url_selects_the_postgres_bus_on_the_projection_s_listener(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
+    # Nothing to close: `build_state` connects to nothing (every pool is opened by the
+    # lifespan, which this does not run), and `AppState` has no teardown of its own.
     state = build_state(
         Settings(
             data_dir=tmp_path,
@@ -583,6 +585,8 @@ async def test_a_print_run_through_the_apps_bus_drops_the_follows_kept_run(
     events = state.events
     assert isinstance(events, PgNotifyEventBus)
     _migrated(pg_conninfo)
+    # The bus is all this opens (`build_state` connects to nothing), so closing it is
+    # the whole teardown.
     await events.start()
     try:
         await assert_hears(recent, events)

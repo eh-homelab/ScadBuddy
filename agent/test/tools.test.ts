@@ -17,6 +17,7 @@ import { TAB_WAIT_S } from '../src/sessions/manager.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
+import { BYTES_NEVER_AN_ARGUMENT } from '../src/tools/workspaceUploads.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { OPENSCAD_COLOUR_NAMES } from '../src/tools/colours.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -1963,6 +1964,14 @@ describe('binary inputs by pointer, never base64 (#2510)', () => {
     const result = await runTool({ ...tool(name), gated: false }, args, ctx())
     expect(result.isError).toBe(true)
     expect(String(firstText(result))).toMatch(/invalid arguments/)
+  })
+
+  // create_model_from_mesh is not in this list: its workspace file is one of three
+  // sources (a library file, an output or the workspace), so the pointer is optional
+  // there by design; its handler refuses a call that gives none or more than one. It
+  // still says, in the shared words, that bytes are never an argument.
+  it('create_model_from_mesh says bytes are never an argument in the shared words', () => {
+    expect(tool('create_model_from_mesh').description).toContain(BYTES_NEVER_AN_ARGUMENT)
   })
 
   it.each(['set_model_thumbnail', 'set_output_thumbnail', 'add_model_media', 'upload_asset'])(

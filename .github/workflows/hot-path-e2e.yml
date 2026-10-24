@@ -1,0 +1,169 @@
+# The native hot path against a real stack (#3818 tier A, plan 2026-10-18 Task 13,
+# #4593): e2e-stack/run.sh --mode both brings up ScadBuddy with the S3 store, its own
+# library and the native slicer worker, a fake LAN printer and a Bambuddy that fails
+# every call, and runs frontend/e2e/real-hot-path.spec.ts twice: with the recorder as
+# bambuddy_url (AC1: it sees no call) and with none (AC2). The recorder pass fails until
+# #4601 (with a URL set, the Customize page and the dialog's first read ask Bambuddy):
+# that failure is AC1's check working, not a flake.
+#
+# Weekly and on demand, never a PR check: it builds three images and prints twice, and
+# it is not in ci.yml's `CI Summary` needs (plan decision 6). On a PR that touches
+# e2e-stack/ (or this file, or the fakes' tests) only the `fakes` job runs: the two
+# fakes' own tests and ruff over e2e-stack/ (#4187, below), a minute's work.
+#
+# #4187, settled here rather than in backend-pytest: the fake printer's test needs
+# mosquitto, which the test image does not carry, and mounting e2e-stack/ into the four
+# backend-pytest shards would still skip it. Installing mosquitto on this runner keeps
+# the test image, and so every backend-pytest shard and its cache, unchanged, at the cost
+# of the tests running only here: on a PR that touches what they test, weekly, and on
+# demand.
+name: Hot path e2e
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 3"
+  pull_request:
+    paths:
+      - e2e-stack/**
+      - backend/tests/printers/test_fake_printer.py
+      - backend/tests/test_bambuddy_recorder.py
+      - .github/workflows/hot-path-e2e.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hot-path-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fakes:
+    name: The stack's fakes, tested and linted
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # Ubuntu's mosquitto 2, as the fake printer's image has Debian's.
+      - name: Install mosquitto
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mosquitto
+
+      - name: ruff over e2e-stack
+        working-directory: backend
+        run: |
+          uv run --frozen ruff check --config pyproject.toml ../e2e-stack
+          uv run --frozen ruff format --check --config pyproject.toml ../e2e-stack
+
+      - name: mypy over the fakes
+        working-directory: backend
+        run: >-
+          uv run --frozen mypy --strict --ignore-missing-imports
+          ../e2e-stack/fake-printer/printer.py ../e2e-stack/bambuddy-recorder/recorder.py
+
+      # Both files skip when what they need is missing; here nothing may.
+      - name: The fakes' tests
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv run --frozen pytest -p no:cacheprovider -rs \
+            tests/printers/test_fake_printer.py tests/test_bambuddy_recorder.py | tee "$RUNNER_TEMP/fakes.txt"
+          if grep -qiE '[0-9]+ skipped' "$RUNNER_TEMP/fakes.txt"; then
+            echo "::error::a fake's test skipped: each one must run here"
+            exit 1
+          fi
+
+  stack:
+    name: The hot path on a real stack (recorder, then unset)
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      # Read the scopes ci.yml and build-image.yml write (the default one for the app's
+      # layers, `slicer` for the Rust build), and write this workflow's own at mode=min:
+      # the repo's Actions cache is at its ceiling (#743).
+      - name: Build the app image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: scadbuddy:hot-path-app
+          cache-from: |
+            type=gha
+            type=gha,scope=hot-path-app
+          cache-to: type=gha,scope=hot-path-app,mode=min
+
+      # The Temporal dev server and moto. A superset of `runtime`, so almost free after it.
+      - name: Build the test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:hot-path-test
+          cache-from: |
+            type=gha
+            type=gha,scope=hot-path-app
+
+      - name: Build the slicer image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slicer
+          load: true
+          tags: scadbuddy-slicer:hot-path
+          cache-from: |
+            type=gha,scope=slicer
+            type=gha,scope=hot-path-slicer
+          cache-to: type=gha,scope=hot-path-slicer,mode=min
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # `pnpm install` needs no spec; Playwright never runs `gen:api`.
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: run.sh --mode both
+        run: e2e-stack/run.sh --mode both --no-build
+
+      - name: Upload the Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-hot-path
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          if-no-files-found: ignore
