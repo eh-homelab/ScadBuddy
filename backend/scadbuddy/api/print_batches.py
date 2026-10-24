@@ -383,7 +383,11 @@ async def _queue_one(
             MAY_HAVE_STARTED
         ):
             return BatchOutcome(status="pending", detail=error.detail, attempt=attempt)
-        return BatchOutcome(status="refused", detail=error.detail, attempt=attempt)
+        # Named by its file (#4551): a refusal of the step's own choices, such as a
+        # printer to pick again (`print_run._named_printer`), says which step to edit.
+        return BatchOutcome(
+            status="refused", detail=f"In {item.filename}'s step: {error.detail}", attempt=attempt
+        )
     except Exception:
         # Not an answer at all: the run may have started, so the file is pending, and
         # the same request_id sent again follows it. The rest of the batch still goes
