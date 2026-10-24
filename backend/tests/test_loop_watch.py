@@ -19,6 +19,15 @@ def _sample(metrics: Metrics, name: str) -> float:
     return value or 0.0
 
 
+def _watch_logs(caplog: pytest.LogCaptureFixture) -> str:
+    """What the watch itself logged. caplog takes every logger's records, and a pool an
+    earlier test left open logs its connect failures from a thread (``unused.invalid``,
+    #4653's CI), so "logs nothing" means nothing from the watch."""
+    return "\n".join(
+        r.getMessage() for r in caplog.records if r.name == "scadbuddy.core.loop_watch"
+    )
+
+
 def _blocks_the_loop(seconds: float) -> None:
     time.sleep(seconds)
 
@@ -46,7 +55,7 @@ async def test_a_loop_that_keeps_running_logs_nothing(caplog: pytest.LogCaptureF
     # A threshold far above any scheduling jitter under `pytest -n`.
     async with LoopWatch(metrics, threshold=1.0, interval=0.1):
         await asyncio.sleep(0.5)
-    assert not caplog.records
+    assert not _watch_logs(caplog)
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
     assert _sample(metrics, "scadbuddy_event_loop_lag_seconds_count") >= 3
 
@@ -113,7 +122,7 @@ async def test_a_beat_left_unrun_after_leaving_is_no_stall(
     assert watch._thread is not None
     await asyncio.to_thread(watch._thread.join, 2)
     assert not watch._thread.is_alive()
-    assert not caplog.records, caplog.text
+    assert not _watch_logs(caplog)
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
 
 
@@ -142,7 +151,7 @@ async def test_a_probe_left_waiting_after_leaving_is_no_stall(
         # the loop once its beat has run.
         watch._thread.join(2)
         assert not watch._thread.is_alive()
-        assert not caplog.records, caplog.text
+        assert not _watch_logs(caplog)
         assert _sample(metrics, "scadbuddy_default_executor_stalls_total") == 0
         await held
     finally:
