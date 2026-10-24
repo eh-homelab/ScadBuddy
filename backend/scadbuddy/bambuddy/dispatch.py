@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
+from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.rack.usage import PickedHotend
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class QueueOutcome(BaseModel):
     #: record (spec 2026-10-01 §5). Never reported: ``_queued`` builds the run's result
     #: from named fields and never dumps this model (spec §6, §7).
     rack_picks: list[PickedHotend] = Field(default_factory=list)
+    #: A plate started over the LAN (plan 2026-10-16 Task 9), with no queue item: the
+    #: native follow reads it from the printer's report.
+    lan: LanStarted | None = None
 
 
 class RackChoice(BaseModel):

@@ -90,7 +90,15 @@ from scadbuddy.bambuddy.projects import (
     _destination_folders,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
+from scadbuddy.bambuddy.runs import (
+    UNEXPECTED_DETAIL,
+    PrintRun,
+    failure_of,
+    given_run,
+    newest_failure,
+    read_latest,
+    run_key,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import (
     DATABASE_ERRORS,
@@ -112,7 +120,8 @@ from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.printers.component import PrintersDep
+from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.printers.progress import LanProgress
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.slicing.component import SlicingDep
@@ -1214,6 +1223,18 @@ async def failed_before_queueing(state: AppState, run_subject: str) -> str | Non
     return await newest_failure(state.print_runs.store, run_subject)
 
 
+async def newest_run(state: AppState, run_subject: str) -> PrintRun | None:
+    """The subject's newest run, read once for its failure and its LAN print (#4540
+    review); ``None`` with a database that does not answer."""
+    return await read_latest(state.print_runs.store.latest_for_output, run_subject)
+
+
+def lan_reads(registry: Printers, latest: PrintRun | None) -> LanProgress:
+    """A LAN print's progress from its printer's report (plan 2026-10-16 Task 9), over
+    the newest run read already: no second query of the runs."""
+    return LanProgress(given_run(latest), registry.store, registry.reports)
+
+
 @router.get(
     "/outputs/{output_id}/progress",
     response_model=PrintProgress | None,
@@ -1228,8 +1249,10 @@ async def get_progress(
     observer: PrintProgressDep,
     follows: FollowsDep,
     state: StateDep,
+    registry: PrintersDep,
 ) -> PrintProgress | None:
-    """Follow this output's last print, slice then queue (#89).
+    """Follow this output's last print, slice then queue (#89), or over the LAN
+    (``route: "lan"``, from the printer's report).
 
     ``null`` means this output has never been printed — that is an answer, not an
     error, and the send bar shows nothing rather than a failure.
@@ -1241,13 +1264,16 @@ async def get_progress(
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
-    failed = await failed_before_queueing(state, meta.id)
+    latest = await newest_run(state, meta.id)
+    failed = failure_of(latest)
     progress: PrintProgress | None
     async with client_for(store.load()) as client:
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await progress_for(client, meta, uploads=uploads, links=links)
+            progress = await progress_for(
+                client, meta, uploads=uploads, links=links, lan=lan_reads(registry, latest)
+            )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

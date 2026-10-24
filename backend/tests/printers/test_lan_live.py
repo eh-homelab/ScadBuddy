@@ -72,7 +72,9 @@ async def test_upload_then_project_file_is_accepted(printer: dict[str, str]) -> 
     """Stores a sliced 3MF the printer already holds under a probe name (set
     ``SCADBUDDY_TEST_PRINTER_FILE`` to its path there, e.g. ``/cache/x.gcode.3mf``),
     starts it with ``SCADBUDDY_TEST_PRINTER_AMS`` (comma-separated tray ids) as its
-    ``ams_mapping``, and stops it as soon as the printer is running it."""
+    ``ams_mapping``, and stops it as soon as the printer is running it. A 60 s timeout
+    before any report names the probe sends no ``stop`` (the printer may still have
+    taken the start), so whoever runs it checks the printer afterwards."""
     lan = LanPrinter(**printer, cert_sha256=fetch_cert_sha256(printer["host"]))
     sliced = await lan.download(os.environ["SCADBUDDY_TEST_PRINTER_FILE"])
     assert "Metadata/plate_1.gcode" in zipfile.ZipFile(BytesIO(sliced)).namelist()

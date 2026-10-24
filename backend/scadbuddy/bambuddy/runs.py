@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any, Literal, LiteralString, Protocol
@@ -552,35 +553,98 @@ class PrintRunStore:
         return PrintRun.model_validate(current)
 
 
-async def newest_failure(runs: PrintRunStore, run_subject: str) -> str | None:
+#: The newest run of a run subject (`PrintRunStore.latest_for_output`, or one read already).
+LatestRun = Callable[[str], Awaitable["PrintRun | None"]]
+
+
+def given_run(run: PrintRun | None) -> LatestRun:
+    """A `LatestRun` that answers ``run``, read already: a progress route reads the
+    subject's newest run once, for its failure and its LAN print alike."""
+
+    async def latest(run_subject: str) -> PrintRun | None:
+        return run
+
+    return latest
+
+
+class RecentRuns:
+    """`PrintRunStore.latest_for_output`, kept per subject for ``ttl`` seconds: a follow's
+    tick asks for the newest failure and the LAN print (plan 2026-10-16 Task 9) of one
+    subject within it, and they share one query."""
+
+    def __init__(
+        self,
+        runs: PrintRunStore,
+        *,
+        ttl: float = 2.0,
+        clock: Callable[[], float] = time.monotonic,
+        capacity: int = 256,
+    ) -> None:
+        self.runs = runs
+        self.ttl = ttl
+        self.clock = clock
+        self.capacity = capacity
+        self._kept: dict[str, tuple[float, PrintRun | None]] = {}
+
+    async def latest(self, run_subject: str) -> PrintRun | None:
+        now = self.clock()
+        kept = self._kept.get(run_subject)
+        if kept is not None and now - kept[0] < self.ttl:
+            return kept[1]
+        run = await self.runs.latest_for_output(run_subject)
+        if len(self._kept) >= self.capacity:
+            self._kept = {k: v for k, v in self._kept.items() if now - v[0] < self.ttl}
+        self._kept[run_subject] = (now, run)
+        return run
+
+
+async def read_latest(latest: LatestRun, run_subject: str) -> PrintRun | None:
+    """The subject's newest run, or ``None`` with a database that does not answer."""
+    try:
+        return await latest(run_subject)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+
+
+def failure_of(latest: PrintRun | None) -> str | None:
+    """Why ``latest`` failed, when it failed before it queued anything (#1049); else
+    ``None``."""
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
+async def newest_failure(
+    runs: PrintRunStore, run_subject: str, *, latest: LatestRun | None = None
+) -> str | None:
     """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
     #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
     run that may have queued recorded what it queued, so its print's own progress says
     more. With a database that does not answer, there are no runs to read, and the
-    progress is read as it was before.
+    progress is read as it was before. ``latest`` reads the run in place of ``runs``.
 
     The one rule for what a subject's progress is: the progress routes and the print
     follow both apply it, so the two never publish different progress for it (#1837)."""
-    try:
-        latest = await runs.latest_for_output(run_subject)
-    except DATABASE_ERRORS:
-        logger.warning("print runs unreadable; progress read without them")
-        return None
-    if latest is None or latest.status != "failed" or latest.may_have_queued:
-        return None
-    return latest.error.detail if latest.error is not None else None
+    return failure_of(await read_latest(latest or runs.latest_for_output, run_subject))
 
 
 #: A run subject's newest-run failure, as the progress it shows (``Follower.newest_failed``).
 NewestFailed = Callable[[str], Awaitable[PrintProgress | None]]
 
 
-def newest_failed_from(runs: PrintRunStore, load: Callable[[], StoredSettings]) -> NewestFailed:
-    """``Follower.newest_failed`` over ``runs``: the progress the routes show for a
-    run subject whose newest run failed before queueing, else None."""
+def newest_failed_from(
+    runs: PrintRunStore,
+    load: Callable[[], StoredSettings],
+    *,
+    latest: LatestRun | None = None,
+) -> NewestFailed:
+    """``Follower.newest_failed`` over ``runs`` (or ``latest``, a `RecentRuns`' read):
+    the progress the routes show for a run subject whose newest run failed before
+    queueing, else None."""
 
     async def newest_failed(run_subject: str) -> PrintProgress | None:
-        detail = await newest_failure(runs, run_subject)
+        detail = await newest_failure(runs, run_subject, latest=latest)
         if detail is None:
             return None
         settings = await asyncio.to_thread(load)

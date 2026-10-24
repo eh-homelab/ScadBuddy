@@ -24,7 +24,12 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents, newest_failed_from
+from scadbuddy.bambuddy.runs import (
+    PrintRunStore,
+    RecentRuns,
+    TransactionalEvents,
+    newest_failed_from,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.components import Components, discover_components
@@ -61,6 +66,9 @@ from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
+from scadbuddy.printers.progress import LanProgress
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.previews import (
     TIMEOUT_FACTOR,
     PreviewScheduler,
@@ -386,6 +394,12 @@ def _build_core(settings: Settings) -> AppState:
     settings_store = SettingsStore(settings, events=events)
     print_progress = ProgressObserver(events)
     print_links = PrintLinkStore(pool)
+    print_run_store = PrintRunStore(pool, events=transactional_events(events))
+    # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9): the
+    # registry's rows and reports, read only, so no key.
+    # The follow's newest-failure read shares its newest-run query (#4540 review).
+    recent_runs = RecentRuns(print_run_store)
+    lan = LanProgress(recent_runs.latest, PrinterStore(pool, None), PrinterReportStore(pool))
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # The follow links archives too (#306), so a print nobody watches is found.
@@ -398,14 +412,14 @@ def _build_core(settings: Settings) -> AppState:
                 # print's archive is never linked, so its rack use goes uncounted, and
                 # no test catches it (the P3 settle test builds its own reader).
                 links=print_links,
+                lan=lan,
             )
 
     async def read_library(subject: PrintSubject) -> PrintProgress | None:
         # A library print is linked by its sends (#1073).
         async with client_for(settings_store.load()) as client:
-            return await library_progress(client, subject, print_links, uploads=uploads)
+            return await library_progress(client, subject, print_links, uploads=uploads, lan=lan)
 
-    print_run_store = PrintRunStore(pool, events=transactional_events(events))
     return AppState(
         settings=settings,
         config=config,
@@ -435,7 +449,9 @@ def _build_core(settings: Settings) -> AppState:
             read=read_progress,
             read_library=read_library,
             events=events,
-            newest_failed=newest_failed_from(print_run_store, settings_store.load),
+            newest_failed=newest_failed_from(
+                print_run_store, settings_store.load, latest=recent_runs.latest
+            ),
         ),
         print_runs=PrintCommands(
             store=print_run_store,

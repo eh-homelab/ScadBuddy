@@ -124,6 +124,27 @@ def test_drifted_fields_read_as_unknown() -> None:
     assert status.nozzles == [] and status.active_extruder == 0
 
 
+def test_a_rack_slots_mistyped_filament_reads_as_absent() -> None:
+    """#4538: ``fila_id`` and ``color_m`` are kept only as text."""
+    report = _lan(
+        {
+            "device": {
+                "nozzle": {
+                    "info": [
+                        {"id": 16, "diameter": "0.4", "type": "HS01", "fila_id": 7, "color_m": {}},
+                        {"id": 17, "diameter": "0.4", "type": "HS01", "fila_id": "GFA00"},
+                    ]
+                }
+            }
+        }
+    )
+    status = status_from_report(row(), report, now=report.received_at)
+    assert [(s.filament_id, s.filament_colour) for s in status.nozzle_rack] == [
+        ("", ""),
+        ("GFA00", ""),
+    ]
+
+
 # --- #4336 review I1, I3: presence bits and the H2 external holders ---------------------
 
 

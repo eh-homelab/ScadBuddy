@@ -17,6 +17,8 @@ type PrintRunResult struct {
 	copies *int32
 	// The folder_id property
 	folder_id PrintRunResult_PrintRunResult_folder_idable
+	// The lan property
+	lan []LanStartedable
 	// The library_file_id property
 	library_file_id *int32
 	// The path property
@@ -672,6 +674,22 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		return nil
 	}
+	res["lan"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfObjectValues(CreateLanStartedFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]LanStartedable, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = v.(LanStartedable)
+				}
+			}
+			m.SetLan(res)
+		}
+		return nil
+	}
 	res["library_file_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetInt32Value()
 		if err != nil {
@@ -799,6 +817,12 @@ func (m *PrintRunResult) GetFolderId() PrintRunResult_PrintRunResult_folder_idab
 	return m.folder_id
 }
 
+// GetLan gets the lan property value. The lan property
+// returns a []LanStartedable when successful
+func (m *PrintRunResult) GetLan() []LanStartedable {
+	return m.lan
+}
+
 // GetLibraryFileId gets the library_file_id property value. The library_file_id property
 // returns a *int32 when successful
 func (m *PrintRunResult) GetLibraryFileId() *int32 {
@@ -875,6 +899,18 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 	}
 	{
 		err := writer.WriteObjectValue("folder_id", m.GetFolderId())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetLan() != nil {
+		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetLan()))
+		for i, v := range m.GetLan() {
+			if v != nil {
+				cast[i] = v.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable)
+			}
+		}
+		err := writer.WriteCollectionOfObjectValues("lan", cast)
 		if err != nil {
 			return err
 		}
@@ -981,6 +1017,11 @@ func (m *PrintRunResult) SetFolderId(value PrintRunResult_PrintRunResult_folder_
 	m.folder_id = value
 }
 
+// SetLan sets the lan property value. The lan property
+func (m *PrintRunResult) SetLan(value []LanStartedable) {
+	m.lan = value
+}
+
 // SetLibraryFileId sets the library_file_id property value. The library_file_id property
 func (m *PrintRunResult) SetLibraryFileId(value *int32) {
 	m.library_file_id = value
@@ -1037,6 +1078,7 @@ type PrintRunResultable interface {
 	GetBambuddyUrl() PrintRunResult_PrintRunResult_bambuddy_urlable
 	GetCopies() *int32
 	GetFolderId() PrintRunResult_PrintRunResult_folder_idable
+	GetLan() []LanStartedable
 	GetLibraryFileId() *int32
 	GetPath() *PrintRunResult_path
 	GetPrinterId() PrintRunResult_PrintRunResult_printer_idable
@@ -1050,6 +1092,7 @@ type PrintRunResultable interface {
 	SetBambuddyUrl(value PrintRunResult_PrintRunResult_bambuddy_urlable)
 	SetCopies(value *int32)
 	SetFolderId(value PrintRunResult_PrintRunResult_folder_idable)
+	SetLan(value []LanStartedable)
 	SetLibraryFileId(value *int32)
 	SetPath(value *PrintRunResult_path)
 	SetPrinterId(value PrintRunResult_PrintRunResult_printer_idable)

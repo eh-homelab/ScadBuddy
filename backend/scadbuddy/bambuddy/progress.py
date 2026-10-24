@@ -17,7 +17,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable
-from typing import Literal
+from typing import Literal, Protocol
 
 import psycopg
 from pydantic import BaseModel, Field
@@ -63,7 +63,9 @@ class PrintProgress(BaseModel):
 
     #: ``run`` is a print whose run failed before it queued anything (#1049): there is
     #: no slice job or queue item, only the run's own refusal in ``error_message``.
-    route: PrintRoute | Literal["run"]
+    #: ``lan`` is one started over the LAN (plan 2026-10-16 Task 9), read from the
+    #: printer's report (`printers/progress.py`); its ``bambuddy_url`` is ``""``.
+    route: PrintRoute | Literal["run", "lan"]
     stage: Stage = "unknown"
     #: True when nothing further will change without another print. Polling stops here.
     settled: bool = False
@@ -374,12 +376,20 @@ def from_plates(
     )
 
 
+class LanReads(Protocol):
+    """A subject's LAN print (`printers/progress.py` `LanProgress`): its progress when
+    its newest run printed over the LAN, else ``None``."""
+
+    async def read(self, run_subject: str) -> PrintProgress | None: ...
+
+
 async def progress_for(
     client: BambuddyClient,
     meta: OutputMeta,
     *,
     uploads: BambuddyUploadStore | None = None,
     links: PrintLinkStore | None = None,
+    lan: LanReads | None = None,
 ) -> PrintProgress | None:
     """Read the progress of whatever this output last printed, or ``None``.
 
@@ -391,7 +401,12 @@ async def progress_for(
 
     With ``uploads`` and ``links``, the archives the print produced are linked to the
     output as they appear (#306).
+
+    With ``lan``, a print whose newest run started it over the LAN (``route="lan"``) is
+    read from the printer's report instead (plan 2026-10-16 Task 9).
     """
+    if lan is not None and (native := await lan.read(meta.id)) is not None:
+        return native
     route = meta.print_route
     if route is None and meta.queue_item_id is not None:
         # Records written before #89 carry no route; a queue item is this route's.
@@ -446,6 +461,7 @@ async def library_progress(
     links: PrintLinkStore,
     *,
     uploads: BambuddyUploadStore | None = None,
+    lan: LanReads | None = None,
 ) -> PrintProgress | None:
     """The progress of a library file's print (#1073), read as an output's is: each of
     its last run's queue items (`PrintLinkStore.last_run`, #1751), as one progress over
@@ -453,7 +469,10 @@ async def library_progress(
     linked to the file on the way, so the settle hooks find it
     (`linking.link_library_prints` does the same for the prints list); one Bambuddy no
     longer has reads as done, as an output's does, and with ``uploads`` has the file's
-    archives looked for by hash (#1755), as an output's gone item does."""
+    archives looked for by hash (#1755), as an output's gone item does. With ``lan``,
+    a LAN print is read from the printer's report, as `progress_for` reads one."""
+    if lan is not None and (native := await lan.read(subject.run_subject)) is not None:
+        return native
     sends = await links.last_run(subject)
     if not sends:
         return None

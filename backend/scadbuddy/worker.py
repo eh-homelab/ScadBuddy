@@ -37,7 +37,7 @@ from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
-from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteOutputs
+from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteBlobs, RemoteOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     PrintProgress,
@@ -45,7 +45,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore, newest_failed_from
+from scadbuddy.bambuddy.runs import PrintRunStore, RecentRuns, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -82,6 +82,8 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.print_library.remote import RemoteLibrary
+from scadbuddy.printers.print_activities import LanActivities, LanDeps
+from scadbuddy.printers.progress import LanProgress
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
@@ -1017,22 +1019,27 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
 
-    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
-        # As the API's: the follow links archives too (#306), which the rack's settle
-        # hook needs (#836).
-        async with client_for(settings_store.load()) as client:
-            return await progress_for(client, meta, uploads=uploads, links=links)
-
-    async def read_library(subject: PrintSubject) -> PrintProgress | None:
-        async with client_for(settings_store.load()) as client:
-            return await library_progress(client, subject, links, uploads=uploads)
-
     activity = ActivityIndex(pool, events=events, metrics=metrics)
     print_runs = PrintRunStore(pool, events=events, activity=activity)
     operations = OperationStore(pool, events=events, activity=activity)
     kek = settings_kek(settings.secret_key_file)
     printers = PrinterStore(pool, kek)
     reports = PrinterReportStore(pool)
+    # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9).
+    # The follow's newest-failure read shares its newest-run query (#4540 review).
+    recent_runs = RecentRuns(print_runs)
+    lan = LanProgress(recent_runs.latest, printers, reports)
+
+    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        # As the API's: the follow links archives too (#306), which the rack's settle
+        # hook needs (#836).
+        async with client_for(settings_store.load()) as client:
+            return await progress_for(client, meta, uploads=uploads, links=links, lan=lan)
+
+    async def read_library(subject: PrintSubject) -> PrintProgress | None:
+        async with client_for(settings_store.load()) as client:
+            return await library_progress(client, subject, links, uploads=uploads, lan=lan)
+
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1040,7 +1047,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         read_library=read_library,
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
-        newest_failed=newest_failed_from(print_runs, settings_store.load),
+        newest_failed=newest_failed_from(
+            print_runs, settings_store.load, latest=recent_runs.latest
+        ),
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys.
     native = native_slice_starter(settings)
@@ -1070,6 +1079,12 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             reports=reports,
         )
     )
+    # A LAN print's sliced blob, through the API's internal route with a token signed
+    # under the key (plan 2026-10-16 Task 9); a LAN print needs the key anyway.
+    blobs = RemoteBlobs(settings.api_internal_url, kek) if kek is not None else None
+    lan_printing = LanActivities(
+        LanDeps(printers=printers, settings_store=settings_store, library=library, blobs=blobs)
+    )
     return PrintWorkerDeps(
         settings_store=settings_store,
         events=events,
@@ -1080,6 +1095,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         operations=operations,
         activities=[
             *printing.all(),
+            *lan_printing.all(),
             *operation_activities(
                 operations,
                 settings_store,

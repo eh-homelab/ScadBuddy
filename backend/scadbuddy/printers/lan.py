@@ -259,17 +259,26 @@ class LanPrinter:
                 return report
         raise ConnectionError("the printer closed the connection before it reported")
 
-    async def reports(self, connected: asyncio.Event | None = None) -> AsyncIterator[LanReport]:
+    async def reports(
+        self,
+        connected: asyncio.Event | None = None,
+        *,
+        command: dict[str, Any] | None = None,
+    ) -> AsyncIterator[LanReport]:
         """Each report, merged over the ones before, for as long as the connection
         lasts. A message that is not a JSON object with a ``print`` object is skipped.
         ``connected`` is set once the printer has taken the login and the subscription:
-        the evidence it is there, before it has said anything."""
+        the evidence it is there, before it has said anything. ``command`` is published
+        after the ``pushall`` on the same connection, so what it does is reported here
+        without a second one (a LAN start, `print_activities.lan_print`)."""
         merged: dict[str, Any] | None = None
         async with await self._client() as client:
             await client.subscribe(self.report_topic)
             if connected is not None:
                 connected.set()
             await client.publish(self.request_topic, json.dumps(pushall_command()))
+            if command is not None:
+                await client.publish(self.request_topic, json.dumps(command))
             async for message in client.messages:
                 delta = _print_of(message.payload)
                 if delta is None:
