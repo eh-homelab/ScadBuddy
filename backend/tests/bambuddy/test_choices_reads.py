@@ -373,6 +373,8 @@ async def test_an_unreadable_kept_catalogue_is_read_again(
     kept.write_text('{"leaked-file-text"', encoding="utf-8")
     catalogue.forget_catalogues()
     caplog.set_level(logging.INFO, logger=catalogue.__name__)
+    # The first read's own miss (nothing kept yet) is logged too, where INFO already is.
+    caplog.clear()
 
     assert (await cached_catalogue(bambuddy, tmp_path)).process
     assert presets.call_count == 2
