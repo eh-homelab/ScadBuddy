@@ -29,6 +29,7 @@ from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import _kind_activities
 from scadbuddy.workflows.operation_models import (
+    HEARTBEAT_THROTTLE,
     FinishOp,
     InsertOp,
     OperationAnswer,
@@ -42,6 +43,7 @@ from scadbuddy.workflows.problems import (
     OPERATION_CHECK_TIMED_OUT,
     OPERATION_UNEXPECTED_DETAIL,
     operation_cancelled_running,
+    operation_interrupted,
     operation_unexpected_running_detail,
     problem_of,
 )
@@ -66,6 +68,8 @@ class Fake:
         self.insert_gate: asyncio.Event | None = None
         #: Set, the finish waits on it.
         self.finish_gate: asyncio.Event | None = None
+        #: Set, the run's first attempt waits on it without heartbeating (#4635).
+        self.first_attempt_gate: asyncio.Event | None = None
 
     def _op(self, status: str = "running", **fields: Any) -> Operation:
         return Operation(
@@ -97,6 +101,8 @@ class Fake:
     async def run(self, input: RunOp) -> dict[str, Any]:
         self.calls.append("run")
         assert input.checked == {"checked": True}
+        if self.first_attempt_gate is not None and activity.info().attempt == 1:
+            await self.first_attempt_gate.wait()
         await self.hold.wait()
         if self.run_error is not None:
             raise self.run_error
@@ -436,6 +442,63 @@ async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     assert answer.operation is not None
     assert answer.operation.error == operation_cancelled_running("Bambuddy")
     assert (await ended(client, arg)).status == "failed"
+
+
+async def _run_with_short_heartbeat(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch, arg: OperationInput
+) -> Operation:
+    """``arg`` on a worker whose runs time out after 1 s without a heartbeat, the fake's
+    first attempt never heartbeating. Unsandboxed, so the patched timeout is the one the
+    workflow reads."""
+    monkeypatch.setattr(operation, "RUN_HEARTBEAT", timedelta(seconds=1))
+    fake.first_attempt_gate = asyncio.Event()
+    queue = f"op-{uuid.uuid4().hex[:8]}"
+    try:
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[OperationWorkflow],
+            activities=fake.all(),
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            await start(client, queue, arg)
+            return await ended(client, arg)
+    finally:
+        fake.first_attempt_gate.set()
+
+
+async def test_a_run_timed_out_on_its_heartbeat_is_interrupted_not_unexpected(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4635: a run whose heartbeats Temporal did not record in time (a stalled history
+    shard, or a worker a rollout stopped) is not "failed unexpectedly", whose logs say
+    nothing: it is a retryable interruption that names what to check."""
+    done = await _run_with_short_heartbeat(client, fake, monkeypatch, op_input(answer_running=True))
+    assert done.status == "failed"
+    assert done.error == operation_interrupted("Bambuddy")
+    assert done.error is not None and done.error.status == 503
+    assert "unexpectedly" not in done.error.detail
+    assert fake.calls == ["check", "insert", "run", "finish:503"]
+
+
+async def test_a_kind_that_may_run_again_retries_a_run_timed_out_on_its_heartbeat(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4635: with attempts to spare (``preview_slice``), the next attempt runs and its
+    outcome is the operation's."""
+    done = await _run_with_short_heartbeat(
+        client, fake, monkeypatch, op_input(run_attempts=3, answer_running=True)
+    )
+    assert done.status == "succeeded" and done.result == {"queue_item_id": 7}
+    assert fake.calls == ["check", "insert", "run", "run", "finish:ok"]
+
+
+def test_several_heartbeats_land_in_each_run_heartbeat_window() -> None:
+    """#4635: the SDK sends at most one heartbeat per throttle interval. At its default,
+    one send per 30 s window left 6 s for it to land; three leave room for one to be
+    late."""
+    assert HEARTBEAT_THROTTLE * 3 <= operation.RUN_HEARTBEAT
+    assert timedelta(seconds=operation_activities.HEARTBEAT_EVERY) < HEARTBEAT_THROTTLE
 
 
 async def test_a_library_kind_says_to_check_the_model_not_bambuddy(
