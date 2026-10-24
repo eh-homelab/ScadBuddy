@@ -236,7 +236,7 @@ async def _keep_filaments(
 
 
 async def library_filaments(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     cache: Path,
     file: LibraryFile,
     budget: ReadBudget | None = None,

@@ -66,7 +66,7 @@ from scadbuddy.bambuddy.choices import (
     native_choices_for,
     with_lan_printers,
 )
-from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
+from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for, maybe_client
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
@@ -87,10 +87,17 @@ from scadbuddy.bambuddy.print_run import (
     dialog_route,
     filament_options,
     filament_options_for_output,
+    lan_printers,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
-from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
+from scadbuddy.bambuddy.progress import (
+    PrintProgress,
+    from_failed_run,
+    progress_for,
+    queue_url,
+    queued_on_bambuddy,
+)
 from scadbuddy.bambuddy.projects import (
     AttachResult,
     ProjectAttach,
@@ -1058,7 +1065,17 @@ async def post_check(
         print_settings = await asyncio.to_thread(library_catalogue.print_settings, meta.slug)
     except InvalidModelMetaError:
         print_settings = {}  # the run refuses it; the check judges the request alone
-    async with client_for(settings) as client:
+    # The path first (D2): a native run's check builds no client (D3), so it answers
+    # with no Bambuddy configured at all (AC2).
+    route = await dialog_route(
+        settings,
+        printers.store,
+        printers.reports,
+        printer=body.printer,
+        printer_id=body.printer_id,
+    )
+    bare = names_no_printer(settings, body.printer, body.printer_id)
+    async with maybe_client(settings, native=route is not None or bare) as client:
         return await check_for_output(
             client,
             outputs,
@@ -1070,7 +1087,7 @@ async def post_check(
             print_settings=print_settings,
             printers=printers.store,
             reports=printers.reports,
-            catalogue=kept_catalogue(client, paths.cache, store.kek),
+            catalogue=None if client is None else kept_catalogue(client, paths.cache, store.kek),
             # A native run's check (plan 2026-10-18 D2) reads these, never `client`.
             profiles=slicing.profiles,
             native=await library.serving_native(),
@@ -1165,6 +1182,40 @@ async def get_preview_toolpath(
     return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
 
 
+def names_no_printer(settings: StoredSettings, printer: str | None, printer_id: int | None) -> bool:
+    """Whether a dialog request names no printer and Settings none either: the check then
+    has nothing to judge, and reads nothing (`check_print`)."""
+    return printer is None and (printer_id or settings.printer_id) is None
+
+
+async def opening_route(
+    settings: StoredSettings,
+    printers: Printers,
+    *,
+    printer: str | None,
+    printer_id: int | None,
+) -> RunRoute | None:
+    """`dialog_route`, and with no Bambuddy configured and no printer named (by the
+    request or Settings), the first registry row a run reaches natively (#3818 tier A,
+    AC2): Bambuddy's choices would open on a printer of its own, and cannot be read.
+    The dialog then opens on that row, as it does on a LAN-only one (``lan_printers``)."""
+    route = await dialog_route(
+        settings, printers.store, printers.reports, printer=printer, printer_id=printer_id
+    )
+    if (
+        route is not None
+        or settings.bambuddy_url
+        or not names_no_printer(settings, printer, printer_id)
+    ):
+        return route
+    rows = await lan_printers(settings, printers.store, printers.reports)
+    if not rows:
+        return None
+    return await dialog_route(
+        settings, printers.store, printers.reports, printer=rows[0], printer_id=None
+    )
+
+
 @router.get(
     "/outputs/{output_id}/filaments",
     response_model=FilamentOptions,
@@ -1203,9 +1254,7 @@ async def get_filaments(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
-    route = await dialog_route(
-        settings, printers.store, printers.reports, printer=printer, printer_id=printer_id
-    )
+    route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
     if route is not None:
         # A native run's filaments (#3818 tier A, D1): the trays, with the providers'
         # records over them, and no Bambuddy call.
@@ -1255,10 +1304,9 @@ async def get_choices(
     meta = require_output(outputs, output_id)
     settings = store.load()
     remembered = settings.model_print_choices.get(meta.slug)
-    route = await dialog_route(
+    route = await opening_route(
         settings,
-        printers.store,
-        printers.reports,
+        printers,
         printer=printer,
         printer_id=printer_id or (remembered.printer_id if remembered else None),
     )
@@ -1402,12 +1450,14 @@ async def get_progress(
     if lan is not None:
         # A LAN print's progress is its printer's report: no client is built (D3).
         progress = lan
+    elif failed is not None:
+        # Nothing was queued, so nothing of Bambuddy's is read (AC2).
+        progress = from_failed_run(failed, bambuddy_url=queue_url(store.load()))
+    elif not queued_on_bambuddy(meta):
+        progress = None  # never printed, or only over the LAN: no client (AC2)
     else:
         async with client_for(store.load()) as client:
-            if failed is not None:
-                progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
-            else:
-                progress = await progress_for(client, meta, uploads=uploads, links=links)
+            progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

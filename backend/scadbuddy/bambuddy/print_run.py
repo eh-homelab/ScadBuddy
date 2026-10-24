@@ -1543,7 +1543,7 @@ def _check_manual_pick(
 
 
 async def check_for_output(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     store: OutputStore,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
@@ -1583,7 +1583,7 @@ async def check_for_output(
 
 
 async def check_for_library(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     uploads: BambuddyUploadStore,
     settings: StoredSettings,
     file_id: int,
@@ -1595,10 +1595,12 @@ async def check_for_library(
     printers: PrinterStore | None = None,
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
+    profiles: Profiles | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
     slots read from the file itself (#2550), from the download the check's layout reads
-    anyway (#4495); ``files`` reads a native one (#3827)."""
+    anyway (#4495); ``files`` reads a native one (#3827). ``profiles`` are a native
+    run's presets (D5), as :func:`check_for_output`'s."""
     return await check_print(
         client,
         await LibrarySource.load(
@@ -1616,6 +1618,7 @@ async def check_for_library(
         printers=printers,
         reports=reports,
         catalogue=catalogue,
+        profiles=profiles,
     )
 
 

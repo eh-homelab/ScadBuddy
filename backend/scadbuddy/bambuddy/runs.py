@@ -46,9 +46,8 @@ from pydantic import BaseModel, Field, computed_field, model_validator
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.bambuddy.activity import row_of
-from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
-from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run
+from scadbuddy.bambuddy.progress import PrintProgress, from_failed_run, queue_url
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.core.problems import DATABASE_ERRORS
@@ -647,8 +646,6 @@ def newest_failed_from(
         detail = await newest_failure(runs, run_subject, latest=latest)
         if detail is None:
             return None
-        settings = await asyncio.to_thread(load)
-        url = BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
-        return from_failed_run(detail, bambuddy_url=url)
+        return from_failed_run(detail, bambuddy_url=queue_url(await asyncio.to_thread(load)))
 
     return newest_failed
