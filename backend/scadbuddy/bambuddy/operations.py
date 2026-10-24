@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import psycopg
 from fastapi import status
 from temporalio import activity
 
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
@@ -27,7 +27,7 @@ from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
 from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.print_run import PrintRunRequest, resolve_project
+from scadbuddy.bambuddy.print_run import PrintRunRequest, resolve_project, run_route
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
@@ -49,7 +49,11 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
-from scadbuddy.print_library.reads import NativeReads, no_native, reads_for
+from scadbuddy.print_library.reads import NativeCopies, NativeReads, no_native, reads_for
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.hot_path import native_backends
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.start import NativeSliceStarter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -80,6 +84,8 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         library=components.get(PRINT_LIBRARY).serving_native,
         native_slices=components.get(SLICING).store,
         native=components.get(SLICING).starter,
+        printers=components.get(PRINTERS).store,
+        reports=components.get(PRINTERS).reports,
     )
 
 
@@ -93,6 +99,8 @@ def bambuddy_kinds_over(
     library: NativeReads = no_native,
     native_slices: NativeSliceStore | None = None,
     native: NativeSliceStarter | None = None,
+    printers: PrinterStore | None = None,
+    reports: PrinterReportStore | None = None,
 ) -> list[OperationKind]:
     """The Bambuddy kinds over these stores: the API's, or the print worker's, which
     reads its outputs (#1060) and native library files (#3827) through the API."""
@@ -332,7 +340,27 @@ def bambuddy_kinds_over(
         nothing twice."""
         settings = await asyncio.to_thread(settings_store.load)
         body = PrintRunRequest.model_validate(request["request"])
-        async with client_for(settings) as client:
+        # The run's own decision (plan 2026-10-18 D2): a native run's slice builds no
+        # Bambuddy client (D3).
+        route = (
+            await run_route(
+                settings,
+                printers,
+                reports,
+                printer=body.printer,
+                printer_id=body.printer_id,
+                say_fallback=False,
+            )
+            if printers is not None and native_backends(settings)
+            else None
+        )
+        lan = route is not None and route.native
+        own = await library()
+        # The native library a native run's copy goes into: the API's own
+        # (`NativeLibrary`) or, on the print worker, its internal routes (`RemoteLibrary`).
+        copies = cast("NativeCopies | None", own) if lan else None
+        title: str | None = None
+        async with maybe_client(settings, native=lan) as client:
             source: PrintSource
             subject: str
             if request.get("library_file_id") is not None:
@@ -345,12 +373,14 @@ def bambuddy_kinds_over(
                     uploads=uploads,
                     settings=settings,
                     read_own=True,
-                    files=reads_for(file_id, client, await library()),
+                    files=reads_for(file_id, client, own),
+                    native=copies,
                 )
             else:
                 meta = await require(outputs, request["output_id"])
                 subject = PrintSubject.output(meta.id).run_subject
                 naming = await outputs.naming(meta)
+                title = naming.title
                 source = OutputSource(
                     store=outputs,
                     meta=meta,
@@ -359,6 +389,7 @@ def bambuddy_kinds_over(
                     # The preview's copy goes to the inbox, never a project's folder.
                     stem=None,
                     print_settings=naming.print_settings,
+                    native=copies,
                 )
             return _json(
                 await start_preview(
@@ -372,7 +403,9 @@ def bambuddy_kinds_over(
                     native=native,
                     native_slices=native_slices,
                     temporal=activity.client(),
-                    native_reads=await library(),
+                    native_reads=own,
+                    route=route,
+                    title=title,
                 )
             )
 

@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
 
 import psycopg
@@ -381,6 +381,20 @@ class LanReads(Protocol):
     its newest run printed over the LAN, else ``None``."""
 
     async def read(self, run_subject: str) -> PrintProgress | None: ...
+
+
+async def lan_first(
+    lan: LanReads,
+    run_subject: str,
+    bambuddy: Callable[[], Awaitable[PrintProgress | None]],
+) -> PrintProgress | None:
+    """A subject's LAN print's progress from its printer's report, else ``bambuddy``'s
+    read: a follow of a native run never builds a Bambuddy client (#3818 tier A, plan
+    2026-10-18 D3)."""
+    native = await lan.read(run_subject)
+    if native is not None:
+        return native
+    return await bambuddy()
 
 
 async def progress_for(

@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import fields
 from datetime import UTC, datetime
+from typing import Any
+
+import pytest
 
 from scadbuddy.bambuddy.choices import ChoicesView, with_lan_printers
 from scadbuddy.bambuddy.dispatch import QueueOutcome
@@ -13,10 +16,10 @@ from scadbuddy.bambuddy.print_run import (
     PrintRunResult,
     _queued,
     lan_printers,
-    native_runs,
     run_path,
 )
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.hot_path import hot_path_native
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.print_activities import PrintDeps
 
@@ -75,20 +78,54 @@ class _Unread:
         raise AssertionError("the registry was read")
 
 
-def test_a_native_row_reports_bambuddys_path_while_no_run_is_native() -> None:
+#: The hot path's stored backends (plan 2026-10-18 D2).
+HOT_PATH: dict[str, Any] = {
+    "slicer_backend": "native",
+    "library_backend": "native",
+    "store_backend": "s3",
+}
+
+
+def test_a_native_row_reports_bambuddys_path_on_bambuddys_backends() -> None:
+    """D2: the stored backends are the control. On the defaults (prod's
+    ``slicer_backend=bambuddy``) a row whose own path is the LAN prints through
+    Bambuddy, and the registry is not read for the dialog."""
     settings = StoredSettings()
     row = _both_links_native()
-    # The row's own path is the LAN, but no run takes it until hot-path Task 9.
     assert run_path(row, None, now=datetime.now(UTC)) == "native"
-    assert native_runs(settings) is False
+    assert hot_path_native(settings, "native") is False
     rows = _Rows()
     assert asyncio.run(lan_printers(settings, rows, None)) == []  # type: ignore[arg-type]
     assert rows.reads == 0
 
 
+def test_a_native_row_is_listed_on_the_hot_paths_backends() -> None:
+    settings = StoredSettings(**HOT_PATH)
+    rows = _Rows()
+    listed = asyncio.run(lan_printers(settings, rows, None))  # type: ignore[arg-type]
+    assert listed == [_both_links_native().id]
+
+
+@pytest.mark.parametrize(
+    ("change", "path", "native"),
+    [
+        ({}, "native", True),
+        ({"store_backend": "bambuddy"}, "native", True),
+        ({}, "bambuddy", False),
+        ({"store_backend": "local"}, "native", False),
+        ({"slicer_backend": "bambuddy"}, "native", False),
+        ({"library_backend": "bambuddy"}, "native", False),
+    ],
+)
+def test_hot_path_native_is_the_backends_and_the_rows_path(
+    change: dict[str, str], path: Any, native: bool
+) -> None:
+    assert hot_path_native(StoredSettings(**{**HOT_PATH, **change}), path) is native
+
+
 def test_the_print_worker_decides_a_run_as_the_dialog_reads_it() -> None:
     default = next(f for f in fields(PrintDeps) if f.name == "native_run").default
-    assert default is native_runs
+    assert default is hot_path_native
 
 
 def test_the_choices_view_lists_no_lan_printer_while_no_run_is_native() -> None:

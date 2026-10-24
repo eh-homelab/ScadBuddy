@@ -60,7 +60,12 @@ from scadbuddy.api.operations import (
     temporal_unavailable,
 )
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
-from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output, with_lan_printers
+from scadbuddy.bambuddy.choices import (
+    ChoicesView,
+    choices_for_output,
+    native_choices_for,
+    with_lan_printers,
+)
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
@@ -76,9 +81,14 @@ from scadbuddy.bambuddy.preview import (
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
+    RunRoute,
+    all_native,
     check_for_output,
+    dialog_route,
+    filament_options,
     filament_options_for_output,
 )
+from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
 from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
@@ -124,8 +134,14 @@ from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.progress import LanProgress
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
+from scadbuddy.rack.usage import RackUsage
 from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
+from scadbuddy.slicing.profiles import Profiles
+from scadbuddy.spools.component import Spools, SpoolsDep
+from scadbuddy.spools.models import Overlay
+from scadbuddy.spools.overlay import labels as spool_labels
+from scadbuddy.spools.overlay import status_overlay
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -189,6 +205,13 @@ PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = temporal_problems(
     " 502 or 504); the route's own are 404 for an unknown output and 409 for a run whose"
     " record expired.",
 )
+
+
+#: The registry printer a dialog read is for (#3823): on a printer a run reaches natively
+#: (plan 2026-10-18 D2) the read asks nothing of Bambuddy.
+PrinterQuery = Annotated[
+    str | None, Query(description="The registry printer (its id) the dialog is for")
+]
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -575,10 +598,12 @@ async def get_printers_now(
     store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep
 ) -> PrintersNow:
     now = datetime.now(UTC)
-    if not (await asyncio.to_thread(store.load)).bambuddy_url:
-        # No Bambuddy (#3823): the LAN printers still have cards.
+    settings = await asyncio.to_thread(store.load)
+    if not settings.bambuddy_url or await all_native(settings, printers.store, printers.reports):
+        # No Bambuddy (#3823), or every printer printed to natively (plan 2026-10-18 D4):
+        # the cards are the LAN reports', and Bambuddy is not asked.
         return await printers_now(None, links, printers.store, printers.reports, now=now)
-    async with client_for(store.load()) as client:
+    async with client_for(settings) as client:
         return await printers_now(client, links, printers.store, printers.reports, now=now)
 
 
@@ -1015,6 +1040,8 @@ async def post_check(
     library_catalogue: CatalogueDep,
     paths: PathsDep,
     printers: PrintersDep,
+    slicing: SlicingDep,
+    library: PrintLibraryDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -1044,6 +1071,9 @@ async def post_check(
             printers=printers.store,
             reports=printers.reports,
             catalogue=kept_catalogue(client, paths.cache, store.kek),
+            # A native run's check (plan 2026-10-18 D2) reads these, never `client`.
+            profiles=slicing.profiles,
+            native=await library.serving_native(),
         )
 
 
@@ -1145,7 +1175,10 @@ async def get_filaments(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
+    printers: PrintersDep,
+    spools: SpoolsDep,
     printer_id: Annotated[int | None, Query()] = None,
+    printer: PrinterQuery = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
     plate_ids: Annotated[
@@ -1170,6 +1203,20 @@ async def get_filaments(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
+    route = await dialog_route(
+        settings, printers.store, printers.reports, printer=printer, printer_id=printer_id
+    )
+    if route is not None:
+        # A native run's filaments (#3818 tier A, D1): the trays, with the providers'
+        # records over them, and no Bambuddy call.
+        return await native_filaments(
+            OutputSource(store=outputs, meta=meta, uploads=uploads, settings=settings),
+            route,
+            spools,
+            plate_id=plate_id,
+            all_plates=all_plates,
+            plate_ids=plate_ids,
+        )
     async with client_for(settings) as client:
         return await filament_options_for_output(
             client,
@@ -1197,12 +1244,36 @@ async def get_choices(
     rack: RackUsageDep,
     paths: PathsDep,
     printers: PrintersDep,
+    spools: SpoolsDep,
+    slicing: SlicingDep,
     printer_id: Annotated[int | None, Query()] = None,
+    printer: PrinterQuery = None,
 ) -> ChoicesView:
     """Printers, installed nozzles, quality tiers and processes, plates with the last one
-    used, and the filament step — one read for the whole dialog (spec §3)."""
+    used, and the filament step — one read for the whole dialog (spec §3). On a printer
+    a run reaches natively (``printer``, plan 2026-10-18 D2) nothing is read of Bambuddy."""
     meta = require_output(outputs, output_id)
     settings = store.load()
+    remembered = settings.model_print_choices.get(meta.slug)
+    route = await dialog_route(
+        settings,
+        printers.store,
+        printers.reports,
+        printer=printer,
+        printer_id=printer_id or (remembered.printer_id if remembered else None),
+    )
+    if route is not None:
+        native_view = await native_choices(
+            OutputSource(store=outputs, meta=meta, uploads=uploads, settings=settings),
+            settings,
+            route,
+            remembered=remembered,
+            profiles=slicing.profiles,
+            registry=printers,
+            spools=spools,
+            rack=rack,
+        )
+        return await with_lan_printers(native_view, settings, printers)
     async with client_for(settings) as client:
         view = await choices_for_output(
             client,
@@ -1216,6 +1287,70 @@ async def get_choices(
             rack=rack,
         )
     return await with_lan_printers(view, settings, printers)
+
+
+async def _overlay_of(spools: Spools, route: RunRoute) -> tuple[Overlay, dict[str, str]]:
+    """The spool providers' records over ``route``'s trays, a Postgres read (D1), and
+    the providers' names for its notes."""
+    assert route.row is not None and route.status is not None, "a native route is a report's"
+    overlay = await status_overlay(spools, route.row, route.status, now=datetime.now(UTC))
+    return overlay, spool_labels(spools)
+
+
+async def native_filaments(
+    source: PrintSource,
+    route: RunRoute,
+    spools: Spools,
+    *,
+    plate_id: int,
+    all_plates: bool,
+    plate_ids: list[int] | None,
+) -> FilamentOptions:
+    """The filament step on a native run (#3818 tier A, D1): no Bambuddy call."""
+    assert route.status is not None
+    overlay, labels = await _overlay_of(spools, route)
+    return await filament_options(
+        None,
+        source,
+        printer_id=route.printer_id,
+        plate_id=plate_id,
+        all_plates=all_plates,
+        plate_ids=plate_ids,
+        trays_from=route.status,
+        overlay=overlay,
+        provider_labels=labels,
+    )
+
+
+async def native_choices(
+    source: PrintSource,
+    settings: StoredSettings,
+    route: RunRoute,
+    *,
+    remembered: ModelPrintChoices | None,
+    profiles: Profiles | None,
+    registry: Printers,
+    spools: Spools,
+    rack: RackUsage | None,
+) -> ChoicesView:
+    """The dialog's choices on a native run (D2-D5): the registry, the report, the
+    image's presets and the trays; no Bambuddy call."""
+    overlay, labels = await _overlay_of(spools, route)
+    return await native_choices_for(
+        _given_source(source),
+        settings,
+        route,
+        remembered=remembered,
+        profiles=profiles,
+        rows=await asyncio.to_thread(registry.store.list),
+        overlay=overlay,
+        provider_labels=labels,
+        rack=rack,
+    )
+
+
+async def _given_source(source: PrintSource) -> PrintSource:
+    return source
 
 
 async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:
@@ -1267,13 +1402,16 @@ async def get_progress(
     latest = await newest_run(state, meta.id)
     failed = failure_of(latest)
     progress: PrintProgress | None
-    async with client_for(store.load()) as client:
-        if failed is not None:
-            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
-        else:
-            progress = await progress_for(
-                client, meta, uploads=uploads, links=links, lan=lan_reads(registry, latest)
-            )
+    lan = None if failed is not None else await lan_reads(registry, latest).read(meta.id)
+    if lan is not None:
+        # A LAN print's progress is its printer's report: no client is built (D3).
+        progress = lan
+    else:
+        async with client_for(store.load()) as client:
+            if failed is not None:
+                progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
+            else:
+                progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

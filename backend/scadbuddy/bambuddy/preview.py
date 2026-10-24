@@ -30,24 +30,28 @@ from pydantic import BaseModel, Field
 from temporalio.client import Client
 
 from scadbuddy.bambuddy import toolpath
+from scadbuddy.bambuddy.catalogue import Catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import ReuseSlice, SlicePlan, slice_request
 from scadbuddy.bambuddy.models import SliceJob
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.print_run import (
+    NATIVE_SLICER_UNAVAILABLE,
     PlannedRun,
     PlatePlan,
     PreparedPlates,
     PrintRunRequest,
+    RunRoute,
     plan_run,
     prepare_run,
 )
-from scadbuddy.bambuddy.print_source import PrintSource
+from scadbuddy.bambuddy.print_source import PrintSource, bambuddy_client
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, PreviewSlice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.reads import LibraryReads, reads_for
 from scadbuddy.slicing import slice_info
+from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError
 from scadbuddy.slicing.start import NativeSliceStarter, start_native_slice
 from scadbuddy.slicing.store import NativeSliceStore, SliceSubjectError
@@ -95,29 +99,62 @@ class SlicePreview(BaseModel):
 
 
 async def _planned(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
     native: NativeSliceStarter | None,
+    *,
+    route: RunRoute | None = None,
+    title: str | None = None,
 ) -> PlannedRun:
-    """The run's own layout, upload and presets for ``request``, never into a project."""
+    """The run's own layout, upload and presets for ``request``, never into a project.
+
+    On a native ``route`` (plan 2026-10-18 D2) it is the native run's plan, with no
+    Bambuddy call (``client`` is ``None``, D3): its copy goes where the run's would with
+    no folder chosen, the ``title``'s template folder, so a run of the same choices
+    queues this slice (#2169)."""
     if source.is_sliced:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "This file is sliced already, so there is nothing to slice: it prints as it is.",
         )
     request = request.model_copy(update={"project_id": None, "folder_id": None})
-    prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
+    lan = route is not None and route.native
+    catalogue = None
+    if lan:
+        if native is None:
+            raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
+        profiles = native.profiles
+
+        async def presets() -> Catalogue:
+            return await catalogue_for(None, native=profiles)
+
+        catalogue = presets
+    prepared = await prepare_run(
+        client,
+        source,
+        settings,
+        request,
+        refuse_manual_pick=False,
+        native=source.native if lan else None,
+        catalogue=catalogue,
+        route=route,
+    )
+    plates = PreparedPlates.of(prepared)
+    if lan:
+        # The check's mark of a native run, which the plan keys on.
+        plates = plates.model_copy(update={"lan_start": True})
     # It slices to show the toolpath: no earlier slice is looked up (#2691 review).
     planned = await plan_run(
         client,
         source,
         settings,
         request,
-        PreparedPlates.of(prepared),
+        plates,
         reuse_slices=False,
         native=native,
+        title=title,
     )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
@@ -125,7 +162,7 @@ async def _planned(
 
 
 async def _start_plate(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     settings: StoredSettings,
     uploads: BambuddyUploadStore,
     planned: PlannedRun,
@@ -159,6 +196,7 @@ async def _start_plate(
             temporal=temporal,
             native_reads=native_reads,
         )
+    client = bambuddy_client(client)
     key = slice_request(plate.plan, plate.plate_id).preset_key
     job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
     if job_id is None:
@@ -183,7 +221,7 @@ async def _start_plate(
 
 
 async def start_preview(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     source: PrintSource,
     settings: StoredSettings,
     uploads: BambuddyUploadStore,
@@ -194,6 +232,8 @@ async def start_preview(
     native_slices: NativeSliceStore | None = None,
     temporal: Client | None = None,
     native_reads: LibraryReads | None = None,
+    route: RunRoute | None = None,
+    title: str | None = None,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
     record the slice for ``subject``; the first plate when every plate prints.
@@ -202,7 +242,7 @@ async def start_preview(
     change, and a copy filed in a project's folder is that project's record, never
     removed (#317), so trying spools would fill the project. A print into the project
     then slices its own copy."""
-    planned = await _planned(client, source, settings, request, native)
+    planned = await _planned(client, source, settings, request, native, route=route, title=title)
     return await _start_plate(
         client,
         settings,
@@ -218,7 +258,7 @@ async def start_preview(
 
 
 async def start_preview_plates(
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     source: PrintSource,
     settings: StoredSettings,
     uploads: BambuddyUploadStore,
@@ -229,6 +269,8 @@ async def start_preview_plates(
     native_slices: NativeSliceStore | None = None,
     temporal: Client | None = None,
     native_reads: LibraryReads | None = None,
+    route: RunRoute | None = None,
+    title: str | None = None,
 ) -> list[PreviewStarted]:
     """:func:`start_preview` for every plate the source lays out (#4250 Ruling 2): a
     quote is the whole output's price, so ``request``'s ``plate_id``, ``plate_ids`` and
@@ -237,7 +279,7 @@ async def start_preview_plates(
     plate, in plate order. A plate that fails to start leaves the earlier plates'
     records to the preview sweeps, as the dialog leaves its own."""
     every = request.model_copy(update={"all_plates": True, "plate_ids": None, "plate_id": 1})
-    planned = await _planned(client, source, settings, every, native)
+    planned = await _planned(client, source, settings, every, native, route=route, title=title)
     return [
         await _start_plate(
             client,
@@ -260,7 +302,7 @@ async def _start_native(
     plan: SlicePlan,
     plate_id: int,
     nozzle_plan: NozzlePlan | None,
-    client: BambuddyClient,
+    client: BambuddyClient | None,
     *,
     subject: str,
     native: NativeSliceStarter | None,

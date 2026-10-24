@@ -68,11 +68,22 @@ class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
         ...
 
 
-def reads_for(file_id: int, client: BambuddyClient, native: LibraryReads | None) -> LibraryReads:
+def _no_client(message: str) -> ApiError:
+    """A Bambuddy read reached with no client, as a native run (#3818 tier A, plan
+    2026-10-18 D3) passes none: a caller's mistake, the 500 the print path's misuse guards
+    raise (`print_source._misuse`), which its activities raise as non-retryable."""
+    return ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, message)
+
+
+def reads_for(
+    file_id: int, client: BambuddyClient | None, native: LibraryReads | None
+) -> LibraryReads:
     """Where file ``file_id`` is read: ``native`` for a native id, Bambuddy for any other.
     A native id with no native library to read it (``library_backend=bambuddy``) is the
     404 a missing file is."""
     if not is_native_id(file_id):
+        if client is None:
+            raise _no_client(f"library file {file_id} is Bambuddy's, and a native run has none")
         return client
     if native is None:
         raise ApiError(
@@ -91,7 +102,7 @@ def served_reads(
     if native is not None:
         return native
     if client is None:
-        raise TypeError(f"library file {file_id} is read from Bambuddy, which needs a client")
+        raise _no_client(f"library file {file_id} is read from Bambuddy, which needs a client")
     return reads_for(file_id, client, None)
 
 
@@ -120,7 +131,7 @@ def reads_of(files: LibraryReads | None, client: BambuddyClient | None) -> Libra
     if files is not None:
         return files
     if client is None:
-        raise TypeError("a library read needs its file's library or a Bambuddy client")
+        raise _no_client("a library read needs its file's library or a Bambuddy client")
     return client
 
 

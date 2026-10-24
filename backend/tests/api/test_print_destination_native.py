@@ -132,7 +132,11 @@ def test_the_print_worker_reads_folders_and_makes_the_template_folder(
 
 def _activities(native: Any, **settings: Any) -> PrintActivities:
     unused: Any = None
-    store: Any = SimpleNamespace(load=lambda: StoredSettings(bambuddy_url=BAMBUDDY, **settings))
+    # A printer to print on: the run's row and path are decided first (Task 9's
+    # `run_route`), and with no registry the run names Settings' printer.
+    store: Any = SimpleNamespace(
+        load=lambda: StoredSettings(bambuddy_url=BAMBUDDY, printer_id=1, **settings)
+    )
     return PrintActivities(
         PrintDeps(
             settings_store=store,
@@ -142,7 +146,9 @@ def _activities(native: Any, **settings: Any) -> PrintActivities:
             store=unused,
             observer=unused,
             library=native,
-            native_run=lambda settings, request: True,
+            # The image's profiles a native check resolves against (D5); never read here.
+            native=SimpleNamespace(profiles=unused),
+            native_run=lambda settings, path: True,
         )
     )
 
@@ -206,7 +212,7 @@ async def test_prepare_run_on_native_checks_the_folder_natively(
     request = PrintRunRequest.model_validate({**_REQUEST, "folder_id": 7})
     with pytest.raises(ApiError) as refused:
         await print_run.prepare_run(
-            None,  # type: ignore[arg-type]  # never read: the folder is refused first
+            None,  # never read: the folder is refused first
             None,  # type: ignore[arg-type]
             StoredSettings(),
             request,

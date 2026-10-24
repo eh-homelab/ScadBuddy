@@ -27,7 +27,7 @@ from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, OutputNotFoundError, OutputStore
 from scadbuddy.slicing.transfer import INTERNAL_BLOBS, TRANSFER_HEADER
 from scadbuddy.slicing.transfer_token import TransferToken, sign, transfer_key
-from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content import ContentStore, template_title
 
 #: The API's internal routes the remote reader calls (``api/internal.py``).
 INTERNAL_OUTPUTS = "/api/v1/internal/outputs"
@@ -51,6 +51,9 @@ class OutputNaming(BaseModel):
     #: The model.json's refusal of its print settings, when it has one: a print refuses
     #: on it (409 "Invalid Model Metadata"), a project file only names.
     invalid_meta: str | None = None
+    #: The template's display name (`template_title`): the folder a native run files its
+    #: copy under (#3818 tier A, plan 2026-10-18 D6), as the output's filing does.
+    title: str | None = None
 
 
 class OutputReader(OutputFiles, Protocol):
@@ -89,11 +92,14 @@ class LocalOutputs:
 
     async def naming(self, meta: OutputMeta) -> OutputNaming:
         stem = await output_stem(meta, self.outputs, self.catalogue)
+        title = await asyncio.to_thread(
+            template_title, self.catalogue.paths.model_source(meta.slug).parent, meta.slug
+        )
         try:
             settings = await asyncio.to_thread(self.catalogue.print_settings, meta.slug)
         except InvalidModelMetaError as error:
-            return OutputNaming(stem=stem, invalid_meta=str(error))
-        return OutputNaming(stem=stem, print_settings=settings)
+            return OutputNaming(stem=stem, invalid_meta=str(error), title=title)
+        return OutputNaming(stem=stem, print_settings=settings, title=title)
 
 
 def _problem(response: httpx.Response) -> ApiError:
