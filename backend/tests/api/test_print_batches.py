@@ -3,6 +3,7 @@ Postgres so a reload resumes it, and queued as each file's own library run."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
+from scadbuddy import main
 from scadbuddy.api import library_print, print_batches
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.print_batches import batch_request_id
@@ -22,7 +24,13 @@ from scadbuddy.api.printing import STILL_CHECKING_DETAIL, _answered
 from scadbuddy.bambuddy.print_run import PICK_AGAIN, PrintRunRequest, _named_printer
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
-from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome, PrintBatchStore
+from scadbuddy.batches.store import (
+    BatchChoice,
+    BatchItem,
+    BatchOutcome,
+    NewBatchFile,
+    PrintBatchStore,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.main import BATCH_TTL, PENDING_BATCH_TTL
@@ -35,11 +43,25 @@ from tests.api.test_print_library import SLICED_RUN, sliced_3mf, sliced_file
 from tests.api.test_print_run_choices import follow_run, run_routes
 from tests.api.test_send import BASE, configure
 from tests.api.test_settings_runtime import _state
+from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
 BATCHES = "/api/v1/print/batches"
 API = f"{BASE}/api/v1"
+
+
+@pytest.fixture(autouse=True)
+def _no_background_prune(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The app's prune Schedule runs once at boot whatever the sweep interval, and its
+    claims sweep prunes the batches on this test's schema at any point of the test
+    (#4639): it pruned the batch a test had aged before the test's own prune could, and
+    deadlocked with an outcome. These tests run the prune themselves."""
+
+    async def no_sweep(_state: object) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_sweep_claims_and_batches_logged", no_sweep)
 
 
 def new_batch(client: TestClient, *ids: int) -> Any:
@@ -953,3 +975,47 @@ def test_queue_all_with_every_file_left_out_queues_nothing(client: TestClient) -
     assert response.status_code == 422, response.text
     assert "nothing to queue" in response.json()["detail"]
     assert client.get(f"{BATCHES}/{batch['id']}").json()["status"] == "open"
+
+
+def _blocked_by(pool: PgPool, pid: int) -> bool:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid)))"
+            " AS blocked",
+            (pid,),
+        ).fetchone()
+    assert row is not None
+    return bool(row["blocked"])
+
+
+@pytest.mark.parametrize("write", ["record_outcome", "choose"])
+async def test_a_write_to_a_file_never_deadlocks_with_the_prune(
+    pg_pool: PgPool, write: str
+) -> None:
+    """#4639: an outcome or a choice updated the file's row, then the batch's; the prune
+    (and the route's delete) deletes the batch's row, whose cascade then takes the
+    files'. Opposite orders: a write landing during the sweep's prune deadlocked, a 500.
+    Here the prune's DELETE is played in its own two steps, the batch's row locked first
+    (as the DELETE does), its cascade once the write waits on it."""
+    store = PrintBatchStore(pg_pool)
+    batch = await store.create([NewBatchFile(library_file_id=104, filename="a.gcode.3mf")])
+    with pg_pool.connection() as prune, prune.transaction():
+        prune.execute("SET LOCAL lock_timeout = '20s'")
+        pid = prune.execute("SELECT pg_backend_pid() AS pid").fetchone()
+        assert pid is not None
+        prune.execute("SELECT 1 FROM print_batches WHERE id = %s FOR UPDATE", (batch.id,))
+        writing = asyncio.create_task(
+            store.record_outcome(batch.id, 0, BatchOutcome(status="unchosen"))
+            if write == "record_outcome"
+            else store.choose(batch.id, 0, BatchChoice(skipped=True))
+        )
+        for _ in range(200):
+            if await asyncio.to_thread(_blocked_by, pg_pool, pid["pid"]):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the write never waited on the prune's lock")
+        prune.execute("DELETE FROM print_batches WHERE id = %s", (batch.id,))
+    # The prune won: the write finds no batch, and says so rather than failing.
+    assert not await writing
+    assert await store.get(batch.id) is None
