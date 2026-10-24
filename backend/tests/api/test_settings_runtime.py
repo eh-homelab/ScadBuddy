@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import os
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,7 +21,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.settings import APPLIES, ENV_SEEDED, Settings
-from scadbuddy.library.settings_store import ModelProject
+from scadbuddy.library.settings_store import ModelProject, S3Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
 from tests.support.operations import press
@@ -614,3 +617,32 @@ def test_an_unreadable_finish_photo_setting_is_unknown_not_an_error(client: Test
     assert body["version"] == "1.2.5.6"
     assert body["capture_finish_photo"] is None
     assert "Read Status" in body["detail"]
+
+
+def test_the_hot_paths_backends_start_with_no_bambuddy(
+    settings: Settings, s3: S3Settings, tmp_path: Path
+) -> None:
+    """AC2 (#3818 tier A, plan 2026-10-18 Task 10): the app starts on the S3 store, the
+    native library and the native slicer with ``bambuddy_url`` unset, and its settings
+    say so; only a route that is Bambuddy's by nature asks for one."""
+    # Imported here: that module imports this one's helpers.
+    from tests.api.test_print_preview_native import _settings as _native_settings
+    from tests.api.test_print_preview_native import dialog_profiles
+
+    kek_file = tmp_path / "kek"
+    kek_file.write_text(base64.b64encode(os.urandom(32)).decode())
+    native = _native_settings(
+        settings, s3, kek_file, dialog_profiles(tmp_path / "profiles"), library_backend="native"
+    )
+    with TestClient(create_app(native)) as client:
+        body = client.get("/api/v1/settings").json()
+        assert body["bambuddy_url"] is None
+        assert (body["store_backend"], body["library_backend"], body["slicer_backend"]) == (
+            "s3",
+            "native",
+            "native",
+        )
+        assert client.get("/healthz").status_code == 200
+        camera = client.get("/api/v1/print/printers/1/camera")
+        assert camera.status_code == 409
+        assert "set one in Settings" in camera.json()["detail"]

@@ -620,11 +620,16 @@ class PrintActivities:
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)
         await self._touch(planned, settings.library_folder_id)
-        try:
-            config: BambuddyConfig | None = BambuddyConfig.from_settings(settings)
-        except ApiError as error:
-            logger.warning("run %s queued without a Bambuddy link: %s", input.run_id, error.detail)
-            config = None
+        config: BambuddyConfig | None = None
+        if not any(outcome.lan is not None for outcome in input.outcomes):
+            # A plate started over the LAN is on no Bambuddy queue (`finish_run`): a
+            # native run reads no Bambuddy settings, which may be unset (AC2).
+            try:
+                config = BambuddyConfig.from_settings(settings)
+            except ApiError as error:
+                logger.warning(
+                    "run %s queued without a Bambuddy link: %s", input.run_id, error.detail
+                )
         return finish_run(config, planned, input.outcomes, input.queued)
 
     @activity.defn(name="print_succeed")

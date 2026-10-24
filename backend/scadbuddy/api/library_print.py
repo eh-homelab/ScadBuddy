@@ -55,14 +55,19 @@ from scadbuddy.api.outputs import (
 )
 from scadbuddy.api.printing import (
     PRINT_RUN_PROBLEMS,
+    PrinterQuery,
     accept_run,
     lan_reads,
+    names_no_printer,
+    native_choices,
+    native_filaments,
     newest_run,
+    opening_route,
 )
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for, with_lan_printers
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for, maybe_client
 from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
@@ -91,13 +96,15 @@ from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
     check_for_library,
+    dialog_route,
     filament_options_for_library,
 )
 from scadbuddy.bambuddy.print_source import LibrarySource
-from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, library_progress
+from scadbuddy.bambuddy.progress import PrintProgress, from_failed_run, library_progress, queue_url
 from scadbuddy.bambuddy.projects import AttachResult, ProjectAttach
 from scadbuddy.bambuddy.runs import PrintRun, failure_of
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
@@ -141,6 +148,7 @@ from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.slicing.preview import SlicerQuery, read_native_preview, read_native_toolpath
+from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
@@ -1054,6 +1062,31 @@ async def get_library_plate_thumbnail(
     )
 
 
+async def _native_source(
+    file_id: int,
+    native: NativeLibrary | None,
+    store: SettingsStore,
+    uploads: BambuddyUploadStore,
+    paths: DataPaths,
+    *,
+    budget: ReadBudget,
+    downloads: DownloadCache | None,
+) -> LibrarySource:
+    """File ``file_id`` as a native run's dialog reads it (#3818 tier A, D3): from the
+    native library, its slots from the file itself, with no Bambuddy client."""
+    files = served_reads(file_id, None, native)
+    return await LibrarySource.load(
+        None,
+        file_id,
+        uploads=uploads,
+        settings=store.load(),
+        filaments=partial(
+            library_filaments, None, paths.cache, budget=budget, downloads=downloads, files=files
+        ),
+        files=files,
+    )
+
+
 @router.get(
     "/{file_id}/choices",
     response_model=ChoicesView,
@@ -1069,15 +1102,40 @@ async def get_library_choices(
     downloads: DownloadsDep,
     library: PrintLibraryDep,
     printers: PrintersDep,
+    spools: SpoolsDep,
+    slicing: SlicingDep,
     printer_id: Annotated[int | None, Query()] = None,
+    printer: PrinterQuery = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
     printed with, so the dialog reopens on it. The file's filament slots are read from
     the file itself, the fetch its preview shares, and from Bambuddy only for a file
-    ScadBuddy cannot read them from (#2550)."""
+    ScadBuddy cannot read them from (#2550). On a printer a run reaches natively
+    (``printer``, plan 2026-10-18 D2) nothing is read of Bambuddy, as an output's."""
     settings = store.load()
     remembered = store.library_choices(file_id)
     native = await library.serving_native()
+    route = await opening_route(
+        settings,
+        printers,
+        printer=printer,
+        printer_id=printer_id or (remembered.printer_id if remembered else None),
+    )
+    if route is not None:
+        own = await _native_source(
+            file_id, native, store, uploads, paths, budget=budget, downloads=downloads
+        )
+        native_view = await native_choices(
+            own,
+            settings,
+            route,
+            remembered=remembered,
+            profiles=slicing.profiles,
+            registry=printers,
+            spools=spools,
+            rack=rack,
+        )
+        return await with_lan_printers(native_view, settings, printers)
     async with client_for(settings) as client:
         files = served_reads(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
@@ -1134,15 +1192,33 @@ async def get_library_filaments(
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
+    printers: PrintersDep,
+    spools: SpoolsDep,
     printer_id: Annotated[int | None, Query()] = None,
+    printer: PrinterQuery = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
     plate_ids: Annotated[
         list[Annotated[int, Field(ge=1)]] | None, Query(max_length=MAX_PLATES)
     ] = None,
 ) -> FilamentOptions:
+    """As ``/print/outputs/{id}/filaments``: on a native run (``printer``, D2) the
+    printer's trays with the providers' records over them (D1), and no Bambuddy call."""
     settings = store.load()
     native = await library.serving_native()
+    route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
+    if route is not None:
+        source = await _native_source(
+            file_id, native, store, uploads, paths, budget=budget, downloads=downloads
+        )
+        return await native_filaments(
+            source,
+            route,
+            spools,
+            plate_id=plate_id,
+            all_plates=all_plates,
+            plate_ids=plate_ids,
+        )
     async with client_for(settings) as client:
         files = served_reads(file_id, client, native)
         return await filament_options_for_library(
@@ -1272,7 +1348,8 @@ async def _run_filaments(
     does for a file this cannot read. Never refuses the run: the run's own reads say
     why a file cannot print."""
     try:
-        async with client_for(store.load()) as client:
+        # The native library reads its own files: no client (AC2).
+        async with maybe_client(store.load(), native=native is not None) as client:
             files = served_reads(file_id, client, native)
             file = await files.library_file(file_id)
             if not file.file_hash:
@@ -1308,13 +1385,16 @@ async def get_library_progress(
     latest = await newest_run(state, key)
     failed = failure_of(latest)
     progress: PrintProgress | None = None
-    async with client_for(store.load()) as client:
-        if failed is not None:
-            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
-        else:
-            progress = await library_progress(
-                client, subject, links, uploads=uploads, lan=lan_reads(registry, latest)
-            )
+    if failed is not None:
+        # Nothing was queued, so nothing of Bambuddy's is read (AC2).
+        progress = from_failed_run(failed, bambuddy_url=queue_url(store.load()))
+    elif (progress := await lan_reads(registry, latest).read(key)) is None and (
+        await links.last_run(subject)
+    ):
+        # Only a print Bambuddy queued is read there; a LAN print's is its printer's
+        # report, and a file never queued has none: neither builds a client (D3, AC2).
+        async with client_for(store.load()) as client:
+            progress = await library_progress(client, subject, links, uploads=uploads)
     observer.observe_subject(key, library_slug(subject), progress)
     # As an output's: a print someone is looking at that is still moving is followed.
     if progress is not None and not progress.settled:
@@ -1447,13 +1527,21 @@ async def post_library_check(
     downloads: DownloadsDep,
     library: PrintLibraryDep,
     printers: PrintersDep,
+    slicing: SlicingDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550), and its
-    presets from the dialog's kept catalogue (#4196)."""
+    presets from the dialog's kept catalogue (#4196). A native run's check (D2) builds
+    no client (D3)."""
     settings = store.load()
     native = await library.serving_native()
-    async with client_for(settings) as client:
+    route = await dialog_route(
+        settings, printers.store, printers.reports, printer=body.printer, printer_id=body.printer_id
+    )
+    # Naming no printer, the check judges nothing (`check_print`): the file is still
+    # read, which the native library does with no client.
+    bare = native is not None and names_no_printer(settings, body.printer, body.printer_id)
+    async with maybe_client(settings, native=route is not None or bare) as client:
         files = served_reads(file_id, client, native)
         return await check_for_library(
             client,
@@ -1473,5 +1561,6 @@ async def post_library_check(
             files=files,
             printers=printers.store,
             reports=printers.reports,
-            catalogue=kept_catalogue(client, paths.cache, store.kek),
+            catalogue=None if client is None else kept_catalogue(client, paths.cache, store.kek),
+            profiles=slicing.profiles,
         )
