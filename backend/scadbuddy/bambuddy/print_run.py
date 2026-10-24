@@ -1911,8 +1911,7 @@ async def prepare_run(
         row = route.row
         path: RunPath = route.path
         report_status = route.status
-        if not source.is_sliced:
-            _require_model(printer)
+        _check_resolvable(printer, any_model=source.is_sliced)
     else:
         named, bambuddy_id = await _named_printer(
             request.printer, request.printer_id, settings, printers
@@ -1928,8 +1927,7 @@ async def prepare_run(
         if listed is not None and listed.id == printer_id:
             # `ensured_route` read it for this run's first check (#4551): one read.
             printer = listed
-            if not source.is_sliced:
-                _require_model(printer)
+            _check_resolvable(printer, any_model=source.is_sliced)
         else:
             # Resolved before the path is decided (#4442 M2), so a row this run links or
             # merges takes its own path from its first run.
@@ -2004,9 +2002,23 @@ async def _record_seen(
         await record_seen(rack, printer_id, printer_status)
 
 
-#: How a disagreeing printer's refusal ends: a batch print's file says it of its own step
-#: (`print_batches._queue_one`, #4551).
+#: How a disagreeing printer's refusal ends.
 PICK_AGAIN = "Pick the printer again."
+#: The problem type of a disagreeing printer's refusal. It survives the run's refusal
+#: (`PrintRunError.type`), so a batch print says it of its own step from the type and
+#: ``reason``, never from the wording (`print_batches._queue_one`, #4551).
+DISAGREEING_PRINTER_PROBLEM = "https://scadbuddy.dev/problems/disagreeing-printer"
+
+
+class DisagreeingPrinterError(RunRefusalError):
+    """A named row that links another Bambuddy printer, or none, than the one sent beside
+    it (#4442 I1, #4516). ``reason`` is the detail without `PICK_AGAIN`, as an
+    extension member, for a caller that says what to pick again itself."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"{reason} {PICK_AGAIN}")
+        self.type = DISAGREEING_PRINTER_PROBLEM
+        self.extensions["reason"] = reason
 
 
 async def _named_printer(
@@ -2048,14 +2060,13 @@ async def _named_printer(
     if named.bambuddy_printer_id is None:
         # Never printed on the Bambuddy printer instead (#4516): the row may be one only
         # the LAN reaches, whose run the dialog asked for.
-        raise RunRefusalError(
+        raise DisagreeingPrinterError(
             f"disagreeing printer: {named.name} is not linked to Bambuddy printer {sent}."
-            f" {PICK_AGAIN}"
         )
     if named.bambuddy_printer_id != sent:
-        raise RunRefusalError(
+        raise DisagreeingPrinterError(
             f"disagreeing printer: {named.name} is Bambuddy printer"
-            f" {named.bambuddy_printer_id} now, not {sent}. {PICK_AGAIN}"
+            f" {named.bambuddy_printer_id} now, not {sent}."
         )
     return named, sent
 
@@ -2843,9 +2854,15 @@ async def _require_resolvable_printer(
             f"{printer.name} is deactivated in Bambuddy. Activate it there, or pick "
             "another printer.",
         )
+    _check_resolvable(printer, any_model=any_model)
+    return printer
+
+
+def _check_resolvable(printer: Printer, *, any_model: bool) -> None:
+    """What `_require_resolvable_printer` checks of a printer already read: its model,
+    unless ``any_model``."""
     if not any_model:
         _require_model(printer)
-    return printer
 
 
 def sliced_nozzle_size(
