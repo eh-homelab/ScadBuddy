@@ -234,6 +234,22 @@ def test_let_the_printer_pick_is_said_as_declined() -> None:
     assert not least.declined
 
 
+def test_a_declined_pick_says_the_hand_picked_position_was_not_sent() -> None:
+    """#4545: with several rack groups, "Let Bambuddy pick" sends nothing, the position
+    picked by hand included, so ``manual_for``'s "group 1 got position 6" is not said."""
+    plan = read_rack_plan(sliced(), 1)
+    assert plan is not None
+    chosen = choose_nozzles(
+        plan, idle_status(), algorithm="bambuddy", manual_position=6, usage={}, spools={}
+    )
+    assert chosen.declined and chosen.mapping is None
+    manual = [w.message for w in chosen.warnings if w.kind == "rack-manual-partial"]
+    assert manual == [
+        "Rack position 6 was not sent: the slice put the rack side in 4 nozzle groups, and"
+        " over the LAN the printer picks for all of them or none."
+    ]
+
+
 def test_a_file_with_no_slice_info_has_no_plan() -> None:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:

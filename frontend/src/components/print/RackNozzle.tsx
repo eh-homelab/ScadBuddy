@@ -109,7 +109,8 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
           </Select>
           {algorithm === 'bambuddy' && (
             <p data-testid="rack-algorithm-bambuddy" className="text-xs text-muted-foreground">
-              Printed over the LAN, the printer picks the hotends itself, unless a position is picked above.
+              Printed over the LAN, the printer picks the hotends itself. A position picked above is sent
+              only when the plate prints from one rack nozzle group; with several, the printer picks them all.
             </p>
           )}
           {algorithmUnsaved && (

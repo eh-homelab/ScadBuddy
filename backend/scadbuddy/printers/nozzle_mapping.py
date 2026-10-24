@@ -329,6 +329,17 @@ def choose_nozzles(
     picks = rank_rack(groups, status.nozzle_rack, algorithm, usage, manual)
     found = rank_warnings(groups, status.nozzle_rack, algorithm, picks, manual)
     if algorithm == "bambuddy" and len(picks) < len(groups):
+        # Nothing is sent, the hand-picked position included, so ``manual_for``'s "group
+        # N got position P" does not hold (#4545).
+        if manual and len(groups) > 1:
+            notes = [
+                FilamentWarning(
+                    kind="rack-manual-partial",
+                    message=f"Rack position {manual_position} was not sent: the slice put "
+                    f"the rack side in {len(groups)} nozzle groups, and over the LAN the "
+                    "printer picks for all of them or none.",
+                )
+            ]
         return NozzleChoice(mapping=None, warnings=[*notes, *found], declined=True)
     mapping = nozzle_mapping(
         plan.slot_groups,

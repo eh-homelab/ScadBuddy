@@ -9,6 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy.filaments import FilamentWarning
+
 
 class LanReport(BaseModel):
     """A printer's state: the ``print`` object of its reports on
@@ -45,3 +47,7 @@ class LanStarted(BaseModel):
 
     subtask_name: str
     started_at: datetime
+    #: The rack pick's advisories for this plate (#4545): what was sent, or why the
+    #: printer picks the hotends itself. Never a serial. A start an earlier attempt took
+    #: carries none, as no pick is made again.
+    warnings: list[FilamentWarning] = Field(default_factory=list)
