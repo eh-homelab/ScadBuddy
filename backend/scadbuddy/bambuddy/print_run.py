@@ -2767,7 +2767,8 @@ def finish_run(
     queued: list[QueuedPlate] | None = None,
 ) -> PrintRunResult:
     """Report what was queued, with each plate's rack picks and warnings (``queued``,
-    one per outcome), linked to Bambuddy's queue unless its settings are gone (``None``)."""
+    one per outcome, and a LAN start's own, #4545), linked to Bambuddy's queue unless
+    its settings are gone (``None``)."""
     warnings = list(planned.warnings)
     if queued and all(plate.picks for plate in queued):
         # Every plate had the rack side's hotend picked from the rack, which is always one
@@ -2775,9 +2776,10 @@ def finish_run(
         # (#1238), whichever flow the slice is for.
         swapped = [high_flow_warning(RACK_SIDE, flow) for flow in VOLUME_TYPE]
         warnings = [warning for warning in warnings if warning not in swapped]
-    for plate in queued or []:
+    lan = [outcome.lan.warnings for outcome in outcomes if outcome.lan is not None]
+    for plate_warnings in [*(plate.warnings for plate in queued or []), *lan]:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
-        warnings += [warning for warning in plate.warnings if warning not in warnings]
+        warnings += [warning for warning in plate_warnings if warning not in warnings]
     return _queued(
         config,
         outcomes,

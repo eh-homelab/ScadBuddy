@@ -65,7 +65,7 @@ describe('RackNozzleStep (#836, #2166)', () => {
       <RackNozzleStep rack={rack} algorithm="bambuddy" position={null} onAlgorithm={vi.fn()} onPosition={vi.fn()} />,
     )
     expect(screen.getByTestId('rack-algorithm-bambuddy')).toHaveTextContent(
-      'Printed over the LAN, the printer picks the hotends itself, unless a position is picked above.',
+      'Printed over the LAN, the printer picks the hotends itself. A position picked above is sent only when the plate prints from one rack nozzle group; with several, the printer picks them all.',
     )
     rerender(<RackNozzleStep rack={rack} algorithm="least_used" position={null} onAlgorithm={vi.fn()} onPosition={vi.fn()} />)
     expect(screen.queryByTestId('rack-algorithm-bambuddy')).toBeNull()

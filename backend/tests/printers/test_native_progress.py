@@ -245,6 +245,28 @@ def test_a_lan_run_reports_no_bambuddy_link() -> None:
     assert result.queue_item_ids == []
 
 
+def test_a_lan_starts_warnings_are_the_runs() -> None:
+    """#4545: the rack pick's advisories reach the run's warnings, each fact once."""
+    from scadbuddy.bambuddy.filaments import FilamentWarning
+
+    planned = PlannedRun(
+        library_file_id=41,
+        printer_id=1,
+        nozzle_size="0.4",
+        copies=1,
+        options=PrintOptions(),
+        plates=[],
+        path="native",
+    )
+    left = FilamentWarning(kind="rack-left-to-bambuddy", message="Rack pick left to the printer.")
+    started = OURS.model_copy(update={"warnings": [left]})
+    outcomes = [
+        QueueOutcome(sliced_library_file_id=77, printer_id=1, lan=started),
+        QueueOutcome(sliced_library_file_id=78, printer_id=1, lan=started),
+    ]
+    assert finish_run(None, planned, outcomes).warnings == [left]
+
+
 @pytest.mark.parametrize(
     ("plates", "copies", "refused"),
     [([1], None, False), ([1], 1, False), ([1, 2], None, True), ([1], 2, True)],
