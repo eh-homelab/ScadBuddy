@@ -114,7 +114,20 @@ function detail(order: Order): OrderDetail {
   const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id) }))
   const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position)
   const payments = state.payments.filter((p) => p.order_id === order.id)
-  const subtotal = items.filter((i) => i.status !== 'cancelled').flatMap((i) => i.quotes.filter((q) => q.accepted)).reduce((sum, q) => sum + q.total_minor, 0)
+  // `api/orders.py` `_totals`: an accepted quote's total, else the newest quote's unit
+  // price times the quantity now; an item with no quote is in no sum.
+  let subtotal = 0
+  let pending = 0
+  const unpriced: string[] = []
+  for (const i of items.filter((each) => each.status !== 'cancelled')) {
+    const accepted = i.quotes.find((q) => q.accepted)
+    const newest = i.quotes.at(-1)
+    if (accepted) subtotal += accepted.total_minor
+    else if (newest) {
+      subtotal += newest.unit_price_minor * i.quantity
+      pending += newest.unit_price_minor * i.quantity
+    } else unpriced.push(i.id)
+  }
   const charged = charges.reduce((sum, c) => sum + c.amount_minor, 0)
   const paid = payments.reduce((sum, p) => sum + p.amount_minor, 0)
   return {
@@ -124,7 +137,7 @@ function detail(order: Order): OrderDetail {
     payments,
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
-    totals: { subtotal_minor: subtotal, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
+    totals: { subtotal_minor: subtotal, pending_minor: pending, unpriced_items: unpriced, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
   }
 }
 
@@ -352,7 +365,11 @@ export const handlers = [
           cancelled.push(i.id)
         }
       }
-      setStatus(order, 'cancelled')
+      // As `Lifecycle.cancel_order` records it: what it was, and the items it took.
+      event(order, 'order.status', { from_status: order.status, to: 'cancelled', items: cancelled })
+      order.status = 'cancelled'
+      order.cancelled_at ??= now()
+      order.updated_at = now()
       return order
     })
   }),
@@ -378,16 +395,42 @@ export const handlers = [
       return order
     }),
   ),
-  // `Lifecycle.reopen_order`: the status its rows give it, `closed_at` cleared.
+  // `Lifecycle.reopen_order`: a closed order back to what its rows give it; a cancelled
+  // one back to the status it was cancelled from, with the items that cancel took.
   http.post('/api/v1/orders/:id/reopen', ({ request, params }) =>
     transition(request, () => {
       const order = lock(String(params.id))
-      if (order.status !== 'closed') throw new Refused('order_not_closed', `order ${order.number} is ${order.status}: only a closed order reopens`)
-      event(order, 'order.status', { from_status: 'closed', to: 'accepted', reopened: true })
-      order.status = 'accepted'
+      if (order.status !== 'closed' && order.status !== 'cancelled') {
+        throw new Refused('order_not_ended', `order ${order.number} is ${order.status}: only a closed or cancelled order reopens`)
+      }
+      let base: OrderStatus = 'accepted'
+      const restored: string[] = []
+      if (order.status === 'cancelled') {
+        const cancel = [...state.events].reverse().find((e) => e.order_id === order.id && e.kind === 'order.status' && e.detail.to === 'cancelled')
+        const from = cancel?.detail.from_status as OrderStatus | undefined
+        base = from && (OPEN_FOR_EDITS.has(from) || DERIVED.has(from)) ? from : order.accepted_at ? 'accepted' : 'draft'
+        for (const id of (cancel?.detail.items as string[] | undefined) ?? []) {
+          const found = state.items.find((i) => i.id === id && i.order_id === order.id && i.status === 'cancelled')
+          if (!found) continue
+          const quotes = quotesOf(found.id)
+          const accepted = quotes.some((q) => q.accepted)
+          if (DERIVED.has(base) && !accepted) continue
+          const latest = attemptsOf(found.id).at(-1)
+          found.status = accepted ? (latest?.outcome === 'failed' ? 'failed' : 'approved') : quotes.length > 0 ? 'quoted' : 'draft'
+          restored.push(found.id)
+        }
+        if (DERIVED.has(base)) base = 'accepted'
+      }
+      const from = order.status
+      order.status = base
       order.closed_at = null
+      order.cancelled_at = null
       order.updated_at = now()
+      const before = state.events.length
       rederive(order)
+      // One audit row, as the backend writes: the rederive's own, if it wrote one, is folded in.
+      state.events.splice(before)
+      event(order, 'order.status', { from_status: from, to: order.status, reopened: true, items: restored })
       return order
     }),
   ),

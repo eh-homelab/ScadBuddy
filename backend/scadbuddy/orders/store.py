@@ -775,9 +775,11 @@ class OrderStore:
         return Order.model_validate(row)
 
     def reopen_order_row(self, conn: Conn, order_id: str, status: OrderStatus) -> Order:
-        """A closed order back to ``status``, its ``closed_at`` cleared."""
+        """A closed or cancelled order back to ``status``, its ``closed_at`` and
+        ``cancelled_at`` cleared."""
         row = conn.execute(
-            "UPDATE orders SET status = %s, closed_at = NULL, updated_at = now()"
+            "UPDATE orders SET status = %s, closed_at = NULL, cancelled_at = NULL,"
+            " updated_at = now()"
             f" WHERE id = %s RETURNING {_ORDER}",
             (status, order_id),
         ).fetchone()

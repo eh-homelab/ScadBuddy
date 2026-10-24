@@ -576,10 +576,10 @@ export const orderTools: Tool[] = [
   defineTool({
     name: 'order_reopen',
     description:
-      'Undo a close or a cancel: reopen a closed order (it takes the status its items and shipments give it, ' +
-      '`shipped` as it closed), or one cancelled line item (`item_id`), which takes the state its quotes and ' +
-      'attempts give it. A cancelled order stays cancelled; an accepted order takes back a priced item only ' +
-      '(`item_not_priced`). Outward, as a cancel is: it changes what the shop told the customer.',
+      'Undo a close or a cancel. A closed order takes the status its items and shipments give it (`shipped` as ' +
+      'it closed); a cancelled order goes back to the status it was cancelled from, with the items that cancel took. ' +
+      'With `item_id`, one cancelled line item comes back as its quotes and attempts say (an accepted order takes ' +
+      'back a priced item only, `item_not_priced`). Outward, as a cancel is: it changes what the shop told the customer.',
     input: z.object({ order_id: orderId, item_id: itemId.optional() }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/reopen', 'POST /api/v1/orders/{order_id}/items/{item_id}/reopen'],

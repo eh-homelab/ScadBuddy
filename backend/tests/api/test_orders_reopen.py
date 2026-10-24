@@ -61,7 +61,7 @@ def test_a_closed_order_reopens_to_what_its_rows_say(client: TestClient) -> None
     )
     assert shipped.status_code == 201, shipped.text
     # Not closed yet: nothing to reopen.
-    problem(client.post(f"/api/v1/orders/{order['id']}/reopen"), "order_not_closed")
+    problem(client.post(f"/api/v1/orders/{order['id']}/reopen"), "order_not_ended")
     assert client.post(f"/api/v1/orders/{order['id']}/close").json()["status"] == "closed"
 
     reopened = client.post(f"/api/v1/orders/{order['id']}/reopen")
@@ -77,11 +77,53 @@ def test_a_closed_order_reopens_to_what_its_rows_say(client: TestClient) -> None
     assert client.post(f"/api/v1/orders/{order['id']}/close").json()["status"] == "closed"
 
 
-def test_a_cancelled_order_stays_cancelled(client: TestClient) -> None:
+def test_only_an_ended_order_reopens(client: TestClient) -> None:
     order = create_order(client, create_customer(client)["id"])
-    client.post(f"/api/v1/orders/{order['id']}/cancel")
-    problem(client.post(f"/api/v1/orders/{order['id']}/reopen"), "order_not_closed")
+    problem(client.post(f"/api/v1/orders/{order['id']}/reopen"), "order_not_ended")
     assert client.post("/api/v1/orders/nothing/reopen").status_code == 404
+
+
+def test_a_cancelled_draft_reopens_with_the_items_it_cancelled(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    draft = item_of(client, order["id"])
+    priced = item_of(client, order["id"], title="Priced")
+    earlier = item_of(client, order["id"], title="Cancelled before")
+    quote_and_accept(client, order["id"], priced["id"])
+    # Cancelled on its own, before the order: the order's reopen leaves it cancelled.
+    client.post(f"/api/v1/orders/{order['id']}/items/{earlier['id']}/cancel")
+    cancelled = client.post(f"/api/v1/orders/{order['id']}/cancel")
+    assert cancelled.json()["status"] == "cancelled"
+
+    reopened = client.post(f"/api/v1/orders/{order['id']}/reopen")
+    assert reopened.status_code == 200, reopened.text
+    assert (reopened.json()["status"], reopened.json()["cancelled_at"]) == ("draft", None)
+    statuses = {i["id"]: i["status"] for i in detail(client, order["id"])["items"]}
+    assert statuses == {
+        draft["id"]: "draft",
+        priced["id"]: "approved",
+        earlier["id"]: "cancelled",
+    }
+    event = [
+        e["detail"]
+        for e in client.get(f"/api/v1/orders/{order['id']}/events").json()
+        if e["detail"].get("reopened")
+    ][-1]
+    assert (event["from_status"], event["to"]) == ("cancelled", "draft")
+    assert sorted(event["items"]) == sorted([draft["id"], priced["id"]])
+
+
+def test_a_cancelled_accepted_order_reopens_accepted(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    item = item_of(client, order["id"])
+    quote_and_accept(client, order["id"], item["id"])
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    client.post(f"/api/v1/orders/{order['id']}/cancel")
+    reopened = client.post(f"/api/v1/orders/{order['id']}/reopen")
+    assert reopened.json()["status"] == "accepted"
+    assert detail(client, order["id"])["items"][0]["status"] == "approved"
+    assert detail(client, order["id"])["totals"]["subtotal_minor"] == 1200
 
 
 def test_a_cancelled_item_reopens_to_what_its_quotes_say(client: TestClient) -> None:
@@ -165,3 +207,28 @@ def test_an_item_of_an_ended_order_does_not_reopen(client: TestClient) -> None:
     problem(
         client.post(f"/api/v1/orders/{order['id']}/items/{item['id']}/reopen"), "order_cancelled"
     )
+
+
+def test_a_draft_adds_up_before_anything_is_accepted(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    accepted = item_of(client, order["id"])
+    pending = item_of(client, order["id"], title="Pending")
+    unpriced = item_of(client, order["id"], title="Unpriced")
+    quote_and_accept(client, order["id"], accepted["id"], price=1000)
+    typed = client.post(
+        f"/api/v1/orders/{order['id']}/items/{pending['id']}/quotes",
+        json={"unit_price_minor": 250},
+    )
+    assert typed.status_code == 201, typed.text
+    # A quantity change after the quote: the pending price follows the item.
+    client.patch(f"/api/v1/orders/{order['id']}/items/{pending['id']}", json={"quantity": 3})
+    totals = detail(client, order["id"])["totals"]
+    assert totals["subtotal_minor"] == 1000 + 750
+    assert totals["pending_minor"] == 750
+    assert totals["unpriced_items"] == [unpriced["id"]]
+    assert totals["total_minor"] == totals["balance_minor"] == 1750
+    # A cancelled item is in no sum.
+    client.post(f"/api/v1/orders/{order['id']}/items/{pending['id']}/cancel")
+    totals = detail(client, order["id"])["totals"]
+    assert (totals["subtotal_minor"], totals["pending_minor"]) == (1000, 0)

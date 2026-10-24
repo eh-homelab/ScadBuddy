@@ -587,10 +587,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
   `ItemPicture.tsx`; mocks `src/mocks/features/orders/attachments.ts`.
   Undo (spec §3.5 "Undo"): `Lifecycle.reopen_order` (a closed order back to what
-  `derive` gives its rows) and `reopen_item` (a cancelled item back to what its quotes
-  and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
+  `derive` gives its rows; a cancelled one back to the status its cancel's audit row
+  recorded, with the items it took) and `reopen_item` (a cancelled item back to what its
+  quotes and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
   `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel) and
   `customer_upsert`'s `unarchive`.
+  `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
+  times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
+  with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

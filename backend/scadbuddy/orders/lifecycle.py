@@ -599,29 +599,88 @@ class Lifecycle:
         self._told(_Change(closed, released=released))
         return closed
 
+    def _reopened_status(self, conn: Conn, item: OrderItem) -> tuple[ItemStatus, bool]:
+        """What a cancelled item comes back as, from its quotes and attempts: `approved`
+        with an accepted quote (`failed` when its latest attempt failed), `quoted` with
+        a quote not accepted, else `draft`; and whether it has an accepted quote."""
+        quotes = self.store.quotes(item.id, conn=conn)
+        accepted = any(quote.accepted for quote in quotes)
+        attempts = self.store.fulfilments(item.id, conn=conn)
+        latest = max(attempts, key=lambda a: a.attempt, default=None)
+        if accepted:
+            failed = latest is not None and latest.outcome == "failed"
+            return ("failed" if failed else "approved"), True
+        return ("quoted" if quotes else "draft"), False
+
+    def _last_cancel(self, conn: Conn, order: Order) -> tuple[OrderStatus, list[str]]:
+        """The status the order was cancelled from and the items that cancel took with
+        it, from its audit row; an order cancelled before that row carried them goes
+        back to `accepted` when it had been accepted, else `draft`, with no items."""
+        for event in reversed(self.store.events(order.id, conn=conn)):
+            if event.kind == "order.status" and event.detail.get("to") == "cancelled":
+                before = event.detail.get("from_status")
+                items = event.detail.get("items")
+                if isinstance(before, str) and before in OPEN_FOR_EDITS | DERIVED:
+                    ids = items if isinstance(items, list) else []
+                    status: OrderStatus = before
+                    return status, [each for each in ids if isinstance(each, str)]
+                break
+        return ("accepted" if order.accepted_at is not None else "draft"), []
+
     def reopen_order(self, order_id: str, by: Actor) -> Order:
-        """Undo a close: the order takes the status its rows give it again (`shipped`,
-        as when it closed, unless a row changed since), `closed_at` cleared, and its
-        quotes' sliced files are held again. Only a closed order reopens; a cancelled
-        one stays cancelled."""
+        """Undo a close or a cancel.
+
+        A closed order takes the status its rows give it again (`shipped`, as it
+        closed, unless a row changed since). A cancelled one goes back to the status it
+        was cancelled from, and the items that cancel took with it come back as
+        `reopen_item` brings one back (an accepted order's item with no accepted quote
+        stays cancelled); then its status follows from its rows. Either way `closed_at`
+        and `cancelled_at` are cleared and the quotes' sliced files are held again."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            if order.status != "closed":
+            if order.status not in ENDED:
                 raise LifecycleError(
-                    "order_not_closed",
-                    f"order {order.number} is {order.status}: only a closed order reopens",
+                    "order_not_ended",
+                    f"order {order.number} is {order.status}: only a closed or cancelled"
+                    " order reopens",
                 )
+            restored: list[tuple[OrderItem, int | None]] = []
+            if order.status == "closed":
+                base: OrderStatus = "accepted"
+            else:
+                base, cancelled_items = self._last_cancel(conn, order)
+                for item_id in cancelled_items:
+                    item = self.store.item(item_id, conn=conn)
+                    if item is None or item.order_id != order.id or item.status != "cancelled":
+                        continue
+                    status, priced = self._reopened_status(conn, item)
+                    if base in DERIVED and not priced:
+                        continue
+                    restored.append((self.store.update_item(conn, item.id, status=status), None))
+            # The status its rows give it now, written once, on one audit row.
             items = self.store.items(order.id, conn=conn)
-            attempted = {item.id for item in items if self.store.fulfilments(item.id, conn=conn)}
-            status = derive(
-                order.model_copy(update={"status": "accepted"}),
-                items,
-                self.store.shipments(order.id, conn=conn),
-                attempted,
-            )
-            reopened = self.store.reopen_order_row(conn, order.id, status)
+            if base in OPEN_FOR_EDITS:
+                target = _settle_open(items)
+            else:
+                attempted = {
+                    item.id for item in items if self.store.fulfilments(item.id, conn=conn)
+                }
+                target = derive(
+                    order.model_copy(update={"status": "accepted"}),
+                    items,
+                    self.store.shipments(order.id, conn=conn),
+                    attempted,
+                )
+            reopened = self.store.reopen_order_row(conn, order.id, target)
             self._event(
-                conn, order, by, "order.status", from_status="closed", to=status, reopened=True
+                conn,
+                order,
+                by,
+                "order.status",
+                from_status=order.status,
+                to=target,
+                reopened=True,
+                items=[item.id for item, _ in restored],
             )
             held = [
                 quote
@@ -630,14 +689,13 @@ class Lifecycle:
                 for quote in self._standing(conn, item.id)
             ]
         self._hold(held)
-        self._told(_Change(reopened))
+        self._told(_Change(reopened, restored))
         return reopened
 
     def reopen_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
         """Undo a cancel: the item takes the state its quotes and attempts give it
-        (`approved` with an accepted quote, `failed` when its latest attempt failed,
-        `quoted` with a quote not accepted, else `draft`), and its quotes' sliced files
-        are held again. Refused once the order ended, and on an order past `quoted` for
+        (`_reopened_status`), and its quotes' sliced files are held again. Refused once
+        the order ended (reopen the order instead), and on an order past `quoted` for
         an item with no accepted quote: an accepted order only holds priced items."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -649,24 +707,14 @@ class Lifecycle:
                     f"item {item_id} is {item.status}: only a cancelled item reopens",
                     items=[item.id],
                 )
-            quotes = self.store.quotes(item.id, conn=conn)
-            accepted = any(quote.accepted for quote in quotes)
-            if order.status not in OPEN_FOR_EDITS and not accepted:
+            status, priced = self._reopened_status(conn, item)
+            if order.status not in OPEN_FOR_EDITS and not priced:
                 raise LifecycleError(
                     "item_not_priced",
                     f"item {item_id} has no accepted quote, and order {order.number} is"
                     f" {order.status}: an accepted order holds priced items only",
                     items=[item.id],
                 )
-            attempts = self.store.fulfilments(item.id, conn=conn)
-            latest = max(attempts, key=lambda a: a.attempt, default=None)
-            status: ItemStatus
-            if accepted:
-                status = (
-                    "failed" if latest is not None and latest.outcome == "failed" else "approved"
-                )
-            else:
-                status = "quoted" if quotes else "draft"
             item = self.store.update_item(conn, item.id, status=status)
             self._event(conn, order, by, "item.reopened", item_id=item.id, to=status)
             order = self._rederive(conn, order, by)

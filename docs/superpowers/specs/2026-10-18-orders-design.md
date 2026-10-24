@@ -204,7 +204,12 @@ unique index), the measured facts and the arithmetic:
 - `unit_cost_minor`, `unit_price_minor`, `quantity`, `total_minor`.
 
 The item's price is its accepted quote's `total_minor`. The order's subtotal is the sum
-of accepted quotes; the total adds the charges. An item with no accepted quote has no
+of accepted quotes; the total adds the charges. As built, a draft adds up as it is
+entered: before an item's quote is accepted, the totals count it at its newest quote's
+`unit_price_minor` times its quantity now. `OrderTotals.pending_minor` is the part of
+the subtotal no accepted quote stands behind yet, and `unpriced_items` lists the items
+with no quote, which are in no sum. Accepting the order still needs an accepted quote
+on every item. An item with no accepted quote has no
 price, and an order with such an item cannot be accepted (§3.5). A `manual` quote is a
 person typing a price; it is recorded as such.
 
@@ -233,10 +238,16 @@ derivation keeps meaning "any item past `approved`" (Ruling 4 of the phase 1 pla
 **Undo.** A close and a cancel can be taken back, since a person can press either by
 mistake. Each one is recorded on the audit line, and the rows decide the result, never
 the body.
-- `POST /orders/{id}/reopen` takes a closed order back to the status `derive` gives its
-  rows: `shipped`, as it closed, unless a row changed since. It clears `closed_at` and
-  holds its quotes' sliced files again. A cancelled order stays cancelled, because
-  cancelling it also cancelled its items.
+- `POST /orders/{id}/reopen` undoes a close or a cancel, in one status write and one
+  audit row. It clears `closed_at` and `cancelled_at` and holds the quotes' sliced files
+  again.
+  - A closed order goes back to the status `derive` gives its rows: `shipped`, as it
+    closed, unless a row changed since.
+  - A cancelled order goes back to the status it was cancelled from, which the cancel's
+    audit row records with the items it took. Those items come back as an item's reopen
+    brings one back; an item cancelled on its own before stays cancelled. Then the
+    order's status follows from its rows. On an accepted order, an item with no
+    accepted quote stays cancelled.
 - `POST /orders/{id}/items/{item}/reopen` takes a cancelled item back to the state its
   quotes and attempts give it: `approved` with an accepted quote (`failed` when its
   latest attempt failed), `quoted` with a quote not accepted, else `draft`. The order's
@@ -834,7 +845,8 @@ usable on its own.
 - Phase 3 is being built order-entry first, ahead of the print path:
   - §6.2's attachments on orders and line items, with an item's delivered photo and
     picture (PR #4661).
-  - §3.5's undo of a close and a cancel, and a customer's unarchive (stacked on it).
+  - §3.5's undo of a close and a cancel (a closed or cancelled order, a cancelled
+    item), a customer's unarchive, and a draft's running total (PR #4666, stacked on it).
 - Next, still order entry:
   - adding a line item from the order page;
   - the unit price and an inline typed price in the items table;
