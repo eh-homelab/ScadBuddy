@@ -464,7 +464,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`api/internal.py`). An output's last print is `output_last_prints` in Postgres
   (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
   `prelude`, another kind run first on its own queue: `output_delete` (library) names
-  `output_inbox_delete` (bambuddy).
+  `output_inbox_delete` (bambuddy). How a print ended is `print_outcomes`
+  (`outcomes.py`, #2665): the follow's settled read (`Follower.record_outcome`, every
+  path) records it once against the run that queued or started it and publishes
+  `print.outcome` in that transaction; `print.finished`/`print.failed` triggers fire on
+  it, never on the per-process `print.settled`.
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per

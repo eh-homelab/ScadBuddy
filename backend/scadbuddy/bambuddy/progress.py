@@ -567,7 +567,8 @@ class ProgressObserver:
     while its realtime socket is down. Each read is compared with the last one seen
     for that output, so a read that finds nothing new publishes nothing, and
     ``print.settled`` is published once, on the read that first finds the print
-    settled.
+    settled. Once per process, not once per print, and with no outcome: what acts on a
+    print ending (flow triggers) hears ``print.outcome`` instead (#2665, ``outcomes.py``).
     """
 
     def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
