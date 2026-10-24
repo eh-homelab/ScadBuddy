@@ -391,12 +391,13 @@ export function PrintPicker({
   /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   /**
-   * #3818 Task 9 — the `printer_id` every body the dialog sends carries (run, check,
-   * preview and batch; analysis and quote too, #4551): none beside a LAN-only row, which
-   * links no Bambuddy printer. `registryPrinter` is `registryAsked`
-   * first, so while the view still shows the Bambuddy printer's read the old id would ride
-   * along with the asked row, and the server refuses that pair (422) rather than print on
-   * the Bambuddy printer.
+   * #3818 Task 9 — the `printer_id` every run, check, background-slice and batch-step body
+   * sends beside `printer`: none beside a LAN-only row, which links no Bambuddy printer.
+   * `registryPrinter` is `registryAsked` first, so while the view still shows the Bambuddy
+   * printer's read the old id would ride along with the asked row, and the server refuses
+   * that pair (422) rather than print on the Bambuddy printer. Arrange, analysis and quote
+   * send the view's `printerId` and no `printer` (#4551): their routes take no registry
+   * printer, and a null there would mean Settings' printer, not the LAN-only row.
    */
   const sentPrinterId = lanOnly.some((row) => row.id === registryPrinter) ? null : printerId
   const { askRegistry } = picker
@@ -1014,7 +1015,7 @@ export function PrintPicker({
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices && planReady && !noPlate
       ? {
-          printer_id: sentPrinterId,
+          printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
           ...plateFields(plate),
@@ -1308,7 +1309,7 @@ export function PrintPicker({
     setQuoteError(null)
     try {
       const made = await api.quoteItem(quote.orderId, quote.itemId, {
-        printer_id: sentPrinterId,
+        printer_id: printerId,
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         filaments: priced,
@@ -1614,6 +1615,7 @@ export function PrintPicker({
                         tray={tray}
                         // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.
                         spools={nativeRow ? openShelf : (filaments?.spools ?? [])}
+                        providerLabels={filaments?.provider_labels}
                         onAssigned={(link) => claim(tray, link)}
                         onDecline={() => trays.decline(tray)}
                       />

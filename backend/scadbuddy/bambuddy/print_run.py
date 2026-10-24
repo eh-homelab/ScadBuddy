@@ -105,6 +105,8 @@ from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     OutputSource,
     PrintSource,
+    ReadOutOfMemoryError,
+    SharedFilamentReader,
     bambuddy_client,
 )
 from scadbuddy.bambuddy.projects import require_destination_folder
@@ -998,10 +1000,14 @@ async def check_print(
         return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     try:
         laid_out = await laying_out
-    except BaseException:
+    except BaseException as error:
         if reading is not None:
             reading.cancel()
             await asyncio.gather(reading, return_exceptions=True)
+        if isinstance(error, MemoryError):
+            # The file too large to hold here (#4562 review): refused as a read of it is,
+            # saying how to bound it, never a 500.
+            return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     inventory = await reading if reading is not None else None
     nozzle_plan = (
@@ -1590,7 +1596,7 @@ async def check_for_library(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
-    filaments: FilamentReader | None = None,
+    filaments: SharedFilamentReader | None = None,
     files: LibraryReads | None = None,
     printers: PrinterStore | None = None,
     reports: PrinterReportStore | None = None,
@@ -1598,9 +1604,9 @@ async def check_for_library(
     profiles: Profiles | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
-    slots read from the file itself (#2550), from the download the check's layout reads
-    anyway (#4495); ``files`` reads a native one (#3827). ``profiles`` are a native
-    run's presets (D5), as :func:`check_for_output`'s."""
+    slots read from the file itself (#2550): from their cache, else from the download
+    the check's layout reads anyway (#4495); ``files`` reads a native one (#3827).
+    ``profiles`` are a native run's presets (D5), as :func:`check_for_output`'s."""
     return await check_print(
         client,
         await LibrarySource.load(
@@ -1608,8 +1614,7 @@ async def check_for_library(
             file_id,
             uploads=uploads,
             settings=settings,
-            filaments=filaments,
-            share_fetch=True,
+            shared=filaments,
             files=files,
         ),
         settings,
@@ -1667,14 +1672,16 @@ async def lan_printers(
     """The registry rows a run would reach over the LAN (#3818): those `run_path` puts on
     the LAN, when the stored backends make such a run native (`hot_path_native`, D2).
     None otherwise, so the dialog keeps its project, Bambuddy's folders and "queued" for
-    every printer, and the registry is not read."""
+    every printer, and the registry is not read. The reports are one query (#4516):
+    this is on every choices read."""
     if printers is None or not native_backends(settings):
         return []
     rows = await asyncio.to_thread(printers.list)
+    seen = {} if reports is None else await asyncio.to_thread(reports.all)
     now = datetime.now(UTC)
     out: list[str] = []
     for row in rows:
-        report = None if reports is None else await asyncio.to_thread(reports.get, row.id)
+        report = seen.get(row.id)
         path = run_path(row, None if report is None else report[1], now=now)
         if hot_path_native(settings, path):
             out.append(row.id)
@@ -1698,13 +1705,16 @@ class RunRoute:
     """Which printer a run prints on and how, decided before any Bambuddy client is
     built (#3818 tier A, plan 2026-10-18 D2, D3): the registry row, the Bambuddy printer
     (``None`` for a row Bambuddy does not reach), the row's path and, on the LAN path, its
-    status from the report (D4). ``native`` is `hot_path_native` of the path."""
+    status from the report (D4). ``native`` is `hot_path_native` of the path. ``listed``
+    is Bambuddy's printer when :func:`ensured_route` read it, so `prepare_run` does not
+    read it again on Bambuddy's path (#4551)."""
 
     row: PrinterRow | None
     printer_id: int | None
     path: RunPath
     status: PrinterStatus | None
     native: bool
+    listed: Printer | None = None
 
     @property
     def printer(self) -> Printer:
@@ -1783,6 +1793,7 @@ async def ensured_route(
         path=path,
         status=report_status,
         native=(decide or hot_path_native)(settings, path),
+        listed=printer,
     )
 
 
@@ -1923,11 +1934,18 @@ async def prepare_run(
             assert named is not None  # `_named_printer` refuses a request naming nothing
             raise RunRefusalError(_not_on_bambuddy(named))
         printer_id = bambuddy_id
-        # Resolved before the path is decided (#4442 M2), so a row this run links or
-        # merges takes its own path from its first run.
-        printer = await _require_resolvable_printer(
-            bambuddy_client(client), printer_id, any_model=source.is_sliced
-        )
+        listed = None if route is None else route.listed
+        if listed is not None and listed.id == printer_id:
+            # `ensured_route` read it for this run's first check (#4551): one read.
+            printer = listed
+            if not source.is_sliced:
+                _require_model(printer)
+        else:
+            # Resolved before the path is decided (#4442 M2), so a row this run links or
+            # merges takes its own path from its first run.
+            printer = await _require_resolvable_printer(
+                bambuddy_client(client), printer_id, any_model=source.is_sliced
+            )
         row = await _ensure_row(printers, named, printer)
         path, report_status = await _registry_path(
             row, printers, reports, say_fallback=refuse_manual_pick
@@ -1996,6 +2014,11 @@ async def _record_seen(
         await record_seen(rack, printer_id, printer_status)
 
 
+#: How a disagreeing printer's refusal ends: a batch print's file says it of its own step
+#: (`print_batches._queue_one`, #4551).
+PICK_AGAIN = "Pick the printer again."
+
+
 async def _named_printer(
     printer: str | None,
     sent: int | None,
@@ -2037,12 +2060,12 @@ async def _named_printer(
         # the LAN reaches, whose run the dialog asked for.
         raise RunRefusalError(
             f"disagreeing printer: {named.name} is not linked to Bambuddy printer {sent}."
-            " Pick the printer again."
+            f" {PICK_AGAIN}"
         )
     if named.bambuddy_printer_id != sent:
         raise RunRefusalError(
             f"disagreeing printer: {named.name} is Bambuddy printer"
-            f" {named.bambuddy_printer_id} now, not {sent}. Pick the printer again."
+            f" {named.bambuddy_printer_id} now, not {sent}. {PICK_AGAIN}"
         )
     return named, sent
 
@@ -2777,7 +2800,8 @@ def finish_run(
     queued: list[QueuedPlate] | None = None,
 ) -> PrintRunResult:
     """Report what was queued, with each plate's rack picks and warnings (``queued``,
-    one per outcome), linked to Bambuddy's queue unless its settings are gone (``None``)."""
+    one per outcome, and a LAN start's own, #4545), linked to Bambuddy's queue unless
+    its settings are gone (``None``)."""
     warnings = list(planned.warnings)
     if queued and all(plate.picks for plate in queued):
         # Every plate had the rack side's hotend picked from the rack, which is always one
@@ -2785,9 +2809,10 @@ def finish_run(
         # (#1238), whichever flow the slice is for.
         swapped = [high_flow_warning(RACK_SIDE, flow) for flow in VOLUME_TYPE]
         warnings = [warning for warning in warnings if warning not in swapped]
-    for plate in queued or []:
+    lan = [outcome.lan.warnings for outcome in outcomes if outcome.lan is not None]
+    for plate_warnings in [*(plate.warnings for plate in queued or []), *lan]:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
-        warnings += [warning for warning in plate.warnings if warning not in warnings]
+        warnings += [warning for warning in plate_warnings if warning not in warnings]
     return _queued(
         config,
         outcomes,

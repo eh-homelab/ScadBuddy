@@ -21,6 +21,8 @@ type FilamentOptions struct {
 	printer_id FilamentOptions_FilamentOptions_printer_idable
 	// The printer_name property
 	printer_name FilamentOptions_FilamentOptions_printer_nameable
+	// The provider_labels property
+	provider_labels FilamentOptions_provider_labelsable
 	// The shelf property
 	shelf []SpoolOptionable
 	// The slots property
@@ -410,6 +412,16 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["provider_labels"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateFilamentOptions_provider_labelsFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProviderLabels(val.(FilamentOptions_provider_labelsable))
+		}
+		return nil
+	}
 	res["shelf"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfObjectValues(CreateSpoolOptionFromDiscriminatorValue)
 		if err != nil {
@@ -559,6 +571,12 @@ func (m *FilamentOptions) GetPrinterName() FilamentOptions_FilamentOptions_print
 	return m.printer_name
 }
 
+// GetProviderLabels gets the provider_labels property value. The provider_labels property
+// returns a FilamentOptions_provider_labelsable when successful
+func (m *FilamentOptions) GetProviderLabels() FilamentOptions_provider_labelsable {
+	return m.provider_labels
+}
+
 // GetShelf gets the shelf property value. The shelf property
 // returns a []SpoolOptionable when successful
 func (m *FilamentOptions) GetShelf() []SpoolOptionable {
@@ -641,6 +659,12 @@ func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("printer_name", m.GetPrinterName())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("provider_labels", m.GetProviderLabels())
 		if err != nil {
 			return err
 		}
@@ -769,6 +793,11 @@ func (m *FilamentOptions) SetPrinterName(value FilamentOptions_FilamentOptions_p
 	m.printer_name = value
 }
 
+// SetProviderLabels sets the provider_labels property value. The provider_labels property
+func (m *FilamentOptions) SetProviderLabels(value FilamentOptions_provider_labelsable) {
+	m.provider_labels = value
+}
+
 // SetShelf sets the shelf property value. The shelf property
 func (m *FilamentOptions) SetShelf(value []SpoolOptionable) {
 	m.shelf = value
@@ -817,6 +846,7 @@ type FilamentOptionsable interface {
 	GetOverlayNotes() []string
 	GetPrinterId() FilamentOptions_FilamentOptions_printer_idable
 	GetPrinterName() FilamentOptions_FilamentOptions_printer_nameable
+	GetProviderLabels() FilamentOptions_provider_labelsable
 	GetShelf() []SpoolOptionable
 	GetSlots() []SlotNeedable
 	GetSource() *FilamentOptions_source
@@ -830,6 +860,7 @@ type FilamentOptionsable interface {
 	SetOverlayNotes(value []string)
 	SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable)
 	SetPrinterName(value FilamentOptions_FilamentOptions_printer_nameable)
+	SetProviderLabels(value FilamentOptions_provider_labelsable)
 	SetShelf(value []SpoolOptionable)
 	SetSlots(value []SlotNeedable)
 	SetSource(value *FilamentOptions_source)

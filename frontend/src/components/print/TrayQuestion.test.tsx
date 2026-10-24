@@ -78,6 +78,20 @@ describe('TrayQuestion on the native path', () => {
     records: { bambuddy: { record_id: '27', brand: 'Inland', name: 'Black', remaining_g: 515 } },
   }
 
+  it("names a candidate's records by their provider's own label (#4516)", () => {
+    render(
+      <TrayQuestion
+        native={{ printer }}
+        tray={{ ...tray, candidates: [16] }}
+        spools={[record]}
+        providerLabels={{ bambuddy: 'Bambuddy (garage)' }}
+        onAssigned={vi.fn()}
+        onDecline={vi.fn()}
+      />,
+    )
+    expect(screen.getByText(/Bambuddy \(garage\)'s record/)).toBeInTheDocument()
+  })
+
   it('links the record through PUT …/trays/{ams}/{tray}/spool and re-reads', async () => {
     const link = vi.spyOn(api, 'linkTraySpool').mockResolvedValue({ ams_id: 3, tray_id: 3, records: {} })
     const assign = vi.spyOn(api, 'assignTraySpool')

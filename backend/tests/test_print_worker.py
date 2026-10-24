@@ -26,6 +26,7 @@ from scadbuddy import worker as worker_module
 from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
+from scadbuddy.bambuddy.runs import RecentRuns
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import OperationKind
@@ -141,6 +142,11 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
         assert print_deps.printers is not None and print_deps.reports is not None
+        # #4541: a subject's print.run drops the follow's kept newest run.
+        assert any(
+            getattr(listener, "__func__", None) is RecentRuns.heard
+            for listener in deps.events.local._listeners
+        )
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

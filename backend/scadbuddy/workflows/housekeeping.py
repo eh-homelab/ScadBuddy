@@ -174,7 +174,11 @@ SWEEPS = (
 #: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6);
 #: and the native print library's trash purge and orphan blobs (#3827), which the generic
 #: blob sweep skips, so with the sweeps off nothing else would collect them. Behind
-#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged.
+#: `LIBRARY_PATCH` as in `SWEEPS`, so a run recorded before it replays unchanged. With the
+#: sweeps on it runs from both Schedules, whose overlap SKIP is each its own, so two may
+#: overlap: harmless, since a purge deletes a row only while it is still trashed past the
+#: cutoff and an orphan blob only while it is still stale (`purge_trashed`,
+#: `delete_if_stale`), so the second run's attempt finds nothing to do.
 #: Not the dialog's background slices (`PREVIEWS_SWEEP`, `NATIVE_SLICES_SWEEP`): they
 #: obey the sweeps' switch, so with the sweeps off they stay. The transfer PUTs'
 #: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch. And the

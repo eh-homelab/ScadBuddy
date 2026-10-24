@@ -23,7 +23,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.models import SlotChoice
+from scadbuddy.bambuddy.models import RackAlgorithm, SlotChoice
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, PrintRunRequest
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
@@ -155,15 +155,19 @@ def as_the_h2c(fake_lan: FakeLan) -> dict[str, Any]:
 class Usage:
     """Rack usage: no history, and what it was asked."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, linked: bool = False) -> None:
         self.asked: list[list[str]] = []
+        self.linked = linked
+        self.seen_by: list[int] = []
 
     async def usage(self, serials: Iterable[str]) -> dict[str, object]:
         self.asked.append(list(serials))
         return {}
 
     async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
-        raise AssertionError("a LAN-only printer has no Bambuddy id to record it under")
+        if not self.linked:
+            raise AssertionError("a LAN-only printer has no Bambuddy id to record it under")
+        self.seen_by.append(printer_id)
 
 
 class Library:
@@ -191,6 +195,7 @@ class NativeFake(Fake):
         #: Fail the next real `lan_print` attempts as unsure, after the real one ran.
         self.unsure_after_start = 0
         self.rack_position: int | None = None
+        self.rack_algorithm: RackAlgorithm = "least_used"
 
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
@@ -207,7 +212,7 @@ class NativeFake(Fake):
             printer=self.printer,
             path="native",
             lan_start=self.lan_start,
-            rack_algorithm="least_used",
+            rack_algorithm=self.rack_algorithm,
             rack_position=self.rack_position,
             has_rack=True,
         )
@@ -287,12 +292,14 @@ async def _run(
     lan_start: bool = True,
     rack: Usage | None = None,
     rack_position: int | None = None,
+    rack_algorithm: RackAlgorithm = "least_used",
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
     fake.native_slicer = native_slicer
     fake.lan_start = lan_start
     fake.rack_position = rack_position
+    fake.rack_algorithm = rack_algorithm
     deps = LanDeps(
         printers=PrinterStore(pg_pool, KEK),
         # Never read: a native file and a blob need no Bambuddy client.
@@ -487,10 +494,18 @@ async def test_a_rack_pick_that_cannot_be_made_lets_the_printer_pick(
     device = as_the_h2c(fake_lan)
     nozzle = device["nozzle"]
     nozzle["info"] = [e for e in nozzle["info"] if e["id"] not in (17, 21)]
-    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS)
+    fake, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS
+    )
     assert run.status == "succeeded"
     [sent] = fake_lan.project_files()
     assert "nozzle_mapping" not in sent
+    # The run says the printer picked, and never what the pick it dropped chose (#4545).
+    [outcome] = fake.outcomes
+    assert outcome.lan is not None
+    assert [w.message for w in outcome.lan.warnings] == [
+        "Rack pick left to the printer: ScadBuddy could not pick a hotend for every rack group."
+    ]
 
 
 async def test_a_hand_picked_rack_position_is_sent(
@@ -514,3 +529,59 @@ async def test_a_hand_picked_rack_position_is_sent(
 
 def test_lan_uploaded_carries_the_project_filament_count() -> None:
     assert LanUploaded(remote_name="x", md5="m", bytes=1).filament_count == 1
+
+
+async def test_let_bambuddy_pick_over_the_lan_says_the_printer_picks(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4545: "Let Bambuddy pick" sends no ``nozzle_mapping``, and a position picked by
+    hand for a plate with several rack groups is dropped with it; the run says both."""
+    as_the_h2c(fake_lan)
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(rack_3mf()),
+        plan=RACK_TRAYS,
+        rack_position=6,
+        rack_algorithm="bambuddy",
+    )
+    assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert "nozzle_mapping" not in sent
+    [outcome] = fake.outcomes
+    assert outcome.lan is not None
+    messages = [w.message for w in outcome.lan.warnings]
+    assert messages[0].startswith("Rack position 6 was not sent: the slice put the rack side in")
+    assert not any("got position" in message for message in messages)
+    assert messages[-1] == (
+        "Rack pick left to the printer: Let Bambuddy pick sends no hotends over the LAN."
+    )
+
+
+async def test_a_sent_rack_pick_carries_no_left_to_the_printer_warning(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    as_the_h2c(fake_lan)
+    fake, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS
+    )
+    assert run.status == "succeeded"
+    [sent] = fake_lan.project_files()
+    assert "nozzle_mapping" in sent
+    [outcome] = fake.outcomes
+    assert outcome.lan is not None
+    assert not any(w.kind == "rack-left-to-bambuddy" for w in outcome.lan.warnings)
+
+
+async def test_the_rack_is_recorded_seen_once_per_report_read(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4545: recorded at the report ``lan_print`` reads, not by the pick, so a plate
+    that prints nothing from the rack records it too, once."""
+    PrinterStore(pg_pool, KEK).link_bambuddy(registry_native, 9)
+    as_the_h2c(fake_lan)
+    usage = Usage(linked=True)
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)
+    assert run.status == "succeeded"
+    assert usage.seen_by == [9] and usage.asked == []

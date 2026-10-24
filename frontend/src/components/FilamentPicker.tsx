@@ -198,14 +198,14 @@ export function WarningList({ warnings, testId }: { warnings: FilamentWarning[];
  * #3818 — what each spool provider's record says of the spool in a tray, labelled by
  * provider: "Bambuddy: Bambu Lab Blue · 812 g". The overlay's own order (priority) is kept.
  */
-function TrayRecords({ spool }: { spool: SpoolOption }) {
+function TrayRecords({ spool, labels }: { spool: SpoolOption; labels?: Readonly<Record<string, string>> }) {
   const records = Object.entries(spool.records ?? {})
   if (records.length === 0) return null
   return (
     <ul className="basis-full space-y-0.5 pl-6 text-[11px] text-muted-foreground" data-testid={`records-${spool.spool_id}`}>
       {records.map(([provider, record]) => (
         <li key={provider}>
-          <span className="text-foreground">{providerLabel(provider)}:</span>{' '}
+          <span className="text-foreground">{providerLabel(provider, labels)}:</span>{' '}
           {[record.brand, record.name].filter(Boolean).join(' ') || record.material || 'a spool'}
           {record.remaining_g !== null && record.remaining_g !== undefined && (
             <span className="sb-num"> · {grams(record.remaining_g)}</span>
@@ -508,7 +508,7 @@ export function FilamentPicker({
                                 : grams(spool.remaining_g)}
                           </span>
                         </span>
-                        {trays && <TrayRecords spool={spool} />}
+                        {trays && <TrayRecords spool={spool} labels={options.provider_labels} />}
                       </label>
                     )
                   })}

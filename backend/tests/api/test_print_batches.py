@@ -366,6 +366,34 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
 
 
 @respx.mock
+async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4551: a stored step naming a row unlinked from Bambuddy since is refused (#4516);
+    its row says to edit that file's step and pick the printer there."""
+
+    async def answers(*_: Any, **__: Any) -> Any:
+        raise ApiError(
+            422,
+            "disagreeing printer: Garage is not linked to Bambuddy printer 1."
+            " Pick the printer again.",
+        )
+
+    monkeypatch.setattr(print_batches, "start_library_run", answers)
+    item = BatchItem(
+        position=2,
+        library_file_id=104,
+        filename="bracket.3mf",
+        request=PrintRunRequest.model_validate(SLICED_RUN),
+    )
+    result = await print_batches._queue_one("b1", item, 0, *([None] * 6))  # type: ignore[arg-type]
+    assert (result.status, result.detail) == (
+        "refused",
+        "disagreeing printer: Garage is not linked to Bambuddy printer 1."
+        " Edit bracket.3mf and pick its printer again.",
+    )
+
+
 def test_a_file_that_fails_to_start_twice_is_refused_so_it_can_be_left(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -874,28 +902,3 @@ def test_queue_all_with_every_file_left_out_queues_nothing(client: TestClient) -
     assert response.status_code == 422, response.text
     assert "nothing to queue" in response.json()["detail"]
     assert client.get(f"{BATCHES}/{batch['id']}").json()["status"] == "open"
-
-
-@respx.mock
-def test_a_stored_step_whose_printer_was_unlinked_names_its_file(client: TestClient) -> None:
-    """#4551: a step saved for a registry row and its Bambuddy printer, the row unlinked
-    from Bambuddy since, is refused (#4516) in words that name the file, so the review
-    says which step needs its printer picked again."""
-    from scadbuddy.printers.component import PRINTERS
-    from scadbuddy.printers.models import PrinterCreate
-
-    configure(client)
-    sliced_file(104)
-    run_routes()
-    printers = _state(client).components.get(PRINTERS)
-    row = printers.store.create(PrinterCreate(serial="01P00UNLINKED01", name="Old H2C"))
-    batch = new_batch(client, 104)
-    stored = {**SLICED_RUN, "printer": row.id, "printer_id": 1}
-    choose(client, batch["id"], 0, request=stored)
-
-    done = client.post(f"{BATCHES}/{batch['id']}/queue").json()
-
-    outcome = done["items"][0]["outcome"]
-    assert outcome["status"] == "refused", outcome
-    assert "Old H2C is not linked to Bambuddy printer 1" in outcome["detail"]
-    assert done["items"][0]["filename"] in outcome["detail"]

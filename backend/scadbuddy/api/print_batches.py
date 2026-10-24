@@ -31,6 +31,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
 from scadbuddy.api.printing import ACCEPT_BUDGET
+from scadbuddy.bambuddy.print_run import PICK_AGAIN
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
 from scadbuddy.batches.component import PrintBatchesDep
 from scadbuddy.batches.store import (
@@ -383,11 +384,7 @@ async def _queue_one(
             MAY_HAVE_STARTED
         ):
             return BatchOutcome(status="pending", detail=error.detail, attempt=attempt)
-        # Named by its file (#4551): a refusal of the step's own choices, such as a
-        # printer to pick again (`print_run._named_printer`), says which step to edit.
-        return BatchOutcome(
-            status="refused", detail=f"In {item.filename}'s step: {error.detail}", attempt=attempt
-        )
+        return BatchOutcome(status="refused", detail=_of_step(error.detail, item), attempt=attempt)
     except Exception:
         # Not an answer at all: the run may have started, so the file is pending, and
         # the same request_id sent again follows it. The rest of the batch still goes
@@ -408,6 +405,14 @@ async def _queue_one(
         )
         return BatchOutcome(status="refused", detail=NOT_A_RUN, attempt=attempt)
     return BatchOutcome(status="started", run_id=run.id, attempt=attempt)
+
+
+def _of_step(detail: str, item: BatchItem) -> str:
+    """A refusal as this file's row says it: a stored step whose printer has been
+    unlinked or re-linked since it was chosen names the step to pick it again in (#4551)."""
+    if detail.endswith(PICK_AGAIN):
+        return f"{detail.removesuffix(PICK_AGAIN)}Edit {item.filename} and pick its printer again."
+    return detail
 
 
 NOT_STARTED = "ScadBuddy could not start this file's print. Queue all again to retry."

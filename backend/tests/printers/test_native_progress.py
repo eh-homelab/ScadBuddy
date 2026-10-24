@@ -3,6 +3,7 @@ Review Focus 5), and the run result that names it."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,7 +13,8 @@ import pytest
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, finish_run
-from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, newest_failure
+from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, given_run, newest_failure
+from scadbuddy.core.events import PrintEvent, PrintRunEvent
 from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.printers.progress import MOVED_ON, NOT_HEARD, PAUSED, LanProgress, from_lan_report
 from scadbuddy.printers.status import print_error_text
@@ -172,7 +174,7 @@ async def test_unreadable_runs_read_as_no_lan_print() -> None:
 
 async def test_a_run_read_already_is_not_read_again() -> None:
     """#4540 review: a progress route reads the newest run once, for its failure and its
-    LAN print; `given` reads no run."""
+    LAN print; `given_run` reads no run."""
     calls = 0
 
     async def latest(run_subject: str) -> PrintRun | None:
@@ -180,9 +182,10 @@ async def test_a_run_read_already_is_not_read_again() -> None:
         calls += 1
         return None
 
-    lan = LanProgress(latest, _Rows(), _Reports(report(gcode_state="FINISH")))  # type: ignore[arg-type]
-    progress = await lan.given(_run(LAN_RESULT)).read("o" * 32)
-    assert progress is not None and progress.stage == "done" and calls == 0
+    assert calls == 0  # ``latest`` is the route's reader, never called.
+    lan = LanProgress(given_run(_run(LAN_RESULT)), _Rows(), _Reports(report(gcode_state="FINISH")))  # type: ignore[arg-type]
+    progress = await lan.read("o" * 32)
+    assert progress is not None and progress.stage == "done"
 
 
 async def test_a_follows_two_reads_share_one_query() -> None:
@@ -200,13 +203,50 @@ async def test_a_follows_two_reads_share_one_query() -> None:
     assert store.calls == 2
 
 
+async def test_a_settled_run_is_read_again_at_once() -> None:
+    """#4541: the subject's ``print.run`` event drops its kept run, so a follow's tick
+    just after a retry does not read the run before it for up to ``ttl``."""
+    store = _CountingRuns(_run(LAN_RESULT))
+    recent = RecentRuns(store, ttl=2.0, clock=lambda: 0.0)  # type: ignore[arg-type]
+    first = await recent.latest("o" * 32)
+    store.run = _run(None)
+    recent.heard(PrintRunEvent(output_id="o" * 32, slug="s", run_id="r2"))
+    assert await recent.latest("o" * 32) is store.run is not first
+    assert store.calls == 2
+
+
+async def test_another_subjects_event_keeps_the_run() -> None:
+    store = _CountingRuns(_run(LAN_RESULT))
+    recent = RecentRuns(store, ttl=2.0, clock=lambda: 0.0)  # type: ignore[arg-type]
+    await recent.latest("o" * 32)
+    recent.heard(PrintRunEvent(output_id="p" * 32, slug="s", run_id="r2"))
+    recent.heard(PrintEvent(kind="print.progress", output_id="o" * 32, slug="s"))
+    await recent.latest("o" * 32)
+    assert store.calls == 1
+
+
+async def test_a_run_read_across_its_event_is_not_kept() -> None:
+    """An event heard while the read is in flight: what the read answers may be the run
+    before it, so the next read asks again."""
+    store = _CountingRuns(_run(LAN_RESULT))
+    recent = RecentRuns(store, ttl=2.0, clock=lambda: 0.0)  # type: ignore[arg-type]
+    store.during = lambda: recent.heard(PrintRunEvent(output_id="o" * 32, slug="s", run_id="r2"))
+    await recent.latest("o" * 32)
+    store.during = None
+    await recent.latest("o" * 32)
+    assert store.calls == 2
+
+
 class _CountingRuns(_Runs):
     def __init__(self, run: PrintRun | None) -> None:
         super().__init__(run)
         self.calls = 0
+        self.during: Callable[[], None] | None = None
 
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         self.calls += 1
+        if self.during is not None:
+            self.during()
         return self.run
 
 
@@ -243,6 +283,28 @@ def test_a_lan_run_reports_no_bambuddy_link() -> None:
     result = finish_run(None, planned, [outcome])
     assert (result.path, result.lan, result.bambuddy_url) == ("native", [OURS], None)
     assert result.queue_item_ids == []
+
+
+def test_a_lan_starts_warnings_are_the_runs() -> None:
+    """#4545: the rack pick's advisories reach the run's warnings, each fact once."""
+    from scadbuddy.bambuddy.filaments import FilamentWarning
+
+    planned = PlannedRun(
+        library_file_id=41,
+        printer_id=1,
+        nozzle_size="0.4",
+        copies=1,
+        options=PrintOptions(),
+        plates=[],
+        path="native",
+    )
+    left = FilamentWarning(kind="rack-left-to-bambuddy", message="Rack pick left to the printer.")
+    started = OURS.model_copy(update={"warnings": [left]})
+    outcomes = [
+        QueueOutcome(sliced_library_file_id=77, printer_id=1, lan=started),
+        QueueOutcome(sliced_library_file_id=78, printer_id=1, lan=started),
+    ]
+    assert finish_run(None, planned, outcomes).warnings == [left]
 
 
 @pytest.mark.parametrize(

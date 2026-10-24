@@ -17,8 +17,8 @@ function candidateName(spool: SpoolOption): string {
 }
 
 /** "Bambuddy's record", or "ScadBuddy's and Bambuddy's records", for the candidate's line. */
-function providersOf(spool: SpoolOption): string {
-  const names = Object.keys(spool.records ?? {}).map(providerLabel)
+function providersOf(spool: SpoolOption, labels?: Readonly<Record<string, string>>): string {
+  const names = Object.keys(spool.records ?? {}).map((provider) => providerLabel(provider, labels))
   if (names.length === 0) return ''
   return `${names.join(' and ')}${names.length === 1 ? "'s record" : "'s records"}`
 }
@@ -41,6 +41,8 @@ type Props = Target & {
    */
   onAssigned: (link?: TraySpoolLink) => void
   onDecline: () => void
+  /** The providers' own names (`FilamentOptions.provider_labels`, #4516). */
+  providerLabels?: Readonly<Record<string, string>>
 }
 
 /**
@@ -49,7 +51,7 @@ type Props = Target & {
  * scope); "No / not sure" records nothing, offers the tray itself as a choice and is not
  * asked again until the tray changes.
  */
-export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }: Props) {
+export function TrayQuestion({ tray, spools, onAssigned, onDecline, providerLabels, ...target }: Props) {
   const native = target.native
   useLoadBambuddyLinks()
   const candidates = (tray.candidates ?? [])
@@ -99,7 +101,7 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
   }
 
   const spoolRow = (spool: (typeof candidates)[number]) => {
-    const providers = native ? providersOf(spool) : ''
+    const providers = native ? providersOf(spool, providerLabels) : ''
     return (
     <>
       <Swatch colour={spool.colour} size="sm" />

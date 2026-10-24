@@ -24,7 +24,7 @@ from typing import Any
 
 from scadbuddy.bambuddy.follow import MAX_AGE
 from scadbuddy.bambuddy.progress import CopyProgress, PrintProgress, from_plates
-from scadbuddy.bambuddy.runs import LatestRun, PrintRun, given_run, read_latest
+from scadbuddy.bambuddy.runs import LatestRun, read_latest
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.printers.lan_models import LanStarted
@@ -121,12 +121,6 @@ class LanProgress:
         self.reports = reports
         self.now = now
         self.max_age = max_age
-
-    def given(self, run: PrintRun | None) -> LanProgress:
-        """The same reads, over a newest run read already."""
-        return LanProgress(
-            given_run(run), self.printers, self.reports, now=self.now, max_age=self.max_age
-        )
 
     async def read(self, run_subject: str) -> PrintProgress | None:
         run = await read_latest(self.latest, run_subject)
