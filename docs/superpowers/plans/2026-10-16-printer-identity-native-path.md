@@ -397,6 +397,8 @@ git add backend/scadbuddy/printers/lan.py backend/tests/printers/test_lan_live.p
 git commit -m "feat(printers): measured LAN upload directory and file url"
 ```
 
+> **Measured 2026-10-24** (H2C, firmware 01.02.00.00): `UPLOAD_DIR = "/"`, `file_url(name) = f"ftp://{name}"`. `project_file_command` as written (ids `"0"`, no `ams_mapping2`) was accepted and ran; see `backend/tests/printers/test_lan_live.py`.
+
 ### Task 8: The run names a registry printer and chooses its path
 
 **Files:**

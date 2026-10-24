@@ -20,7 +20,13 @@ The protocol facts, each cited:
   ``tests/printers/test_lan_ftps.py``: 200,000 bytes sent, 98,304 arrived).
 
 Which directory a 3MF goes in and the ``url`` the printer then accepts are not
-documented there: Task 7 measures them on a printer, so this module sets neither.
+documented there; Task 7 measured them (`UPLOAD_DIR`, `file_url`) on an H2C, firmware
+01.02.00.00, on 2026-10-24: a 3MF stored at ``/<name>`` and named ``ftp://<name>`` in
+`project_file_command`, with the four ids ``"0"`` and no ``ams_mapping2``, was answered
+``result: SUCCESS`` and ``RUNNING`` 1.8 s later (`tests/printers/test_lan_live.py`).
+Bambuddy does the same (``print_scheduler.py`` "Upload to root directory (not
+/cache/)", ``bambu_mqtt.py`` ``start_print``: ``"url": f"ftp://{filename}"``, read in
+the deployed image 2026-10-24).
 
 The printer's certificate is self-signed and names no host, so verification is by pin,
 never off: `fetch_cert_sha256` reads the leaf certificate's SHA-256 once, when the user
@@ -58,6 +64,8 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 #: How long an FTPS command or block may wait.
 FTP_TIMEOUT = 30.0
 FTP_BLOCK = 64 * 1024
+#: Where a 3MF is stored for ``print.project_file`` (Task 7, measured; module docstring).
+UPLOAD_DIR = "/"
 #: How long an upload waits for the printer's answer to its ``close_notify``. Some
 #: printers never send one (ha-bambulab skips the unwrap for that reason); the ``226``
 #: reply, not the close, says the file arrived.
@@ -134,6 +142,11 @@ def ftps_context(cert_sha256_hex: str) -> ssl.SSLContext:
     context = pinned_context(cert_sha256_hex)
     context.maximum_version = ssl.TLSVersion.TLSv1_2
     return context
+
+
+def file_url(remote_name: str) -> str:
+    """The ``url`` ``print.project_file`` takes for a file in `UPLOAD_DIR` (Task 7)."""
+    return f"ftp://{remote_name}"
 
 
 def pushall_command() -> dict[str, Any]:
@@ -267,7 +280,7 @@ class LanPrinter:
 
     async def upload(self, data: BinaryIO, remote_name: str) -> str:
         """Send ``data`` over implicit FTPS as ``remote_name`` (a path on the printer;
-        which directory is Task 7's measurement) and return the md5 (hex) of what was
+        in `UPLOAD_DIR`, Task 7) and return the md5 (hex) of what was
         sent, which ``print.project_file`` names."""
         address = await lan_address(self.host)
         return await asyncio.to_thread(self._upload, address, data, remote_name)
