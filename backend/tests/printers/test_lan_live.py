@@ -90,14 +90,18 @@ async def test_upload_then_project_file_is_accepted(printer: dict[str, str]) -> 
         ),
         "20001",
     )
+    ours = False
     try:
         await lan.publish(command)
         async with asyncio.timeout(60):
             async for report in lan.reports():
                 if report.print.get("subtask_name") != "scadbuddy-probe":
                     continue
+                ours = True
                 assert report.print.get("print_error", 0) == 0
                 if report.print.get("gcode_state") in ("PREPARE", "RUNNING"):
                     break
     finally:
-        await lan.publish({"print": {"command": "stop", "sequence_id": "20002"}})
+        # Only the probe's own job: a refused start leaves whatever ran before untouched.
+        if ours:
+            await lan.publish({"print": {"command": "stop", "sequence_id": "20002"}})

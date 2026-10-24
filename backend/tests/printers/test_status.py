@@ -289,6 +289,15 @@ def test_a_unit_on_a_fixed_extruder_is_mapped_and_has_no_inlet(recorded_h2c: Lan
     assert status.ams_switch_inlet == {}
 
 
+def test_an_inlet_other_than_a_or_b_is_unknown(recorded_h2c: LanReport) -> None:
+    from scadbuddy.bambuddy.extruders import extruder_of
+
+    recorded_h2c.print["ams"]["ams"][0]["info"] = "12002E03"  # inlet nibble 2
+    status = status_from_report(row(), recorded_h2c, now=recorded_h2c.received_at)
+    assert "0" not in status.ams_switch_inlet and "0" not in status.ams_extruder_map
+    assert extruder_of(0, 0, status) is None
+
+
 def test_an_info_that_is_not_hex_text_reads_as_absent(recorded_h2c: LanReport) -> None:
     data = recorded_h2c.print
     data["ams"]["ams"][0]["info"] = 1003
