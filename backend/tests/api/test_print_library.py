@@ -1324,9 +1324,8 @@ def test_a_library_files_check_reads_the_dialogs_kept_catalogue(client: TestClie
 def test_a_library_files_check_fetches_the_file_once(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#4489: the check fetches the 3MF beside `prepare_run`, and `_fetch` keeps only a
-    finished fetch, so a `prepare_run` that fetched it as well would fetch it twice. (The
-    slot read shares this fetch too: #4495.)"""
+    """#4489: the check fetches the 3MF beside `prepare_run`; every read of it, the slot
+    read's too (#4495), shares that one fetch, even one that starts before it ends."""
     configure(client)
     download = library_file(89)
     run_routes()
@@ -1378,12 +1377,16 @@ def test_a_check_whose_fetch_runs_out_of_memory_is_refused_saying_how_to_bound_i
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#4562 review: the check's own fetch (its layout read) running out of memory is the
-    check's refusal, as a library file's read is, never an unhandled 500."""
+    check's refusal, as a library file's read is, never an unhandled 500. #4571 review:
+    the slot read, which made that fetch first and read the slots from disk instead, left
+    the layout read to fetch the file again; the one fetch's failure answers both."""
     configure(client)
     library_file(89)
     run_routes()
+    fetches: list[int] = []
 
     async def out_of_memory(self: LibrarySource, bambuddy: BambuddyClient | None) -> bytes:
+        fetches.append(self.file_id)
         raise MemoryError
 
     monkeypatch.setattr(LibrarySource, "fetch_3mf", out_of_memory)
@@ -1392,6 +1395,7 @@ def test_a_check_whose_fetch_runs_out_of_memory_is_refused_saying_how_to_bound_i
 
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
+    assert fetches == [89]
 
 
 @respx.mock

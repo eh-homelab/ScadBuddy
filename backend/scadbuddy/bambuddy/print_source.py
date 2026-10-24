@@ -269,7 +269,8 @@ class _Fetching(Protocol):
     prints: OutputPrintStore | None
     stem: str | None
     native: NativeCopies | None
-    _fetched: _Fetched | None
+    _fetching: asyncio.Future[_Fetched] | None
+    _waiting: int
 
     async def fetch_3mf(self, client: BambuddyClient | None) -> bytes | None: ...
 
@@ -281,6 +282,12 @@ class _Fetched:
 
     payload: bytes | None
     stated: bool
+
+
+async def _fetch_once(source: _Fetching, client: BambuddyClient | None) -> _Fetched:
+    payload = await source.fetch_3mf(client)
+    stated = payload is not None and await asyncio.to_thread(nozzles_stated, payload)
+    return _Fetched(payload, stated)
 
 
 async def _spool_colours(
@@ -360,14 +367,34 @@ class PrintPipeline:
     #: ScadBuddy's own library, where a native run's copy goes (#3818 tier A Task 4):
     #: `NativeLibrary` in the API's process, `RemoteLibrary` on the print worker.
     native: NativeCopies | None = None
-    _fetched: _Fetched | None = field(default=None, init=False, repr=False, compare=False)
+    #: The one fetch of the 3MF every reader of this source shares, from its start: a
+    #: reader that arrives while it runs waits on it rather than download the file again
+    #: (the check's slot read, layout and preparation run at once, #4495, #4581 review).
+    _fetching: asyncio.Future[_Fetched] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    #: How many readers wait on :attr:`_fetching`: the last to go away stops it.
+    _waiting: int = field(default=0, init=False, repr=False, compare=False)
 
     async def _fetch(self: _Fetching, client: BambuddyClient | None) -> _Fetched:
-        if self._fetched is None:
-            payload = await self.fetch_3mf(client)
-            stated = payload is not None and await asyncio.to_thread(nozzles_stated, payload)
-            self._fetched = _Fetched(payload, stated)
-        return self._fetched
+        """:meth:`fetch_3mf`, made once per source and shared. Its failure is kept as its
+        answer: a fetch that ran out of memory (#4571 review) fails every reader at once,
+        never downloads the file again to run out again. A fetch whose every reader was
+        cancelled (a check refused first) is stopped, and the next reader starts anew."""
+        fetching = self._fetching
+        if fetching is None:
+            fetching = asyncio.ensure_future(_fetch_once(self, client))
+            self._fetching = fetching
+        self._waiting += 1
+        try:
+            # Shielded: one reader cancelled does not cancel the fetch the others wait on.
+            return await asyncio.shield(fetching)
+        finally:
+            self._waiting -= 1
+            if self._waiting == 0 and not fetching.done():
+                fetching.cancel()
+                if self._fetching is fetching:
+                    self._fetching = None
 
     def _printable(self: _Fetching, client: BambuddyClient | None) -> Printable:
         async def fetch() -> bytes:
