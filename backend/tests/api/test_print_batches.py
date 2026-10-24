@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import timedelta
-from typing import Any, LiteralString
+from datetime import UTC, datetime, timedelta
+from typing import Any, LiteralString, cast
 
 import httpx
 import pytest
@@ -18,13 +18,18 @@ from psycopg.types.json import Jsonb
 from scadbuddy.api import library_print, print_batches
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.print_batches import batch_request_id
-from scadbuddy.api.printing import STILL_CHECKING_DETAIL
-from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.api.printing import STILL_CHECKING_DETAIL, _answered
+from scadbuddy.bambuddy.print_run import PICK_AGAIN, PrintRunRequest, _named_printer
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome, PrintBatchStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.main import BATCH_TTL, PENDING_BATCH_TTL
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.store import PrinterStore
+from scadbuddy.workflows.print_activities import problem
+from scadbuddy.workflows.print_models import AcceptAnswer
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import SLICED_RUN, sliced_3mf, sliced_file
 from tests.api.test_print_run_choices import follow_run, run_routes
@@ -365,19 +370,28 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
     assert result.status == outcome
 
 
-@respx.mock
+class _OneRow:
+    """A registry of one row, ``Garage``, linked to no Bambuddy printer (#4516)."""
+
+    def get(self, id: str) -> PrinterRow | None:
+        now = datetime.now(UTC)
+        return PrinterRow(id=id, serial="S", name="Garage", created_at=now, updated_at=now)
+
+
 async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#4551: a stored step naming a row unlinked from Bambuddy since is refused (#4516);
-    its row says to edit that file's step and pick the printer there."""
+    its row says to edit that file's step and pick the printer there. The refusal is
+    `_named_printer`'s own, carried as the run's refusal is, through the workflow's
+    problem document and back."""
 
     async def answers(*_: Any, **__: Any) -> Any:
-        raise ApiError(
-            422,
-            "disagreeing printer: Garage is not linked to Bambuddy printer 1."
-            " Pick the printer again.",
-        )
+        try:
+            await _named_printer("garage", 1, StoredSettings(), cast(PrinterStore, _OneRow()))
+        except ApiError as error:
+            _answered(AcceptAnswer(refusal=problem(error)))
+        raise AssertionError("the named printer was not refused")
 
     monkeypatch.setattr(print_batches, "start_library_run", answers)
     item = BatchItem(
@@ -392,6 +406,25 @@ async def test_a_step_whose_printer_was_unlinked_says_which_step_to_edit(
         "disagreeing printer: Garage is not linked to Bambuddy printer 1."
         " Edit bracket.3mf and pick its printer again.",
     )
+
+
+async def test_only_a_disagreeing_printer_names_the_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The step is named off the refusal's problem type, not its wording: another 422
+    that happens to end the same way is the file's row word for word."""
+    detail = f"Some other refusal. {PICK_AGAIN}"
+
+    async def answers(*_: Any, **__: Any) -> Any:
+        raise ApiError(422, detail)
+
+    monkeypatch.setattr(print_batches, "start_library_run", answers)
+    item = BatchItem(
+        position=0,
+        library_file_id=104,
+        filename="bracket.3mf",
+        request=PrintRunRequest.model_validate(SLICED_RUN),
+    )
+    result = await print_batches._queue_one("b1", item, 0, *([None] * 6))  # type: ignore[arg-type]
+    assert (result.status, result.detail) == ("refused", detail)
 
 
 def test_a_file_that_fails_to_start_twice_is_refused_so_it_can_be_left(
