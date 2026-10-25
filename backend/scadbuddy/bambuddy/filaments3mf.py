@@ -136,6 +136,12 @@ class SlicedProfile(BaseModel):
     nozzle_diameters: list[str] = Field(default_factory=list)
     #: The plates with G-code in the file, in index order.
     plates: list[SlicedPlate] = Field(default_factory=list)
+    #: ``enable_prime_tower`` as the slice wrote it (#3962); ``None`` when unstated.
+    prime_tower: bool | None = None
+    #: Whether ``different_settings_to_system``'s first entry, the process's, names
+    #: ``enable_prime_tower``: the slice's value is not its process preset's. Bambu
+    #: Studio's CLI turning the tower off leaves it there (preview slice 140, #3962).
+    prime_tower_changed: bool = False
 
     def plate(self, index: int) -> SlicedPlate | None:
         return next((plate for plate in self.plates if plate.index == index), None)
@@ -340,6 +346,9 @@ def _profile(
         bed_type=_first(settings.get("curr_bed_type")),
         nozzle_diameters=[str(value) for value in project if isinstance(value, (str, int, float))],
         plates=[plates[index] for index in sorted(plates)],
+        prime_tower={"1": True, "0": False}.get(_first(settings.get("enable_prime_tower")) or ""),
+        prime_tower_changed="enable_prime_tower"
+        in (_first(settings.get("different_settings_to_system")) or "").split(";"),
     )
     profile.nozzle_diameters = profile.diameters_for([p.index for p in profile.plates]) or [
         size for value in profile.nozzle_diameters if (size := diameter(value)) is not None

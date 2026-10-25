@@ -19,12 +19,17 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from scadbuddy.core.events import Event, EventBus, JobEvent, VersionCommitted
+from scadbuddy.core.events import Event, EventBus, JobEvent, PrintOutcome, VersionCommitted
 from scadbuddy.flow_triggers.models import EventKind
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT, FIRE_WORKFLOW, schedule_id
 
 logger = logging.getLogger(__name__)
+
+#: A print's recorded outcome (#2665) and the trigger event it fires. A cancelled print
+#: fires neither: a person stopped it, which is a decision, not a failure (Ruling 24);
+#: nor does one whose end is unknown.
+PRINT_KINDS: dict[str, EventKind] = {"finished": "print.finished", "failed": "print.failed"}
 
 
 def trigger_event(event: Event) -> tuple[EventKind, str, str, dict[str, Any]] | None:
@@ -35,6 +40,15 @@ def trigger_event(event: Event) -> tuple[EventKind, str, str, dict[str, Any]] | 
     if isinstance(event, VersionCommitted):
         facts = {"kind": "model.changed", "slug": event.slug, "commit": event.commit}
         return "model.changed", event.slug, f"commit:{event.slug}:{event.commit}", facts
+    if isinstance(event, PrintOutcome) and (kind := PRINT_KINDS.get(event.outcome)) is not None:
+        print_facts: dict[str, Any] = {
+            "kind": kind,
+            "slug": event.slug,
+            "run_id": event.run_id,
+            "output_id": event.output_id,
+            "printer": event.printer,
+        }
+        return kind, event.slug, f"print:{event.run_id}", print_facts
     return None
 
 

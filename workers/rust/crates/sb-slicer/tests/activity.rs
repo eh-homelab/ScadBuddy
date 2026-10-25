@@ -183,6 +183,29 @@ async fn an_exit_0_without_output_is_a_non_retryable_slicer_error_before_any_put
 }
 
 #[tokio::test]
+async fn an_empty_plate_says_why_from_the_clis_log() {
+    // The CLI writes an empty plate's reason to stdout and nothing to stderr (#4638).
+    let (base, _seen) = serve().await;
+    let env = ActivityEnvironment::builder()
+        .register_activities(activities("empty-plate"))
+        .build();
+    let err = env
+        .run(SlicerActivities::slice_plate, input(&base))
+        .await
+        .unwrap_err();
+    let (type_name, _, details) = details(err);
+    assert_eq!(type_name, SLICER_ERROR);
+    let details = details.expect("details");
+    assert_eq!(details["exit_code"], 206);
+    assert_eq!(details["stderr_tail"], "");
+    assert_eq!(
+        details["errors"],
+        "plate 2: Nothing to be sliced, Either the print is empty or no object is fully \
+         inside the print volume before apply."
+    );
+}
+
+#[tokio::test]
 async fn a_failed_slice_still_records_its_stage_time() {
     let (base, _seen) = serve().await;
     let acts = activities("exit-1");

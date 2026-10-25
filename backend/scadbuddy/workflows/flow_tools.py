@@ -1255,20 +1255,50 @@ class RenderFinished(BaseModel):
     job_id: str
 
 
+class PrintFinished(BaseModel):
+    """A print finished (#2665)."""
+
+    kind: Literal["print.finished"]
+    slug: str
+    #: The print run that queued or started it.
+    run_id: str
+    #: What was printed: an output's id, or `library:<file id>`.
+    output_id: str
+    #: The registry printer it printed on, when its run named one.
+    printer: str | None = None
+
+
+class PrintFailed(BaseModel):
+    """A print failed (#2665); a cancelled one fires nothing."""
+
+    kind: Literal["print.failed"]
+    slug: str
+    run_id: str
+    output_id: str
+    printer: str | None = None
+
+
 def trigger_tool(event: dict[str, Any] | None = None) -> Any:
     """`trigger()` (#2666): the event a trigger fired this run on, as the fire recorded
     it, or None. It reads the run's own message, so it records no step. Data only: who
     the run acts as, and its grant, are the trigger's record (spec 2026-10-11 §12.4)."""
 
-    async def trigger() -> ModelChanged | RenderFinished | None:
-        """The event that started this run: a template changed (`commit`) or a render
-        finished (`job_id`), with its template's `slug`. None for a run started by hand
-        or on a schedule."""
+    async def trigger() -> ModelChanged | RenderFinished | PrintFinished | PrintFailed | None:
+        """The event that started this run, told apart by `kind`: a template changed
+        (`commit`), a render finished (`job_id`), or a print finished or failed
+        (`run_id`, `output_id`, `printer`), each with its template's `slug`. None for a
+        run started by hand or on a schedule."""
         if event is None:
             return None
-        if event.get("kind") == "model.changed":
-            return ModelChanged.model_validate(event)
-        return RenderFinished.model_validate(event)
+        match event.get("kind"):
+            case "model.changed":
+                return ModelChanged.model_validate(event)
+            case "print.finished":
+                return PrintFinished.model_validate(event)
+            case "print.failed":
+                return PrintFailed.model_validate(event)
+            case _:
+                return RenderFinished.model_validate(event)
 
     return agent.tool_defn(inherently_safe=True)(trigger)
 

@@ -117,10 +117,17 @@ function folderName(folderId: number | undefined, folderPath: string | undefined
   return "the library's top level"
 }
 
-type FilamentQuery = { printer_id?: number | undefined; plate_id?: number | undefined; all_plates?: boolean | undefined }
+type PrinterQuery = { printer_id?: number | undefined; printer?: string | undefined }
+type FilamentQuery = PrinterQuery & { plate_id?: number | undefined; all_plates?: boolean | undefined }
 
-function getChoices(ctx: ToolContext, source: Source, printer_id: number | undefined) {
-  const query = { printer_id }
+/**
+ * A registry printer's `id` (list_printers, get_printers_now), as every dialog read and the
+ * run take it (#3823): on a row a run reaches over the LAN (#4646) the reads are the
+ * native path's, its trays for spools, and ask Bambuddy nothing.
+ */
+const registryPrinter = z.string().uuid()
+
+function getChoices(ctx: ToolContext, source: Source, query: PrinterQuery) {
   return source.kind === 'library'
     ? ok(
         ctx.backend.GET('/api/v1/print/library/{file_id}/choices', { params: { path: { file_id: source.id }, query } }),
@@ -193,6 +200,30 @@ async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
   return run
 }
 
+/**
+ * #4646 — a run that printed over the LAN (`result.path` `native`) queued nothing on
+ * Bambuddy: its result carries no queue item ids or Bambuddy URL, and the print is
+ * followed by its subject's progress, which reads the LAN report (`FollowPrint`), the
+ * plates by the `subtask_name` each started under. A Bambuddy run is returned as it is.
+ */
+export function followed(run: PrintRun) {
+  const result = run.result
+  if (run.status !== 'succeeded' || result?.path !== 'native') return run
+  const { queue_item_ids: _queued, bambuddy_url: _url, ...rest } = result
+  // `output_id` is the run's subject as clients read it: an output's id, or `library:<file id>`.
+  const library = run.output_id.startsWith('library:')
+  return {
+    ...run,
+    result: rest,
+    path: 'native' as const,
+    follow: {
+      tool: 'get_print_progress',
+      ...(library ? { library_file_id: Number(run.output_id.slice('library:'.length)) } : { output_id: run.output_id }),
+      subtask_names: (rest.lan ?? []).map((plate) => plate.subtask_name),
+    },
+  }
+}
+
 /** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
 function runOutcome(run: PrintRun, ctx: ToolContext) {
   if (run.status === 'failed') {
@@ -207,7 +238,7 @@ function runOutcome(run: PrintRun, ctx: ToolContext) {
     return { ...json({ ...run, note }), isError: true }
   }
   if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
-  return json(run)
+  return json(followed(run))
 }
 const calibration = z.enum(['off', 'on', 'auto'])
 
@@ -274,13 +305,12 @@ function seedPlan(
 
 const PRINT_OUTPUT_INPUT = withSource({
   printer_id: z.number().int().optional(),
-  printer: z
-    .string()
-    .uuid()
+  printer: registryPrinter
     .optional()
     .describe(
       "A registry printer's `id` (list_printers, get_printers_now), in place of `printer_id`: the run prints " +
-        'on the Bambuddy printer it links and records the printer by this id.',
+        'on the Bambuddy printer it links and records the printer by this id. A row that links no Bambuddy ' +
+        'printer prints over the LAN (#4646); send no `printer_id` beside it.',
     ),
   copies: z.number().int().min(1).max(1000).optional(),
   plate_id: z.number().int().min(1).default(1),
@@ -352,27 +382,42 @@ const PRINT_OUTPUT_INPUT = withSource({
 })
 type PrintOutputArgs = z.infer<typeof PRINT_OUTPUT_INPUT>
 
+/** #4646 — a print over the LAN is filed in a native library folder, never a Bambuddy project. */
+function refuseProject(name: string, args: PrintOutputArgs): void {
+  if (args.project_id === undefined || args.project_id === null) return
+  throw new ToolError(
+    `${name} prints over the LAN, so the print has no Bambuddy project: omit project_id. ` +
+      "folder_id may name one of ScadBuddy's own library folders (list_print_projects with native: true).",
+  )
+}
+
 /**
  * The Bambuddy printer a print_output call prints on, and its name, resolved as the backend
  * resolves it (#4442). A registry `printer` must still link the `printer_id` sent beside it,
- * or the call is refused: the backend would print on `printer_id`'s printer instead.
+ * or the call is refused: the backend would print on `printer_id`'s printer instead. A row
+ * that links no Bambuddy printer is `lan` (#4646): it prints over the LAN with `printer_id`
+ * null, as the dialog prints it, so a `printer_id` or a project beside it is refused.
  */
 async function printerOf(
   args: PrintOutputArgs,
   backend: BackendClient,
   signal: AbortSignal,
   needs: ApprovalNeeds = { summary: true },
-): Promise<{ printerId?: number; name?: string }> {
+): Promise<{ printerId?: number; name?: string; lan?: true }> {
   if (args.printer !== undefined) {
     const row = await ok(
       backend.GET('/api/v1/printers/{printer_id}', { params: { path: { printer_id: args.printer } }, signal }),
       'read the printer',
     )
     if (row.bambuddy_printer_id == null) {
-      throw new ToolError(
-        `${row.name} is reached only over the LAN, which ScadBuddy cannot print to yet. ` +
-          'Ask the user to link it to Bambuddy in Settings > Printers.',
-      )
+      if (args.printer_id !== undefined) {
+        throw new ToolError(
+          `${row.name} links no Bambuddy printer, so it is not printer_id ${args.printer_id}: it prints over ` +
+            'the LAN. Send only `printer`.',
+        )
+      }
+      refuseProject(row.name, args)
+      return { name: row.name, lan: true }
     }
     if (args.printer_id !== undefined && args.printer_id !== row.bambuddy_printer_id) {
       throw new ToolError(
@@ -391,7 +436,7 @@ async function printerOf(
 }
 
 /** print_output's approval line; `printerName` is the name of the printer that prints, when read. */
-function printSummary(args: PrintOutputArgs, printerName?: string): string {
+function printSummary(args: PrintOutputArgs, printerName?: string, lan = false): string {
   const { printer_id, printer, copies, plate_id, all_plates, nozzles, tier, process_name } = args
   const defaulted =
     nozzles === undefined ||
@@ -405,6 +450,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string): string {
     `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
     `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
     `${printerName !== undefined ? ` on printer ${JSON.stringify(printerName)}` : printer_id !== undefined ? ` on printer ${printer_id}` : printer !== undefined ? ` on printer ${printer}` : ''}` +
+    `${lan ? ' over the LAN' : ''}` +
     `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
@@ -425,7 +471,16 @@ export const printTools: Tool[] = [
       'they cannot be read: then report that rather than assume plate 1), which ' +
       'print_output takes as `plate_id`. What ' +
       'print_output fills omitted choices from.',
-    input: withSource({ printer_id: z.number().int().optional() }),
+    input: withSource({
+      printer_id: z.number().int().optional(),
+      printer: registryPrinter
+        .optional()
+        .describe(
+          "A registry printer's `id` (list_printers), the one way to name a printer only the LAN reaches: " +
+            'on a printer a run reaches over the LAN (`lan_printers` lists them) the filament step is its ' +
+            'loaded trays, each a negative `spool_id` print_output takes in `filament_plan`.',
+        ),
+    }),
     risk: 'read',
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
@@ -445,7 +500,7 @@ export const printTools: Tool[] = [
       // it says why (#2107): "no plates" and "a missing Bambuddy scope" are not the same answer.
       let platesError: string | undefined
       const [choices, plates] = await Promise.all([
-        getChoices(ctx, source, args.printer_id),
+        getChoices(ctx, source, { printer_id: args.printer_id, printer: args.printer }),
         getPlates(ctx, source).catch((err: unknown) => {
           platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
           // #1814: the error's name and status, never its message, which can quote a connection string (telemetry/scrub.ts).
@@ -469,6 +524,12 @@ export const printTools: Tool[] = [
       '(or, with `all_plates`, every plate) needs and a suggested spool per slot.',
     input: withSource({
       printer_id: z.number().int().optional(),
+      printer: registryPrinter
+        .optional()
+        .describe(
+          "A registry printer's `id` (list_printers): on a printer a run reaches over the LAN the spools are " +
+            "its loaded trays, each a negative `spool_id`, with the spool providers' records over them.",
+        ),
       plate_id: z.number().int().min(1).optional(),
       all_plates: z.boolean().optional(),
     }),
@@ -477,8 +538,8 @@ export const printTools: Tool[] = [
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Library'],
     routes: ['GET /api/v1/print/outputs/{output_id}/filaments', 'GET /api/v1/print/library/{file_id}/filaments'],
-    handler: async ({ printer_id, plate_id, all_plates, ...source }, ctx) =>
-      json(await getFilaments(ctx, sourceOf(source), { printer_id, plate_id, all_plates })),
+    handler: async ({ printer_id, printer, plate_id, all_plates, ...source }, ctx) =>
+      json(await getFilaments(ctx, sourceOf(source), { printer_id, printer, plate_id, all_plates })),
   }),
 
   defineTool({
@@ -550,11 +611,13 @@ export const printTools: Tool[] = [
     name: 'get_print_run',
     description:
       'A print run print_output started: `running` while it slices and queues, then `succeeded` with its ' +
-      '`result` (warnings, queue item ids, the Bambuddy URL) or `failed` with the `error` that stopped it.',
+      '`result` (warnings, queue item ids, the Bambuddy URL) or `failed` with the `error` that stopped it. ' +
+      'A run that printed over the LAN (`path: "native"`) has no queue item ids: its `follow` names the ' +
+      'get_print_progress call that follows it.',
     input: z.object({ run_id: runId }),
     risk: 'read',
     routes: ['GET /api/v1/print/runs/{run_id}'],
-    handler: async ({ run_id }, ctx) => json(await getRun(ctx, run_id)),
+    handler: async ({ run_id }, ctx) => json(followed(await getRun(ctx, run_id))),
   }),
 
   defineTool({
@@ -563,9 +626,11 @@ export const printTools: Tool[] = [
       "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
       'the user changes, in Settings; also `folders`, the library folders of no project a print or ' +
       'file_output_in_project_folder may go to instead (`folder_id`), each with its `path`; and `sort`, how ' +
-      'the picker orders them. get_default_print_project says where some content goes by default.' +
+      'the picker orders them. get_default_print_project says where some content goes by default. With ' +
+      "`native`, the destinations of a print over the LAN: ScadBuddy's own library folders, no projects, and " +
+      'Bambuddy is not asked.' +
       PAGED,
-    input: z.object({ ...pageInput }),
+    input: z.object({ native: z.boolean().optional(), ...pageInput }),
     risk: 'read',
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
@@ -573,7 +638,7 @@ export const printTools: Tool[] = [
     routes: ['GET /api/v1/print/projects'],
     handler: async (args, { backend }) => {
       const { last_project_id, projects, folders, sort } = await ok(
-        backend.GET('/api/v1/print/projects'),
+        backend.GET('/api/v1/print/projects', { params: { query: { native: args.native } } }),
         'list projects',
       )
       const { items, ...rest } = page(projects ?? [], args, (p) => String(p.id), 'list_print_projects')
@@ -1009,9 +1074,15 @@ export const printTools: Tool[] = [
       '`folder_id` (from list_print_projects\' `folders`) puts the 3MF in a library folder of no project ' +
       'instead; it cannot be sent with a `project_id`. ' +
       '`printer` names a registry printer by its id (list_printers) in place of `printer_id`. ' +
+      'On a printer a run reaches over the LAN (a row that links no Bambuddy printer, or one ' +
+      "get_print_choices lists in `lan_printers` for that `printer`) the print goes to the printer with no " +
+      'Bambuddy call, as the print dialog sends it: spools are its loaded trays, by the negative `spool_id`s ' +
+      'get_print_filaments gives them, there is no project (a `project_id` is refused; `folder_id` names one ' +
+      "of ScadBuddy's own folders, list_print_projects with `native`) and no queue item. " +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
-      '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
-      'get_print_run. Then follow the print with get_print_progress.',
+      '`result` (warnings, queue item ids; over the LAN, `path: "native"` and a `follow` handle instead), or ' +
+      'hands back the still-running run to poll with get_print_run. Then follow the print with ' +
+      'get_print_progress.',
     input: PRINT_OUTPUT_INPUT,
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -1026,10 +1097,11 @@ export const printTools: Tool[] = [
     // #4442: the approval names the printer that prints, and approves the pair it is: a
     // registry `printer` is sent with the `printer_id` it links, so confirm_action runs
     // exactly what the person saw.
+    // A row only the LAN reaches (#4646) is approved as sent: it links no printer_id to add.
     prepareApproval: async (args, ctx, needs) => {
-      const { printerId, name } = await printerOf(args, ctx.backend, ctx.signal, needs)
-      const input = args.printer === undefined ? args : { ...args, printer_id: printerId }
-      return { input, summary: printSummary(input, name) }
+      const { printerId, name, lan } = await printerOf(args, ctx.backend, ctx.signal, needs)
+      const input = args.printer === undefined || lan ? args : { ...args, printer_id: printerId }
+      return { input, summary: printSummary(input, name, lan) }
     },
     // Its own wait for the print run, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
@@ -1039,8 +1111,19 @@ export const printTools: Tool[] = [
       let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
       // #3823 — a registry printer prints on the Bambuddy printer it links; both go to the
       // backend. A pair the registry no longer links is refused here (#4442 security
-      // review), so the backend never falls back to a printer nobody approved.
-      if (args.printer !== undefined) printerId = (await printerOf(args, backend, ctx.signal)).printerId
+      // review), so the backend never falls back to a printer nobody approved. A row that
+      // links none prints over the LAN with `printer_id` null (#4646), as the dialog sends it.
+      let lanOnly = false
+      let printerName: string | undefined
+      if (args.printer !== undefined) {
+        const resolved = await printerOf(args, backend, ctx.signal)
+        printerId = resolved.printerId
+        printerName = resolved.name
+        lanOnly = resolved.lan === true
+      }
+      // Whether the run goes over the LAN: always for a LAN-only row, else as the choices
+      // say (`lan_printers`, the server's `hot_path_native`), never the tool's own guess.
+      let native = lanOnly
       let slots = args.filament_plan?.slots
       let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
       let processName: string | null | undefined = args.process_name
@@ -1050,14 +1133,16 @@ export const printTools: Tool[] = [
       // on: GET /print/{outputs|library}/{id}/choices. /run takes no defaults of its own
       // for nozzles, spools or plate, so an omitted choice must be made here.
       if (
-        printerId === undefined ||
+        (printerId === undefined && !lanOnly) ||
         chosenNozzles === undefined ||
         bedType === undefined ||
         slots === undefined ||
         (chosenTier === undefined && processName === undefined)
       ) {
-        const view = await getChoices(ctx, source, printerId)
-        printerId ??= view.printer_id ?? undefined
+        const view = await getChoices(ctx, source, { printer_id: printerId, printer: args.printer })
+        if (args.printer !== undefined && view.lan_printers?.includes(args.printer)) native = true
+        // A LAN-only row's view names no Bambuddy printer, and the run must send none.
+        if (!lanOnly) printerId ??= view.printer_id ?? undefined
         bedType ??= view.bed_type
         const last = view.model_choices
         const remembered = last?.nozzles ?? []
@@ -1082,12 +1167,14 @@ export const printTools: Tool[] = [
                   ctx,
                   source,
                   args.all_plates
-                    ? { printer_id: printerId, all_plates: true }
-                    : { printer_id: printerId, plate_id: args.plate_id },
+                    ? { printer_id: printerId, printer: args.printer, all_plates: true }
+                    : { printer_id: printerId, printer: args.printer, plate_id: args.plate_id },
                 )
           slots = seedPlan(filaments, last?.filament_plan ?? [])
         }
       }
+      // A linked row the choices say prints natively refuses a project as a LAN-only row does.
+      if (native && !lanOnly) refuseProject(printerName ?? `printer ${args.printer ?? printerId}`, args)
       // One per call (#470): a call is a deliberate print, so the same choices again are
       // a new one rather than the last call's run. Every re-send below reuses it, so a
       // POST whose answer was lost re-attaches to its run instead of printing twice. A call
@@ -1108,8 +1195,9 @@ export const printTools: Tool[] = [
           bed_type: bedType,
           filament_overrides: args.filament_overrides ?? {},
         },
-        // Omitted stays omitted (the remembered project); null is "No project" (#317).
-        ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
+        // Omitted stays omitted (the remembered project); null is "No project" (#317). Over
+        // the LAN there is no project to name (#4646, plan 2026-10-18 D6), so none is sent.
+        ...(args.project_id === undefined || native ? {} : { project_id: args.project_id }),
         // #3651 — a library folder in place of a project; the backend refuses both.
         ...(args.folder_id === undefined ? {} : { folder_id: args.folder_id }),
         options: args.options,

@@ -148,16 +148,29 @@ def prepare_failure(cause: BaseException | None) -> str:
 
 
 def slice_failure(cause: BaseException | None, queue: str) -> str:
-    """Ruling C4: a ``SlicerError``'s ``stderr_tail``, the only details decoded (the
-    worker's README, "Slicer worker"); any other type is named, never its message. No
-    worker taking the activity in `SliceWorkflowInput.slicer_wait` says so (review M2)."""
+    """Ruling C4: a ``SlicerError``'s ``stderr_tail``, or when that is empty its
+    ``errors`` (the CLI's own ``[error]`` log lines, which is where it says a plate is
+    empty, #4638), the only details decoded (the worker's README, "Slicer worker"); with
+    neither, the exit code. Any other type is named, never its message. No worker taking
+    the activity in `SliceWorkflowInput.slicer_wait` says so (review M2)."""
     if isinstance(cause, ApplicationError) and cause.type == SLICER_ERROR:
         details: Any = cause.details[0] if cause.details else {}
         if not isinstance(details, dict):
             details = {}
-        refused = details.get("exit_code") == VALIDATION_EXIT
-        prefix = "The slicer refused the plate:" if refused else "The slicer failed:"
-        return f"{prefix} {details.get('stderr_tail', '')}".rstrip()
+        exit_code = details.get("exit_code")
+        refused = exit_code == VALIDATION_EXIT
+        prefix = "The slicer refused the plate" if refused else "The slicer failed"
+        reason = next(
+            (
+                text.strip()
+                for text in (details.get("stderr_tail"), details.get("errors"))
+                if isinstance(text, str) and text.strip()
+            ),
+            None,
+        )
+        if reason is not None:
+            return f"{prefix}: {reason}"
+        return f"{prefix} (exit code {exit_code})." if exit_code is not None else f"{prefix}."
     if isinstance(cause, TemporalTimeoutError) and cause.type == TimeoutType.SCHEDULE_TO_START:
         return (
             "No slicer worker took the slice: is scadbuddy-slicer running, serving the"
