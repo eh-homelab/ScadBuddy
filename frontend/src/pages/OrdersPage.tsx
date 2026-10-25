@@ -3,6 +3,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Loader2Icon } from 'lucide-react'
 import { api } from '../api/client'
 import type { Customer, Order, OrderStatus } from '../api/types'
+import { CustomerPicker } from '../components/orders/CustomerPicker'
+import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustomerPicker'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { refusalText } from '../components/orders/refusal'
 import { DataTable, type Column } from '../components/records/DataTable'
@@ -12,8 +14,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
 import { timeAgo } from '../lib/format'
 import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, parseOrdersQuery, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { useAsync } from '../lib/useAsync'
@@ -34,7 +36,10 @@ export function OrdersPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreFailed, setMoreFailed] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [newCustomer, setNewCustomer] = useState('')
+  const picker = useCustomerPicker(customers.data)
+  const [newNotes, setNewNotes] = useState('')
+  const [newDue, setNewDue] = useState('')
+  const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
   const onChange = useCallback(
@@ -65,16 +70,21 @@ export function OrdersPage() {
   }
 
   async function create() {
-    if (!newCustomer) {
-      setCreateError('Pick a customer.')
-      return
-    }
+    setCreateBusy(true)
+    setCreateError(null)
     try {
-      const order = await api.createOrder({ customer_id: newCustomer })
+      // A customer made here stays picked when the order then fails, so a retry reuses it.
+      const making = picker.value === NEW_CUSTOMER
+      const customerId = await picker.resolve()
+      // The list's names and Customer filter read `customers`: take the new one in.
+      if (making) customers.reload()
+      const order = await api.createOrder({ customer_id: customerId, notes: newNotes, due_at: newDue ? `${newDue}T00:00:00Z` : null })
       setCreating(false)
       void navigate(`/orders/${order.id}`)
     } catch (err) {
       setCreateError(refusalText(err))
+    } finally {
+      setCreateBusy(false)
     }
   }
 
@@ -91,7 +101,7 @@ export function OrdersPage() {
     { key: 'customer', header: 'Customer', className: 'break-words', cell: (order) => names.get(order.customer_id) ?? order.customer_id },
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
     { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
-    { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? new Date(order.due_at).toLocaleDateString() : '') },
+    { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? dueDate(order.due_at) : '') },
   ]
 
   return (
@@ -99,7 +109,18 @@ export function OrdersPage() {
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-xl font-semibold tracking-tight">Orders</h1>
-          <Button onClick={() => setCreating(true)}>New order</Button>
+          <Button
+            onClick={() => {
+              // Each New order starts empty: a cancelled attempt's choices do not carry over.
+              picker.reset()
+              setNewDue('')
+              setNewNotes('')
+              setCreateError(null)
+              setCreating(true)
+            }}
+          >
+            New order
+          </Button>
         </div>
         <FilterBar
           label="Order filters"
@@ -167,30 +188,19 @@ export function OrdersPage() {
           </div>
         )}
       </div>
-      <Dialog open={creating} onOpenChange={(open) => !open && setCreating(false)}>
-        <DialogContent className="sm:max-w-sm">
+      <Dialog open={creating} onOpenChange={(open) => !open && !createBusy && setCreating(false)}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New order</DialogTitle>
           </DialogHeader>
+          <CustomerPicker picker={picker} id="new-order-customer" label="Customer for the new order" loading={customers.loading} disabled={createBusy} />
           <div className="flex flex-col gap-1">
-            <Label htmlFor="new-order-customer">Customer</Label>
-            <Select value={newCustomer} onValueChange={setNewCustomer}>
-              <SelectTrigger id="new-order-customer" aria-label="Customer for the new order">
-                <SelectValue placeholder="Pick a customer" />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                {(customers.data ?? [])
-                  .filter((c) => !c.archived_at)
-                  .map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.display_name}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              No customer yet? <Link to="/customers" className="text-primary underline-offset-4 hover:underline">Add one</Link> first.
-            </p>
+            <Label htmlFor="new-order-due">Due</Label>
+            <Input id="new-order-due" type="date" className="w-40" disabled={createBusy} value={newDue} onChange={(e) => setNewDue(e.target.value)} />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="new-order-notes">Notes</Label>
+            <Textarea id="new-order-notes" rows={2} disabled={createBusy} value={newNotes} onChange={(e) => setNewNotes(e.target.value)} />
           </div>
           {createError && (
             <p role="alert" className="text-[13px] text-warn">
@@ -198,13 +208,21 @@ export function OrdersPage() {
             </p>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreating(false)}>
+            <Button variant="outline" disabled={createBusy} onClick={() => setCreating(false)}>
               Cancel
             </Button>
-            <Button onClick={() => void create()}>Create order</Button>
+            <Button disabled={createBusy} onClick={() => void create()}>
+              {createBusy && <Loader2Icon className="animate-spin" />}
+              Create order
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   )
+}
+
+/** A due date is a day, stored as that day's UTC midnight: shown as that day everywhere. */
+function dueDate(dueAt: string): string {
+  return new Date(dueAt).toLocaleDateString(undefined, { timeZone: 'UTC' })
 }

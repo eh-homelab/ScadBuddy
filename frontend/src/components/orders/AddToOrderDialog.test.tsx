@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { useState } from 'react'
 import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -11,6 +12,19 @@ import { AddToOrderDialog } from './AddToOrderDialog'
 function Location() {
   const location = useLocation()
   return <output data-testid="location">{location.pathname}</output>
+}
+
+/** The dialog behind a toggle, as a page opens and closes it. */
+function Toggled() {
+  const [open, setOpen] = useState(true)
+  return (
+    <>
+      <button type="button" onClick={() => setOpen((was) => !was)}>
+        Toggle
+      </button>
+      <AddToOrderDialog open={open} outputId={OUTPUT_REAGAN} onClose={() => setOpen(false)} />
+    </>
+  )
 }
 
 describe('AddToOrderDialog (#4249)', () => {
@@ -47,10 +61,41 @@ describe('AddToOrderDialog (#4249)', () => {
     const dialog = screen.getByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'New customer…')
     await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.type(within(dialog).getByLabelText('Email'), 'grace@example.com')
+    await user.type(within(dialog).getByLabelText('Phone'), '+44 20 7946 0000')
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
     const customers = await api.customers({ q: 'grace' })
     expect(customers).toHaveLength(1)
+    expect(customers[0]?.contacts).toEqual([
+      expect.objectContaining({ kind: 'email', value: 'grace@example.com', primary: true }),
+      expect.objectContaining({ kind: 'phone', value: '+44 20 7946 0000', primary: true }),
+    ])
+    const order = screen.getByTestId('location').textContent?.split('/').pop() ?? ''
+    expect((await api.order(order)).order.customer_id).toBe(customers[0]?.id)
+  })
+
+  it('refuses a new customer with no name, and makes nothing (#4251)', async () => {
+    const createCustomer = vi.spyOn(api, 'createCustomer')
+    const { user } = renderPage(<AddToOrderDialog open outputId={OUTPUT_REAGAN} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'New customer…')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Name the new customer.')
+    expect(createCustomer).not.toHaveBeenCalled()
+    createCustomer.mockRestore()
+  })
+
+  it('opens empty again after a half-typed new customer is closed away', async () => {
+    const { user } = renderPage(<Toggled />)
+    let dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add to order' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Toggle' }))
+    dialog = await screen.findByRole('dialog', { name: 'Add to order' })
+    expect(within(dialog).queryByLabelText('Customer name')).toBeNull()
   })
 
   it('shows a rough estimate once a filament is picked, and records nothing (#4250)', async () => {
