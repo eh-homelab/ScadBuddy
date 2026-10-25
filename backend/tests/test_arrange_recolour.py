@@ -11,6 +11,7 @@ import trimesh
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, arrange_inputs
+from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.library_objects import LibraryObjects, piece_key, publish_library_pieces
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -397,3 +398,52 @@ async def test_a_colour_every_copy_swaps_away_takes_no_slot(tmp_path: Path) -> N
     )
     _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
     assert MAGENTA in inputs.colours and own not in [c.upper() for c in inputs.colours]
+
+
+GOLD = "#E4BD68"
+
+
+def _with_a_gold_base(paths: DataPaths, output_id: str) -> None:
+    """The output also holds a gold part, first in its colour list: the menorah's base."""
+    directory = OutputStore(paths).directory(output_id)
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    gold = {**manifest[0], "part": "gold-base", "colours": [GOLD]}
+    (directory / "manifest.json").write_text(json.dumps([gold, *manifest]), encoding="utf-8")
+    stored = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    stored["colors"] = [GOLD, *stored["colors"]]
+    (directory / "meta.json").write_text(json.dumps(stored), encoding="utf-8")
+
+
+async def test_a_subset_takes_only_the_colours_its_parts_print_in(tmp_path: Path) -> None:
+    """#4636: the menorah's candles arranged without its gold base kept all ten of the
+    source's colours, gold first, so the order item had a slot no plate prints and its
+    slice quote refused it. A subset's colours are those its copies print in, in the
+    source's order."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    own = entry.colours[0].upper()
+    _with_a_gold_base(paths, meta.id)
+    store = OutputStore(paths)
+    subset = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part=entry.part)])
+    _, inputs = arrange_inputs(store, subset, plate_model=None)
+    assert [c.upper() for c in inputs.colours] == [own]
+    whole = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id)])
+    _, inputs = arrange_inputs(store, whole, plate_model=None)
+    assert [c.upper() for c in inputs.colours] == [GOLD, own]
+
+
+async def test_a_subsets_plan_keeps_each_spool_on_its_colour(tmp_path: Path) -> None:
+    """#4636: with no colours given, a plan names slots in the source's colour order, so
+    a slot the subset drops takes its spool with it and the rest follow their colours."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    _with_a_gold_base(paths, meta.id)
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
+        filament_plan=FilamentPlan.model_validate(
+            {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 2, "spool_id": 9}]}
+        ),
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert inputs.filament_plan is not None
+    assert inputs.filament_plan.slots == {1: 9}
