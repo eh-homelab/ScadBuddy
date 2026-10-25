@@ -17,9 +17,10 @@
 # test needs.
 #
 # Host ports: the app on 18080, the printer's control port on 18081 and the recorder on
-# 18000, the three the spec reads. The printer's MQTT and FTPS ports are never published:
-# the app reaches them on this network, and through published ports on Docker Desktop the
-# FTPS data connection never arrives (e2e-stack/fake-printer/Dockerfile).
+# 18000 (SB_HOTPATH_RECORDER_PORT, on a host where that one is taken), the three the spec
+# reads. The printer's MQTT and FTPS ports are never published: the app reaches them on
+# this network, and through published ports on Docker Desktop the FTPS data connection
+# never arrives (e2e-stack/fake-printer/Dockerfile).
 name: sb-hotpath
 
 x-tools: &tools
@@ -134,7 +135,7 @@ services:
     build: ./bambuddy-recorder
     image: scadbuddy-bambuddy-recorder:hot-path
     ports:
-      - "127.0.0.1:18000:8000"
+      - "127.0.0.1:${SB_HOTPATH_RECORDER_PORT:-18000}:8000"
 
 secrets:
   kek:
