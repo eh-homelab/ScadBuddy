@@ -554,6 +554,20 @@ def test_a_job_forgotten_from_the_record_logs_again(
     assert list(jobs_api._UNREADABLE_LOGGED) == ["first"]
 
 
+def test_a_job_still_polled_stays_in_the_record(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4709 review: the record forgets the job least recently polled, not the one first
+    logged, so a job polled again while newer ones come in is not logged again."""
+    monkeypatch.setattr(jobs_api, "_UNREADABLE_LOGGED_MAX", 2)
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        for job_id in ("polled", "other", "polled", "newest", "polled"):
+            _job_status(_unreadable(job_id), None)
+    logged = [getattr(r, "job_id", None) for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert logged == ["polled", "other", "newest"]
+    assert list(jobs_api._UNREADABLE_LOGGED) == ["newest", "polled"]
+
+
 def test_an_arrange_rows_unreadable_notes_are_logged(caplog: pytest.LogCaptureFixture) -> None:
     """#4704 review: notes a row holds in a shape this build cannot read are not said,
     and the drift is logged with the job's id rather than lost without a trace."""

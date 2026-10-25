@@ -289,7 +289,8 @@ _NOTES_FIELD = "notes"
 _ARRANGE_NOTES: TypeAdapter[list[str]] = TypeAdapter(list[str])
 #: The jobs whose unreadable notes this process logged: once per job per process (each
 #: replica, and each restart, logs a job once), not on every poll. Bounded, forgetting
-#: the oldest, so a long-running API never grows it without end. Checked and filled
+#: the job least recently polled (each poll moves its job to the end), so a long-running
+#: API never grows it without end and a job still being polled stays. Checked and filled
 #: under `_UNREADABLE_LOCK`: `get_job` is a sync route, so two polls of one job can run
 #: at once on FastAPI's threadpool.
 _UNREADABLE_LOGGED: OrderedDict[str, None] = OrderedDict()
@@ -313,6 +314,8 @@ def _arranged_notes(job: Job) -> list[str]:
                 _UNREADABLE_LOGGED[job.id] = None
                 if len(_UNREADABLE_LOGGED) > _UNREADABLE_LOGGED_MAX:
                     _UNREADABLE_LOGGED.popitem(last=False)
+            else:
+                _UNREADABLE_LOGGED.move_to_end(job.id)
         if first:
             logger.warning("an arrange job's notes are unreadable", extra={"job_id": job.id})
         return []
