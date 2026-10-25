@@ -9,10 +9,10 @@ import {
   ParentBasedSampler,
   SamplingDecision,
   StackContextManager,
-  WebTracerProvider,
+  TracerProvider,
   type Sampler,
   type SpanLimits,
-} from '@opentelemetry/sdk-trace-web'
+} from '@opentelemetry/sdk-trace'
 import { RELAY_PATH, RelayExporter } from './relayExporter'
 import { TRACER_NAME } from './traceAction'
 import { ScrubbingSpanExporter } from './traceScrub'
@@ -84,7 +84,7 @@ let stop: (() => Promise<void>) | null = null
 
 /**
  * The page's tracing (§5.3), loaded lazily by `main.tsx` after the first paint:
- * a `WebTracerProvider`, sampling as §6 says, whose `BatchSpanProcessor` exports through
+ * a `TracerProvider`, sampling as §6 says, whose `BatchSpanProcessor` exports through
  * `ScrubbingSpanExporter` → `RelayExporter`; W3C trace context only, no baggage (§4);
  * fetch instrumentation that injects `traceparent` only into same-origin requests
  * (never Bambuddy or Google Fonts), and document-load instrumentation. Calling it
@@ -95,7 +95,7 @@ export function startTracing(): () => Promise<void> {
   // The relay's off is the backend's only, but the page's `traceparent` would make every
   // downstream span the child of one nobody exports: so off undoes the tracing itself.
   const exporter = new RelayExporter(() => void undo())
-  const provider = new WebTracerProvider({
+  const provider = new TracerProvider({
     resource: resourceFromAttributes({
       'service.name': TRACER_NAME,
       'service.version': import.meta.env.VITE_SCADBUDDY_VERSION || 'dev',
@@ -103,15 +103,17 @@ export function startTracing(): () => Promise<void> {
     sampler: new ParentBasedSampler({ root: noParentlessPolls }),
     spanLimits: SPAN_LIMITS,
     spanProcessors: [
-      new BatchSpanProcessor(new ScrubbingSpanExporter(exporter), {
+      new BatchSpanProcessor({
+        exporter: new ScrubbingSpanExporter(exporter),
         maxExportBatchSize: MAX_EXPORT_BATCH_SIZE,
       }),
     ],
   })
-  provider.register({
-    contextManager: new StackContextManager(),
-    propagator: new W3CTraceContextPropagator(),
-  })
+  // SDK 3 dropped `WebTracerProvider.register`: install the context manager, propagator
+  // and provider as it did.
+  context.setGlobalContextManager(new StackContextManager().enable())
+  propagation.setGlobalPropagator(new W3CTraceContextPropagator())
+  trace.setGlobalTracerProvider(provider)
   const unload = registerInstrumentations({
     tracerProvider: provider,
     instrumentations: [

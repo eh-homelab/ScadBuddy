@@ -268,7 +268,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 // ── end to end: the real MCP SDK client against /mcp, the UI's approval routes ──
 
 const backend = setupServer()
-beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
 

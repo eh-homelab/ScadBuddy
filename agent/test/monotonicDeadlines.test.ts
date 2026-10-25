@@ -13,7 +13,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 // Date.now() by an hour on every read and checks the deadline holds anyway.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => {
   server.resetHandlers()
   vi.restoreAllMocks()

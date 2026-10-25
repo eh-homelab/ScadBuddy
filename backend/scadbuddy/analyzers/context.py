@@ -63,6 +63,11 @@ class AnalysisRequest(BaseModel):
     """
 
     printer_id: int | None = None
+    #: The registry printer the dialog is for, by its id, as ``printer`` on the run and
+    #: the dialog's reads. When a run on it would be native (`dialog_route`), its printer,
+    #: trays and spools are read from the registry, its report and the spool overlay,
+    #: with no Bambuddy call (#3818 tier A, #4629).
+    printer: str | None = None
     filament_plan: FilamentPlan | None = None
     choices: PrintChoices | None = None
     plate_id: int = Field(default=1, ge=1)

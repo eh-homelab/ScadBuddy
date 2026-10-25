@@ -247,3 +247,8 @@ updates:
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
       - dependency-name: "openscad/openscad"
+      # The slicer stages run Bambu Studio's ubuntu24.04 AppImage (BAMBU_STUDIO_ASSET),
+      # and their runtime libraries were measured on 24.04 (Dockerfile `slicer`). The
+      # base moves with that asset, re-measured, never on its own (#4604's review).
+      - dependency-name: "ubuntu"
+        update-types: ["version-update:semver-major"]

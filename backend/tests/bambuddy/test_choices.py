@@ -1,10 +1,16 @@
+import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import cast
+
+import psycopg
+import pytest
 
 from scadbuddy.bambuddy.choices import (
     installed_nozzles,
     last_bed_type,
     nozzle_warning,
+    offering_lan_printers,
     plate_warning,
 )
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -12,6 +18,9 @@ from scadbuddy.bambuddy.hardware import plate_unlisted_warning
 from scadbuddy.bambuddy.models import Archive, NozzleChoice, PrinterStatus
 from scadbuddy.bambuddy.print_run import PreparedPlates, _hardware_warnings
 from scadbuddy.bambuddy.resolver import PrintChoices
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.component import Printers
 from tests.bambuddy.conftest import recording
 
 
@@ -181,3 +190,25 @@ def test_naive_and_aware_timestamps_compare_with_the_naive_one_read_as_utc() -> 
 def test_only_timestampless_rows_still_name_a_plate() -> None:
     rows = [Archive(id=1, printer_id=1, status="completed", bed_type="Cool Plate")]
     assert last_bed_type(rows, printer_id=1) == "Cool Plate"
+
+
+def test_an_unreadable_registry_leaves_bambuddys_problem_as_it_was() -> None:
+    """#4601 review: the LAN printers' offer is advisory; a registry read that fails while
+    Bambuddy's read is failing re-raises Bambuddy's problem, not the registry's."""
+
+    class Unreadable:
+        def list(self) -> list[object]:
+            raise psycopg.OperationalError("the registry is down")
+
+    settings = StoredSettings(slicer_backend="native", library_backend="native", store_backend="s3")
+    printers = cast(Printers, SimpleNamespace(store=Unreadable(), reports=None))
+    problem = ApiError(502, "Bambuddy answered 599")
+
+    async def read() -> None:
+        async with offering_lan_printers(settings, printers):
+            raise problem
+
+    with pytest.raises(ApiError) as raised:
+        asyncio.run(read())
+    assert raised.value is problem
+    assert "lan_printers" not in problem.extensions

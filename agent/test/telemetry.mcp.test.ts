@@ -27,7 +27,7 @@ const server = setupServer(
     return HttpResponse.json([])
   }),
 )
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterAll(() => server.close())
 beforeEach(async () => {
   await resetTracing()

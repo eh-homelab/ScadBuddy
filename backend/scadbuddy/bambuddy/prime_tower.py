@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from typing import Protocol
 
@@ -154,17 +154,6 @@ class SlicedFiles(Protocol):
     async def preset_values(self, ref: PresetRef) -> PresetValues: ...
 
 
-def may_share_a_name(refs: Sequence[PresetRef]) -> bool:
-    """Whether two of the slots' ``refs`` may reach Bambu Studio's CLI under one name,
-    the case in which it drops the tower (``slot_presets``), so :func:`tower_dropped` is
-    worth its download (#4649). Two equal refs do; so may a ``standard`` and a ``cloud``
-    ref, since a ``cloud`` system preset carries a ``standard`` one's name. Any other
-    distinct refs name distinct presets, as a slot's own preset does."""
-    keys = {(ref.source, ref.id) for ref in refs}
-    sources = {source for source, _ in keys}
-    return len(keys) < len(refs) or {"standard", "cloud"} <= sources
-
-
 async def tower_dropped(
     client: SlicedFiles,
     *,
@@ -230,7 +219,10 @@ async def tower_dropped(
 
 async def _process_tower_on(client: SlicedFiles, process: PresetRef) -> bool:
     """Whether ``process``'s own ``enable_prime_tower`` is ``"1"``; ``False`` when it
-    cannot be read."""
+    cannot be read. A second Bambuddy call (``GET /slicer/preset-values``, scope
+    ``MANAGE_LIBRARY``), made only for a tower dropped with no override: a key without
+    that scope, or a sidecar that cannot flatten the preset, says nothing rather than a
+    warning that may be false (#4648)."""
     try:
         answer = await client.preset_values(process)
     except Exception as error:

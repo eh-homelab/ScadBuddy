@@ -4,9 +4,9 @@ import { ExportResultCode, type ExportResult } from '@opentelemetry/core'
 import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
-  WebTracerProvider,
+  TracerProvider,
   type ReadableSpan,
-} from '@opentelemetry/sdk-trace-web'
+} from '@opentelemetry/sdk-trace'
 import { describe, expect, it } from 'vitest'
 import { ARRAY_ITEMS_MAX, frameLines, ScrubbingSpanExporter, scrubSpan, SPAN_NAME_MAX } from './traceScrub'
 
@@ -17,9 +17,9 @@ const RELAY_GECKO = /^[^\s@]*@\S+:\d+:\d+$/
 const SENTINEL = 'SENTINEL-4f1c'
 
 /** Spans made by a real (unregistered) provider, so they are the SDK's own objects. */
-function record(make: (tracer: ReturnType<WebTracerProvider['getTracer']>) => void): ReadableSpan[] {
+function record(make: (tracer: ReturnType<TracerProvider['getTracer']>) => void): ReadableSpan[] {
   const exporter = new InMemorySpanExporter()
-  const provider = new WebTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] })
+  const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] })
   make(provider.getTracer('test'))
   return exporter.getFinishedSpans()
 }
