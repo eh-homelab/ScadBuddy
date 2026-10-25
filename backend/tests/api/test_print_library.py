@@ -13,6 +13,7 @@ import time
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -1477,7 +1478,9 @@ def test_an_out_of_memory_traceback_is_logged_again_past_the_interval_and_kept_b
             try:
                 raise MemoryError
             except MemoryError:
-                print_run._log_out_of_memory(subject, "laying out the file", now=now)
+                print_run._log_out_of_memory(
+                    subject, "laying out the file", clock=partial(float, now)
+                )
 
     assert [(r.__dict__["subject"], bool(r.exc_info)) for r in caplog.records] == [
         ("library:89", True),

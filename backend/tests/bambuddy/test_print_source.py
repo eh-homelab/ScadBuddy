@@ -1238,6 +1238,19 @@ async def test_a_fetch_given_up_on_takes_its_client_with_it() -> None:
     assert source.begun == 2
 
 
+async def test_a_settled_fetch_answers_a_reader_with_another_client() -> None:
+    """#4659 review: once the fetch has ended no client is used, so a later reader with
+    another client gets the kept answer, not a 500."""
+    source = _HeldFetch(b"not a 3mf")
+    first, other = cast(BambuddyClient, object()), cast(BambuddyClient, object())
+    source.release.set()
+    assert await source.fetched_3mf(first) == b"not a 3mf"
+
+    async with asyncio.timeout(5):
+        assert await source.fetched_3mf(other) == b"not a 3mf"
+    assert source.begun == 1
+
+
 async def test_every_reader_of_a_fetch_hands_in_its_client() -> None:
     """#4623 review: the fetch runs on the first reader's client, so a reader with
     another (which might close first) is a caller's mistake, said at once."""
