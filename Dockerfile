@@ -404,7 +404,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
 # Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
 # build script fails with "google/protobuf/field_mask.proto: File not found".
-FROM rust:1.99.1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS slicer-build
+FROM rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS slicer-build
 
 # hadolint ignore=DL3008
 RUN apt-get update \
