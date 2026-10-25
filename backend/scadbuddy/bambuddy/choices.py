@@ -444,12 +444,22 @@ async def offering_lan_printers(
 ) -> AsyncIterator[None]:
     """A dialog read of Bambuddy's that fails names, on its problem, the registry
     printers a run reaches natively (``lan_printers``, #4601): the dialog then offers
-    them in place of the read it could not make, rather than only its Retry."""
+    them in place of the read it could not make, rather than only its Retry. The offer is
+    advisory: a registry that cannot be read leaves the problem as it was, never in place
+    of Bambuddy's."""
     try:
         yield
     except ApiError as error:
         if native_backends(settings) and printers is not None:
-            rows = await lan_printers(settings, printers.store, printers.reports)
+            try:
+                rows = await lan_printers(settings, printers.store, printers.reports)
+            except Exception as unread:
+                # Bambuddy's problem is the answer; the offer only adds to it.
+                logger.warning(
+                    "could not read the LAN printers to offer",
+                    extra={"error": type(unread).__name__},
+                )
+                rows = []
             if rows:
                 error.extensions["lan_printers"] = rows
         raise

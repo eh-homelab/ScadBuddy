@@ -430,6 +430,56 @@ def test_the_dialogs_analysis_on_the_native_row_asks_bambuddy_nothing(
         assert inputs[name]["available"], inputs[name]
 
 
+def test_the_native_analysis_names_a_plan_spool_the_trays_do_not_hold(
+    native_app: TestClient, model: str, spans: InMemorySpanExporter, fake_lan: FakeLan
+) -> None:
+    """#4634 review: a plan slot whose spool is in no tray is named, not dropped."""
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    body = run_body(row, filaments.json())
+    gone = tray_spool_id(3, 3)
+    body["filament_plan"]["slots"][0]["spool_id"] = gone
+    slot = body["filament_plan"]["slots"][0]["slot_id"]
+
+    with forbid_bambuddy(spans, BASE):
+        report = native_app.post(
+            "/api/v1/analyzers/run",
+            json={"target": {"output_id": output}, "request": body, "detail": "advanced"},
+        )
+    assert report.status_code == 200, report.text
+    inputs = {row["name"]: row for row in report.json()["inputs"]}
+    assert not inputs["filaments"]["available"]
+    assert inputs["filaments"]["reason"] == (
+        f"slot {slot}'s spool {gone} is not in the printer's trays"
+    )
+
+
+@pytest.mark.parametrize("native_app", [False], indirect=True, ids=["no-url"])
+def test_an_analysis_naming_a_printer_the_registry_refuses_goes_on_without_it(
+    native_app: TestClient, model: str, fake_lan: FakeLan
+) -> None:
+    """#4634 review: a named row that is gone is the printer's reason, and the analysis
+    still answers on the rest."""
+    lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    report = native_app.post(
+        "/api/v1/analyzers/run",
+        json={
+            "target": {"output_id": output},
+            "request": {"printer": "no-such-row"},
+            "detail": "advanced",
+        },
+    )
+    assert report.status_code == 200, report.text
+    inputs = {row["name"]: row for row in report.json()["inputs"]}
+    assert not inputs["printer"]["available"]
+    assert "There is no printer no-such-row in the registry" in inputs["printer"]["reason"]
+    assert inputs["geometry"]["available"], inputs["geometry"]
+
+
 #: The app with no ``bambuddy_url`` (AC2), for `native_app`'s indirect parametrisation.
 NO_BAMBUDDY = pytest.mark.parametrize("native_app", [False], indirect=True, ids=["no-url"])
 

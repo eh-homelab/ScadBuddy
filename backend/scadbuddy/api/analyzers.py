@@ -69,7 +69,7 @@ from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.api.printing import native_filaments
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.options import library_options_scope
-from scadbuddy.bambuddy.print_run import dialog_route
+from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
@@ -82,6 +82,7 @@ from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.spools.component import Spools, SpoolsDep
@@ -319,17 +320,29 @@ async def _context(
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     settings = store.load()
     remembered = _remembered(target, slug, settings)
-    route = (
-        await dialog_route(
-            settings,
-            printers.store,
-            printers.reports,
-            printer=request.printer,
-            printer_id=request.printer_id,
-        )
-        if request.printer is not None and printers is not None and spools is not None
-        else None
-    )
+    route: RunRoute | None = None
+    #: Why the named registry printer cannot be judged (gone, a disagreeing pair): the
+    #: analysis goes on without it, as `dialog_route` would, and says so.
+    refused: str | None = None
+    if (
+        request.printer is not None
+        and printers is not None
+        and spools is not None
+        and native_backends(settings)
+    ):
+        # `dialog_route`'s own resolution, with the refusal kept for the report.
+        try:
+            resolved = await run_route(
+                settings,
+                printers.store,
+                printers.reports,
+                printer=request.printer,
+                printer_id=request.printer_id,
+            )
+        except ApiError as error:
+            refused = error.detail
+        else:
+            route = resolved if resolved.native else None
     if route is not None:
         assert spools is not None
         # The dialog's own native reads (#4629): the trays from the LAN report, the spools
@@ -397,6 +410,7 @@ async def _context(
         budget=budget,
         downloads=downloads,
         native=native,
+        refused=refused,
     )
 
 

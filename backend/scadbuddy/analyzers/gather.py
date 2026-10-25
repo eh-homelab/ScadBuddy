@@ -75,6 +75,7 @@ async def gather_context(
     native: LibraryReads | None = None,
     route: RunRoute | None = None,
     trays: Callable[[], Awaitable[FilamentOptions | None]] | None = None,
+    refused: str | None = None,
 ) -> AnalysisContext:
     """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
@@ -88,7 +89,10 @@ async def gather_context(
 
     ``route`` is the dialog's native route (#4629): the printer is its registry row, and
     ``trays`` reads the filament step as the dialog's native read does (the LAN report's
-    trays under the spool overlay), so nothing is asked of Bambuddy, configured or not."""
+    trays under the spool overlay), so nothing is asked of Bambuddy, configured or not.
+    ``refused`` is why the registry printer the request named cannot be judged (gone, a
+    disagreeing pair): the printer is then unavailable for that reason, the rest read as
+    before."""
     context = AnalysisContext(
         slug=slug, params=params, request=request, output=meta, library_file_id=library_subject
     )
@@ -134,6 +138,9 @@ async def gather_context(
                 )
             await _read_bambuddy(context, client, settings, remembered, library_file_id, native)
 
+    if refused is not None:
+        context.printer = None
+        context.unavailable["printer"] = refused
     model = context.printer.model if context.printer and context.printer.model else None
     plate = plate_for(model)
     # As the customizer does: an unknown or unchosen printer is the configured default.
@@ -310,9 +317,11 @@ async def _read_trays(
         return
     context.filament_options = options
     spools = {spool.spool_id: spool for spool in options.spools}
+    missing: list[str] = []
     for choice in sorted(plan.slots, key=lambda row: row.slot_id):
         spool = spools.get(choice.spool_id)
         if spool is None:
+            missing.append(f"slot {choice.slot_id}'s spool {choice.spool_id}")
             continue
         context.filaments.append(
             FilamentSlot(
@@ -324,8 +333,12 @@ async def _read_trays(
                 preset_name=spool.slicer_filament_name,
             )
         )
-    if not context.filaments:
-        context.unavailable["filaments"] = "no spool of the plan is in the printer's trays"
+    if missing:
+        # Named, not dropped: a plan the trays no longer hold is judged on no slot of it.
+        context.unavailable["filaments"] = (
+            f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not in the "
+            "printer's trays"
+        )
 
 
 def _read_choices(
