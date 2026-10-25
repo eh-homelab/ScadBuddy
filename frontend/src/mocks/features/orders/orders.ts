@@ -19,6 +19,7 @@ import type {
 } from '../../../api/types'
 import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
+import { byCreated } from '../../../components/orders/price'
 import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state, UNKNOWN_PARAMETER } from './state'
 
 /**
@@ -121,8 +122,8 @@ function detail(order: Order): OrderDetail {
   const unpriced: string[] = []
   for (const i of items.filter((each) => each.status !== 'cancelled')) {
     const accepted = i.quotes.find((q) => q.accepted)
-    // `item_price`'s newest: the latest by (created_at, id).
-    const newest = [...i.quotes].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id.localeCompare(b.id)).at(-1)
+    // `item_price`'s newest: the latest by (created_at, id), as the page orders them.
+    const newest = [...i.quotes].sort(byCreated).at(-1)
     if (accepted) subtotal += accepted.total_minor
     else if (newest) {
       subtotal += newest.unit_price_minor * i.quantity

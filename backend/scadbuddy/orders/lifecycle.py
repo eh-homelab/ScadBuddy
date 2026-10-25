@@ -211,8 +211,8 @@ class _Change:
     items: list[tuple[OrderItem, int | None]] = field(default_factory=list)
     #: The quotes whose sliced-file holder §3.4 releases, dropped once committed.
     released: list[str] = field(default_factory=list)
-    #: Released by a cancel or a close: dropped only while that still holds when the drop
-    #: runs, so a reopen that commits in between keeps the holds it took (§3.5 "Undo").
+    #: Released by a cancel or a close: dropped, under the orders' locks, only while that
+    #: still holds when the drop runs, so a reopen keeps the holds it took (§3.5 "Undo").
     ended: bool = False
 
 
@@ -301,15 +301,22 @@ class Lifecycle:
     def _quote_ids(self, conn: Conn, item_ids: Iterable[str]) -> list[str]:
         return [quote.id for item_id in item_ids for quote in self.store.quotes(item_id, conn=conn)]
 
+    def _release_ended(self, quote_ids: Sequence[str]) -> None:
+        """A cancel's or a close's release: only the quotes still released when it runs,
+        under their orders' locks (`OrderStore.drop_released_holds`), so a reopen that
+        took the holds again keeps them. A failure is logged: the reaper drops them."""
+        if self.refs is None or not quote_ids:
+            return
+        try:
+            self.store.drop_released_holds(QUOTE_HOLDER, quote_ids)
+        except Exception:
+            logger.exception("could not release an ended item's quotes; the reaper drops them")
+
     def _told(self, change: _Change) -> None:
-        released = change.released
-        if change.ended and released:
-            try:
-                released = self.store.still_released(released)
-            except Exception:
-                logger.exception("could not check released quotes; the reaper drops them")
-                released = []
-        self._release(released)
+        if change.ended:
+            self._release_ended(change.released)
+        else:
+            self._release(change.released)
         emit(self.bus, OrderChanged(order_id=change.order.id, status=change.order.status))
         for item, attempt in change.items:
             emit(
