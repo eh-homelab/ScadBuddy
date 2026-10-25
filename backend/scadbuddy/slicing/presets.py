@@ -55,7 +55,7 @@ from typing import Literal
 from fastapi import status
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import read_catalogue
+from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
@@ -132,7 +132,7 @@ class _Names:
         if self._client is None:
             return None
         if self._names is None:
-            self._names = (await read_catalogue(self._client)).names()
+            self._names = await read_preset_names(self._client)
         return self._names.get((ref.source, ref.id))
 
 

@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.slicing.conftest import PROFILES
@@ -997,9 +998,24 @@ async def test_the_runs_fresh_read_without_its_standard_tier_is_bambuddy_unavail
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
 
     with pytest.raises(ApiError) as raised:
-        await catalogue.read_catalogue(bambuddy)
+        await catalogue_for(bambuddy, native=None)
 
     assert raised.value.type == UNAVAILABLE_PROBLEM
+
+
+@respx.mock
+async def test_preset_names_still_read_without_the_standard_tier(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4717: the native slicer reads only names, which need no standard tier, so a read
+    the sidecar did not answer still names a cloud ref."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=_sidecar_unanswered())
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    cloud = recording("slicer-presets-h2c.json")["cloud"]["process"][0]
+
+    names = await catalogue.read_preset_names(bambuddy)
+
+    assert names[("cloud", cloud["id"])] == cloud["name"]
 
 
 @respx.mock

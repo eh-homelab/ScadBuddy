@@ -164,12 +164,15 @@ class Catalogue:
         }
 
 
-async def _catalogue(client: BambuddyClient) -> Catalogue:
+async def _catalogue(client: BambuddyClient, *, fits: bool = True) -> Catalogue:
+    """Bambuddy's catalogue; with ``fits``, one whose rows say which printers they fit
+    (:func:`_check_standard_tier`), as every reader but :func:`read_preset_names` needs."""
     presets, local_presets = await asyncio.gather(
         client.presets(), client.local_presets(), return_exceptions=True
     )
     read = settled(presets)
-    _check_standard_tier(read)
+    if fits:
+        _check_standard_tier(read)
     # Thousands of rows: built off the event loop, which every other request shares.
     return await asyncio.to_thread(_build, read, settled(local_presets))
 
@@ -234,10 +237,13 @@ NAME_KEY_INFO = b"scadbuddy:bambuddy:catalogue_name:v1"
 _ADAPTER = TypeAdapter(Catalogue)
 
 
-async def read_catalogue(client: BambuddyClient) -> Catalogue:
-    """The preset catalogue, read fresh from Bambuddy, as the run reads it;
-    :func:`cached_catalogue` is the print dialog's kept copy."""
-    return await _catalogue(client)
+async def read_preset_names(client: BambuddyClient) -> dict[tuple[str, str], str]:
+    """Every preset's name by its ref (:meth:`Catalogue.names`), read fresh from Bambuddy:
+    what the native slicer finds a ``cloud`` ref by when its id is not one of the
+    image's. Names need no standard tier, so a read without one (#4717) still answers.
+    The run's catalogue is ``slicing/catalogue.py`` ``catalogue_for``; the print
+    dialog's kept copy is :func:`cached_catalogue`."""
+    return (await _catalogue(client, fits=False)).names()
 
 
 #: The catalogue this process last parsed, by its file and that file's mtime: one
