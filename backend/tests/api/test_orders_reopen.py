@@ -232,3 +232,39 @@ def test_a_draft_adds_up_before_anything_is_accepted(client: TestClient) -> None
     client.post(f"/api/v1/orders/{order['id']}/items/{pending['id']}/cancel")
     totals = detail(client, order["id"])["totals"]
     assert (totals["subtotal_minor"], totals["pending_minor"]) == (1000, 0)
+
+
+def test_an_accepted_order_with_nothing_open_reopens_as_a_draft(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    item = item_of(client, order["id"])
+    quote_and_accept(client, order["id"], item["id"])
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    # Its one item cancelled on its own: an accepted order with nothing open...
+    client.post(f"/api/v1/orders/{order['id']}/items/{item['id']}/cancel")
+    client.post(f"/api/v1/orders/{order['id']}/cancel")
+    # ...reopens open for edits, as `accept_order` would refuse it accepted.
+    reopened = client.post(f"/api/v1/orders/{order['id']}/reopen")
+    assert reopened.json()["status"] == "draft"
+    # Its item, cancelled before the order, reopens on its own.
+    back = client.post(f"/api/v1/orders/{order['id']}/items/{item['id']}/reopen")
+    assert back.json()["status"] == "approved"
+    assert detail(client, order["id"])["order"]["status"] == "quoted"
+
+
+def test_an_item_whose_latest_attempt_failed_reopens_failed(client: TestClient) -> None:
+    upload(client)
+    order = create_order(client, create_customer(client)["id"])
+    item = item_of(client, order["id"])
+    quote_and_accept(client, order["id"], item["id"])
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    failed = client.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/fulfilments",
+        json={"quantity": 0, "outcome": "failed", "failure_reason": "spaghetti"},
+    )
+    assert failed.status_code == 201, failed.text
+    assert detail(client, order["id"])["order"]["status"] == "in_production"
+    client.post(f"/api/v1/orders/{order['id']}/items/{item['id']}/cancel")
+    back = client.post(f"/api/v1/orders/{order['id']}/items/{item['id']}/reopen")
+    assert back.json()["status"] == "failed"
+    assert detail(client, order["id"])["order"]["status"] == "in_production"

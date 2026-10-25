@@ -211,6 +211,9 @@ class _Change:
     items: list[tuple[OrderItem, int | None]] = field(default_factory=list)
     #: The quotes whose sliced-file holder §3.4 releases, dropped once committed.
     released: list[str] = field(default_factory=list)
+    #: Released by a cancel or a close: dropped only while that still holds when the drop
+    #: runs, so a reopen that commits in between keeps the holds it took (§3.5 "Undo").
+    ended: bool = False
 
 
 def _covered(items: Iterable[OrderItem], shipments: Iterable[Shipment]) -> list[str]:
@@ -299,7 +302,14 @@ class Lifecycle:
         return [quote.id for item_id in item_ids for quote in self.store.quotes(item_id, conn=conn)]
 
     def _told(self, change: _Change) -> None:
-        self._release(change.released)
+        released = change.released
+        if change.ended and released:
+            try:
+                released = self.store.still_released(released)
+            except Exception:
+                logger.exception("could not check released quotes; the reaper drops them")
+                released = []
+        self._release(released)
         emit(self.bus, OrderChanged(order_id=change.order.id, status=change.order.status))
         for item, attempt in change.items:
             emit(
@@ -548,6 +558,7 @@ class Lifecycle:
                     change.items.append((moved, None))
             # §3.4: cancelling the order releases every quote's sliced file.
             change.released = self._quote_ids(conn, (item.id for item in every))
+            change.ended = True
             cancelled = self.store.set_order_status(conn, order.id, "cancelled")
             self._event(
                 conn,
@@ -587,7 +598,7 @@ class Lifecycle:
             self._event(conn, order, by, "order.status", from_status=order.status, to="closed")
             # §3.4: closing the order releases every quote's sliced file.
             released = self._quote_ids(conn, (item.id for item in items))
-        self._told(_Change(closed, released=released))
+        self._told(_Change(closed, released=released, ended=True))
         return closed
 
     def _reopened_status(self, conn: Conn, item: OrderItem) -> tuple[ItemStatus, bool]:
@@ -640,11 +651,22 @@ class Lifecycle:
                 base: OrderStatus = "accepted"
             else:
                 base, cancelled_items = self._last_cancel(conn, order)
+                taken: list[tuple[OrderItem, ItemStatus, bool]] = []
                 for item_id in cancelled_items:
                     item = self.store.item(item_id, conn=conn)
                     if item is None or item.order_id != order.id or item.status != "cancelled":
                         continue
                     status, priced = self._reopened_status(conn, item)
+                    taken.append((item, status, priced))
+                others_open = any(
+                    item.status != "cancelled" for item in self.store.items(order.id, conn=conn)
+                )
+                if base in DERIVED and not others_open and not any(p for _, _, p in taken):
+                    # Nothing would come back priced: an accepted order with no open item
+                    # is one `accept_order` refuses, so it reopens open for edits instead,
+                    # with every item the cancel took.
+                    base = "draft"
+                for item, status, priced in taken:
                     if base in DERIVED and not priced:
                         continue
                     restored.append((self.store.update_item(conn, item.id, status=status), None))
@@ -907,7 +929,7 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
             # §3.4: cancelling the item releases every quote's sliced file.
             released = self._quote_ids(conn, [item.id])
-        self._told(_Change(order, [(item, None)], released))
+        self._told(_Change(order, [(item, None)], released, ended=True))
         return item
 
     # -- quotes (§3.4) --------------------------------------------------------------------
