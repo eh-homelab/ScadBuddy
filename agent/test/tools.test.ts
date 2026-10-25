@@ -28,7 +28,7 @@ import { memoryWorkspace } from './helpers/workspace.js'
 // `runTool` where the gate is the point.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
@@ -686,15 +686,200 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2 })
     })
 
-    it('says a printer only the LAN reaches cannot be printed to yet, before anything is sent', async () => {
-      server.use(row(null))
-      const refused = await tool('print_output')
-        .execute({ ...chosen, printer: PRINTER }, ctx())
-        .then(
-          () => null,
-          (error: unknown) => error as Error,
+    // #4646 — a printer only the LAN reaches prints on the native hot path, as the dialog
+    // prints it: `printer_id` null, the trays for spools, no project, and a follow handle.
+    describe('a printer only the LAN reaches (#4646)', () => {
+      const lanRow = () =>
+        http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, () =>
+          HttpResponse.json({
+            id: PRINTER,
+            serial: '01P00A0000000AA',
+            name: 'Garage',
+            bambuddy_printer_id: null,
+            lan_host: '192.0.2.7',
+            preferred_path: 'auto',
+          }),
         )
-      expect(refused?.message).toMatch(/Garage is reached only over the LAN/)
+      // The trays, as the native filaments read offers them (`trays.tray_spool_id`).
+      const TRAYS = {
+        library_file_id: null,
+        printer_id: null,
+        slots: [
+          { slot_id: 1, colour_matches: [-1, -2] },
+          { slot_id: 2, colour_matches: [-2] },
+        ],
+        spools: [
+          { spool_id: -1, material: 'PLA', tray_only: true, label: 'AMS-A slot 1' },
+          { spool_id: -2, material: 'PLA', tray_only: true, label: 'AMS-A slot 2' },
+        ],
+        suggested: [
+          { slot_id: 1, spool_id: -1 },
+          { slot_id: 2, spool_id: -2 },
+        ],
+      }
+      const NATIVE_RESULT = {
+        library_file_id: 0,
+        copies: 1,
+        queue_item_ids: [],
+        bambuddy_url: null,
+        path: 'native',
+        lan: [{ subtask_name: 'widget-plate-1', started_at: '2026-10-24T00:00:00Z', warnings: [] }],
+        warnings: [],
+      }
+      /** The native choices for the row, recording each read's query. */
+      function nativeChoices(asked: URLSearchParams[], view: Record<string, unknown> = {}) {
+        return http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, ({ request }) => {
+          asked.push(new URL(request.url).searchParams)
+          return HttpResponse.json({
+            printer_id: null,
+            bed_type: 'Textured PEI Plate',
+            default_nozzles: [{ size: '0.4', flow: 'standard' }],
+            filaments: TRAYS,
+            model_choices: {},
+            lan_printers: [PRINTER],
+            ...view,
+          })
+        })
+      }
+
+      it('reads the choices and the trays for the row by its id, never a Bambuddy printer', async () => {
+        const choices: URLSearchParams[] = []
+        const filaments: URLSearchParams[] = []
+        server.use(
+          nativeChoices(choices),
+          http.get(`${BACKEND}/api/v1/outputs/${OUT}/plates`, () => HttpResponse.json([{ index: 1, name: 'Widget' }])),
+          http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/filaments`, ({ request }) => {
+            filaments.push(new URL(request.url).searchParams)
+            return HttpResponse.json(TRAYS)
+          }),
+        )
+        const view = firstText(await tool('get_print_choices').execute({ output_id: OUT, printer: PRINTER }, ctx()))
+        expect(view).toMatchObject({ lan_printers: [PRINTER], filaments: { suggested: TRAYS.suggested } })
+        const trays = firstText(await tool('get_print_filaments').execute({ output_id: OUT, printer: PRINTER, plate_id: 2 }, ctx()))
+        expect(trays).toMatchObject({ suggested: TRAYS.suggested })
+        expect(choices.map((q) => [q.get('printer'), q.get('printer_id')])).toEqual([[PRINTER, null]])
+        expect(filaments.map((q) => [q.get('printer'), q.get('printer_id'), q.get('plate_id')])).toEqual([[PRINTER, null, '2']])
+      })
+
+      it('prints over the LAN: printer_id null, the trays, no project, and the follow handle', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        const choices: URLSearchParams[] = []
+        server.use(lanRow(), nativeChoices(choices), ...capturedRun(run, { status: 'succeeded', result: NATIVE_RESULT }))
+        const result = await tool('print_output').execute({ output_id: OUT, printer: PRINTER }, ctx())
+        expect(result.isError).toBeFalsy()
+        expect(choices.map((q) => [q.get('printer'), q.get('printer_id')])).toEqual([[PRINTER, null]])
+        expect(run.body).toMatchObject({
+          printer: PRINTER,
+          printer_id: null,
+          filament_plan: { slots: TRAYS.suggested, force_colour_match: false },
+          choices: { nozzles: [{ size: '0.4', flow: 'standard' }], bed_type: 'Textured PEI Plate' },
+        })
+        expect(run.body).not.toHaveProperty('project_id')
+        const answer = firstText(result) as Record<string, unknown> & { result: Record<string, unknown> }
+        expect(answer).toMatchObject({
+          id: RUN,
+          status: 'succeeded',
+          path: 'native',
+          follow: { tool: 'get_print_progress', output_id: OUT, subtask_names: ['widget-plate-1'] },
+        })
+        expect(answer.result).not.toHaveProperty('queue_item_ids')
+        expect(answer.result).not.toHaveProperty('bambuddy_url')
+      })
+
+      it('takes trays the caller chose, by the ids the filaments read gives them, without reading the dialog', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        // No choices handler: reading it would be an unhandled request.
+        server.use(lanRow(), ...capturedRun(run, { status: 'succeeded', result: NATIVE_RESULT }))
+        const result = await tool('print_output').execute(
+          { ...chosen, filament_plan: { slots: [{ slot_id: 1, spool_id: -2 }] }, printer: PRINTER, folder_id: 4 },
+          ctx(),
+        )
+        expect(result.isError).toBeFalsy()
+        expect(run.body).toMatchObject({
+          printer: PRINTER,
+          printer_id: null,
+          folder_id: 4,
+          filament_plan: { slots: [{ slot_id: 1, spool_id: -2 }] },
+        })
+        expect(run.body).not.toHaveProperty('project_id')
+      })
+
+      it('refuses a project, or a printer_id beside the row, before anything is sent', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        server.use(lanRow(), ...capturedRun(run))
+        const project = await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER, project_id: 7 }, ctx())
+        expect(project.isError).toBe(true)
+        expect(firstText(project)).toMatch(/over the LAN.*no Bambuddy project/)
+        const paired = await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER, printer_id: 2 }, ctx())
+        expect(paired.isError).toBe(true)
+        expect(firstText(paired)).toMatch(/Garage links no Bambuddy printer/)
+        expect(run.body).toBeUndefined()
+      })
+
+      it('drops "No project": a print over the LAN has none to name', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        server.use(lanRow(), ...capturedRun(run, { status: 'succeeded', result: NATIVE_RESULT }))
+        await tool('print_output').execute({ ...chosen, printer: PRINTER, project_id: null }, ctx())
+        expect(run.body).not.toHaveProperty('project_id')
+      })
+
+      it('approves the row as sent, named, over the LAN; outward as ever', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        server.use(lanRow(), ...capturedRun(run, { status: 'succeeded', result: NATIVE_RESULT }))
+        expect(tool('print_output').risk).toBe('outward')
+        const { context, pending } = pendingCtx()
+        const result = await runTool(tool('print_output'), { ...chosen, printer: PRINTER }, context)
+        const answer = firstText(result) as { status: string; summary: string }
+        expect(answer.status).toBe('pending_approval')
+        expect(answer.summary).toContain('on printer "Garage" over the LAN')
+        // Nothing resolved to add: confirm_action sends the same arguments.
+        expect(answer).not.toHaveProperty('arguments')
+        expect(pending.inputs).toHaveLength(1)
+        expect(pending.inputs[0]).not.toHaveProperty('printer_id')
+        await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER }, ctx())
+        expect(run.body).toMatchObject({ printer: PRINTER, printer_id: null })
+      })
+
+      it('lists the native folders a print over the LAN is filed in', async () => {
+        let native: string | null = null
+        server.use(
+          http.get(`${BACKEND}/api/v1/print/projects`, ({ request }) => {
+            native = new URL(request.url).searchParams.get('native')
+            return HttpResponse.json({ last_project_id: null, projects: [], folders: [{ id: 4, name: 'Prints', path: 'Prints' }] })
+          }),
+        )
+        const listed = firstText(await tool('list_print_projects').execute({ native: true }, ctx()))
+        expect(native).toBe('true')
+        expect(listed).toMatchObject({ folders: [{ id: 4 }] })
+      })
+    })
+
+    it('a linked row the backend says prints natively sends its printer_id, and no project', async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      const asked: URLSearchParams[] = []
+      server.use(
+        row(2),
+        http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, ({ request }) => {
+          asked.push(new URL(request.url).searchParams)
+          return HttpResponse.json({ printer_id: 2, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices: {}, lan_printers: [PRINTER] })
+        }),
+        ...capturedRun(run, { status: 'succeeded', result: { ...RESULT, queue_item_ids: [], bambuddy_url: null, path: 'native', lan: [] } }),
+      )
+      const result = await tool('print_output').execute({ output_id: OUT, printer: PRINTER, project_id: null }, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(asked.map((q) => [q.get('printer'), q.get('printer_id')])).toEqual([[PRINTER, '2']])
+      expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2 })
+      expect(run.body).not.toHaveProperty('project_id')
+      expect(firstText(result)).toMatchObject({ path: 'native', follow: { tool: 'get_print_progress', output_id: OUT } })
+    })
+
+    it("keeps a Bambuddy run's queue item ids and its Bambuddy URL, with no follow handle", async () => {
+      const run: { body?: Record<string, unknown> } = {}
+      server.use(row(2), ...capturedRun(run))
+      const answer = firstText(await tool('print_output').execute({ ...chosen, printer: PRINTER, project_id: 3 }, ctx()))
+      expect(answer).toMatchObject({ result: { queue_item_ids: [9], bambuddy_url: 'http://b' } })
+      expect(answer).not.toHaveProperty('follow')
+      expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2, project_id: 3 })
     })
 
     // #4442 security review: what a person approves is the printer that prints.
@@ -817,19 +1002,20 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     })
 
     it("reads the printer under the turn's abort signal (#4442 gate review)", async () => {
-      let seen: AbortSignal | undefined
+      // msw 3 links a handler's `request.signal` to the caller's only while the request is in
+      // flight, so the turn is aborted inside the handler, not after the read returned.
+      const turn = new AbortController()
+      let aborted: boolean | undefined
       server.use(
         http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, ({ request }) => {
-          seen = request.signal
+          turn.abort()
+          aborted = request.signal.aborted
           return HttpResponse.json({ id: PRINTER, serial: 'x', name: 'Garage', bambuddy_printer_id: 2, preferred_path: 'auto' })
         }),
       )
-      const turn = new AbortController()
       const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
-      await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, turn.signal)
-      expect(seen).toBeDefined()
-      turn.abort()
-      expect(seen!.aborted).toBe(true)
+      await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, turn.signal).catch(() => undefined)
+      expect(aborted).toBe(true)
     })
 
     it("does not resolve a disabled print_output's printer (#4442 gate review)", async () => {

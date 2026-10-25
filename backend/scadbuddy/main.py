@@ -52,6 +52,7 @@ from scadbuddy.api.limits import (
     LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
     MESH_UPLOAD_PATH,
+    ORDER_ATTACHMENT_UPLOAD_PATH,
     BodySizeGate,
     RouteLimit,
 )
@@ -1765,6 +1766,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 ATTACHMENT_UPLOAD_PATH,
                 lambda: state.settings.media_upload_max_bytes,
                 "a print's photo or video",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
+                ORDER_ATTACHMENT_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "an order's attachment",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
             ),
             RouteLimit(

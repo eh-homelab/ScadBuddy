@@ -276,7 +276,7 @@ function BambuddyProjectPicker({
   onCreating,
 }: Props) {
   const own = useProjectList(onLoaded, list === undefined)
-  const { choices, loading, error: listError, retry, rereadFor, add } = list ?? own
+  const { choices, loading, error: listError, retry, rereadFor, add, request } = list ?? own
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -401,7 +401,8 @@ function BambuddyProjectPicker({
     setCreating(true)
   }
 
-  if (loading) {
+  // Open, the popover stays while a lazy list's first read (#4601) is in flight.
+  if (loading && !open) {
     return (
       <div role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground">
         <span className="sr-only">Loading projects</span>
@@ -435,7 +436,14 @@ function BambuddyProjectPicker({
       <Label htmlFor={id} className={inline ? 'text-xs font-normal text-muted-foreground' : undefined}>
         {folder ? 'Project or folder' : 'Project'}
       </Label>
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          // #4601 — a lazy list (the Customize page's Bambuddy projects) is read as it opens.
+          if (next) request()
+          setOpen(next)
+        }}
+      >
         <PopoverTrigger asChild>
           <Button
             id={id}
@@ -482,7 +490,9 @@ function BambuddyProjectPicker({
               </ToggleGroup>
             </div>
             <CommandList>
-              <CommandEmpty>{folder ? 'No project or folder matches.' : 'No project matches.'}</CommandEmpty>
+              <CommandEmpty>
+                {loading ? 'Loading…' : folder ? 'No project or folder matches.' : 'No project matches.'}
+              </CommandEmpty>
               <CommandGroup>
                 <CommandItem
                   value="none"

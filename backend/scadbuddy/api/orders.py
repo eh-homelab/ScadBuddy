@@ -62,6 +62,7 @@ from scadbuddy.orders.lifecycle import (
     ShipmentInput,
 )
 from scadbuddy.orders.models import (
+    Attachment,
     Charge,
     ChargeInput,
     Filament,
@@ -209,6 +210,8 @@ class OrderDetail(BaseModel):
     payments: list[Payment]
     shipments: list[Shipment]
     totals: OrderTotals
+    #: The order's files and its items' (``item_id``), oldest first (§6.2).
+    attachments: list[Attachment]
 
 
 class OrderPage(BaseModel):
@@ -535,6 +538,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             payments=payments,
             shipments=store.shipments(order.id),
             totals=_totals(items, charges, payments),
+            attachments=store.attachments(order.id),
         )
 
     detail = await asyncio.to_thread(read)

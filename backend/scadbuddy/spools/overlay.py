@@ -48,14 +48,25 @@ def labels(spools: Spools) -> dict[str, str]:
 async def status_overlay(
     spools: Spools, row: PrinterRow, status: PrinterStatus, *, now: datetime
 ) -> Overlay:
-    """The overlay of the trays ``status`` shows filled."""
-    return await spools.store.overlay(
+    """The overlay of the trays ``status`` shows filled. A provider not configured now
+    (Bambuddy with no ``bambuddy_url``) is never stale: the dialog's note would name a
+    service that is not there (#4601). Its records, while fresh, still show."""
+    overlay = await spools.store.overlay(
         UUID(row.id),
         seen_trays(status),
         now=now,
         providers=[provider.name for provider in spools.providers],
         located=located(spools, row),
     )
+    absent = {
+        provider.name
+        for provider in spools.providers
+        if provider.name in overlay.stale and not await provider.configured()
+    }
+    if not absent:
+        return overlay
+    stale = {name: at for name, at in overlay.stale.items() if name not in absent}
+    return overlay.model_copy(update={"stale": stale})
 
 
 async def printer_overlay(

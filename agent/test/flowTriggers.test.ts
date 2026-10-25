@@ -12,7 +12,7 @@ import { BACKEND, services } from './helpers/mcp.js'
 // declining a standing grant has no tool at all.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

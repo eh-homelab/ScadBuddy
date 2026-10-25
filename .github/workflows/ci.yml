@@ -245,6 +245,10 @@ jobs:
       - name: Test the Go client's spec workarounds
         run: .github/scripts/generate-go-client-jq.test.sh
 
+      # backend-pytest-split merges the shards' timings with it.
+      - name: Test the test-durations merge
+        run: .github/scripts/merge-test-durations.test.sh
+
       # verify-models.sh reaps a timed-out template's containers by the
       # `scadbuddy-verify=<slug>` label (#302). An unlabelled `docker run` that
       # mounts nothing would survive the timeout, so each one fails here.
@@ -392,7 +396,7 @@ jobs:
       # backend's spec with uv: the spec and the generated clients are not
       # committed (#492). Same pinned action as the `freshness` job.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -470,7 +474,7 @@ jobs:
 
       # The webServer's `pnpm build` runs typecheck, which runs `pnpm gen:api`.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -632,7 +636,7 @@ jobs:
       # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
       # worker with uv too.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -766,7 +770,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
@@ -959,7 +963,7 @@ jobs:
       - name: mypy
         run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync mypy
 
-      # The backend suite runs in `backend-pytest`, four jobs of its own (#1167).
+      # The backend suite runs in `backend-pytest`, six jobs of its own (#1167).
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
@@ -1162,12 +1166,15 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-ci temporal-ci || true
 
-  # ── Backend pytest, in four shards (#1167) ─────────────────────────────────
+  # ── Backend pytest, in six shards (#1167) ──────────────────────────────────
   #
   # One 4-vCPU runner is CPU-bound on this suite: eight xdist workers took longer
   # than four (25:59 against 23:53, the per-test setup 0.70 s -> 2.66 s at the
-  # median). So the lever is more runners: four jobs, each running a quarter by
-  # time with pytest-split and `-n auto` inside it.
+  # median). So the lever is more runners: six jobs, each running a sixth by
+  # time with pytest-split and `-n auto` inside it. Four shards took 15-26 min
+  # each on main (run 40144180572, 2026-10-24), about 295 worker-minutes of tests
+  # in all; six bring a balanced shard to ~12 min of pytest plus ~3.5 min of image
+  # build and setup, below `models` on main and beside the other jobs on a PR.
   #
   # Each shard builds the test image itself, READING the `image` job's gha cache
   # (`cache-from` only: no new cache scope, nothing written, so the 10 GB ceiling
@@ -1178,20 +1185,24 @@ jobs:
   # The split reads backend/.test_durations (pytest-split's format). A test it does
   # not list -- a new one -- is placed by the average duration, so it always runs
   # in some shard; a stale file only balances the shards worse, it never fails a
-  # run. Refresh it with
-  #   cd backend && uv run --frozen pytest -n auto --store-durations
-  # (from the image, as CI runs it, for CI's own timings) and commit the result.
+  # run. Its timings must be CI's own: a file stored on another machine had the
+  # non-API tests at about twice their CI time, so the shard holding them finished
+  # ten minutes before the rest. So each shard stores what it ran, timed here
+  # (`--store-durations --clean-durations`), and `backend-pytest-split` merges the
+  # six into the `backend-test-durations` artifact. To refresh, download that
+  # artifact from a green run on main, unzip it into backend/ and commit.
   #
-  # The file is mounted at pytest-split's default path, `.test_durations` beside
-  # pyproject.toml, so no `--durations-path` is passed: pytest reads its rootdir
-  # from the command line before plugins add their options, so
+  # `--durations-path` takes its value after `=`, never as a second word: pytest
+  # reads its rootdir from the command line before plugins add their options, so
   # `--durations-path /durations.json` made `/` the rootdir, dropped
   # pyproject.toml's settings (asyncio_mode=auto among them) and broke the run.
+  # The split reads the same path the timings are stored to, so the run's copy of
+  # the committed file is what it splits by.
   #
   # Each shard also counts what it selected and what the whole suite collects,
-  # and `backend-pytest-split` checks the four counts add up to the whole, so no
+  # and `backend-pytest-split` checks the six counts add up to the whole, so no
   # test can fall between the shards unnoticed.
-  # The LFS fixtures, pulled once per change of them into the Actions cache the four
+  # The LFS fixtures, pulled once per change of them into the Actions cache the six
   # shards restore from: a miss in `lfs-fixtures` (a new fixture, or an entry evicted
   # before the run) costs one ~290 MB pull of the LFS bandwidth quota, not one per
   # shard. A shard that then misses too (a save that never landed, or an eviction
@@ -1230,7 +1241,7 @@ jobs:
           key: lfs-fixtures-${{ steps.lfs.outputs.key }}
 
   backend-pytest:
-    name: Backend pytest (${{ matrix.group }}/4)
+    name: Backend pytest (${{ matrix.group }}/6)
     needs: [layout, lfs-fixtures]
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
@@ -1238,7 +1249,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        group: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:17
@@ -1293,14 +1304,19 @@ jobs:
           cache-from: type=gha
 
       # What this shard selects, and what the suite collects: pytest prints
-      # "<selected>/<collected> tests collected (<n> deselected)".
+      # "<selected>/<collected> tests collected (<n> deselected)". It splits by
+      # results/durations.json, the copy of the committed timings the run splits
+      # by too, so the count and the run can never select differently.
       - name: Count this shard's tests
         run: |
           set -euo pipefail
-          line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
+          mkdir -p results && chmod 777 results
+          cp backend/.test_durations results/durations.json && chmod 666 results/durations.json
+          line=$(docker run --rm -v "$PWD/results:/results" \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            --collect-only -q --splits 4 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
+            --collect-only -q --splits 6 --group ${{ matrix.group }} \
+            --durations-path=/results/durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
           selected=${line%%/*}
           rest=${line#*/}
@@ -1325,20 +1341,27 @@ jobs:
       #
       # `--junitxml`: the next step counts what this run reported, one testcase per
       # test whatever its outcome, to set beside what the shard selected.
+      #
+      # `--store-durations --clean-durations`: results/durations.json starts as the
+      # committed timings (the step above copied them), which the split reads, and
+      # ends as this shard's own tests timed on this runner, for
+      # `backend-pytest-split` to merge.
       - name: pytest
         run: >-
-          mkdir -p results && chmod 777 results &&
           docker run --rm --network host --shm-size=1g
-          -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
           -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 4 --group ${{ matrix.group }}
+          --splits 6 --group ${{ matrix.group }}
+          --store-durations --clean-durations --durations-path=/results/durations.json
           --junitxml=/results/junit.xml --durations=20
 
       # Even when pytest failed, so the split check still says what ran.
+      # The timings go along only when they are this run's: one entry per test it
+      # reported. A pytest that died before storing them leaves the committed copy,
+      # which would read as every test timed by this shard.
       - name: Count what this shard ran
         if: ${{ !cancelled() }}
         run: |
@@ -1347,6 +1370,13 @@ jobs:
           [ -f results/junit.xml ] && ran=$(grep -o '<testcase ' results/junit.xml | wc -l)
           echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.group }}.txt
           cat counts/shard-${{ matrix.group }}.txt
+          # A missing or truncated file (pytest died mid-write) counts as none.
+          timed=$(jq length results/durations.json 2>/dev/null || echo 0)
+          if [ "$ran" -gt 0 ] && [ "$timed" -eq "$ran" ]; then
+            cp results/durations.json counts/durations-${{ matrix.group }}.json
+          else
+            echo "::notice::not passing on this shard's timings: ${timed} entries for ${ran} tests run"
+          fi
 
       - name: Upload the count
         if: ${{ !cancelled() }}
@@ -1355,10 +1385,20 @@ jobs:
           name: backend-pytest-count-${{ matrix.group }}
           path: counts/shard-${{ matrix.group }}.txt
 
+      - name: Upload this shard's timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-pytest-durations-${{ matrix.group }}
+          path: counts/durations-${{ matrix.group }}.json
+          if-no-files-found: ignore
+
   # The shards between them ran every test: each one's selection adds up to the
   # whole collection, which every shard saw the same, and each shard's run
   # reported exactly the tests it selected (the `--collect-only` count is serial,
   # the run is under xdist). Each count file is "<group> <selected> <collected> <ran>".
+  # Then the shards' own timings merge into the `backend-test-durations` artifact,
+  # the next backend/.test_durations (see `backend-pytest`).
   backend-pytest-split:
     name: Backend pytest shards cover the suite
     needs: backend-pytest
@@ -1366,25 +1406,63 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          sparse-checkout: .github/scripts
+
       - uses: actions/download-artifact@v8
         with:
           pattern: backend-pytest-count-*
           merge-multiple: true
           path: counts
 
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: backend-pytest-durations-*
+          merge-multiple: true
+          path: durations
+
       - name: Check the counts
         run: |
           set -euo pipefail
           cat counts/shard-*.txt
           files=(counts/shard-*.txt)
-          [ "${#files[@]}" -eq 4 ] || { echo "::error::expected 4 shard counts, got ${#files[@]}"; exit 1; }
+          [ "${#files[@]}" -eq 6 ] || { echo "::error::expected 6 shard counts, got ${#files[@]}"; exit 1; }
           totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
           [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards collected different suites: $totals"; exit 1; }
           sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
           [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
           short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
           [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
-          echo "The four shards select and ran all ${totals} tests."
+          echo "The six shards select and ran all ${totals} tests."
+
+      # Only from a green run whose six shards each timed what they ran: a shard
+      # that failed early sends none, a partial merge would split the next run
+      # worse, and a red run's timings are not ones to commit.
+      - name: Merge the shards' timings
+        id: durations
+        if: ${{ needs.backend-pytest.result == 'success' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(durations/durations-*.json)
+          if [ "${#files[@]}" -ne 6 ]; then
+            echo "::notice::${#files[@]} of 6 shards sent timings; no merged backend/.test_durations from this run"
+            exit 0
+          fi
+          collected=$(awk '{print $3}' counts/shard-*.txt | sort -u)
+          mkdir -p merged
+          .github/scripts/merge-test-durations.sh merged/.test_durations "$collected" "${files[@]}"
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the merged timings
+        if: ${{ steps.durations.outputs.merged == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-test-durations
+          path: merged/.test_durations
+          include-hidden-files: true
 
   # ── Each template's verify.sh (#229) ────────────────────────────────────────
   #
@@ -1546,7 +1624,7 @@ jobs:
       # python3 the runner already has.
       - name: Set up uv
         if: ${{ steps.select.outputs.count != '0' }}
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
 
       - name: Run the selected verify.sh scripts
         if: ${{ steps.select.outputs.count != '0' }}
@@ -1840,7 +1918,7 @@ jobs:
       # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -2164,7 +2242,7 @@ jobs:
           fetch-depth: 1
       # As `freshness`: the spec depends on the locked FastAPI/pydantic, not on uv.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

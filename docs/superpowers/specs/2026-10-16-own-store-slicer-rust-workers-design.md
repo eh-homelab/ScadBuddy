@@ -51,6 +51,13 @@ that UI; everything in it is a precondition for it.
 
 - Replacing Bambuddy's spool inventory, archives, timelapse or project folders. Those
   stay Bambuddy features reached through the existing client until a later design.
+  A native run (the hot path, `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md` D2) reads no Bambuddy project, archive or queue,
+  and reads Bambuddy's inventory only through the off-path provider refresh (the
+  `spool-providers` Schedule, `bambuddy/spool_providers.py`): its filaments are the
+  loaded trays from the LAN report with the physical-spool overlay of cached provider
+  records (plan D1), and ScadBuddy's own inventory is tier B's native provider of that
+  overlay (#4643). Projects stay the Bambuddy path's; a native run files in the native
+  library (plan D6).
 - Rewriting the API, the workflows or the agent in Rust. Orchestration stays Python.
 - Linking libslic3r directly. It is C++ with no C API; the CLI is the supported
   boundary (§5.1).
@@ -78,7 +85,7 @@ that UI; everything in it is a precondition for it.
 | Temporal Rust SDK is GA: 1.0.0 on 2026-09-04, 1.1.0 on 2026-10-06 (worker versioning in `temporalio-common`/`temporalio-client`, OpenTelemetry experimental) | github.com/temporalio/sdk-rust releases, read 2026-10-16 |
 | Temporal Standalone Activities (an activity with no workflow) are public preview, need server 1.31 or later, and have no Rust SDK support yet | docs.temporal.io standalone activities page, read 2026-10-16; prod runs `temporalio/server:1.28.4` (clusters#2146 is the upgrade) |
 | Bambu LAN protocol: MQTT over TLS on 8883, user `bblp`, password the printer's access code, topics `device/<serial>/report` and `device/<serial>/request`, `pushing.pushall` for full state, `print.project_file` with `url`, `param`, `subtask_name`, `use_ams`, `ams_mapping`, `bed_type`, `flow_cali`, `timelapse`, `layer_inspect`; the file goes to the printer's storage over FTPS first | Doridian/OpenBambuAPI `mqtt.md`, read 2026-10-16. The FTPS port (990, implicit TLS) and the SD-card path are not stated there; the builder re-measures against a printer before relying on them |
-| LAN file delivery on an H2C (firmware 01.02.00.00): the 3MF is stored at the FTPS root `/<name>` and `print.project_file` names it `url: ftp://<name>`; ids `"0"` and an `ams_mapping` without `ams_mapping2` are accepted; MQTT (8883) and FTPS (990) present one certificate; idle reports are whole `push_status` messages every ~1.8 s | measured 2026-10-24 against the H2C (`backend/tests/printers/test_lan_live.py` docstring: `result: SUCCESS` in 0.4 s, `RUNNING` at 1.8 s, then stopped); Bambuddy does the same (`print_scheduler.py` "Upload to root directory (not /cache/)", `bambu_mqtt.py` `start_print`, deployed image read 2026-10-24) |
+| LAN file delivery on an H2C (firmware 01.02.00.00): the 3MF is stored at the FTPS root `/<name>` and `print.project_file` names it `url: ftp://<name>`; ids `"0"` and an `ams_mapping` without `ams_mapping2` are accepted; MQTT (8883) and FTPS (990) present one certificate; idle reports are whole `push_status` messages every ~1.8 s; once a start is accepted the printer moves the file to `/cache/<name>.gcode.3mf`, so `/<name>` is gone and a retried start uploads again | measured 2026-10-24 against the H2C (`backend/tests/printers/test_lan_live.py` docstring: `result: SUCCESS` in 0.4 s, `RUNNING` at 1.8 s, then stopped); Bambuddy does the same (`print_scheduler.py` "Upload to root directory (not /cache/)", `bambu_mqtt.py` `start_print`, deployed image read 2026-10-24) |
 | A rack print on an H2C (firmware 01.02.00.00) sends `nozzle_mapping` in `print.project_file`: 32 entries, one per filament slot (index 0 is slot 1), each a physical nozzle id: `1` the fixed hotend, `15 + position` (16-21) a rack position 1-6, `-1` a slot not printed; no field at all when no slot prints from the rack | Bambuddy's completed dispatches to the live H2C, its `print_queue` read 2026-10-24: item 370 `ams_mapping` `[4, 1, 6, 12, 5, 13]` sent `[21, 18, 20, 17, 1, 17, -1 x26]`, 367 `[3, 15, 0, 11, 8, 5, 6]` sent `[18, 1, 1, 20, 1, 18, 20, -1 x25]`, 374 `[128]` sent `[18, -1 x31]`, each printed; `bambu_mqtt.py` `_RACK_WIRE_SLOTS`, `_FIXED_NOZZLE_ID`, `rack_position_to_nozzle_id` (deployed image, read 2026-10-24); `backend/tests/printers/fixtures/rack-project-file.json` |
 | Extruder indices are another namespace: on the wire extruder 0 is the rack's carriage and 1 the fixed hotend. `slice_info.config` names each filament's `group_id` and each group's 1-based slicer `extruder_id` (`<nozzle id=<group> extruder_id=…>`); the H2C preset's `extruder_max_nozzle_count` `["1", "6"]` makes the slicer's second extruder the rack, `physical_extruder_map` `["1", "0"]` the wire's 0 | item 370's `slice_info.config` (`backend/tests/printers/fixtures/rack-slice-info-h2c.config`: group 0 on extruder 1, groups 1-4 on extruder 2, groups by slot `[2, 4, 3, 1, 0, 1]`) against what it sent; Bambuddy `threemf_tools.py` `_rack_plan`, `_group_extruder_indices` (deployed image, read 2026-10-24) |
 | A wrong nozzle id levels with one nozzle and prints with another (a first layer in mid-air); omitting `nozzle_mapping` lets the firmware pick | Bambuddy `bambu_mqtt.py` `resolve_rack_nozzle_mapping` docstring and the #2800 A/B in its comments (deployed image, read 2026-10-24) |
@@ -341,6 +348,11 @@ three kinds of files:
   2026-10-13 is the authority on the override keys);
 - one filament JSON per slot, flattened.
 
+A native run offers only the image's presets (hot-path plan D5, `slicing/catalogue.py`
+for the lists and `slicing/values.py` for a process preset's values): Bambuddy's `local`
+(OrcaSlicer-import) and cloud user presets are not offered, and a remembered one is
+refused naming it, because reading them is a Bambuddy call on the hot path (#4645).
+
 Flattening reads Bambu Studio's profile tree, copied into the API image at build time
 from the Dockerfile's `slicer-dist` stage, the same checked download the slicer image
 installs (`/opt/slicer-profiles`: `BBL.json`, `VERSION` and `BBL/{machine,process,filament}`;
@@ -441,10 +453,7 @@ stays. A new `backend/scadbuddy/slicing/slice_info.py` reads `slice_info.config`
 ### 5.5 Failure surface
 
 A `SlicerError` with exit 192 is shown as the slicer's own message (the CLI prints the
-validation failure before exiting; `stderr_tail` carries it). Bambu Studio logs a
-failed plate's reason ("plate 2: Nothing to be sliced, …") to stdout, not stderr, so
-`stderr_tail` starts with the `[error]` lines of stdout's tail, their timestamps cut
-(#4638; measured on the v02.08.02.61 CLI, whose stderr was empty). The preview
+validation failure to stderr before exiting; `stderr_tail` carries it). The preview
 pane's `slice-error` alert shows it verbatim, and the run fails with it as its
 `failure`. The row's failure text decodes details for a `SlicerError` only: `"The slicer
 refused the plate: <stderr_tail>"` for 192, `"The slicer failed: <stderr_tail>"`
@@ -513,15 +522,21 @@ renamed): `lan_upload` (fetches the sliced 3MF through the internal blob route o
 §5.2, since the print worker has no store, then FTPS it to the printer's storage; the
 printer's own name for the file is the run id) and
 `lan_print` (`print.project_file` over MQTT with `param` naming the plate's gcode in
-the file, `use_ams` and `ams_mapping` from ScadBuddy's nozzle plan and tray colours,
+the file, `use_ams`, `ams_mapping` and `ams_mapping2` computed by ScadBuddy from the
+plan's trays (`printers/ams_mapping.py`, hot-path Task 7), and on an H2C rack print
+`nozzle_mapping` (`printers/nozzle_mapping.py`, Task 8: 32 entries of physical nozzle
+ids, `1` the fixed hotend, 16-21 the rack positions, `-1` unused, omitted when no slot
+prints from the rack; measurements in §2),
 `bed_type` from the plan, `subtask_name` the output's name), then `FollowPrint`'s
 native variant, which subscribes to `device/<serial>/report` and publishes the same
 `print.*` events the Bambuddy follower does, from `print_percent`, `layer_num`,
 `mc_remaining_time`, `gcode_state` and the `print_error` code.
 
 The printer's live state (`/printers/now`, the print dialog's trays, the nozzle
-plan's inputs) comes from whichever link answers: Bambuddy's `printer_status` when
-linked, else the MQTT report cached by a `printer_watch` long-running activity per
+plan's inputs) comes from the LAN link first (hot-path plan D4): on a native run it is
+always the cached report, and Bambuddy's `printer_status` is read only for a printer
+whose path is `bambuddy`. Without a LAN link it comes from Bambuddy's `printer_status`. The
+report is the MQTT report cached by a `printer_watch` long-running activity per
 LAN printer (one workflow `printer-<serial>`, continue-as-new daily) that writes the
 latest report into `printer_reports` (one row per printer, `report jsonb`, `seen_at`)
 and publishes `printer:<id>` realtime events. The `PrinterStatus` model becomes the
@@ -534,7 +549,8 @@ Spools and inventory, archives, timelapse, projects, the queue's ordering. A nat
 print on a Bambuddy-linked printer still records to Bambuddy's archive when Bambuddy
 sees the print through its own connection; the linking code (`bambuddy/linking.py`)
 matches by `content_hash` as it does today. ScadBuddy keeps its own `output_last_prints`
-either way.
+either way, in intent: a LAN print records no queue item, archive or `output_last_prints`
+row today (#4644).
 
 ### 6.4 Credentials
 

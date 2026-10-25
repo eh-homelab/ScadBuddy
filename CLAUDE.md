@@ -53,17 +53,19 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
-CI runs the suite in four `backend-pytest` jobs (#1167), each `--splits 4 --group N`
+CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N`
 (pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
-checks that the four selections add up to the whole collection and that each
+checks that the six selections add up to the whole collection and that each
 shard ran what it selected. A test missing from
-the file is placed by the average, so a stale file only unbalances the shards. Refresh
-it with `uv run --frozen pytest -n auto --store-durations` (best from the test image,
-for CI's timings) and commit it; it is in `.dockerignore`, so a refresh leaves the
-image's layers alone, and a shard in the image needs it mounted where pytest-split
-looks by default (`-v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"`,
-as `ci.yml` does). Never pass `--durations-path <path>` as two words: pytest takes the
-path for its rootdir and drops `pyproject.toml`'s settings.
+the file is placed by the average, so a stale file only unbalances the shards. The
+timings must be CI's own (a file stored on a faster machine left one shard ten minutes
+early): each shard stores the tests it ran (`--store-durations --clean-durations
+--durations-path=/results/durations.json`, a copy of the committed file it also splits
+by) and `backend-pytest-split` merges them (`.github/scripts/merge-test-durations.sh`)
+into the `backend-test-durations` artifact. To refresh, download that artifact from a
+green run on main, unzip it into `backend/` and commit; the file is in `.dockerignore`,
+so a refresh leaves the image's layers alone. Never pass `--durations-path <path>` as
+two words: pytest takes the path for its rootdir and drops `pyproject.toml`'s settings.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
@@ -103,6 +105,10 @@ CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Pla
 in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 `frontend-e2e-split` checks that the three selections add up to the whole `--list` and
 that each shard ran what it selected, as `backend-pytest-split` does.
+`e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
+e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
+images; weekly and on dispatch in `hot-path-e2e.yml`, never on PRs); `e2e/real-hot-path.spec.ts`
+skips without what it sets.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -423,6 +429,31 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `SliceWorkflow` histories replay from `tests/fixtures/slice_workflow_histories/`; a
   change goes behind `workflow.patched`. The worker is `workers/rust/`
   (`scadbuddy-slicer`, README "Slicer worker").
+- `backend/scadbuddy/printers/hot_path.py` — the native hot path (#3818 tier A, plan
+  `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md`): a print that
+  touches Bambuddy nowhere. `hot_path_native(settings, path)` decides per run from the
+  stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3` or
+  `bambuddy`) and the printer row's resolved path; there is no switch of its own. A
+  native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
+  state from the LAN report (`printers/reports.py`), and its filaments are the loaded
+  trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
+  off the path). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
+  plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
+  (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
+  command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
+  presets and a process preset's values in Bambuddy's shapes (`local` presets are not
+  offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
+  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  first read and its analysis, and the Prints page's queue and history panels ask
+  Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+- `e2e-stack/` — the real-stack e2e of the hot path (#4602): `compose.yaml` (ScadBuddy on
+  moto's S3, the Temporal dev server, the slicer worker, a fake LAN printer and a
+  Bambuddy recorder that fails every call), `run.sh` (builds, brings up, seeds with
+  `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
+  `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
+  `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
+  Run by `.github/workflows/hot-path-e2e.yml` weekly and on dispatch, not on PRs.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -582,6 +613,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
+  Attachments (#4251, spec §6.2 "As built"): any file on an order or a line item,
+  `attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
+  `orders/attachments.py` `sniff`; only `INLINE` types are served as themselves, the rest
+  as downloads), uploaded through the claim store and the `order_attachment_add` kind (the
+  blob `attachment-<sha256>`, its `blob_refs` row written in the attachment's own
+  transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
+  (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
+  `ItemPicture.tsx`; mocks `src/mocks/features/orders/attachments.ts`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

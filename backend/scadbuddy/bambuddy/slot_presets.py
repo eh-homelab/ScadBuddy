@@ -113,6 +113,15 @@ class SlotPresets:
             return plan
         return plan.model_copy(update={"filament_presets": refs})
 
+    def shares_a_name(self, plan: SlicePlan) -> bool:
+        """Whether two of ``plan``'s slots still reach the CLI under one name, as
+        :meth:`plan` compares them: a slot whose own preset could not be made. Only
+        then can the CLI have dropped the tower, so only then is the slice read for it
+        (``prime_tower.tower_dropped``, #4649)."""
+        made = {(ref.source, ref.id): name for name, ref in self._made.items()}
+        names = [made.get((ref.source, ref.id)) or self._name(ref) for ref in plan.filament_presets]
+        return len(set(names)) < len(names)
+
     async def _own(self, ref: PresetRef, base: str, slot: int) -> PresetRef | None:
         name = slot_preset_name(base, slot)
         if name in self._made:

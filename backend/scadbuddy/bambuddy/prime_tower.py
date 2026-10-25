@@ -30,7 +30,7 @@ from pydantic import BaseModel, model_validator
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.filaments3mf import read_filaments
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.models import PresetRef, PresetValues
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -147,13 +147,20 @@ MAX_SLICED_BYTES = 128 * 1024 * 1024
 
 
 class SlicedFiles(Protocol):
-    """The one read :func:`tower_dropped` makes; ``BambuddyClient`` is one."""
+    """The reads :func:`tower_dropped` makes; ``BambuddyClient`` is one."""
 
     def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]: ...
 
+    async def preset_values(self, ref: PresetRef) -> PresetValues: ...
+
 
 async def tower_dropped(
-    client: SlicedFiles, *, sliced: int, plate_id: int, process_overrides: Mapping[str, object]
+    client: SlicedFiles,
+    *,
+    sliced: int,
+    plate_id: int,
+    process: PresetRef,
+    process_overrides: Mapping[str, object],
 ) -> list[FilamentWarning]:
     """Say so when Bambuddy's slice of ``plate_id`` came back with no prime tower that
     was asked for, on a plate printing two or more filaments (#3962). Bambu Studio's CLI
@@ -162,9 +169,11 @@ async def tower_dropped(
     shows. A warning, never a refusal, and it never raises: an unread file says nothing.
 
     Asked for means ``enable_prime_tower`` ``"1"`` among the plan's process overrides,
-    or none at all and the slice's value not its process preset's
-    (:attr:`SlicedProfile.prime_tower_changed`): with the preset's default on, that is
-    what the CLI's override leaves. A plate asked to print no tower is not read."""
+    or none at all, the slice's value not its system parent's
+    (:attr:`SlicedProfile.prime_tower_changed`) and ``process``'s own value ``"1"``: a
+    user preset that turns the tower off differs from its parent too (#4648), so the
+    preset is read, and one that cannot be read says nothing. A plate asked to print no
+    tower is not read."""
     asked = process_overrides.get("enable_prime_tower")
     if asked == "0":
         return []
@@ -193,14 +202,36 @@ async def tower_dropped(
     filaments = len({filament.slot_id for filament in plate or []})
     if filaments < 2:
         return []
+    if asked != "1" and not await _process_tower_on(client, process):
+        return []
     return [
         FilamentWarning(
             kind="prime-tower-not-applied",
             message=(
                 f"Bambuddy's slicer dropped the prime tower from plate {plate_id}, which"
                 f" prints {filaments} filaments: the tower was asked for, and the sliced"
-                " file has none. Its slicer does this when the filament slots share one"
-                " preset."
+                " file has none. Its slicer usually does this when the filament slots"
+                " share one preset."
             ),
         )
     ]
+
+
+async def _process_tower_on(client: SlicedFiles, process: PresetRef) -> bool:
+    """Whether ``process``'s own ``enable_prime_tower`` is ``"1"``; ``False`` when it
+    cannot be read. A second Bambuddy call (``GET /slicer/preset-values``, scope
+    ``MANAGE_LIBRARY``), made only for a tower dropped with no override: a key without
+    that scope, or a sidecar that cannot flatten the preset, says nothing rather than a
+    warning that may be false (#4648)."""
+    try:
+        answer = await client.preset_values(process)
+    except Exception as error:
+        logger.info(
+            "the process preset's prime tower could not be read",
+            extra={"source": process.source, "error": type(error).__name__},
+        )
+        return False
+    value = answer.values.get("enable_prime_tower")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return answer.resolved and value == "1"

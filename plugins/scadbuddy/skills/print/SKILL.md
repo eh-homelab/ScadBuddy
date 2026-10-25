@@ -78,8 +78,17 @@ not a tool in `agent/src/tools/coverage.ts`). Send the user there, or open it wi
 `printer_id`: the run prints on the Bambuddy printer the row links and is
 recorded with the row. Sent together, `printer_id` decides: a row merged away or
 unlinked since falls back to its row, and only a row that links another Bambuddy
-printer now is refused (`backend/scadbuddy/bambuddy/print_run.py` `_named_printer`). A printer the registry
-reaches only over the LAN cannot be printed to yet. `get_printers_now` lists both
+printer now is refused (`backend/scadbuddy/bambuddy/print_run.py` `_named_printer`). A row that
+links no Bambuddy printer prints over the LAN, as the browser's print dialog prints
+it (#4646, `agent/src/tools/print.ts` `printerOf`): name it only by `printer`, with no
+`printer_id`. Whether a run goes over the LAN is the server's call
+(`backend/scadbuddy/printers/hot_path.py` `hot_path_native`), which the choices report
+as `lan_printers` when read with `printer`. On such a run `get_print_choices` and
+`get_print_filaments` (with `printer`) offer the printer's loaded trays as the spools,
+each under a negative `spool_id` (`backend/scadbuddy/bambuddy/trays.py`
+`tray_spool_id`) that `filament_plan` takes; there is no project (a `project_id` is
+refused; `folder_id` names one of ScadBuddy's own folders, `list_print_projects` with
+`native`) and nothing is queued on Bambuddy. `get_printers_now` lists both
 ids and says which link answered (`path`).
 
 ## 2. Assemble the request
@@ -194,6 +203,11 @@ print, use the run above. Sending is outward too.
 A `succeeded` run's `result`, a `PrintRunResult`, reports `route` (always `slice_queue`), `slice_job_id`,
 `queue_item_ids`, `library_file_id`, `copies`, `bambuddy_url` and `warnings`
 (`backend/openapi.json`). Give the user the `bambuddy_url` and every warning.
+A run that went over the LAN has `path: "native"` and no queue item or Bambuddy URL
+(`PrintRunResult.path` and `lan` in `backend/scadbuddy/bambuddy/print_run.py`):
+`print_output` and `get_print_run` answer with a `follow` handle instead, the
+`get_print_progress` call that follows it and each plate's `subtask_name`
+(`agent/src/tools/print.ts` `followed`).
 
 ## 5. Projects
 

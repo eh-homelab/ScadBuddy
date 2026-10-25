@@ -18,15 +18,18 @@ use tokio_util::sync::CancellationToken;
 use crate::models::{Arrange, SliceProgress};
 use crate::progress::{Line, LineBuffer};
 
-/// How much of each of the CLI's streams is kept: their last lines say why it failed.
+/// How much of the CLI's stderr, and of its stdout, is kept: their last lines say why
+/// it failed.
 const STDERR_TAIL: usize = 8 * 1024;
+/// How many of the CLI's own `[error]` log lines a failure reports, the last ones.
+const ERROR_LINES: usize = 3;
 /// At most one progress callback a second; the last line seen is always delivered.
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// The longest the callback goes without a call while the CLI runs: a silent phase
 /// repeats the last progress (zeroed before the first line), because Temporal delivers
 /// cancellation only on a heartbeat and fails an activity silent past its heartbeat timeout.
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
-/// How long stderr and stdout may stay open after the CLI exits (a straggler holding them).
+/// How long stderr may stay open after the CLI exits (a straggler holding it).
 pub const STDERR_GRACE: Duration = Duration::from_secs(1);
 /// The worker's variables the CLI sees, when set, besides `HOME` ([`cli_env`]). AppRun
 /// sets `LD_LIBRARY_PATH` and `LC_ALL` itself; it needs nothing else.
@@ -55,9 +58,10 @@ pub struct RunOutcome {
     /// The CLI's exit code, or 128 + the signal that ended it.
     pub exit_code: i32,
     pub warnings: Vec<String>,
-    /// Why the CLI failed, as it said: the `[error]` lines of its stdout's tail
-    /// ([`error_lines`]), then its stderr's tail.
     pub stderr_tail: String,
+    /// The CLI's `[error]` log lines from its stdout ([`cli_errors`]): where it says why a
+    /// plate failed when stderr is empty, as for an empty plate (exit 206, #4638).
+    pub errors: String,
     pub elapsed: Duration,
 }
 
@@ -244,18 +248,16 @@ pub async fn run(
     // A stream still open past the grace is held by something the kill could not reach
     // (outside the group); its reader is stopped, not left running.
     let _ = tokio::time::timeout(STDERR_GRACE, async {
-        let _ = tokio::join!(&mut stderr_task, &mut stdout_task);
+        let _ = (&mut stderr_task).await;
+        let _ = (&mut stdout_task).await;
     })
     .await;
     stderr_task.abort();
     stdout_task.abort();
-    let stderr = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
-    let reasons = error_lines(&stdout.lock().expect("stdout lock"));
-    let stderr_tail = if reasons.is_empty() {
-        stderr
-    } else {
-        format!("{reasons}\n{stderr}")
-    };
+    let stderr_tail = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
+    let errors = cli_errors(&String::from_utf8_lossy(
+        &stdout.lock().expect("stdout lock"),
+    ));
 
     let exit_code = status
         .code()
@@ -264,8 +266,24 @@ pub async fn run(
         exit_code,
         warnings,
         stderr_tail,
+        errors,
         elapsed,
     })
+}
+
+/// The messages of the last [`ERROR_LINES`] `[error]` lines of the CLI's log, one a line.
+///
+/// The CLI logs `[<time>] [<thread>] [error]   plate 2: Nothing to be sliced, ...` to
+/// stdout, not stderr, so an empty plate's reason was lost (#4638); only the message
+/// after the level is kept.
+pub fn cli_errors(stdout: &str) -> String {
+    const LEVEL: &str = "[error]";
+    let messages: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_once(LEVEL).map(|(_, message)| message.trim()))
+        .filter(|message| !message.is_empty())
+        .collect();
+    messages[messages.len().saturating_sub(ERROR_LINES)..].join("\n")
 }
 
 /// Kills the process group, at most once: on [`Group::kill`] or on drop.
@@ -386,22 +404,6 @@ fn take(
     }
 }
 
-/// The messages of the `[error]` lines in `stdout`, one a line, without their timestamp
-/// and thread. Bambu Studio logs through boost to stdout, so why a plate failed ("plate 2:
-/// Nothing to be sliced, …") never reaches stderr, which a failed slice then reported
-/// empty (#4638).
-pub fn error_lines(stdout: &[u8]) -> String {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .filter_map(|line| {
-            line.split_once("[error]")
-                .map(|(_, message)| message.trim())
-        })
-        .filter(|message| !message.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Reads `stream` to its end, keeping its last `STDERR_TAIL` bytes in `tail`.
 async fn keep_tail(stream: Option<impl AsyncRead + Unpin>, tail: Arc<Mutex<Vec<u8>>>) {
     let Some(mut stream) = stream else { return };
@@ -430,6 +432,25 @@ mod tests {
         cli_env(|name| vars.get(name).cloned(), scratch)
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn the_clis_error_lines_are_its_messages_the_last_few() {
+        let stdout = "[2026-10-24 20:00:29.080527] [0x7751] [trace]   Initializing StaticPrintConfigs\n\
+            [2026-10-24 20:00:29.080527] [0x7751] [error]   plate 2: Nothing to be sliced, \
+            Either the print is empty or no object is fully inside the print volume before apply.\n\
+            \n\
+            run found error, return -50, exit...\n";
+        assert_eq!(
+            cli_errors(stdout),
+            "plate 2: Nothing to be sliced, Either the print is empty or no object is fully \
+             inside the print volume before apply."
+        );
+        let many = (1..=5)
+            .map(|n| format!("[t] [x] [error]   e{n}\n"))
+            .collect::<String>();
+        assert_eq!(cli_errors(&many), "e3\ne4\ne5");
+        assert_eq!(cli_errors("[t] [x] [info]    fine\n"), "");
     }
 
     #[test]

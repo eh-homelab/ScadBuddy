@@ -17,7 +17,7 @@ import { BACKEND, services } from './helpers/mcp.js'
 // activities), before the handler or the backend is reached.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

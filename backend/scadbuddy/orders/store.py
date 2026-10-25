@@ -28,6 +28,9 @@ from scadbuddy.orders.models import (
     Address,
     AddressInput,
     AddressSnapshot,
+    Attachment,
+    AttachmentKind,
+    AttachmentRole,
     Charge,
     ChargeInput,
     ColourSlot,
@@ -110,7 +113,8 @@ _ORDER = (
 )
 _ITEM = (
     "id, order_id, position, status, quantity, title, notes, slug, commit, inputs, libraries,"
-    " template_name, render_key, colours, output_id, created_at, updated_at"
+    " template_name, render_key, colours, output_id, delivered_attachment_id, created_at,"
+    " updated_at"
 )
 _QUOTE = (
     "id, order_item_id, created_at, source, accepted, sliced_sha256, sliced_blob_key, plates,"
@@ -126,6 +130,10 @@ _SHIPMENT = (
 _CHARGE = "id, order_id, kind, label, amount_minor, position"
 _PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, created_at"
 _EVENT = "id, order_id, at, by, kind, detail"
+_ATTACHMENT = (
+    "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
+    " caption, created_at, created_by"
+)
 
 #: The status timestamps `set_order_status` stamps (§3.2).
 _STATUS_STAMPS: dict[str, str] = {
@@ -177,8 +185,48 @@ def _item_of(row: DictRow) -> OrderItem:
         ),
         colours=row["colours"],
         output_id=row["output_id"],
+        delivered_attachment_id=row["delivered_attachment_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+#: The ``blob_refs`` holder kind of an attachment's file (§6.2's ``attachment:<id>``),
+#: written and removed with the attachment's row, in its transaction.
+ATTACHMENT_HOLDER = "attachment"
+
+
+def item_subject(item_id: str) -> str:
+    """An item's attachment subject (§6.2)."""
+    return f"order_item:{item_id}"
+
+
+def order_subject(order_id: str) -> str:
+    """An order's own attachment subject (§6.2)."""
+    return f"order:{order_id}"
+
+
+def _attachment_of(row: DictRow) -> tuple[Attachment, str]:
+    """The attachment and its blob key, which no wire shape carries."""
+    subject: str = row["subject"]
+    kind, _, subject_id = subject.partition(":")
+    return (
+        Attachment(
+            id=row["id"],
+            order_id=row["order_id"],
+            subject=subject,
+            item_id=subject_id if kind == "order_item" else None,
+            kind=row["kind"],
+            role=row["role"],
+            filename=row["filename"],
+            media_type=row["media_type"],
+            size_bytes=row["size_bytes"],
+            sha256=row["sha256"],
+            caption=row["caption"],
+            created_at=row["created_at"],
+            created_by=row["created_by"],
+        ),
+        row["blob_key"],
     )
 
 
@@ -1160,6 +1208,110 @@ class OrderStore:
         assert row is not None
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
         return Payment.model_validate(row)
+
+    # -- attachments (§6.2, #4251) ------------------------------------------------------
+
+    def insert_attachment(
+        self,
+        conn: Conn,
+        *,
+        attachment_id: str,
+        order_id: str,
+        subject: str,
+        kind: AttachmentKind,
+        role: AttachmentRole,
+        filename: str,
+        media_type: str,
+        size_bytes: int,
+        sha256: str,
+        blob_key: str,
+        caption: str,
+        created_by: Actor,
+    ) -> Attachment:
+        """The row and its hold on ``blob_key`` (Ruling 8), in one transaction: the
+        blob was written and touched just before, so the blob sweep's grace keeps it
+        until both are committed, and neither is ever there without the other."""
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (blob_key, ATTACHMENT_HOLDER, attachment_id),
+        )
+        row = conn.execute(
+            "INSERT INTO attachments (id, order_id, subject, kind, role, filename, media_type,"
+            " size_bytes, sha256, blob_key, caption, created_by)"
+            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ATTACHMENT}",
+            (
+                attachment_id,
+                order_id,
+                subject,
+                kind,
+                role,
+                filename,
+                media_type,
+                size_bytes,
+                sha256,
+                blob_key,
+                caption,
+                Jsonb(created_by.model_dump(mode="json")),
+            ),
+        ).fetchone()
+        assert row is not None
+        return _attachment_of(row)[0]
+
+    def attachment(
+        self, attachment_id: str, *, conn: Conn | None = None
+    ) -> tuple[Attachment, str] | None:
+        """The attachment and its blob key, or None."""
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_ATTACHMENT} FROM attachments WHERE id = %s", (attachment_id,)
+            ).fetchone()
+        return None if row is None else _attachment_of(row)
+
+    def attachments(self, order_id: str, *, conn: Conn | None = None) -> list[Attachment]:
+        """Every attachment of the order and of its items, oldest first."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_ATTACHMENT} FROM attachments WHERE order_id = %s"
+                " ORDER BY created_at, id",
+                (order_id,),
+            ).fetchall()
+        return [_attachment_of(r)[0] for r in rows]
+
+    def update_attachment(
+        self,
+        conn: Conn,
+        attachment_id: str,
+        *,
+        caption: str | UnsetType = UNSET,
+        role: AttachmentRole | UnsetType = UNSET,
+    ) -> Attachment:
+        row = _update(
+            conn,
+            "attachments",
+            attachment_id,
+            {"caption": caption, "role": role},
+            _ATTACHMENT,
+            stamp=False,
+        )
+        assert row is not None
+        return _attachment_of(row)[0]
+
+    def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
+        """The row and its hold on the file, together; the blob sweep takes the bytes
+        once nothing else holds them."""
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (ATTACHMENT_HOLDER, attachment_id),
+        )
+        conn.execute("DELETE FROM attachments WHERE id = %s", (attachment_id,))
+
+    def set_delivered(self, conn: Conn, item_id: str, attachment_id: str | None) -> OrderItem:
+        row = _update(
+            conn, "order_items", item_id, {"delivered_attachment_id": attachment_id}, _ITEM
+        )
+        assert row is not None
+        return _item_of(row)
 
     # -- the audit line (§3.2, Ruling 12) ---------------------------------------------
 

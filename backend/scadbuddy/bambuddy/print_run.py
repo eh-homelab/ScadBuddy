@@ -1180,6 +1180,7 @@ async def _native_check(
         laid_out=laid_out,
         nozzle_plan=nozzle_plan,
         inventory=inventory,
+        picker="the printer",
     )
     try:
         _check_manual_pick(request, prepared.printer_status, laid_out=laid_out)
@@ -1461,6 +1462,7 @@ async def rack_preview(
     laid_out: bool,
     nozzle_plan: NozzlePlan | None = None,
     inventory: Inventory | None = None,
+    picker: str = "Bambuddy",
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
     the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
@@ -1470,7 +1472,8 @@ async def rack_preview(
     rack side, unless ScadBuddy's nozzle plan (#2166) says which do: then only those
     on the rack side count. Advisory: a failure previews nothing. ``inventory`` is the
     check's own read, reused so a check reads the spools once (#2936); without it the
-    spools are read here."""
+    spools are read here. ``picker`` is who picks what the ranking leaves: "the printer"
+    on a native run (#4601), which no Bambuddy picks for."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     rack_letter = side_of(RACK_SIDE)
@@ -1505,7 +1508,9 @@ async def rack_preview(
         manual = {0: request.rack_position} if request.rack_position is not None else {}
         picks = rank_rack([group], status.nozzle_rack, algorithm, usage, manual)
         options = candidates_for(group, status.nozzle_rack, algorithm, usage)
-        warnings = rack_warnings([group], status.nozzle_rack, algorithm, picks, manual)
+        warnings = rack_warnings(
+            [group], status.nozzle_rack, algorithm, picks, manual, picker=picker
+        )
     except Exception as exc:
         # Never str(exc): an error's text can carry a serial (§7).
         logger.warning(
@@ -1837,9 +1842,10 @@ async def first_native_route(
     reports: PrinterReportStore | None,
 ) -> RunRoute | None:
     """The :class:`RunRoute` of the first registry row a run reaches natively (D2), or
-    ``None``: where a dialog opens with no Bambuddy configured and no printer named
-    (#3818 tier A, AC2). The rows are read once, and each row's report at most once; a
-    row a run could not start on now (no report, a stale one) is passed over."""
+    ``None``: where a dialog opens with no printer named, Bambuddy configured or not
+    (#3818 tier A, AC1 and AC2, #4601). The rows are read once, and each row's report at
+    most once; a row a run could not start on now (no report, a stale one) is passed
+    over."""
     if printers is None or not native_backends(settings):
         return None
     for row in await asyncio.to_thread(printers.list):
@@ -2265,6 +2271,11 @@ class PlatePlan(BaseModel):
     filaments: QueueFilaments | None = None
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
+    #: Whether two of :attr:`plan`'s filament slots still share a preset name after
+    #: ``SlotPresets.shares_a_name`` (#4649): only then can Bambuddy's slicer have
+    #: dropped the prime tower, so only then is the slice read for it. ``None`` (a plan
+    #: from before it, or one no ``SlotPresets`` saw) reads every multi-slot plate.
+    slots_share_a_name: bool | None = None
 
 
 #: A run on the native slicer without Bambu Studio's profiles (a process outside the
@@ -2401,12 +2412,16 @@ async def queue_plate(
         planned.slicer == "bambuddy"
         and plate.plan is not None
         and len(plate.plan.filament_presets) > 1
+        and plate.slots_share_a_name is not False
     ):
-        # Before the queue call, which is made once: this never raises (#3962).
+        # Before the queue call, which is made once: this never raises (#3962). Slots
+        # that each reach the CLI under a name of their own keep the tower, so their
+        # slice is not downloaded to look (#4649).
         notes += await tower_dropped(
             client,
             sliced=sliced,
             plate_id=plate.plate_id,
+            process=plate.plan.process_preset,
             process_overrides=plate.plan.process_overrides,
         )
     choice = (
@@ -2655,6 +2670,7 @@ async def plan_run(
         ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    shared_names: dict[int, bool] = {}
     if not native_slicing and not native_run and client is not None:
         # Bambuddy's slicer drops the prime tower when slots share one preset name
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
@@ -2664,6 +2680,9 @@ async def plan_run(
             (plate_id, options, resolved, await slot_presets.plan(plan))
             for plate_id, options, resolved, plan in ready
         ]
+        shared_names = {
+            plate_id: slot_presets.shares_a_name(plan) for plate_id, _, _, plan in ready
+        }
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.slicing.start import NativeSliceKeys
@@ -2728,6 +2747,7 @@ async def plan_run(
                 sliced_file_id=reused,
                 filaments=queue_filaments(options, request.filament_plan),
                 spools=_spools_by_slot(options, request.filament_plan),
+                slots_share_a_name=shared_names.get(plate_id),
             )
             for plate_id, options, _, plan, reused in planned
         ],

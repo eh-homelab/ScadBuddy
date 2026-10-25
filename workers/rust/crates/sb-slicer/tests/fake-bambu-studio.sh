@@ -5,10 +5,17 @@
 # the output; FAKE_ENV=1 writes its environment to stderr. FAKE_STRAGGLER=1 writes "pgid <its pid>" to stderr
 # and leaves a background sleep in its group. FAKE_HOLDER=1 leaves a process in a session of its own (out of
 # the group's reach) holding stderr open, its pid in holder.pid beside the output (the CLI's environment
-# is cleared, so no variable can name the file). FAKE_STDOUT_ERROR=1 logs a failed plate's reason to stdout as
-# Bambu Studio's boost log does (#4638): its timestamped `[error]` line, then a plain one.
+# is cleared, so no variable can name the file). FAKE_EMPTY_PLATE=1 does what the real CLI does with an empty
+# plate (#4638): its reason in an "[error]" log line on stdout, nothing on stderr, exit 206.
 pipe=""; out=""
 while [ $# -gt 0 ]; do case "$1" in --pipe) pipe="$2"; shift;; --export-3mf) out="$2"; shift;; esac; shift; done
+if [ -n "$FAKE_EMPTY_PLATE" ]; then
+  echo "[2026-10-24 20:00:29.080527] [0x0000785ffa373540] [trace]   Initializing StaticPrintConfigs"
+  echo "[2026-10-24 20:00:29.080527] [0x0000785ffa373540] [error]   plate 2: Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply."
+  echo
+  echo "run found error, return -50, exit..."
+  exit 206
+fi
 [ -n "$FAKE_HANG" ] && sleep 300
 if [ -n "$FAKE_STRAGGLER" ]; then echo "pgid $$" >&2; sleep 300 & fi
 if [ -n "$FAKE_HOLDER" ]; then
@@ -35,11 +42,5 @@ if [ -z "$FAKE_SILENT" ]; then
 fi
 [ "${FAKE_EXIT:-0}" = 0 ] && [ -z "$FAKE_NO_OUTPUT" ] && printf 'PK fake 3mf' > "$out"
 [ -n "$FAKE_ENV" ] && env >&2
-if [ -n "$FAKE_STDOUT_ERROR" ]; then
-  echo "[2026-10-24 21:38:51.886707] [0x0000743914e14540] [trace]   Initializing StaticPrintConfigs"
-  echo "[2026-10-24 21:38:54.342736] [0x0000743914e14540] [error]   plate 2: Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply."
-  echo ""
-  echo "run found error, return -50, exit..."
-fi
 echo "fake stderr line" >&2
 exit "${FAKE_EXIT:-0}"

@@ -66,7 +66,12 @@ from scadbuddy.api.printing import (
 )
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
-from scadbuddy.bambuddy.choices import ChoicesView, choices_for, with_lan_printers
+from scadbuddy.bambuddy.choices import (
+    ChoicesView,
+    choices_for,
+    offering_lan_printers,
+    with_lan_printers,
+)
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for, maybe_client
 from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
@@ -1062,7 +1067,7 @@ async def get_library_plate_thumbnail(
     )
 
 
-async def _native_source(
+async def native_library_source(
     file_id: int,
     native: NativeLibrary | None,
     store: SettingsStore,
@@ -1122,7 +1127,7 @@ async def get_library_choices(
         printer_id=printer_id or (remembered.printer_id if remembered else None),
     )
     if route is not None:
-        own = await _native_source(
+        own = await native_library_source(
             file_id, native, store, uploads, paths, budget=budget, downloads=downloads
         )
         native_view = await native_choices(
@@ -1136,7 +1141,7 @@ async def get_library_choices(
             rack=rack,
         )
         return await with_lan_printers(native_view, settings, printers)
-    async with client_for(settings) as client:
+    async with offering_lan_printers(settings, printers), client_for(settings) as client:
         files = served_reads(file_id, client, native)
         # Loaded alongside the printers and presets (#2504).
         source = LibrarySource.load(
@@ -1208,7 +1213,7 @@ async def get_library_filaments(
     native = await library.serving_native()
     route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
     if route is not None:
-        source = await _native_source(
+        source = await native_library_source(
             file_id, native, store, uploads, paths, budget=budget, downloads=downloads
         )
         return await native_filaments(

@@ -360,7 +360,7 @@ def test_a_thumbnail_that_fails_to_save_is_logged_by_type(
     source = io.BytesIO(_real_image((64, 64), "PNG"))
     monkeypatch.setattr(Image.Image, "save", broken_save)
     with caplog.at_level("INFO", logger="scadbuddy.api.media"):
-        small = media_api._shrink(source)
+        small = media_api.shrink(source)
 
     assert small is None
     messages = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.api.media"]
@@ -518,7 +518,7 @@ def test_a_file_deleted_after_it_is_opened_is_still_served_whole(
         legacy.unlink()
         return None
 
-    monkeypatch.setattr("scadbuddy.api.media._shrink", deleted_undecoded)
+    monkeypatch.setattr("scadbuddy.api.media.shrink", deleted_undecoded)
     response = client.get(_thumbnail_url(model, "thumbnail"))
 
     assert response.status_code == 200, response.text
@@ -552,7 +552,7 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
             running -= 1
         return None
 
-    monkeypatch.setattr("scadbuddy.api.media._shrink", slow)
+    monkeypatch.setattr("scadbuddy.api.media.shrink", slow)
     with ThreadPoolExecutor(max_workers=requests) as pool:
         codes = list(
             pool.map(
@@ -566,15 +566,15 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
 
 
 def _counting_decodes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """How many times `_shrink` runs, in a one-item list."""
-    real = media_api._shrink
+    """How many times `shrink` runs, in a one-item list."""
+    real = media_api.shrink
     decoded = [0]
 
     def counting(file: IO[bytes], side: int) -> bytes | None:
         decoded[0] += 1
         return real(file, side)
 
-    monkeypatch.setattr("scadbuddy.api.media._shrink", counting)
+    monkeypatch.setattr("scadbuddy.api.media.shrink", counting)
     return decoded
 
 
@@ -627,7 +627,7 @@ def test_a_thumbnail_served_as_it_is_is_not_kept(
         decoded += 1
         return None
 
-    monkeypatch.setattr("scadbuddy.api.media._shrink", undecodable)
+    monkeypatch.setattr("scadbuddy.api.media.shrink", undecodable)
     client.get(_thumbnail_url(model, item["id"]))
     client.get(_thumbnail_url(model, item["id"]))
 

@@ -4997,6 +4997,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     setHotPath(true)
     const checks = watch('POST', '/check')
     const runs = watch('POST', '/run')
+    const analyses = watch('POST', '/run', '/api/v1/analyzers/')
     const { user } = renderPicker()
     await loaded()
     await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
@@ -5005,11 +5006,40 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
     const pair = { printer: HOT_PRINTER.id, printer_id: HOT_PRINTER.bambuddy_printer_id }
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(pair))
+    // The analysis names the row too, so its read stays off Bambuddy (#4629).
+    await waitFor(() => expect(analyses.bodies.at(-1)).toMatchObject({ request: pair }))
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     expect(await screen.findByTestId('queued-items')).toHaveTextContent('Sliced and sent to H2C over the LAN')
     expect(runs.bodies[0]).toMatchObject(pair)
     expect(runs.bodies[0]).not.toHaveProperty('project_id')
+  })
+
+  it("offers the LAN printer a failed Bambuddy read names, and opens on it (#4601)", async () => {
+    setHotPath(true)
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        if (new URL(request.url).searchParams.has('printer')) return undefined
+        return HttpResponse.json(
+          {
+            title: 'Bad Gateway',
+            status: 502,
+            detail: 'Bambuddy answered 599 when asked to list the printers',
+            lan_printers: [HOT_PRINTER.id],
+          },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = renderPicker()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy answered 599')
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Print on H2C over the LAN' }))
+    await loaded()
+    expect(
+      screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Print on H2C over the LAN' })).toBeNull()
   })
 
   it('asks for no Bambuddy destination while it learns its path, with no page project', async () => {
