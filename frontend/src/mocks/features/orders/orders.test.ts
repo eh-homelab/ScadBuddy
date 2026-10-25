@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api, type ApiError } from '../../../api/client'
 import { DEFAULT_ORDERS_QUERY } from '../../../lib/ordersQuery'
+import { MAZE_SLUG } from '../../fixtures'
 import { resetMockState } from '../../handlers'
 import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS } from './state'
 
@@ -85,6 +86,19 @@ describe('orders mock (#4249)', () => {
     const bad = await failure(api.addOrderItem(ORDER_DRAFT, { slug: 'nothing', commit: 'a'.repeat(40), inputs: {}, quantity: 1 }))
     expect(bad?.status).toBe(422)
     expect((bad?.problem as { errors?: { loc: string[] }[] }).errors?.[0]?.loc).toEqual(['body', 'slug'])
+  })
+
+  it("adds an item by hand at a template's own revision with default inputs, and refuses HEAD (#4251)", async () => {
+    const model = await api.getModel(MAZE_SLUG)
+    const commit = model.version ?? ''
+    const added = await api.addOrderItem(ORDER_DRAFT, { slug: MAZE_SLUG, commit, inputs: { params: {}, v: 0 }, quantity: 2 })
+    expect(added.reference).toMatchObject({ slug: MAZE_SLUG, commit, inputs: { params: {}, v: 0 }, template_name: model.name })
+    expect(added.title).toBe(model.name)
+    expect(added.colours).toEqual([])
+    expect(added.output_id).toBeNull()
+    const head = await failure(api.addOrderItem(ORDER_DRAFT, { slug: MAZE_SLUG, commit: 'HEAD', inputs: {}, quantity: 1 }))
+    expect(head?.status).toBe(422)
+    expect((head?.problem as { errors?: { loc: string[] }[] }).errors?.[0]?.loc).toEqual(['body', 'commit'])
   })
 
   it('keeps customers by id on an edit and archives them', async () => {

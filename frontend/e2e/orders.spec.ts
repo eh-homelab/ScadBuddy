@@ -100,6 +100,38 @@ test.describe('orders', () => {
     await expect(dialog.getByTestId('order-estimate')).toContainText(/An estimate: about [\d.]+ g/)
   })
 
+  // #4251 — "Add item" on the order page: an output of a template, then a template's
+  // current version with its defaults, without leaving the order.
+  test('adds items from the order page', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-3' })).toBeVisible()
+    const rows = page.getByRole('table', { name: 'Line items' }).getByRole('row')
+    await expect(rows).toHaveCount(2)
+
+    await page.getByRole('button', { name: 'Add item' }).click()
+    let dialog = page.getByRole('dialog', { name: 'Add item' })
+    await dialog.getByLabel('Template').fill('keychain')
+    await dialog.getByRole('button', { name: /Name Keychain/ }).click()
+    await dialog.getByRole('radio', { name: 'Nova' }).click()
+    await dialog.getByLabel('Quantity').fill('2')
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+    await dialog.getByRole('button', { name: 'Add item' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(rows).toHaveCount(3)
+
+    await page.getByRole('button', { name: 'Add item' }).click()
+    dialog = page.getByRole('dialog', { name: 'Add item' })
+    await dialog.getByLabel('Template').fill('maze')
+    await dialog.getByRole('button', { name: /Ball Maze/ }).click()
+    await expect(dialog.getByRole('radio', { name: 'Current version, default settings' })).toBeChecked()
+    await dialog.getByRole('button', { name: 'Add item' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(rows).toHaveCount(4)
+    await expect(page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Ball Maze' })).toBeVisible()
+  })
+
   test('on a phone the orders page fits', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/orders')

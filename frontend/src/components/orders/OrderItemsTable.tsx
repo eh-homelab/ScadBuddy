@@ -75,7 +75,7 @@ export function OrderItemsTable({
       rowKey={(item) => item.id}
       rowTestId={(item) => `order-item-${item.id}`}
       onOpen={onOpen}
-      empty="No items yet. Add one from a template's Customize page (Add to order…) or from an output (Order this)."
+      empty="No items yet. Add one with Add item above."
     />
   )
 }

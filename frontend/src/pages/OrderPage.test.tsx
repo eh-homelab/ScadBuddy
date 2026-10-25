@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
-import { ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -64,5 +65,26 @@ describe('OrderPage (#4249)', () => {
     await waitFor(() => expect(screen.getByText('Shipped')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: 'Close order' }))
     await waitFor(() => expect(screen.getByText('Closed')).toBeInTheDocument())
+  })
+
+  it('adds an item from the order page while the order is open, and only then (#4251)', async () => {
+    const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
+    const { user } = render(order.id)
+    await screen.findByRole('heading', { name: order.number })
+    expect(screen.getByText(/Add one with Add item above/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'maze')
+    await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
+    await waitFor(() => expect(within(dialog).getByRole('radio', { name: 'Current version, default settings' })).toBeChecked())
+    await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add item' })).not.toBeInTheDocument())
+    expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
+  })
+
+  it('offers no Add item once the order is accepted', async () => {
+    render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(screen.queryByRole('button', { name: 'Add item' })).not.toBeInTheDocument()
   })
 })
