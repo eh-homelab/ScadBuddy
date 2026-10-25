@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
-      - uses: astral-sh/setup-uv@v10.3.1
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Fetch the pinned commit
         id: lock
         run: .github/scripts/agent-durable-pin.sh backend

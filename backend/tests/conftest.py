@@ -31,6 +31,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.catalogue import forget_catalogues
+from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
@@ -78,6 +79,15 @@ def _forget_catalogues() -> Iterator[None]:
     forget_catalogues()
     yield
     forget_catalogues()
+
+
+@pytest.fixture(autouse=True)
+def _forget_out_of_memory_logs() -> Iterator[None]:
+    """A check's out-of-memory traceback is logged once per interval per subject
+    (#4632); each test starts with none logged."""
+    forget_out_of_memory_logs()
+    yield
+    forget_out_of_memory_logs()
 
 
 @pytest.fixture

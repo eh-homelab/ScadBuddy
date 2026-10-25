@@ -104,6 +104,13 @@ export function OrderPage() {
           </span>
         </div>
 
+        {ended && (
+          <div className="flex flex-wrap items-center gap-2" aria-label="Order actions">
+            <Button variant="outline" disabled={busy} onClick={() => void act(() => api.reopenOrder(order.id))}>
+              Reopen order
+            </Button>
+          </div>
+        )}
         {!ended && (
           <div className="flex flex-wrap items-center gap-2" aria-label="Order actions">
             {editable && (
@@ -232,15 +239,26 @@ export function OrderPage() {
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]" data-testid="order-totals">
                 <dt className="text-muted-foreground">Items</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.subtotal_minor, order.currency, order.minor_exponent)}</dd>
+                {(totals.pending_minor ?? 0) !== 0 && (
+                  <>
+                    <dt className="pl-3 text-xs text-muted-foreground">of which not accepted</dt>
+                    <dd className="sb-num text-right text-xs text-muted-foreground">{formatMoney(totals.pending_minor ?? 0, order.currency, order.minor_exponent)}</dd>
+                  </>
+                )}
                 <dt className="text-muted-foreground">Charges</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.charges_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="font-medium">Total</dt>
                 <dd className="sb-num text-right font-medium">{formatMoney(totals.total_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="text-muted-foreground">Paid</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.paid_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="text-muted-foreground">Balance due</dt>
+                <dt className="text-muted-foreground">{(totals.pending_minor ?? 0) !== 0 ? 'Balance due (provisional)' : 'Balance due'}</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.balance_minor, order.currency, order.minor_exponent)}</dd>
               </dl>
+              {(totals.unpriced_items ?? []).length > 0 && (
+                <p className="text-xs text-warn" data-testid="order-unpriced">
+                  Not in the total, with no price yet: {(totals.unpriced_items ?? []).map((id) => titles.get(id) ?? id).join(', ')}
+                </p>
+              )}
               {payments.length > 0 && (
                 <ul className="flex flex-col gap-0.5 text-[13px]" aria-label="Payments">
                   {payments.map((p) => (
@@ -358,7 +376,20 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
         </>
       }
       footer={
-        !settled && !ENDED.has(order.status) && (
+        item.status === 'cancelled' && !ENDED.has(order.status) ? (
+          editable || item.quotes.some((q) => q.accepted) ? (
+            <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
+              Reopen item
+            </Button>
+          ) : (
+            // `item_not_priced`: an accepted order takes back a priced item only.
+            <p className="text-xs text-muted-foreground" data-testid="reopen-unpriced">
+              This item had no accepted price, so it can't come back into an accepted order.
+            </p>
+          )
+        ) : (
+          !settled &&
+          !ENDED.has(order.status) && (
           <>
             {item.status === 'draft' ? (
               <Button variant="ghost" onClick={() => void run(() => api.deleteOrderItem(order.id, item.id), true)}>
@@ -370,6 +401,7 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
               </Button>
             )}
           </>
+          )
         )
       }
     >
@@ -400,7 +432,10 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
       </form>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[13px]">
         <dt className="text-muted-foreground">Price</dt>
-        <dd className="sb-num">{price === null ? 'Not priced' : formatMoney(price, order.currency, order.minor_exponent)}</dd>
+        <dd className="sb-num">
+          {price === null ? 'Not priced' : formatMoney(price.amount, order.currency, order.minor_exponent)}
+          {price && !price.accepted && <span className="ml-1 text-xs text-muted-foreground">(not accepted)</span>}
+        </dd>
         <dt className="text-muted-foreground">Inputs</dt>
         <dd className="break-all font-mono text-xs">{JSON.stringify((item.reference.inputs as { params?: unknown }).params ?? {})}</dd>
         {item.colours.length > 0 && (
