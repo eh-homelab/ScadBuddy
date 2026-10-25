@@ -7,6 +7,7 @@ import type {
   Order,
   OrderCharge,
   OrderEvent,
+  OrderAttachment,
   OrderItem,
   Payment,
   Quote,
@@ -72,6 +73,9 @@ export type State = {
   numbers: Record<string, number>
   /** The price book's filament records (#4250), archived ones included. */
   filaments: Filament[]
+  /** An order's files and its items' (#4251), with each one's bytes. */
+  attachments: OrderAttachment[]
+  files: Record<string, Blob>
 }
 
 let counter = 0
@@ -322,6 +326,8 @@ function fixtures(): State {
       filament(FILAMENT_PLA, 'PLA', '#F9D72C', 'Sunflower Yellow', '25.5'),
       filament(FILAMENT_PETG, 'PETG', '#1E1E1E', 'Black', '30'),
     ],
+    attachments: [],
+    files: {},
   }
 }
 

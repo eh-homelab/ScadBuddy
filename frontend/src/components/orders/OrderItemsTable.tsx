@@ -1,24 +1,36 @@
-import type { OrderItemDetail } from '../../api/types'
+import type { OrderAttachment, OrderItemDetail } from '../../api/types'
 import { formatMoney } from '../../lib/money'
 import { Button } from '@/components/ui/button'
 import { DataTable, type Column } from '../records/DataTable'
+import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
 import { itemPrice } from './price'
 
-/** An order's line items (§3.3): title, status, quantity and price; a row opens the item. */
+/** An order's line items (§3.3): picture, title, status, quantity and price; a row opens the item. */
 export function OrderItemsTable({
+  orderId,
   items,
+  attachments,
   currency,
   exponent,
   onOpen,
 }: {
+  orderId: string
   items: OrderItemDetail[]
+  /** The order's files: an item's picture is its delivered photo once one is marked (#4251). */
+  attachments: OrderAttachment[]
   currency: string
   /** The order's `minor_exponent`. */
   exponent: number
   onOpen: (item: OrderItemDetail) => void
 }) {
   const columns: Column<OrderItemDetail>[] = [
+    {
+      key: 'picture',
+      header: <span className="sr-only">Picture</span>,
+      className: 'w-14',
+      cell: (item) => <ItemPicture orderId={orderId} item={item} attachments={attachments} />,
+    },
     {
       key: 'title',
       header: 'Item',
