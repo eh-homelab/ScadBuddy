@@ -6,5 +6,8 @@
     "printable_height": "250",
     "nozzle_diameter": [
         "0.4"
-    ]
+    ],
+    "machine_start_gcode": ";generic start\nM109 S205\n",
+    "machine_end_gcode": ";generic end\n",
+    "change_filament_gcode": ";generic change\n"
 }

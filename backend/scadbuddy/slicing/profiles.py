@@ -28,10 +28,21 @@ the ``parse_subfile`` lambda):
   (``config = *default_config; ... config.apply(config_src)``): each option replaces
   the parent's as one value, so a child's list is never merged into a longer parent
   list position by position (``test_a_childs_list_replaces_the_parents_whole``).
-- ``includes`` names presets whose non-default options are applied between the parent
-  and the child. Telling which are non-default needs Bambu Studio's built-in defaults,
-  which this side does not have, and no BBL preset in v02.08.02.61 uses it, so a preset
-  naming it is refused rather than flattened wrong.
+- ``include`` (``BBL_JSON_KEY_INCLUDES`` in Preset.hpp; the key is singular) names
+  presets of the same kind whose options are applied, in order, after the parent and
+  before the child: ``config.apply_only(include_config, include_config.diff(default))``.
+  In v02.08.02.61, 29 machine presets take their whole G-code this way (``Bambu Lab
+  H2C 0.4 nozzle`` names ``… template machine_start_gcode`` and five more), and 1500
+  filament presets take their per-variant lists from four ``fdm_filament_template_*``
+  presets (#4714). Bambu Studio applies only the options that differ from its built-in
+  defaults, which this side does not have. Every included preset in that tree is a
+  root, and each of its options is a G-code text or a list of two to six values, where
+  a built-in default is a short G-code or a one-value list. So every option it holds
+  differs from the default, and applying all of them is the same flattening (measured
+  on 2026-10-25). An included preset that has a parent, or names an ``include`` of its
+  own, is refused, because its options cannot be told from its parent's. So is one
+  that is missing: Bambu Studio only logs "can not find include" and slices without
+  it, and a preset without its G-code is worse than none.
 - A root (no ``inherits``) starts from Bambu Studio's built-in defaults; here it starts
   empty, and the CLI fills what a file leaves out from the same defaults when it loads
   ``--load-settings`` and ``--load-filaments``.
@@ -58,7 +69,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, Literal
 
-#: One flattened preset: every option, ``inherits`` gone.
+#: One flattened preset: every option, ``inherits`` and ``include`` resolved and gone.
 Flat = dict[str, str | list[str]]
 Kind = Literal["machine", "process", "filament"]
 
@@ -198,11 +209,6 @@ def flatten(name: str, load: Callable[[str], dict[str, Any] | None]) -> Flat:
             if not chain:
                 raise ProfileError(f"no such preset {name}")
             raise ProfileError(f"preset {seen[-1]} inherits {current}: no such preset")
-        if "includes" in doc:
-            raise ProfileError(
-                f"the native slicer cannot read preset {current}: it names includes"
-                f" {doc['includes']!r}, which only Bambu Studio's defaults can apply"
-            )
         chain.append((current, doc))
         parent = doc.get("inherits")
         if not parent:
@@ -210,20 +216,59 @@ def flatten(name: str, load: Callable[[str], dict[str, Any] | None]) -> Flat:
         current = parent
     flat: Flat = {}
     for preset, doc in reversed(chain):
-        for key, value in doc.items():
-            if key == "inherits":
-                continue
-            if isinstance(value, str):
-                flat[key] = value
-            elif isinstance(value, list) and all(isinstance(item, str) for item in value):
-                flat[key] = list(value)
-            else:
-                raise ProfileError(
-                    f"the native slicer cannot read preset {preset}: {key} is a"
-                    f" {type(value).__name__}, not text"
-                )
+        for included, options in _includes(preset, doc, load):
+            _apply(flat, included, options, skip=_INCLUDE_METADATA)
+        _apply(flat, preset, doc, skip=_RESOLVED)
     _normalize(name, flat)
     return flat
+
+
+#: Keys :func:`flatten` resolves and so never writes into a flattened preset.
+_RESOLVED = frozenset({"inherits", "include"})
+#: An included preset's keys that describe the preset, not an option of it: its own
+#: name and kind, which the preset that includes it has itself.
+_INCLUDE_METADATA = _RESOLVED | {"name", "type", "from", "instantiation", "setting_id"}
+
+
+def _includes(
+    preset: str, doc: dict[str, Any], load: Callable[[str], dict[str, Any] | None]
+) -> list[tuple[str, dict[str, Any]]]:
+    """The presets ``doc``'s ``include`` names, in its order (the module's docstring)."""
+    names = doc.get("include") or []
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ProfileError(
+            f"the native slicer cannot read preset {preset}: its include is not a list of names"
+        )
+    found: list[tuple[str, dict[str, Any]]] = []
+    for included in names:
+        options = load(included)
+        if options is None:
+            raise ProfileError(f"preset {preset} includes {included}: no such preset")
+        nested = [key for key in ("inherits", "include") if options.get(key)]
+        if nested:
+            raise ProfileError(
+                f"the native slicer cannot read preset {preset}: the preset it includes,"
+                f" {included}, names {' and '.join(nested)} of its own"
+            )
+        found.append((included, options))
+    return found
+
+
+def _apply(flat: Flat, preset: str, doc: dict[str, Any], *, skip: frozenset[str]) -> None:
+    for key, value in doc.items():
+        if key in skip:
+            continue
+        if isinstance(value, str):
+            flat[key] = value
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            flat[key] = list(value)
+        else:
+            raise ProfileError(
+                f"the native slicer cannot read preset {preset}: {key} is a"
+                f" {type(value).__name__}, not text"
+            )
 
 
 def _normalize(name: str, flat: Flat) -> None:

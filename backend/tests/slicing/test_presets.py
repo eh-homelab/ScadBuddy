@@ -55,9 +55,35 @@ def test_flatten_refuses_a_missing_parent(profiles: Profiles) -> None:
         profiles.process("orphan")
 
 
-def test_flatten_refuses_includes(profiles: Profiles) -> None:
-    with pytest.raises(ProfileError, match=r"with_includes.*includes"):
+def test_an_include_applies_between_the_parent_and_the_child(profiles: Profiles) -> None:
+    """#4714: Bambu Studio's key is ``include``. The H2C takes its whole G-code from
+    the presets it names, so dropping them left fdm_machine_common's generic start,
+    which loads no filament, and every plate's slice_info named filament 1."""
+    out = profiles.machine("Test Printer with includes")
+    assert out["machine_start_gcode"].startswith(";===== machine: Test Printer")
+    assert out["change_filament_gcode"] == "M620 S[next_extruder]A\nT[next_extruder]\n"
+    # The child's own option wins over the included one, which wins over the parent's.
+    assert out["machine_end_gcode"] == ";child end\n"
+    assert out["name"] == "Test Printer with includes" and out["instantiation"] == "true"
+    assert out["setting_id"] == "GM_INCLUDES"
+    assert "include" not in out and "inherits" not in out
+
+
+def test_flatten_refuses_a_missing_include(profiles: Profiles) -> None:
+    # Bambu Studio only logs "can not find include" and slices without its G-code.
+    with pytest.raises(ProfileError, match=r"with_includes includes no_such_process"):
         profiles.process("with_includes")
+
+
+def test_flatten_refuses_an_include_with_a_parent_of_its_own() -> None:
+    # Which of its options differ from the defaults cannot be told from its parent's.
+    docs: dict[str, dict[str, Any]] = {
+        "root": {"name": "root", "machine_start_gcode": ";root"},
+        "template": {"name": "template", "inherits": "root", "machine_start_gcode": ";t"},
+        "printer": {"name": "printer", "inherits": "root", "include": ["template"]},
+    }
+    with pytest.raises(ProfileError, match=r"printer.*template, names inherits"):
+        flatten("printer", docs.get)
 
 
 def test_flatten_refuses_a_value_that_is_not_text() -> None:
@@ -282,7 +308,9 @@ def test_a_local_preset_from_bambuddy_keys_apart(plan: SlicePlan) -> None:
     filament = native_preset_key(plan, 1, "02.08.02.61", {"filament_2": "ab" * 32})
     edited = native_preset_key(plan, 1, "02.08.02.61", {"filament_2": "cd" * 32})
     assert len({image, filament, edited}) == 3
-    assert filament.endswith("/bambuddy-filament_2=" + "ab" * 32 + "/colours=#FF0000,#00FF00")
+    assert filament.endswith(
+        "/bambuddy-filament_2=" + "ab" * 32 + "/colours=#FF0000,#00FF00/flatten=2"
+    )
     every = native_preset_key(
         plan, 1, "02.08.02.61", {"filament_1": "f1", "printer": "m", "process": "p"}
     )
@@ -359,7 +387,9 @@ async def test_a_local_process_needs_bambuddy(profiles: Profiles, plan: SlicePla
 def test_native_preset_key_is_distinct_from_bambuddys(plan: SlicePlan) -> None:
     assert (
         native_preset_key(plan, 1, "02.08.02.61")
-        == "native@02.08.02.61/" + slice_request(plan, 1).preset_key + "/colours=#FF0000,#00FF00"
+        == "native@02.08.02.61/"
+        + slice_request(plan, 1).preset_key
+        + "/colours=#FF0000,#00FF00/flatten=2"
     )
 
 
@@ -381,6 +411,13 @@ def test_the_images_h2c_machine_flattens() -> None:
     )
     # Bambuddy's cloud ids are these setting_ids (Profiles' docstring).
     assert profiles.machine("GM041") == profiles.machine("Bambu Lab H2C 0.4 nozzle")
+    # Its G-code comes only through `include` (#4714): the H2C's own start, which
+    # loads the first filament, not fdm_machine_common's generic one.
+    h2c = profiles.machine("Bambu Lab H2C 0.4 nozzle")
+    start = h2c["machine_start_gcode"]
+    assert isinstance(start, str) and start.startswith(";===== machine: H2C")
+    assert "T[initial_no_support_filament_id]" in start
+    assert "T[next_filament_id]" in h2c["change_filament_gcode"]
     assert profiles.version == "02.08.02.61"
 
 

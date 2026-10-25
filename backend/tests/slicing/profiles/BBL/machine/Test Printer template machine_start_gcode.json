@@ -1,0 +1,5 @@
+{
+    "name": "Test Printer template machine_start_gcode",
+    "instantiation": "false",
+    "machine_start_gcode": ";===== machine: Test Printer\nM620 S[initial_no_support_extruder]A\nT[initial_no_support_extruder]\n"
+}

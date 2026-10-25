@@ -86,12 +86,24 @@
             "sub_path": "machine/fdm_machine_root.json"
         },
         {
+            "name": "Test Printer template machine_start_gcode",
+            "sub_path": "machine/Test Printer template machine_start_gcode.json"
+        },
+        {
+            "name": "Test Printer template change_filament_gcode",
+            "sub_path": "machine/Test Printer template change_filament_gcode.json"
+        },
+        {
             "name": "Test Printer 0.4 nozzle",
             "sub_path": "machine/Test Printer 0.4 nozzle.json"
         },
         {
             "name": "Bambu Lab H2C 0.4 nozzle",
             "sub_path": "machine/Bambu Lab H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "Test Printer with includes",
+            "sub_path": "machine/Test Printer with includes.json"
         }
     ]
 }
