@@ -10,6 +10,7 @@ import { PRINTS_VIEW_KEY, resetStoredPrintsView } from '../lib/printsQuery'
 import { intersect } from '../test/intersection'
 import { optionNames, selectOption } from '../test/select'
 import { renderPage } from '../test/utils'
+import { setHotPath } from '../mocks/features/hotPath'
 import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
 
@@ -880,5 +881,30 @@ describe('up next (#2351)', () => {
     expect(within(queue).getByTestId('queue-item-259')).toHaveTextContent('Luna keychain')
     const now = await screen.findByRole('region', { name: 'Now printing' })
     expect(now.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+describe("Bambuddy's panels on the hot path (#4629)", () => {
+  it('reads the queue and the history only once each is opened', async () => {
+    setHotPath(true)
+    const asked: string[] = []
+    const listener = ({ request }: { request: Request }) => {
+      const path = new URL(request.url).pathname
+      if (path.startsWith('/api/v1/farm/') || path === '/api/v1/prints') asked.push(path)
+    }
+    server.events.on('request:start', listener)
+    onTestFinished(() => {
+      server.events.removeListener('request:start', listener)
+    })
+    const { user } = render()
+    const history = await screen.findByRole('button', { name: "Bambuddy's print history" })
+    expect(screen.getByRole('button', { name: "Bambuddy's print queue" })).toBeInTheDocument()
+    expect(asked).toEqual([])
+
+    await user.click(history)
+    expect(await list()).toBeInTheDocument()
+    expect(asked).toEqual(['/api/v1/prints'])
+    await user.click(screen.getByRole('button', { name: "Bambuddy's print queue" }))
+    await waitFor(() => expect(asked).toEqual(expect.arrayContaining(['/api/v1/farm/queue', '/api/v1/farm/stats'])))
   })
 })

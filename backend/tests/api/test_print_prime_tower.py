@@ -273,7 +273,7 @@ def test_slots_sharing_a_preset_slice_each_with_its_own(client: TestClient, mode
     local = LocalPresets()
     sliced = Job().routes()
     sliced_routes()
-    respx.get(f"{API}/library/files/{SLICED}/download").mock(
+    download = respx.get(f"{API}/library/files/{SLICED}/download").mock(
         return_value=httpx.Response(200, content=sliced_file({"enable_prime_tower": "1"}, 1, 2))
     )
     queue_route()
@@ -301,6 +301,9 @@ def test_slots_sharing_a_preset_slice_each_with_its_own(client: TestClient, mode
         }
     ]
     assert not [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-not-applied"]
+    # Every slot reaches the CLI under a name of its own, so the slice is not read for
+    # a dropped tower (#4649, #4655 review).
+    assert not download.called
 
 
 @respx.mock

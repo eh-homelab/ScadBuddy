@@ -10,7 +10,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 // (backend/scadbuddy/api/tray_spools.py), as write-tier tools: nothing leaves ScadBuddy.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

@@ -8,7 +8,7 @@ import { runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/t
 import { BACKEND, services } from './helpers/mcp.js'
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

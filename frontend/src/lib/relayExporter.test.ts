@@ -2,9 +2,9 @@ import { ExportResultCode, type ExportResult } from '@opentelemetry/core'
 import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
-  WebTracerProvider,
+  TracerProvider,
   type ReadableSpan,
-} from '@opentelemetry/sdk-trace-web'
+} from '@opentelemetry/sdk-trace'
 import { HttpResponse, delay, http } from 'msw'
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -21,8 +21,8 @@ import {
 /** `count` finished spans, each carrying `padding` characters in one attribute. */
 function spans(count: number, padding = 0): ReadableSpan[] {
   const exporter = new InMemorySpanExporter()
-  const provider = new WebTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  const provider = new TracerProvider({
+    spanProcessors: [new SimpleSpanProcessor({ exporter })],
     // Past the 1024 the page's provider uses, to build a span over MAX_REQUEST_BYTES.
     spanLimits: { attributeValueLengthLimit: 100_000 },
   })

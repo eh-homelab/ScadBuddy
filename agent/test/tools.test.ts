@@ -28,7 +28,7 @@ import { memoryWorkspace } from './helpers/workspace.js'
 // `runTool` where the gate is the point.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
@@ -1002,19 +1002,20 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     })
 
     it("reads the printer under the turn's abort signal (#4442 gate review)", async () => {
-      let seen: AbortSignal | undefined
+      // msw 3 links a handler's `request.signal` to the caller's only while the request is in
+      // flight, so the turn is aborted inside the handler, not after the read returned.
+      const turn = new AbortController()
+      let aborted: boolean | undefined
       server.use(
         http.get(`${BACKEND}/api/v1/printers/${PRINTER}`, ({ request }) => {
-          seen = request.signal
+          turn.abort()
+          aborted = request.signal.aborted
           return HttpResponse.json({ id: PRINTER, serial: 'x', name: 'Garage', bambuddy_printer_id: 2, preferred_path: 'auto' })
         }),
       )
-      const turn = new AbortController()
       const prepare = harnessTools(services()).prepareApproval({ id: 'sess', owner: { kind: 'browser', id: 'browser', label: 'You' } })
-      await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, turn.signal)
-      expect(seen).toBeDefined()
-      turn.abort()
-      expect(seen!.aborted).toBe(true)
+      await prepare('mcp__scadbuddy__print_output', { ...chosen, printer: PRINTER }, turn.signal).catch(() => undefined)
+      expect(aborted).toBe(true)
     })
 
     it("does not resolve a disabled print_output's printer (#4442 gate review)", async () => {

@@ -91,6 +91,11 @@ export function usePrintChoices(
 
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  /**
+   * #4601 — the registry printers a run reaches natively, as a failed read's problem
+   * names them (`lan_printers`): the dialog offers them in place of the read it lacks.
+   */
+  const [offeredLan, setOfferedLan] = useState<string[]>([])
 
   /**
    * Supersedes an in-flight read. The dialog is not unmounted when it closes, so a read
@@ -133,6 +138,7 @@ export function usePrintChoices(
     const token = (attempt.current += 1)
     setLoading(true)
     setLoadError(null)
+    setOfferedLan([])
     sourceApi(current)
       .getChoices(askedPrinter, askedRegistry)
       .then((next) => {
@@ -160,6 +166,8 @@ export function usePrintChoices(
         // A different output clears it (PrintPicker), and a stale read never lands here.
         setRead(null)
         setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
+        const offered = cause instanceof ApiError ? (cause.problem as { lan_printers?: unknown }).lan_printers : undefined
+        setOfferedLan(Array.isArray(offered) ? offered.filter((id): id is string => typeof id === 'string') : [])
       })
       .finally(() => {
         if (token === attempt.current) setLoading(false)
@@ -279,6 +287,8 @@ export function usePrintChoices(
     readsStarted: attempt,
     loading,
     loadError,
+    /** #4601 — the native printers a failed read's problem offers instead. */
+    offeredLan,
     reload,
     printers,
     printerId,

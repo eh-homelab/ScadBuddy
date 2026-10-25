@@ -236,6 +236,49 @@ async def test_distinct_presets_ask_nothing_of_bambuddy(bambuddy: BambuddyClient
     assert not respx.calls
 
 
+@respx.mock
+async def test_distinct_refs_of_one_name_share_it_when_no_preset_could_be_made(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4655 review: two cloud user presets of one name are one preset to the CLI, and
+    neither can be copied, so the plate is read for a dropped tower."""
+    first = PresetRef(source="cloud", id="PFUS1")
+    second = PresetRef(source="cloud", id="PFUS2")
+    names = catalogue(
+        PresetChoice(ref=first, name="My cloud PLA"), PresetChoice(ref=second, name="My cloud PLA")
+    )
+    slots = SlotPresets(bambuddy, names)
+
+    out = await slots.plan(plan(first, second))
+
+    assert out.filament_presets == [first, second]
+    assert slots.shares_a_name(out)
+
+
+@respx.mock
+async def test_a_slot_preset_that_could_not_be_made_still_shares_a_name(
+    bambuddy: BambuddyClient,
+) -> None:
+    listed()
+    respx.post(f"{API}/local-presets/").mock(return_value=httpx.Response(403))
+    slots = SlotPresets(bambuddy, catalogue())
+
+    assert slots.shares_a_name(await slots.plan(plan(STANDARD, STANDARD)))
+
+
+@respx.mock
+async def test_slots_on_presets_of_their_own_share_no_name(bambuddy: BambuddyClient) -> None:
+    listed()
+    creates()
+    slots = SlotPresets(bambuddy, catalogue())
+
+    assert not slots.shares_a_name(await slots.plan(plan(STANDARD, STANDARD, STANDARD)))
+
+
+def test_one_slot_shares_no_name(bambuddy: BambuddyClient) -> None:
+    assert not SlotPresets(bambuddy, catalogue()).shares_a_name(plan(STANDARD))
+
+
 def test_slot_presets_are_never_offered_in_the_catalogue() -> None:
     local = LocalPresetCatalogue.model_validate(
         {
