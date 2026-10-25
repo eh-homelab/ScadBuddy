@@ -1,0 +1,14 @@
+{
+    "type": "machine",
+    "name": "Test Printer with includes",
+    "inherits": "fdm_machine_root",
+    "include": [
+        "Test Printer template machine_start_gcode",
+        "Test Printer template change_filament_gcode"
+    ],
+    "from": "system",
+    "instantiation": "true",
+    "setting_id": "GM_INCLUDES",
+    "printer_model": "Test Printer",
+    "machine_end_gcode": ";child end\n"
+}

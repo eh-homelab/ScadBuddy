@@ -71,11 +71,15 @@ def test_the_native_catalogue_offers_only_instantiable_presets(profiles: Profile
     assert "Bambu PLA Basic @base" not in names and "fdm_filament_root" not in names
     assert {c.name for c in catalogue.process} >= {"leaf", "0.20mm Standard @BBL H2C"}
     assert "mid" not in {c.name for c in catalogue.process}
-    assert {c.name for c in catalogue.printer} == {"Test Printer 0.4 nozzle", H2C}
+    assert {c.name for c in catalogue.printer} == {
+        "Test Printer 0.4 nozzle",
+        "Test Printer with includes",
+        H2C,
+    }
 
 
 def test_a_preset_the_native_slicer_refuses_is_not_offered(profiles: Profiles) -> None:
-    """An inherits loop, a missing parent, ``includes`` and a short per-filament list
+    """An inherits loop, a missing parent, a missing ``include`` and a short per-filament list
     are refused by :func:`flatten`, so the dialog never offers what cannot slice."""
     catalogue = native_catalogue(profiles)
     processes = {c.name for c in catalogue.process}

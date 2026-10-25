@@ -1,0 +1,6 @@
+{
+    "name": "Test Printer template change_filament_gcode",
+    "instantiation": "false",
+    "change_filament_gcode": "M620 S[next_extruder]A\nT[next_extruder]\n",
+    "machine_end_gcode": ";included end\n"
+}
