@@ -19,8 +19,6 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy import print_source
-from scadbuddy.bambuddy.filaments3mf import UnreadableFilamentsError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from tests.api.conftest import read_stored, set_plate_image, wait_for_job
@@ -429,18 +427,6 @@ def _plates_use(used: dict[int, set[int]], grams: float = 0) -> respx.Route:
     return respx.route(
         method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements"
     ).mock(side_effect=answer)
-
-
-@pytest.fixture
-def slots_from_bambuddy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The output's slots read from Bambuddy per plate, as for a 3MF whose slots cannot
-    be read here: a plan reads an output's own slots first (#4696), and these tests set
-    each plate's use and grams through Bambuddy's answer (:func:`_plates_use`)."""
-
-    def unreadable(*args: object, **kwargs: object) -> None:
-        raise UnreadableFilamentsError("read from Bambuddy in this test")
-
-    monkeypatch.setattr(print_source, "read_filaments", unreadable)
 
 
 def _plan_run(

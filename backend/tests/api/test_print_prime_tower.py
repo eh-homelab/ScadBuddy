@@ -261,6 +261,7 @@ PETG = "Bambu PETG Basic @BBL H2C 0.2 nozzle"
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_slots_sharing_a_preset_slice_each_with_its_own(client: TestClient, model: str) -> None:
     """#3962: Bambuddy's slicer turns the tower off when every slot's preset has one
     name, so the second slot refs a local preset inheriting the first's. The dialog's
@@ -307,6 +308,7 @@ def test_slots_sharing_a_preset_slice_each_with_its_own(client: TestClient, mode
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_a_slice_that_still_lost_its_tower_says_so(client: TestClient, model: str) -> None:
     """Bambuddy refused the preset (its auth denies API keys settings writes): the slot
     keeps the shared one, the print goes ahead, and the run warns."""
