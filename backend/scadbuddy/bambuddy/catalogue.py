@@ -170,11 +170,11 @@ async def _catalogue(client: BambuddyClient, *, fits: bool = True) -> Catalogue:
     presets, local_presets = await asyncio.gather(
         client.presets(), client.local_presets(), return_exceptions=True
     )
-    read = settled(presets)
+    read, local = settled(presets), settled(local_presets)
     if fits:
         _check_standard_tier(read)
     # Thousands of rows: built off the event loop, which every other request shares.
-    return await asyncio.to_thread(_build, read, settled(local_presets))
+    return await asyncio.to_thread(_build, read, local)
 
 
 def _is_empty(tier: PresetTier) -> bool:
@@ -189,13 +189,17 @@ def _check_standard_tier(catalogue: PresetCatalogue) -> None:
     no standard row to copy ``compatible_printers`` from, so every cloud row declares no
     printer and the resolver refuses every process as one Bambuddy lacks. That read is
     Bambuddy unavailable, never a catalogue to resolve with or keep. With no cloud
-    presets either, an empty standard tier is no such sign."""
+    presets either, an empty standard tier is no such sign.
+    The check is of the whole tier: ``_fetch_bundled_presets`` fills every slot from one
+    ``/profiles/bundled`` answer or returns them all empty (``backend/app/api/routes/
+    slicer_presets.py`` at maziggy/bambuddy@036f0a6, read 2026-10-25), so a tier with
+    printers but no processes is not a shape it sends."""
     if _is_empty(catalogue.standard) and not _is_empty(catalogue.cloud):
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Bambuddy listed its cloud presets but none of its standard (bundled) ones: its "
-            "slicer sidecar did not answer it, so it could not say which printers each "
-            "preset fits. Try again once the sidecar is not busy.",
+            "Bambuddy listed its cloud presets but none of its standard (bundled) ones, "
+            "most likely because its slicer sidecar did not answer it, so it could not say "
+            "which printers each preset fits. Try again once the sidecar is not busy.",
             type_=UNAVAILABLE_PROBLEM,
         )
 

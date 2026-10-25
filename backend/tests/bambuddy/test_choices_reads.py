@@ -1039,6 +1039,21 @@ async def test_a_refresh_without_the_standard_tier_keeps_the_old_catalogue(
 
 
 @respx.mock
+async def test_a_failed_local_presets_read_beats_a_read_without_the_standard_tier(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4717 review: the reads' failures surface in their order (``settled``), so a
+    failed /local-presets/ read is still what a read without the standard tier says."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=_sidecar_unanswered())
+    respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(500))
+
+    with pytest.raises(ApiError) as raised:
+        await catalogue_for(bambuddy, native=None)
+
+    assert "local presets" in raised.value.detail
+
+
+@respx.mock
 async def test_an_all_empty_catalogue_still_reads(bambuddy: BambuddyClient, tmp_path: Path) -> None:
     """#4717: with no cloud presets either, an empty standard tier is no sign of a
     sidecar that did not answer, and the catalogue reads as it did."""
