@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -454,21 +455,67 @@ def test_a_phantom_filament_1_joins_the_plates_first_filament() -> None:
 def test_a_phantom_filament_in_another_group_has_no_plan(caplog: pytest.LogCaptureFixture) -> None:
     """#4712: a phantom ``id="1"`` whose group is not the first filament's cannot be
     placed with confidence, so no field is sent."""
-    with zipfile.ZipFile(NATIVE / "plate2-two-filaments.gcode.3mf") as original:
-        members = {name: original.read(name) for name in original.namelist()}
-    info = members["Metadata/slice_info.config"].decode()
-    members["Metadata/slice_info.config"] = info.replace(
+    phantom = (
         '<filament id="1" tray_info_idx="GFA00" type="PLA" color="#F5547C" used_m="0.05" '
-        'used_g="0.15" group_id="1"',
-        '<filament id="1" tray_info_idx="GFA00" type="PLA" color="#F5547C" used_m="0.05" '
-        'used_g="0.15" group_id="0"',
-    ).encode()
-    assert members["Metadata/slice_info.config"] != info.encode()
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w") as archive:
-        for name, data in members.items():
-            archive.writestr(name, data)
-    out.seek(0)
+        'used_g="0.15" group_id="{}"'
+    )
+    out = _rewritten(
+        "plate2-two-filaments",
+        lambda name, data: (
+            data.replace(phantom.format(1).encode(), phantom.format(0).encode())
+            if name == "Metadata/slice_info.config"
+            else data
+        ),
+    )
     with caplog.at_level(logging.WARNING):
         assert read_rack_plan(out, 2) is None
     assert "nozzle_mapping not sent" in caplog.text
+
+
+def _rewritten(fixture: str, edit: Callable[[str, bytes], bytes | None]) -> io.BytesIO:
+    """A native slice fixture with each member as ``edit`` returns it (``None`` drops
+    it), checked to differ from the original."""
+    with zipfile.ZipFile(NATIVE / f"{fixture}.gcode.3mf") as original:
+        members = {name: original.read(name) for name in original.namelist()}
+    edited = {name: edit(name, data) for name, data in members.items()}
+    assert edited != members
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in edited.items():
+            if data is not None:
+                archive.writestr(name, data)
+    out.seek(0)
+    return out
+
+
+def test_a_phantom_with_no_first_filament_has_no_plan(caplog: pytest.LogCaptureFixture) -> None:
+    """#4712: with no ``filament_sequence.json``, a header naming several filaments says
+    nothing of which is first, so the phantom ``id="1"`` has no slot: no field."""
+    out = _rewritten(
+        "plate2-two-filaments",
+        lambda name, data: None if name == "Metadata/filament_sequence.json" else data,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(out, 2) is None
+    assert "has no first to join" in caplog.text
+
+
+def test_a_corrupt_gcode_still_reads_the_plan_from_the_sequence() -> None:
+    """#4712: a G-code member that cannot be inflated says nothing of the header, and the
+    plan is read from ``filament_sequence.json`` alone, never refused for it."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(NATIVE / "plate3-one-filament.gcode.3mf") as original,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive,
+    ):
+        for name in original.namelist():
+            archive.writestr(name, original.read(name))
+    payload = bytearray(out.getvalue())
+    with zipfile.ZipFile(io.BytesIO(bytes(payload))) as archive:
+        info = archive.getinfo("Metadata/plate_3.gcode")
+    # The member's data starts after its 30-byte local header, its name and its extra.
+    start = info.header_offset + 30 + len(info.filename) + len(info.extra)
+    payload[start : start + 16] = b"\xff" * 16
+    plan = read_rack_plan(io.BytesIO(bytes(payload)), 3)
+    assert plan is not None
+    assert plan.slot_groups == [-1, -1, 1]

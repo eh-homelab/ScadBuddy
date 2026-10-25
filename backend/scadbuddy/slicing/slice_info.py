@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass
 from typing import BinaryIO
 
@@ -29,6 +30,18 @@ _HEADER_BYTES = 64 * 1024
 #: The CLI's per-plate filament order, and the most of it that is read.
 _SEQUENCE = "Metadata/filament_sequence.json"
 _MAX_SEQUENCE_BYTES = 16 * 1024 * 1024
+#: What reading one corrupt or unsupported member raises (a bad CRC, a truncated or
+#: corrupt deflate stream, an unknown compression, an encrypted entry), as
+#: `printers/nozzle_mapping.py` `read_rack_plan` lists them: the header and the sequence
+#: read as saying nothing then, and never cost a plate its G-code or its rack plan.
+_MEMBER_ERRORS = (
+    zipfile.BadZipFile,
+    OSError,
+    EOFError,
+    NotImplementedError,
+    RuntimeError,
+    zlib.error,
+)
 
 
 def _file(payload: bytes | BinaryIO) -> BinaryIO:
@@ -101,7 +114,7 @@ def _sequence(archive: zipfile.ZipFile, index: int) -> list[int]:
         if len(data) > _MAX_SEQUENCE_BYTES:
             return []
         doc = json.loads(data)
-    except (zipfile.BadZipFile, ValueError, RecursionError):
+    except (*_MEMBER_ERRORS, ValueError):
         return []
     plate = doc.get(f"plate_{index}") if isinstance(doc, dict) else None
     sequence = plate.get("sequence") if isinstance(plate, dict) else None
@@ -119,7 +132,7 @@ def _header_filaments(archive: zipfile.ZipFile, plate_id: int) -> list[int]:
     try:
         with archive.open(name) as member:
             head = member.read(_HEADER_BYTES)
-    except zipfile.BadZipFile:
+    except _MEMBER_ERRORS:
         return []
     end = head.find(b"; HEADER_BLOCK_END")
     found = _HEADER_FILAMENTS.search(head[: end if end >= 0 else len(head)])

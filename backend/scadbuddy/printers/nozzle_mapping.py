@@ -298,12 +298,23 @@ def _on_printed(
     plate does not name otherwise (a plate of one filament, all ``id="1"``) takes the
     first filament's slot, and its type and colour from the project's, since
     ``slice_info.config`` wrote filament 1's."""
+    if (
+        printed.printed
+        and printed.first is None
+        and any(f.slot_id not in printed.printed for f in filaments)
+    ):
+        # The plate names a filament it does not print, and nothing says which it prints
+        # first (a header of several filaments, no sequence): no slot can take it.
+        raise _UnresolvedError("a filament the plate does not print has no first to join")
     named = {f.slot_id: f for f in filaments if printed.slot(f.slot_id) == f.slot_id}
     for moved in (f for f in filaments if printed.slot(f.slot_id) != f.slot_id):
         slot = printed.slot(moved.slot_id)
         known = named.get(slot)
         if known is None:
             colour = _project_value(settings, "filament_colour", slot)
+            # Only the filament's own fields are filament 1's: its group, nozzle diameter
+            # and volume type are the plate's real hotend, which the nozzle table has
+            # checked against the group above.
             group = moved.group
             named[slot] = moved.model_copy(
                 update={
