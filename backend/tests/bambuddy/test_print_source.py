@@ -1240,7 +1240,10 @@ async def test_a_fetch_given_up_on_takes_its_client_with_it() -> None:
 
 async def test_a_fetch_cancelled_from_outside_is_started_anew() -> None:
     """#4695 review: a kept fetch that ended cancelled has no answer to give, so a reader
-    starts a fetch of its own rather than raise `CancelledError`."""
+    starts a fetch of its own rather than raise `CancelledError`.
+
+    No real path keeps a cancelled fetch today, so this puts one back by hand and guards
+    only the branch; a path that comes to keep one gets a test through that path."""
     source = _HeldFetch(b"not a 3mf")
     first = asyncio.ensure_future(source.fetched_3mf(None))
     await source.started.wait()
