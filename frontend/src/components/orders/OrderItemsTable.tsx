@@ -163,7 +163,8 @@ function UnitPriceEditor({
   const [error, setError] = useState<string | null>(null)
   const errorId = useId()
   const text = typed ?? current
-  const unchanged = text === current
+  // The same amount however it is typed (12.5 is 12.50), so an accepted price stays put.
+  const unchanged = price !== null && parseUnitPrice(text, exponent) === price.minor
 
   async function submit() {
     const minor = parseUnitPrice(text, exponent)

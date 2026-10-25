@@ -93,6 +93,20 @@ describe('OrderItemsTable · unit price', () => {
     accepted.mockRestore()
   })
 
+  it('keeps Accept off for the accepted price however it is typed', async () => {
+    state.quotes.push({ ...manual('q-done', 1250, '2026-10-24T23:00:00Z'), accepted: true })
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const input = screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })
+    const accept = within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' })
+    expect(accept).toBeDisabled()
+    await user.clear(input)
+    await user.type(input, '12.5')
+    expect(accept).toBeDisabled()
+    await user.type(input, '1')
+    expect(accept).toBeEnabled()
+  })
+
   it('accepts a pending price with its button', async () => {
     state.quotes.push(manual('q-pending', 900, '2026-10-24T23:00:00Z'))
     const { user } = render(ORDER_DRAFT)
