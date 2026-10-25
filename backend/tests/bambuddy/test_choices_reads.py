@@ -101,8 +101,10 @@ def _expire(cache: Path) -> None:
 
 async def _refreshes_done() -> None:
     """Wait for this process's background refreshes: the one place these tests reach
-    into the module's running reads (#4717 review)."""
-    await asyncio.gather(*catalogue._refreshing.values())
+    into the module's running reads (#4717 review). A refresh that hangs fails the test
+    within 5 s rather than stalling it."""
+    async with asyncio.timeout(5):
+        await asyncio.gather(*catalogue._refreshing.values())
 
 
 class _HeldPresets:
