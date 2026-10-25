@@ -92,9 +92,9 @@ async def test_repeats_of_one_preset_ref_distinct_presets_inheriting_it(
     listed()
     create = creates()
 
-    shared = plan(STANDARD, STANDARD, STANDARD)
+    unslotted = plan(STANDARD, STANDARD, STANDARD)
 
-    out = await slotted(SlotPresets(bambuddy, catalogue()), shared, shared=False)
+    out = await slotted(SlotPresets(bambuddy, catalogue()), unslotted, shared=False)
 
     # The first slot keeps the shared preset; each repeat refs its own.
     assert out.filament_presets == [
@@ -107,7 +107,7 @@ async def test_repeats_of_one_preset_ref_distinct_presets_inheriting_it(
         {"name": f"{PLA} (ScadBuddy slot 3)", "preset_type": "filament", "setting": stub(3)},
     ]
     # Everything but the filaments is the plan as it was.
-    assert out.model_dump(exclude={"filament_presets"}) == shared.model_dump(
+    assert out.model_dump(exclude={"filament_presets"}) == unslotted.model_dump(
         exclude={"filament_presets"}
     )
 
@@ -169,20 +169,20 @@ async def test_a_preset_that_cannot_be_made_leaves_the_shared_ref(
         route.mock(side_effect=answer)
     else:
         route.mock(return_value=answer)
-    shared = plan(STANDARD, STANDARD)
+    unslotted = plan(STANDARD, STANDARD)
 
-    out = await slotted(SlotPresets(bambuddy, catalogue()), shared, shared=True)
+    out = await slotted(SlotPresets(bambuddy, catalogue()), unslotted, shared=True)
 
-    assert out == shared
+    assert out == unslotted
 
 
 @respx.mock
 async def test_an_unreadable_list_leaves_the_shared_ref(bambuddy: BambuddyClient) -> None:
     respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(502))
     create = creates()
-    shared = plan(STANDARD, STANDARD)
+    unslotted = plan(STANDARD, STANDARD)
 
-    assert await slotted(SlotPresets(bambuddy, catalogue()), shared, shared=True) == shared
+    assert await slotted(SlotPresets(bambuddy, catalogue()), unslotted, shared=True) == unslotted
     assert not create.called
 
 
@@ -229,9 +229,9 @@ async def test_a_cloud_user_preset_is_left_shared_and_nothing_is_written(
     create = creates()
     cloud = PresetRef(source="cloud", id="PFUS123")
     names = catalogue(PresetChoice(ref=cloud, name="My cloud PLA"))
-    shared = plan(cloud, cloud)
+    unslotted = plan(cloud, cloud)
 
-    assert await slotted(SlotPresets(bambuddy, names), shared, shared=True) == shared
+    assert await slotted(SlotPresets(bambuddy, names), unslotted, shared=True) == unslotted
     assert not create.called
 
 
