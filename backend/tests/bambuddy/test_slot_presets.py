@@ -247,12 +247,11 @@ async def test_distinct_refs_of_one_name_share_it_when_no_preset_could_be_made(
     names = catalogue(
         PresetChoice(ref=first, name="My cloud PLA"), PresetChoice(ref=second, name="My cloud PLA")
     )
-    slots = SlotPresets(bambuddy, names)
 
-    out = await slots.plan(plan(first, second))
+    out, shared = await SlotPresets(bambuddy, names).planned(plan(first, second))
 
     assert out.filament_presets == [first, second]
-    assert slots.shares_a_name(out)
+    assert shared
 
 
 @respx.mock
@@ -261,22 +260,46 @@ async def test_a_slot_preset_that_could_not_be_made_still_shares_a_name(
 ) -> None:
     listed()
     respx.post(f"{API}/local-presets/").mock(return_value=httpx.Response(403))
-    slots = SlotPresets(bambuddy, catalogue())
 
-    assert slots.shares_a_name(await slots.plan(plan(STANDARD, STANDARD)))
+    _, shared = await SlotPresets(bambuddy, catalogue()).planned(plan(STANDARD, STANDARD))
+
+    assert shared
 
 
 @respx.mock
 async def test_slots_on_presets_of_their_own_share_no_name(bambuddy: BambuddyClient) -> None:
     listed()
     creates()
-    slots = SlotPresets(bambuddy, catalogue())
 
-    assert not slots.shares_a_name(await slots.plan(plan(STANDARD, STANDARD, STANDARD)))
+    out, shared = await SlotPresets(bambuddy, catalogue()).planned(
+        plan(STANDARD, STANDARD, STANDARD)
+    )
+
+    assert len({ref.id for ref in out.filament_presets}) == 3
+    assert not shared
 
 
-def test_one_slot_shares_no_name(bambuddy: BambuddyClient) -> None:
-    assert not SlotPresets(bambuddy, catalogue()).shares_a_name(plan(STANDARD))
+@pytest.mark.parametrize(
+    "other",
+    [PresetRef(source="cloud", id="GFSA00_14"), PresetRef(source="local", id="7")],
+    ids=["cloud", "local"],
+)
+async def test_a_ref_the_catalogue_does_not_name_may_share_one(
+    bambuddy: BambuddyClient, other: PresetRef
+) -> None:
+    """#4655 review: its name cannot be compared, so the guard reads the slice rather
+    than trust ``source:id`` to be distinct (a ``cloud`` system ref may be the
+    ``standard`` preset beside it)."""
+    distinct, shared = await SlotPresets(bambuddy, catalogue()).planned(plan(STANDARD, other))
+
+    assert distinct.filament_presets == [STANDARD, other]
+    assert shared
+
+
+async def test_one_slot_shares_no_name(bambuddy: BambuddyClient) -> None:
+    other = PresetRef(source="cloud", id="GFSA00_14")
+    for one in (plan(STANDARD), plan(other)):
+        assert (await SlotPresets(bambuddy, catalogue()).planned(one))[1] is False
 
 
 def test_slot_presets_are_never_offered_in_the_catalogue() -> None:

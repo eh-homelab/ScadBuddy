@@ -100,27 +100,32 @@ class SlotPresets:
     async def plan(self, plan: SlicePlan) -> SlicePlan:
         """``plan`` with every repeat of a preset name after its first on its slot's own
         preset; ``plan`` itself when nothing repeats or nothing could be made."""
+        return (await self.planned(plan))[0]
+
+    async def planned(self, plan: SlicePlan) -> tuple[SlicePlan, bool]:
+        """:meth:`plan`, and whether two of its slots may still reach the CLI under one
+        name: a repeat whose own preset could not be made, or a ref the catalogue does
+        not name, whose name cannot be compared. Only then can the CLI have dropped the
+        tower, so only then is the slice read for it (``prime_tower.tower_dropped``,
+        #4649, #4655 review)."""
         seen: set[str] = set()
         refs: list[PresetRef] = []
+        shared = False
         for slot, ref in enumerate(plan.filament_presets, start=1):
             name = self._name(ref)
+            unnamed = ref.source != "standard" and (ref.source, ref.id) not in self._names
+            shared = shared or unnamed
             if name not in seen:
                 seen.add(name)
                 refs.append(ref)
                 continue
-            refs.append(await self._own(ref, name, slot) or ref)
+            own = await self._own(ref, name, slot)
+            shared = shared or own is None
+            refs.append(own or ref)
+        shared = shared and len(refs) > 1
         if refs == plan.filament_presets:
-            return plan
-        return plan.model_copy(update={"filament_presets": refs})
-
-    def shares_a_name(self, plan: SlicePlan) -> bool:
-        """Whether two of ``plan``'s slots still reach the CLI under one name, as
-        :meth:`plan` compares them: a slot whose own preset could not be made. Only
-        then can the CLI have dropped the tower, so only then is the slice read for it
-        (``prime_tower.tower_dropped``, #4649)."""
-        made = {(ref.source, ref.id): name for name, ref in self._made.items()}
-        names = [made.get((ref.source, ref.id)) or self._name(ref) for ref in plan.filament_presets]
-        return len(set(names)) < len(names)
+            return plan, shared
+        return plan.model_copy(update={"filament_presets": refs}), shared
 
     async def _own(self, ref: PresetRef, base: str, slot: int) -> PresetRef | None:
         name = slot_preset_name(base, slot)
