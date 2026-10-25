@@ -7,7 +7,7 @@
 # the service failed before any test ran. A digest whose every blob the mirror holds
 # cannot do that.
 #
-# Without --check (the `lint` job, no network): every `image:` naming postgres is
+# Without --check (the `lint` job, no network): every `image:` of the postgres image is
 # mirror.gcr.io/library/postgres:17@sha256:<64 hex>, and all of them the same digest.
 # With --check (the weekly postgres-pin.yml): also that the mirror holds every blob of
 # the pin's linux/amd64 image, and that `17` on the mirror still points at the pin. A
@@ -23,7 +23,7 @@ if [ "$#" = 0 ]; then
 fi
 
 image='mirror.gcr.io/library/postgres:17'
-lines="$(grep -HnE '^[[:space:]]*image:.*postgres' "$@")" || {
+lines="$(grep -HnE '^[[:space:]]*image:.*(library/postgres|[/[:space:]]postgres)[:@]' "$@")" || {
   echo "no postgres service image in $*" >&2; exit 2
 }
 
@@ -84,7 +84,9 @@ fi
 echo "the mirror holds every blob of the pin's linux/amd64 image"
 
 tag="$(curl -fsS --retry 3 -o /dev/null -D - -H "Accept: $index_types" "$registry/manifests/17" \
-  | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }')"
+  | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }')" || {
+  echo "could not read postgres:17 from the mirror" >&2; exit 2
+}
 if [ -z "$tag" ]; then echo "the mirror gave no digest for postgres:17" >&2; exit 2; fi
 echo "postgres:17 on the mirror: $tag"
 if [ "$tag" != "$pin" ]; then

@@ -34,6 +34,10 @@ fails "a bare tag" "$work/bare.yml:5:" "$work/ci.yml" "$work/bare.yml"
 service "$work/hub.yml" "postgres:17@$pin"
 fails "a Docker Hub image" "$work/hub.yml:5:" "$work/hub.yml"
 
+# Another image whose name merely contains postgres is not the service's.
+printf 'jobs:\n  test:\n    services:\n      exporter:\n        image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0\n' >"$work/exporter.yml"
+"$here/postgres-pin.sh" "$work/ci.yml" "$work/exporter.yml" >/dev/null
+
 service "$work/split.yml" "mirror.gcr.io/library/postgres:17@$other"
 fails "two digests" "$work/split.yml:5:" "$work/ci.yml" "$work/split.yml"
 
@@ -89,6 +93,12 @@ mv "$work/amd64-a" "$reg/manifests/sha256:amd64-a"
 mv "$reg/manifests/$pin" "$work/index"
 fails "an index that cannot be read" "could not read the index $pin" --check "$work/ci.yml"
 mv "$work/index" "$reg/manifests/$pin"
+
+: >"$reg/manifests/17.digest"
+fails "a tag the mirror gives no digest for" "the mirror gave no digest for postgres:17" --check "$work/ci.yml"
+printf '{"manifests":[{"digest":"sha256:arm","platform":{"os":"linux","architecture":"arm64"}}]}' >"$reg/manifests/$other"
+echo "$other" >"$reg/manifests/17.digest"
+fails "a moved tag with no linux/amd64 image" "$other (no linux/amd64 manifest)" --check "$work/ci.yml"
 
 image "$other" sha256:amd64-b sha256:config-b sha256:layer-1 sha256:layer-3
 echo "$other" >"$reg/manifests/17.digest"
