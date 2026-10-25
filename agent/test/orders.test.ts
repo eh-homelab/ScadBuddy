@@ -57,6 +57,7 @@ describe('order tools (#4249)', () => {
       'order_ship',
       'order_close',
       'order_cancel',
+      'order_reopen',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -75,6 +76,7 @@ describe('order tools (#4249)', () => {
       order_ship: 'outward',
       order_close: 'outward',
       order_cancel: 'outward',
+      order_reopen: 'outward',
     })
   })
 
@@ -197,6 +199,33 @@ describe('order tools (#4249)', () => {
     await tool('order_cancel').execute({ order_id: ORDER, item_id: ITEM }, ctx())
     expect(calls).toEqual(['ORDER {"reason":"changed mind"}', 'ITEM'])
     expect(tool('order_cancel').summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+  })
+
+  it('reopens the order or one item, and unarchives a customer', async () => {
+    const calls: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/reopen`, () => {
+        calls.push('ORDER')
+        return HttpResponse.json({ id: ORDER, status: 'shipped' })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/reopen`, () => {
+        calls.push('ITEM')
+        return HttpResponse.json({ id: ITEM, status: 'approved' })
+      }),
+      http.post(`${BACKEND}/api/v1/customers/${CUSTOMER}/unarchive`, () => {
+        calls.push('CUSTOMER')
+        return HttpResponse.json({ id: CUSTOMER, archived_at: null })
+      }),
+    )
+    await tool('order_reopen').execute({ order_id: ORDER }, ctx())
+    await tool('order_reopen').execute({ order_id: ORDER, item_id: ITEM }, ctx())
+    await tool('customer_upsert').execute({ customer_id: CUSTOMER, unarchive: true }, ctx())
+    expect(calls).toEqual(['ORDER', 'ITEM', 'CUSTOMER'])
+    expect(tool('order_reopen').summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+    await expect(tool('customer_upsert').execute({ unarchive: true }, ctx())).rejects.toThrow('customer_id')
+    await expect(
+      tool('customer_upsert').execute({ customer_id: CUSTOMER, archive: true, unarchive: true }, ctx()),
+    ).rejects.toThrow('both')
   })
 
   it('records, edits and accepts an attempt, and ships', async () => {

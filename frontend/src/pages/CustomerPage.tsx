@@ -62,7 +62,24 @@ export function CustomerPage() {
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{customer.display_name}</h1>
           {customer.archived_at ? (
-            <span className="text-sm text-muted-foreground">Archived {timeAgo(customer.archived_at)}</span>
+            <>
+              <span className="text-sm text-muted-foreground">Archived {timeAgo(customer.archived_at)}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true)
+                  api
+                    .unarchiveCustomer(customer.id)
+                    .then((next) => view.setData(next))
+                    .catch((err: unknown) => setError(refusalText(err)))
+                    .finally(() => setBusy(false))
+                }}
+              >
+                Unarchive
+              </Button>
+            </>
           ) : (
             <Button
               variant="ghost"

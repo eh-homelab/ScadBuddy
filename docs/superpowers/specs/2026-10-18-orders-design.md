@@ -113,7 +113,7 @@ every feature is (F16). Routes are `api/orders.py` and `api/customers.py`.
   `default_shipping`, `default_billing`, `position`.
 
 A customer is never deleted while an order names them; `archived_at` hides them from
-pickers. A customer's own record is editable by anyone who can edit the library
+pickers, and `POST /customers/{id}/unarchive` clears it, putting them back. A customer's own record is editable by anyone who can edit the library
 (there is one user, as everywhere in ScadBuddy; the agent is a principal, §7.3).
 
 ### 3.2 Orders
@@ -204,7 +204,12 @@ unique index), the measured facts and the arithmetic:
 - `unit_cost_minor`, `unit_price_minor`, `quantity`, `total_minor`.
 
 The item's price is its accepted quote's `total_minor`. The order's subtotal is the sum
-of accepted quotes; the total adds the charges. An item with no accepted quote has no
+of accepted quotes; the total adds the charges. As built, a draft adds up as it is
+entered: before an item's quote is accepted, the totals count it at its newest quote's
+`unit_price_minor` times its quantity now. `OrderTotals.pending_minor` is the part of
+the subtotal no accepted quote stands behind yet, and `unpriced_items` lists the items
+with no quote, which are in no sum. Accepting the order still needs an accepted quote
+on every item. An item with no accepted quote has no
 price, and an order with such an item cannot be accepted (§3.5). A `manual` quote is a
 person typing a price; it is recorded as such.
 
@@ -229,6 +234,33 @@ every item is settled", the "any item past `approved`" above restricted to the s
 has (an attempt is the only way past `approved` there); phase 3's `queued` writer must widen
 `orders/lifecycle.py` `derive` to "any item `queued` or beyond, or with an attempt", so the
 derivation keeps meaning "any item past `approved`" (Ruling 4 of the phase 1 plan).
+
+**Undo.** A close and a cancel can be taken back, since a person can press either by
+mistake. Each one is recorded on the audit line, and the rows decide the result, never
+the body.
+- `POST /orders/{id}/reopen` undoes a close or a cancel, in one status write and one
+  audit row. It clears `closed_at` and `cancelled_at` and holds the quotes' sliced files
+  again.
+  - A closed order goes back to the status `derive` gives its rows: `shipped`, as it
+    closed, unless a row changed since.
+  - A cancelled order goes back to the status it was cancelled from, which the cancel's
+    audit row records with the items it took. Those items come back as an item's reopen
+    brings one back; an item cancelled on its own before stays cancelled. Then the
+    order's status follows from its rows. On an accepted order, an item with no
+    accepted quote stays cancelled.
+- `POST /orders/{id}/items/{item}/reopen` takes a cancelled item back to the state its
+  quotes and attempts give it: `approved` with an accepted quote (`failed` when its
+  latest attempt failed), `quoted` with a quote not accepted, else `draft`. The order's
+  status follows. It is refused once the order has ended, and on an order past `quoted`
+  for an item with no accepted quote (`item_not_priced`), since an accepted order holds
+  priced items only.
+- Both reopens are allowed while the order is on hold, as a cancel is: undoing a
+  mistake does not advance the order.
+- A cancel's or a close's release drops its holds after its commit, under the orders'
+  row locks and only for quotes still released then (`OrderStore.drop_released_holds`),
+  so a reopen racing it keeps the holds it took.
+- A file the sweep took while a quote was released stays gone. The hold taken again
+  keeps nothing, and the item needs a new quote before it prints.
 
 **The close rule.** `orders.status` is never written directly past `accepted`. The
 store derives `in_production`, `ready` and whether `shipped` and `closed` are allowed
@@ -267,6 +299,7 @@ agent's follow a 202.
 | `POST /orders/{id}/items/{item}/quotes/{quote}/accept` | pins the quote; the item becomes `approved` |
 | `POST /orders/{id}/items/{item}/quotes` with `{unit_price_minor, label?}` | a typed price: one `manual` line, `unit_cost_minor = unit_price_minor`, the item's quantity as it is now (Ruling 1 of the phase 1 plan) |
 | `POST /orders/{id}/accept`, `/cancel`, `/hold`, `/release`, `/close` | lifecycle (§3.5); `accept` publishes the event |
+| `POST /orders/{id}/reopen`, `POST /orders/{id}/items/{item}/reopen`, `POST /customers/{id}/unarchive` | §3.5's undo and §3.1's: a closed order, a cancelled item, an archived customer back |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
 | `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order or an item; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. An attempt's own attachments (`…/fulfilments/{f}/attachments`) wait for the print path |
@@ -810,6 +843,20 @@ usable on its own.
 5. **Bambuddy mirrors** (§8) (#4253): the seam, nested projects, archive copy-in, spool import.
 6. **Declared pages** (§9) (#4254): its own spec, after phase 1 has extracted the generic
    table, filter and drawer components the page host would offer.
+
+### Where it stands (2026-10-24)
+
+- Phases 1 and 2 are merged (#4249, #4250).
+- Phase 3 is being built order-entry first, ahead of the print path:
+  - §6.2's attachments on orders and line items, with an item's delivered photo and
+    picture (PR #4661).
+  - §3.5's undo of a close and a cancel (a closed or cancelled order, a cancelled
+    item), a customer's unarchive, and a draft's running total (PR #4666, stacked on it).
+- Next, still order entry:
+  - adding a line item from the order page;
+  - the unit price and an inline typed price in the items table;
+  - making a customer inside the New order dialog.
+- Then the rest of phase 3: the print path, attempts' own attachments, and the costs view.
 
 ## 12. Open decisions
 
