@@ -777,24 +777,28 @@ class OrderStore:
     def hold_quote_files(self, conn: Conn, holder_kind: str, quotes: Sequence[Quote]) -> None:
         """Hold each quote's sliced files (every plate's ``blob_key`` and its
         ``sliced_blob_key``) under ``(holder_kind, <quote id>)``, in the caller's
-        transaction: a rollback leaves no hold, and a commit leaves every one."""
+        transaction: a rollback leaves no hold, and a commit leaves every one. A row a
+        failed release left behind is taken over with a fresh ``created_at`` (and locked
+        until commit), so the reaper's grace counts from this hold, never the old one."""
         for quote in quotes:
             keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
             for key in sorted(k for k in keys if isinstance(k, str) and k):
                 conn.execute(
                     "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
-                    " ON CONFLICT DO NOTHING",
+                    " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
                     (key, holder_kind, quote.id),
                 )
 
     def reopen_order_row(self, conn: Conn, order_id: str, status: OrderStatus) -> Order:
         """A closed or cancelled order back to ``status``, its ``closed_at`` and
-        ``cancelled_at`` cleared."""
+        ``cancelled_at`` cleared, and ``accepted_at`` too when ``status`` is one before
+        acceptance (an accepted order that falls back to ``draft``)."""
         row = conn.execute(
             "UPDATE orders SET status = %s, closed_at = NULL, cancelled_at = NULL,"
+            " accepted_at = CASE WHEN %s IN ('draft', 'quoted') THEN NULL ELSE accepted_at END,"
             " updated_at = now()"
             f" WHERE id = %s RETURNING {_ORDER}",
-            (status, order_id),
+            (status, status, order_id),
         ).fetchone()
         if row is None:
             raise OrderNotFoundError(order_id)

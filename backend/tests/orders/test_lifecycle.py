@@ -1151,18 +1151,55 @@ def test_a_reopen_racing_the_late_release_keeps_its_holds(shop: Shop) -> None:
         shop.rows.hold_quote_files(conn, QUOTE_HOLDER, accepted)
         late = threading.Thread(target=told, args=(deferred[0],))
         late.start()
-        assert shop.refs is not None
-        deadline = time.monotonic() + 10
-        with shop.refs.pool.connection() as watch:
-            while True:
-                waiting = watch.execute(
-                    "SELECT count(*) AS n FROM pg_stat_activity"
-                    " WHERE wait_event_type = 'Lock' AND datname = current_database()"
-                ).fetchone()
-                if waiting is not None and waiting["n"] > 0:
-                    break
-                assert late.is_alive() and time.monotonic() < deadline
-                time.sleep(0.01)
+        _wait_for_a_lock_wait(shop, late)
     late.join(timeout=10)
     assert not late.is_alive()
     assert _held_keys(shop) == {quote.id: {"quote-a", "quote-locked"}}
+
+
+def _wait_for_a_lock_wait(shop: Shop, thread: threading.Thread) -> None:
+    """Until another session waits on a lock (the thread is blocked behind ours)."""
+    assert shop.refs is not None
+    deadline = time.monotonic() + 10
+    with shop.refs.pool.connection() as watch:
+        while True:
+            waiting = watch.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity"
+                " WHERE wait_event_type = 'Lock' AND datname = current_database()"
+            ).fetchone()
+            if waiting is not None and waiting["n"] > 0:
+                return
+            assert thread.is_alive() and time.monotonic() < deadline
+            time.sleep(0.01)
+
+
+def test_a_reopen_takes_over_a_lost_releases_holds_fresh(shop: Shop) -> None:
+    """A release that never ran leaves its holds, past the reaper's grace. A reopen takes
+    them over with a fresh `created_at` and locks them, so a reaper pass while the
+    reopen is in flight waits for it and keeps them."""
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item, key="quote-lost")
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    shop.lifecycle._told = lambda change: None  # type: ignore[method-assign]
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    _age(shop, quote.id, timedelta(hours=2))
+    accepted = shop.rows.quotes(item.id)
+    assert shop.refs is not None
+    reaped: list[int] = []
+    with shop.rows.transaction() as conn:
+        # A reopen in flight: the order locked, the item back, the holds taken again.
+        shop.rows.lock_order(conn, order.id)
+        conn.execute("UPDATE order_items SET status = 'approved' WHERE id = %s", (item.id,))
+        shop.rows.hold_quote_files(conn, QUOTE_HOLDER, accepted)
+        reaper = threading.Thread(
+            target=lambda: reaped.append(
+                reap_quote_holds(shop.refs, shop.rows, grace=timedelta(hours=1))  # type: ignore[arg-type]
+            )
+        )
+        reaper.start()
+        _wait_for_a_lock_wait(shop, reaper)
+    reaper.join(timeout=10)
+    assert not reaper.is_alive()
+    assert reaped == [0]
+    assert _held_keys(shop) == {quote.id: {"quote-a", "quote-lost"}}
