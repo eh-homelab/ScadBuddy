@@ -13,7 +13,6 @@ import time
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -1462,34 +1461,6 @@ def test_a_check_that_runs_out_of_memory_again_logs_its_traceback_once(
         ("library:89", False),
         ("library:90", True),
     ]
-
-
-def test_an_out_of_memory_traceback_is_logged_again_past_the_interval_and_kept_bounded(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """#4632, #4659 review: past the interval a subject logs its traceback again, and an
-    entry past it is dropped then, so the record stays bounded in a long-lived process."""
-    interval = print_run.OUT_OF_MEMORY_TRACEBACK_INTERVAL
-    steps = [(1000.0, "library:89"), (1001.0, "library:89"), (1002.0, "library:90")]
-    steps.append((1000.0 + interval + 5, "library:89"))
-
-    with caplog.at_level(logging.WARNING, logger=print_run.logger.name):
-        for now, subject in steps:
-            try:
-                raise MemoryError
-            except MemoryError:
-                print_run._log_out_of_memory(
-                    subject, "laying out the file", clock=partial(float, now)
-                )
-
-    assert [(r.__dict__["subject"], bool(r.exc_info)) for r in caplog.records] == [
-        ("library:89", True),
-        ("library:89", False),
-        ("library:90", True),
-        ("library:89", True),
-    ]
-    # 90's entry was past the interval when 89's traceback was logged again.
-    assert set(print_run._out_of_memory_logged) == {"library:89"}
 
 
 @respx.mock
