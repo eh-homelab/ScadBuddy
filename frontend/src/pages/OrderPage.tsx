@@ -14,7 +14,7 @@ import { itemPrice } from '../components/orders/price'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
-import { useSliceQuotes, type SliceQuoteRuns } from '../components/orders/useSliceQuotes'
+import { useSliceQuotes } from '../components/orders/useSliceQuotes'
 import { RecordDrawer } from '../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -68,10 +68,23 @@ export function OrderPage() {
     // Replaced, so the hash form becomes the search form and Back leaves the order.
     setSearch(next, { replace: true })
   }
-  const slices = useSliceQuotes(id, reload)
+  const slices = useSliceQuotes(id, view.data?.items, reload)
   // Scrolled to once per item named, when its row first renders: not on every reload.
   const scrolled = useRef<string | null>(null)
   const loaded = view.data !== undefined
+  // A link to an item the order does not have names nothing: it leaves the address bar.
+  const dead = openItem !== null && view.data !== undefined && !view.data.items.some((i) => i.id === openItem)
+  useEffect(() => {
+    if (!dead) return
+    setSearch(
+      (before) => {
+        const next = new URLSearchParams(before)
+        next.delete(ITEM_PARAM)
+        return next
+      },
+      { replace: true },
+    )
+  }, [dead, setSearch])
   useEffect(() => {
     if (!loaded || !openItem || scrolled.current === openItem) return
     const row = document.getElementById(itemAnchor(openItem))
@@ -404,7 +417,7 @@ function ItemDrawer({
 }: {
   detail: OrderDetail
   item: OrderItemDetail
-  slices: { runs: SliceQuoteRuns; start: ReturnType<typeof useSliceQuotes>['start'] }
+  slices: Pick<ReturnType<typeof useSliceQuotes>, 'runs' | 'start' | 'dismiss'>
   onClose: () => void
   onChanged: () => void
 }) {
@@ -526,7 +539,11 @@ function ItemDrawer({
         )}
       </dl>
       <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item}
-        slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body) }}
+        slice={{
+          run: slices.runs.get(item.id),
+          start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)),
+          dismiss: () => slices.dismiss(item.id),
+        }}
       />
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} />
       <OrderAttachments

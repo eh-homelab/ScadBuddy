@@ -136,10 +136,11 @@ describe('OrderPage (#4249)', () => {
       expect(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).toHaveAttribute('aria-current', 'true')
     })
 
-    it('opens nothing for an item the order does not have', async () => {
+    it('opens nothing for an item the order does not have, and drops it from the URL', async () => {
       render(ORDER_DRAFT, '?item=not-an-item')
       await screen.findByRole('heading', { name: 'ORD-2026-3' })
       expect(screen.queryByRole('dialog')).toBeNull()
+      await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(new RegExp(`^/orders/${ORDER_DRAFT}$`)))
     })
   })
 })

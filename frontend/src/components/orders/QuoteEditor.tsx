@@ -11,6 +11,10 @@ import { parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
 import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
 
+function startTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 /** A quote line's kind as the drawer names it (§3.4, #4250 Ruling 5). */
 const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
   filament: 'Filament',
@@ -51,7 +55,7 @@ export function QuoteEditor({
   /** What a slice quote slices: the item's output and its colours' filaments. */
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
-  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => void }
+  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => void; dismiss: () => void }
 }) {
   const [slicing, setSlicing] = useState(false)
   const [price, setPrice] = useState('')
@@ -134,12 +138,17 @@ export function QuoteEditor({
       {slice?.run && !slice.run.error && (
         <p role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
-          Slicing every plate and pricing it, since {new Date(slice.run.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}…
+          {slice.run.detached
+            ? `Still slicing and pricing, since ${startTime(slice.run.startedAt)}: the quote shows here when it lands.`
+            : `Slicing every plate and pricing it, since ${startTime(slice.run.startedAt)}…`}
         </p>
       )}
       {slice?.run?.error && (
-        <p role="alert" className="text-[13px] text-warn" data-testid="quote-error">
+        <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn" data-testid="quote-error">
           The slice quote failed: {slice.run.error}
+          <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
+            Dismiss
+          </Button>
         </p>
       )}
       {editable && item && slice && (

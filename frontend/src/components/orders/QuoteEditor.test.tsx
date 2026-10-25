@@ -18,7 +18,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     const start = vi.fn<(body: SliceQuoteRequest) => void>()
     const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 })
     const { user } = renderPage(
-      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start }} />,
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} />,
     )
     await user.click(screen.getByTestId('quote-from-slice'))
     const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
@@ -54,16 +54,17 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
         editable
         onChanged={vi.fn()}
         item={draft}
-        slice={{ run: { startedAt: Date.now(), error: null }, start: vi.fn() }}
+        slice={{ run: { startedAt: Date.now(), error: null, known: [] }, start: vi.fn(), dismiss: vi.fn() }}
       />,
     )
     expect(screen.getByTestId('quote-running')).toHaveTextContent(/Slicing every plate/)
     expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
   })
 
-  it('shows a failed slice quote, and offers another (#4693)', () => {
+  it('shows a failed slice quote, and offers another and a dismiss (#4693)', async () => {
+    const dismiss = vi.fn()
     const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
-    renderPage(
+    const { user } = renderPage(
       <QuoteEditor
         orderId={ORDER_DRAFT}
         itemId={ITEM_DRAFT}
@@ -73,11 +74,13 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
         editable
         onChanged={vi.fn()}
         item={draft}
-        slice={{ run: { startedAt: Date.now(), error: 'No printer.' }, start: vi.fn() }}
+        slice={{ run: { startedAt: Date.now(), error: 'No printer.', known: [] }, start: vi.fn(), dismiss }}
       />,
     )
     expect(screen.getByTestId('quote-error')).toHaveTextContent('No printer.')
     expect(screen.getByTestId('quote-from-slice')).toBeEnabled()
+    await user.click(within(screen.getByTestId('quote-error')).getByRole('button', { name: 'Dismiss' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
   })
 
   it('shows a slice quote’s lines and the digest of its file', () => {
