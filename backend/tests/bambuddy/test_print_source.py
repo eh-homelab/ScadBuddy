@@ -1236,3 +1236,41 @@ async def test_every_reader_of_a_fetch_hands_in_its_client() -> None:
             await source.fetched_3mf(other)
     source.release.set()
     assert await reading == b"not a 3mf"
+
+
+async def test_a_fresh_output_sources_slots_are_read_from_its_own_3mf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#4696: a quote's plan builds its source fresh and reads no slots before planning,
+    so every plate asked Bambuddy for the same large copy at once and all timed out.
+    ``known_slots`` reads them from the output's own 3MF, for every plate."""
+    from scadbuddy.bambuddy.print_run import known_slots
+    from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+
+    red = ColourPart(1, "Red", "#FF0000", trimesh.creation.box(extents=(10, 10, 4)))
+    blue = ColourPart(2, "Blue", "#0000FF", trimesh.creation.box(extents=(10, 10, 4)))
+    path = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts((red,), (1,)), PlateParts((blue,), (2,))],
+        ["#FF0000", "#0000FF"],
+        path,
+        thumbnails=None,
+    )
+    payload = path.read_bytes()
+
+    async def own_3mf(store: object, meta: object) -> bytes:
+        return payload
+
+    monkeypatch.setattr(print_source, "read_3mf", own_3mf)
+    meta: Any = _Meta()
+    unused: Any = object()
+    source = OutputSource(store=unused, uploads=unused, meta=meta, settings=StoredSettings())
+    assert source.local is None
+
+    known = await known_slots(source)
+
+    assert known is not None
+    used = {
+        plate: [f.slot_id for f in known(plate).filaments if f.used_in_plate] for plate in (1, 2)
+    }
+    assert used == {1: [1], 2: [2]}
