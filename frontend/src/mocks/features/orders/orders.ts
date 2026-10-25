@@ -142,6 +142,14 @@ function detail(order: Order): OrderDetail {
   }
 }
 
+/** `Lifecycle._reopened_status`: what a cancelled item comes back as, and whether priced. */
+function reopenedStatus(item: OrderItem): [OrderItem['status'], boolean] {
+  const quotes = quotesOf(item.id)
+  const accepted = quotes.some((q) => q.accepted)
+  if (accepted) return [attemptsOf(item.id).at(-1)?.outcome === 'failed' ? 'failed' : 'approved', true]
+  return [quotes.length > 0 ? 'quoted' : 'draft', false]
+}
+
 /** The backend's answer for a `Refused`: 404 for a missing row, 409 typed by the slug otherwise. */
 export function refused(request: Request, error: unknown) {
   if (error instanceof FilamentsRefused) return fieldProblem(request, 'filaments', error.message)
@@ -410,14 +418,16 @@ export const handlers = [
         const cancel = [...state.events].reverse().find((e) => e.order_id === order.id && e.kind === 'order.status' && e.detail.to === 'cancelled')
         const from = cancel?.detail.from_status as OrderStatus | undefined
         base = from && (OPEN_FOR_EDITS.has(from) || DERIVED.has(from)) ? from : order.accepted_at ? 'accepted' : 'draft'
-        for (const id of (cancel?.detail.items as string[] | undefined) ?? []) {
-          const found = state.items.find((i) => i.id === id && i.order_id === order.id && i.status === 'cancelled')
-          if (!found) continue
-          const quotes = quotesOf(found.id)
-          const accepted = quotes.some((q) => q.accepted)
-          if (DERIVED.has(base) && !accepted) continue
-          const latest = attemptsOf(found.id).at(-1)
-          found.status = accepted ? (latest?.outcome === 'failed' ? 'failed' : 'approved') : quotes.length > 0 ? 'quoted' : 'draft'
+        const taken = ((cancel?.detail.items as string[] | undefined) ?? [])
+          .map((id) => state.items.find((i) => i.id === id && i.order_id === order.id && i.status === 'cancelled'))
+          .filter((i): i is OrderItem => i !== undefined)
+          .map((i) => [i, ...reopenedStatus(i)] as const)
+        const othersOpen = itemsOf(order.id).some((i) => i.status !== 'cancelled')
+        // Nothing would come back priced: reopened open for edits, with every item taken.
+        if (DERIVED.has(base) && !othersOpen && !taken.some(([, , priced]) => priced)) base = 'draft'
+        for (const [found, status, priced] of taken) {
+          if (DERIVED.has(base) && !priced) continue
+          found.status = status
           restored.push(found.id)
         }
         if (DERIVED.has(base)) base = 'accepted'
@@ -573,13 +583,11 @@ export const handlers = [
       notEnded(order)
       const found = itemOf(order, String(params.item))
       if (found.status !== 'cancelled') throw new Refused('item_not_cancelled', `item ${found.id} is ${found.status}: only a cancelled item reopens`, [found.id])
-      const quotes = quotesOf(found.id)
-      const accepted = quotes.some((q) => q.accepted)
-      if (!OPEN_FOR_EDITS.has(order.status) && !accepted) {
+      const [status, priced] = reopenedStatus(found)
+      if (!OPEN_FOR_EDITS.has(order.status) && !priced) {
         throw new Refused('item_not_priced', `item ${found.id} has no accepted quote, and order ${order.number} is ${order.status}: an accepted order holds priced items only`, [found.id])
       }
-      const latest = attemptsOf(found.id).at(-1)
-      found.status = accepted ? (latest?.outcome === 'failed' ? 'failed' : 'approved') : quotes.length > 0 ? 'quoted' : 'draft'
+      found.status = status
       found.updated_at = now()
       event(order, 'item.reopened', { item_id: found.id, to: found.status })
       rederive(order)

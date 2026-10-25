@@ -1105,3 +1105,24 @@ def test_a_refused_reopen_takes_no_hold(shop: Shop) -> None:
         shop.lifecycle.reopen_order(order.id, BY)
     assert refused.value.slug == "order_not_ended"
     assert _held_keys(shop) == {}
+
+
+def test_a_cancels_late_release_never_drops_a_reopens_holds(shop: Shop) -> None:
+    """The cancel's drop runs after its commit; a reopen that commits first keeps the
+    holds it took (the drop only takes quotes still cancelled when it runs)."""
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item, key="quote-race")
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    told = shop.lifecycle._told
+    deferred: list[Any] = []
+    shop.lifecycle._told = deferred.append  # type: ignore[method-assign, assignment]
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    shop.lifecycle._told = told  # type: ignore[method-assign]
+    shop.lifecycle.reopen_item(order.id, item.id, BY)
+    # The cancel's release, late.
+    told(deferred[0])
+    assert _held_keys(shop) == {quote.id: {"quote-a", "quote-race"}}
+    # Without the reopen, the same release drops them.
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    assert _held_keys(shop) == {}
