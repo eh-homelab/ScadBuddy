@@ -7,6 +7,8 @@ import json
 import logging
 import re
 import zipfile
+import zlib
+from dataclasses import dataclass
 from typing import BinaryIO
 
 from pydantic import BaseModel
@@ -28,6 +30,18 @@ _HEADER_BYTES = 64 * 1024
 #: The CLI's per-plate filament order, and the most of it that is read.
 _SEQUENCE = "Metadata/filament_sequence.json"
 _MAX_SEQUENCE_BYTES = 16 * 1024 * 1024
+#: What reading one corrupt or unsupported member raises (a bad CRC, a truncated or
+#: corrupt deflate stream, an unknown compression, an encrypted entry), as
+#: `printers/nozzle_mapping.py` `read_rack_plan` lists them: the header and the sequence
+#: read as saying nothing then, and never cost a plate its G-code or its rack plan.
+_MEMBER_ERRORS = (
+    zipfile.BadZipFile,
+    OSError,
+    EOFError,
+    NotImplementedError,
+    RuntimeError,
+    zlib.error,
+)
 
 
 def _file(payload: bytes | BinaryIO) -> BinaryIO:
@@ -39,13 +53,18 @@ def _file(payload: bytes | BinaryIO) -> BinaryIO:
     return payload
 
 
-def _gcode(archive: zipfile.ZipFile, plate_id: int) -> bytes | None:
-    """:func:`plate_gcode` in an open archive."""
+def _gcode_name(archive: zipfile.ZipFile, plate_id: int) -> str | None:
+    """``Metadata/plate_<plate_id>.gcode``, else the only plate's; ``None`` for neither."""
     names = [
         name for name in archive.namelist() if re.fullmatch(r"Metadata/plate_\d+\.gcode", name)
     ]
     wanted = f"Metadata/plate_{plate_id}.gcode"
-    name = wanted if wanted in names else (names[0] if len(names) == 1 else None)
+    return wanted if wanted in names else (names[0] if len(names) == 1 else None)
+
+
+def _gcode(archive: zipfile.ZipFile, plate_id: int) -> bytes | None:
+    """:func:`plate_gcode` in an open archive."""
+    name = _gcode_name(archive, plate_id)
     if name is None:
         return None
     # Read no further than the bound, whatever the zip's header claims.
@@ -64,15 +83,24 @@ def plate_gcode(payload: bytes | BinaryIO, plate_id: int) -> bytes | None:
     return _plate_files(payload, plate_id)[0]
 
 
-def _plate_files(payload: bytes | BinaryIO, plate_id: int) -> tuple[bytes | None, list[int]]:
-    """The plate's G-code (:func:`plate_gcode`) and its filament sequence
-    (:func:`_sequence`), read in one pass over the archive."""
+def _plate_files(payload: bytes | BinaryIO, plate_id: int) -> tuple[bytes | None, PrintedFilaments]:
+    """The plate's G-code (:func:`plate_gcode`) and the filaments it prints
+    (:func:`printed_filaments`), read in one pass over the archive."""
     try:
         with zipfile.ZipFile(_file(payload)) as archive:
-            return _gcode(archive, plate_id), _sequence(archive, plate_id)
-    except (zipfile.BadZipFile, KeyError) as error:
+            try:
+                gcode = _gcode(archive, plate_id)
+            except _MEMBER_ERRORS as error:
+                # Only the G-code is lost: the filaments are read from the rest.
+                logger.info(
+                    "the sliced plate's G-code could not be read",
+                    extra={"error": type(error).__name__},
+                )
+                gcode = None
+            return gcode, printed_filaments(archive, plate_id)
+    except (*_MEMBER_ERRORS, KeyError) as error:
         logger.info("the sliced file could not be read", extra={"error": type(error).__name__})
-        return None, []
+        return None, PrintedFilaments()
 
 
 def filament_changes(gcode: bytes) -> int:
@@ -95,7 +123,7 @@ def _sequence(archive: zipfile.ZipFile, index: int) -> list[int]:
         if len(data) > _MAX_SEQUENCE_BYTES:
             return []
         doc = json.loads(data)
-    except (zipfile.BadZipFile, ValueError, RecursionError):
+    except (*_MEMBER_ERRORS, ValueError):
         return []
     plate = doc.get(f"plate_{index}") if isinstance(doc, dict) else None
     sequence = plate.get("sequence") if isinstance(plate, dict) else None
@@ -104,36 +132,66 @@ def _sequence(archive: zipfile.ZipFile, index: int) -> list[int]:
     return [n for n in sequence if isinstance(n, int) and not isinstance(n, bool) and n >= 1]
 
 
-def _header_filaments(gcode: bytes | None) -> list[int]:
-    """The 1-based filaments the G-code's header names (``; filament: 2,3``)."""
-    if gcode is None:
+def _header_filaments(archive: zipfile.ZipFile, plate_id: int) -> list[int]:
+    """The 1-based filaments the plate's G-code header names (``; filament: 2,3``), read
+    from the head of the G-code only; empty when it names none or cannot be read."""
+    name = _gcode_name(archive, plate_id)
+    if name is None:
         return []
-    end = gcode.find(b"; HEADER_BLOCK_END")
-    found = _HEADER_FILAMENTS.search(gcode[: end if end >= 0 else _HEADER_BYTES])
+    try:
+        with archive.open(name) as member:
+            head = member.read(_HEADER_BYTES)
+    except _MEMBER_ERRORS:
+        return []
+    end = head.find(b"; HEADER_BLOCK_END")
+    found = _HEADER_FILAMENTS.search(head[: end if end >= 0 else len(head)])
     if found is None:
         return []
     return [int(n) for n in found.group(1).split(b",") if n.strip().isdigit() and int(n) >= 1]
 
 
-def _printed(gcode: bytes | None, sequence: list[int]) -> tuple[set[int], int | None]:
-    """The filaments a plate prints, and the one it prints first: the sequence's first,
-    else the header's one filament when it names only one; ``None`` when neither says."""
-    printed = set(_header_filaments(gcode)) or set(sequence)
+@dataclass(frozen=True)
+class PrintedFilaments:
+    """The filaments a sliced plate prints, and the one it prints first, as the G-code
+    and ``filament_sequence.json`` say: what ``slice_info.config``'s filament ids are
+    read against (#4711, #4712). Bambu Studio's CLI counts what a plate extrudes before
+    its first filament change as filament 1's, a filament the plate may never load: a
+    plate of one filament is all ``id="1"``, whatever it prints (measured on
+    v02.08.02.61, ``tests/slicing/test_slice_info.py``)."""
+
+    printed: frozenset[int] = frozenset()
+    #: ``None`` when nothing says which is first: the ids are then read as written.
+    first: int | None = None
+
+    def slot(self, written: int) -> int:
+        """The slot ``slice_info.config``'s filament ``id=written`` is: itself when the
+        plate prints it (or nothing says what it prints), else the plate's first."""
+        if not self.printed or self.first is None or written in self.printed:
+            return written
+        return self.first
+
+
+def printed_filaments(archive: zipfile.ZipFile, plate_id: int) -> PrintedFilaments:
+    """Plate ``plate_id``'s :class:`PrintedFilaments`: the header's filaments, else the
+    sequence's; first the sequence's first, else the header's one filament when it names
+    only one, and none when that is not among the filaments printed."""
+    sequence = _sequence(archive, plate_id)
+    printed = frozenset(_header_filaments(archive, plate_id)) or frozenset(sequence)
     first = sequence[0] if sequence else (next(iter(printed)) if len(printed) == 1 else None)
-    return printed, first
+    if first not in printed:
+        # The sequence and the header disagree: nothing says which filament is first.
+        first = None
+    return PrintedFilaments(printed=printed, first=first)
 
 
-def _on_printed(grams: dict[int, float], printed: set[int], first: int | None) -> dict[int, float]:
-    """``grams`` on the filaments the plate prints (#4711). Bambu Studio's CLI counts
-    what a plate extrudes before its first filament change as filament 1's, a filament
-    the plate may never load: a plate of one filament is all ``id="1"``, whatever it
-    prints (measured on v02.08.02.61, ``tests/slicing/test_slice_info.py``). Grams on a
-    filament the plate does not print are its first filament's."""
-    if not printed or first is None or all(slot in printed for slot in grams):
+def _on_printed(grams: dict[int, float], printed: PrintedFilaments) -> dict[int, float]:
+    """``grams`` on the filaments the plate prints (#4711): grams on a filament it does
+    not print are its first filament's."""
+    if all(printed.slot(slot) == slot for slot in grams):
         return grams
     moved: dict[int, float] = {}
     for slot, used in grams.items():
-        key = slot if slot in printed else first
+        key = printed.slot(slot)
         moved[key] = round(moved.get(key, 0.0) + used, 2)
     return dict(sorted(moved.items()))
 
@@ -171,8 +229,8 @@ def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
         plate = found
     index = plate.index
     grams_by_slot = {slot.slot_id: slot.used_grams for slot in read.sliced.get(index, [])}
-    gcode, sequence = _plate_files(payload, index)
-    grams_by_slot = _on_printed(grams_by_slot, *_printed(gcode, sequence))
+    gcode, printed = _plate_files(payload, index)
+    grams_by_slot = _on_printed(grams_by_slot, printed)
     return NativeSliceRead(
         plate_id=plate_id,
         print_time_seconds=plate.print_seconds,

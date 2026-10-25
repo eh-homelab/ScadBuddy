@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from scadbuddy.printers.nozzle_mapping import (
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.rack.rank import eligible, manual_for, rack_positions
 from tests.printers.test_status import row
+from tests.support.sliced3mf import with_corrupt_member
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SLICE_INFO = (FIXTURES / "rack-slice-info-h2c.config").read_text(encoding="utf-8")
@@ -416,3 +418,148 @@ def test_a_plate_on_the_fixed_hotend_only_sends_no_mapping() -> None:
         plan, idle_status(), algorithm="least_used", manual_position=None, usage={}, spools={}
     )
     assert chosen.mapping is None
+
+
+#: Real Bambu Studio CLI slices for the H2C (#4711, `tests/slicing/test_slice_info.py`).
+NATIVE = Path(__file__).parents[1] / "fixtures" / "native_slices"
+
+
+def test_a_one_filament_plates_plan_is_on_the_slot_it_prints() -> None:
+    """#4712: the CLI names a one-filament plate's filament ``id="1"`` whatever it prints;
+    plate 3 prints filament 3 from the rack (group 1), so slot 3 is on the rack and slot
+    1 is not printed. Keyed on ``id="1"``, the wire put the rack nozzle on slot 1."""
+    with (NATIVE / "plate3-one-filament.gcode.3mf").open("rb") as file:
+        plan = read_rack_plan(file, 3)
+    assert plan is not None
+    assert plan.slot_groups == [-1, -1, 1]
+    [filament] = plan.filaments
+    assert (filament.slot_id, filament.group_id) == (3, 1)
+    # Filament 3's colour, not the #F5547C slice_info.config wrote (filament 1's).
+    assert filament.color == "#00AE42"
+    assert filament.group is not None and filament.group.filament_color == "#00AE42"
+
+
+def test_a_phantom_filament_1_joins_the_plates_first_filament() -> None:
+    """#4712: plate 2 prints filaments 2 (rack, group 1) then 3 (fixed, group 0); the
+    CLI's phantom ``id="1"`` (what it extruded before its first change) is filament 2's,
+    in filament 2's group."""
+    with (NATIVE / "plate2-two-filaments.gcode.3mf").open("rb") as file:
+        plan = read_rack_plan(file, 2)
+    assert plan is not None
+    assert plan.slot_groups == [-1, 1, 0]
+    assert [(f.slot_id, f.group_id, f.used_grams) for f in plan.filaments] == [
+        (2, 1, 1.39),
+        (3, 0, 1.1),
+    ]
+
+
+def test_a_phantom_filament_in_another_group_has_no_plan(caplog: pytest.LogCaptureFixture) -> None:
+    """#4712: a phantom ``id="1"`` whose group is not the first filament's cannot be
+    placed with confidence, so no field is sent."""
+    phantom = (
+        '<filament id="1" tray_info_idx="GFA00" type="PLA" color="#F5547C" used_m="0.05" '
+        'used_g="0.15" group_id="{}"'
+    )
+    out = _rewritten(
+        "plate2-two-filaments",
+        lambda name, data: (
+            data.replace(phantom.format(1).encode(), phantom.format(0).encode())
+            if name == "Metadata/slice_info.config"
+            else data
+        ),
+    )
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(out, 2) is None
+    assert "nozzle_mapping not sent" in caplog.text
+
+
+def _rewritten(fixture: str, edit: Callable[[str, bytes], bytes | None]) -> io.BytesIO:
+    """A native slice fixture with each member as ``edit`` returns it (``None`` drops
+    it), checked to differ from the original."""
+    with zipfile.ZipFile(NATIVE / f"{fixture}.gcode.3mf") as original:
+        members = {name: original.read(name) for name in original.namelist()}
+    edited = {name: edit(name, data) for name, data in members.items()}
+    assert edited != members
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in edited.items():
+            if data is not None:
+                archive.writestr(name, data)
+    out.seek(0)
+    return out
+
+
+def test_a_phantom_with_no_first_filament_has_no_plan(caplog: pytest.LogCaptureFixture) -> None:
+    """#4712: with no ``filament_sequence.json``, a header naming several filaments says
+    nothing of which is first, so the phantom ``id="1"`` has no slot: no field."""
+    out = _rewritten(
+        "plate2-two-filaments",
+        lambda name, data: None if name == "Metadata/filament_sequence.json" else data,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(out, 2) is None
+    assert "has no first to join" in caplog.text
+
+
+def test_a_sequence_the_header_disagrees_with_has_no_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4716 review: a sequence whose first filament (4) is not one the G-code header
+    names (2, 3) says nothing of which is first, so the phantom ``id="1"`` has no slot."""
+
+    def first_is_4(name: str, data: bytes) -> bytes:
+        if name != "Metadata/filament_sequence.json":
+            return data
+        sequences = json.loads(data)
+        sequences["plate_2"]["sequence"] = [4, 2, 3]
+        return json.dumps(sequences).encode()
+
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(_rewritten("plate2-two-filaments", first_is_4), 2) is None
+    assert "has no first to join" in caplog.text
+
+
+def test_a_corrupt_gcode_still_reads_the_plan_from_the_sequence() -> None:
+    """#4712: a G-code member that cannot be inflated says nothing of the header, and the
+    plan is read from ``filament_sequence.json`` alone, never refused for it."""
+    payload = with_corrupt_member(
+        (NATIVE / "plate3-one-filament.gcode.3mf").read_bytes(), "Metadata/plate_3.gcode"
+    )
+    plan = read_rack_plan(io.BytesIO(payload), 3)
+    assert plan is not None
+    assert plan.slot_groups == [-1, -1, 1]
+
+
+def test_a_lone_filaments_type_is_its_slots_not_filament_1s() -> None:
+    """#4712: the type feeds the abrasive check (`rack.rank.rack_groups`), so a lone
+    filament's is the project's for its slot: here PLA-CF in slot 3, where
+    ``slice_info.config`` wrote filament 1's PLA."""
+
+    def carbon_in_slot_3(name: str, data: bytes) -> bytes:
+        if name != "Metadata/project_settings.config":
+            return data
+        settings = json.loads(data)
+        settings["filament_type"] = ["PLA", "PLA", "PLA-CF"]
+        return json.dumps(settings).encode()
+
+    plan = read_rack_plan(_rewritten("plate3-one-filament", carbon_in_slot_3), 3)
+    assert plan is not None
+    assert [(f.slot_id, f.type) for f in plan.filaments] == [(3, "PLA-CF")]
+
+
+def test_a_project_with_no_colour_for_the_slot_has_no_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4712: a lone filament takes its slot's type and colour from the project; a
+    project that names none for that slot cannot say them, so no field is sent."""
+
+    def two_colours(name: str, data: bytes) -> bytes:
+        if name != "Metadata/project_settings.config":
+            return data
+        settings = json.loads(data)
+        settings["filament_colour"] = settings["filament_colour"][:2]
+        return json.dumps(settings).encode()
+
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(_rewritten("plate3-one-filament", two_colours), 3) is None
+    assert "names no filament_colour for slot 3" in caplog.text
