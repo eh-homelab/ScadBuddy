@@ -1,4 +1,5 @@
 import { useId, useState } from 'react'
+import { api } from '../../api/client'
 import type { OrderAttachment, OrderItemDetail, OrderStatus } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
@@ -6,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { DataTable, type Column } from '../records/DataTable'
 import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
-import { itemPrice, parseUnitPrice, PRICED_WHILE, recordQuote, UNIT_PRICE_HINT, unitPrice } from './price'
+import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, recordQuote, UNIT_PRICE_HINT, unitPrice } from './price'
 import { refusalText } from './refusal'
 
 /**
@@ -136,8 +137,10 @@ function UnitPrice({ item, currency, exponent }: { item: OrderItemDetail; curren
 }
 
 /**
- * The unit price, typed: Enter (or Accept) records a `manual` quote at it and accepts it
- * (`recordQuote`), Escape puts back the price the item has. A refusal shows under it.
+ * The unit price, typed: Enter (or Accept) accepts the item's pending quote when the
+ * price is that quote's (a slice quote keeps its sliced file and cost), else records a
+ * `manual` quote at it and accepts that (`recordQuote`). Escape puts back the price the
+ * item has. A refusal shows under it.
  */
 function UnitPriceEditor({
   orderId,
@@ -171,7 +174,12 @@ function UnitPriceEditor({
     setBusy(true)
     setError(null)
     try {
-      await recordQuote(orderId, item.id, { unit_price_minor: minor }, true)
+      const pending = pricingQuote(item)
+      if (pending && !pending.accepted && pending.quote.unit_price_minor === minor) {
+        await api.acceptOrderQuote(orderId, item.id, pending.quote.id)
+      } else {
+        await recordQuote(orderId, item.id, { unit_price_minor: minor }, true)
+      }
       setTyped(null)
       onChanged()
     } catch (err) {

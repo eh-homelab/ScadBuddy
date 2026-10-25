@@ -146,6 +146,35 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(row(ITEM_DRAFT)).getByRole('alert')).toHaveTextContent(/on hold/)
   })
 
+  it("accepts a pending slice quote at its own price, recording nothing", async () => {
+    const slice: Quote = { ...manual('q-slice', 900, '2026-10-24T23:00:00Z'), source: 'slice', sliced_sha256: 'a'.repeat(64), sliced_blob_key: 'quote-x', unit_cost_minor: 400 }
+    state.quotes.push(slice)
+    const quoted = vi.spyOn(api, 'quoteOrderItem')
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveValue('9.00')
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' }))
+    await waitFor(() => expect(quotesOfDraft().map((q) => [q.id, q.accepted])).toEqual([['q-slice', true]]))
+    expect(accepted).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, 'q-slice')
+    expect(quoted).not.toHaveBeenCalled()
+    quoted.mockRestore()
+    accepted.mockRestore()
+  })
+
+  it('retries a refused accept on the quote it recorded, never a second one', async () => {
+    const order = state.orders.find((o) => o.id === ORDER_DRAFT)
+    if (order) order.on_hold = true
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.type(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' }), '12.50{Enter}')
+    expect(await within(row(ITEM_DRAFT)).findByRole('alert')).toHaveTextContent(/on hold/)
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$25.00'))
+    if (order) order.on_hold = false
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' }))
+    await waitFor(() => expect(quotesOfDraft().map((q) => [q.unit_price_minor, q.accepted])).toEqual([[1250, true]]))
+  })
+
   it('shows a cancelled item’s price without an editor', async () => {
     state.quotes.push(manual('q-pending', 900, '2026-10-24T23:00:00Z'))
     const draft = state.items.find((i) => i.id === ITEM_DRAFT)
