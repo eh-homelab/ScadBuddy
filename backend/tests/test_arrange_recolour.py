@@ -47,6 +47,16 @@ GREEN, BLACK, MAGENTA = "#2E8B57", "#000000", "#FF00FF"
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
 
 
+@pytest.fixture(autouse=True)
+def _no_logged_jobs() -> Iterator[None]:
+    """Every test in this module starts with no job's unreadable notes logged
+    (`api/jobs.py` keeps the record per process), so an id one test logs never decides
+    another's (#4709 review)."""
+    jobs_api._UNREADABLE_LOGGED.clear()
+    yield
+    jobs_api._UNREADABLE_LOGGED.clear()
+
+
 def _part(key: str = "lib-a", colours: list[str] | None = None) -> Part:
     return Part(
         piece_key=key,
@@ -522,15 +532,6 @@ def test_a_jobs_status_reads_the_notes_field_with_its_own_type() -> None:
     """`api/jobs.py` reads `ArrangeInputs.notes` alone, by name and as `list[str]`."""
     assert jobs_api._NOTES_FIELD in ArrangeInputs.model_fields
     assert ArrangeInputs.model_fields[jobs_api._NOTES_FIELD].annotation == list[str]
-
-
-@pytest.fixture(autouse=True)
-def _no_logged_jobs() -> Iterator[None]:
-    """Each test starts with no job's unreadable notes logged (`api/jobs.py` keeps the
-    record per process), so an id one test logs never decides another's (#4709 review)."""
-    jobs_api._UNREADABLE_LOGGED.clear()
-    yield
-    jobs_api._UNREADABLE_LOGGED.clear()
 
 
 def _unreadable(job_id: str) -> Job:
