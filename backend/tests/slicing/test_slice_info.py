@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from scadbuddy.core.problems import ApiError
@@ -52,3 +54,29 @@ def test_an_unreadable_file_reads_as_unknown() -> None:
 
 def test_plate_gcode_is_none_for_a_bad_zip() -> None:
     assert plate_gcode(b"not a zip", 1) is None
+
+
+#: Two plates sliced by Bambu Studio's CLI v02.08.02.61 (the `slicer-dist` stage's,
+#: `bambu-studio --load-settings … --load-filaments f1;f2;f3 --slice N --export-3mf`,
+#: as `workers/rust` runs it) from a 3-plate file `write_plates_3mf` wrote with three
+#: Bambu PLA Basic @BBL H2C filaments, on 2026-10-25 (#4711): plate 3 prints filament 3
+#: alone; plate 2 prints filaments 2 and 3, one object each.
+NATIVE = Path(__file__).parents[1] / "fixtures" / "native_slices"
+
+
+def test_a_one_filament_plates_grams_are_on_the_filament_it_prints() -> None:
+    """#4711: the CLI names a plate's one filament ``id="1"`` in ``slice_info.config``
+    (with filament 1's colour) whatever filament it prints; the G-code's header
+    (``; filament: 3``) and ``filament_sequence.json`` (``"sequence": [3]``) say which."""
+    read = read_sliced((NATIVE / "plate3-one-filament.gcode.3mf").read_bytes(), 3)
+    assert read.grams_by_slot == {3: 0.5}
+    assert read.filament_used_g == 0.5
+
+
+def test_what_a_plate_prints_before_its_first_change_is_its_first_filaments() -> None:
+    """#4711: before a plate's first change the CLI counts its extrusion as filament
+    1's, which the plate never loads: it is the first filament of the plate's sequence
+    (``filament_sequence.json``), here filament 2."""
+    read = read_sliced((NATIVE / "plate2-two-filaments.gcode.3mf").read_bytes(), 2)
+    assert read.grams_by_slot == {2: 1.3, 3: 1.1}
+    assert read.filament_used_g == 2.4
