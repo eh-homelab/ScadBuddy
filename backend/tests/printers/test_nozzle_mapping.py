@@ -512,6 +512,23 @@ def test_a_corrupt_gcode_still_reads_the_plan_from_the_sequence() -> None:
     assert plan.slot_groups == [-1, -1, 1]
 
 
+def test_a_lone_filaments_type_is_its_slots_not_filament_1s() -> None:
+    """#4712: the type feeds the abrasive check (`rack.rank.rack_groups`), so a lone
+    filament's is the project's for its slot: here PLA-CF in slot 3, where
+    ``slice_info.config`` wrote filament 1's PLA."""
+
+    def carbon_in_slot_3(name: str, data: bytes) -> bytes:
+        if name != "Metadata/project_settings.config":
+            return data
+        settings = json.loads(data)
+        settings["filament_type"] = ["PLA", "PLA", "PLA-CF"]
+        return json.dumps(settings).encode()
+
+    plan = read_rack_plan(_rewritten("plate3-one-filament", carbon_in_slot_3), 3)
+    assert plan is not None
+    assert [(f.slot_id, f.type) for f in plan.filaments] == [(3, "PLA-CF")]
+
+
 def test_a_project_with_no_colour_for_the_slot_has_no_plan(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
