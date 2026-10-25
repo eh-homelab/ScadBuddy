@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -522,14 +523,64 @@ def test_a_jobs_status_reads_the_notes_field_with_its_own_type() -> None:
     assert ArrangeInputs.model_fields[jobs_api._NOTES_FIELD].annotation == list[str]
 
 
+def _unreadable(job_id: str) -> Job:
+    return Job(
+        id=job_id, slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
+    )
+
+
+def test_a_job_forgotten_from_the_record_logs_again(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4709 review: the record is bounded; the oldest job is forgotten first, and a
+    forgotten job's unreadable notes are logged again."""
+    monkeypatch.setattr(jobs_api, "_UNREADABLE_LOGGED_MAX", 1)
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        for job_id in ("first", "second", "first"):
+            _job_status(_unreadable(job_id), None)
+    logged = [getattr(r, "job_id", None) for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert logged == ["first", "second", "first"]
+    assert list(jobs_api._UNREADABLE_LOGGED) == ["first"]
+
+
+def test_a_job_still_polled_stays_in_the_record(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4709 review: the record forgets the job least recently polled, not the one first
+    logged, so a job polled again while newer ones come in is not logged again."""
+    monkeypatch.setattr(jobs_api, "_UNREADABLE_LOGGED_MAX", 2)
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        for job_id in ("polled", "other", "polled", "newest", "polled"):
+            _job_status(_unreadable(job_id), None)
+    logged = [getattr(r, "job_id", None) for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert logged == ["polled", "other", "newest"]
+    assert list(jobs_api._UNREADABLE_LOGGED) == ["newest", "polled"]
+
+
 def test_an_arrange_rows_unreadable_notes_are_logged(caplog: pytest.LogCaptureFixture) -> None:
     """#4704 review: notes a row holds in a shape this build cannot read are not said,
     and the drift is logged with the job's id rather than lost without a trace."""
+    job_id = uuid.uuid4().hex
     job = Job(
-        id="j9", slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
+        id=job_id, slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
     )
     with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
         assert _job_status(job, None).warnings is None
+        # Polled again: logged once per job, not on every poll (#4707 review).
+        assert _job_status(job, None).warnings is None
     [record] = [r for r in caplog.records if r.name == "scadbuddy.api.jobs"]
     assert record.getMessage() == "an arrange job's notes are unreadable"
-    assert getattr(record, "job_id", None) == "j9"
+    assert getattr(record, "job_id", None) == job_id
+
+
+def test_a_rows_notes_are_said_though_its_other_fields_are_unreadable() -> None:
+    """#4707 review: only `notes` is read, so a row whose items this build cannot read
+    as an arrange's still says its notes."""
+    job = Job(
+        id="j10",
+        slug="demo",
+        kind="arrange",
+        inputs={"items": "not a list", "notes": ["slot 5 names no colour"]},
+        created_at=now(),
+    )
+    assert _job_status(job, None).warnings == ["slot 5 names no colour"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -97,7 +98,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
 )
-from scadbuddy.workflows.models import ArrangeInputs, MigrateResult
+from scadbuddy.workflows.models import MigrateResult
 
 logger = logging.getLogger(__name__)
 
@@ -280,13 +281,28 @@ class ModelDiagnostics(BaseModel):
     diagnostics_dropped: int = Field(default_factory=int)
 
 
-#: `ArrangeInputs.notes`, read alone with its type (`test_arrange_recolour` pins the
-#: two together): a job's status reads only that field, never the whole arrange (every
-#: item, the provenance), on every poll.
+#: `workflows.models.ArrangeInputs.notes`, read alone with its type
+#: (`test_arrange_recolour` pins the name and the type to the model): a job's status
+#: reads only that field, never the whole arrange (every item, the provenance), on every
+#: poll. So a row whose other fields this build cannot read still says its notes.
 _NOTES_FIELD = "notes"
-if _NOTES_FIELD not in ArrangeInputs.model_fields:
-    raise ImportError(f"ArrangeInputs has no {_NOTES_FIELD!r} field for a job's warnings")
 _ARRANGE_NOTES: TypeAdapter[list[str]] = TypeAdapter(list[str])
+#: The jobs whose unreadable notes this process logged: once per job per process (each
+#: replica, and each restart, logs a job once), not on every poll. Bounded, forgetting
+#: the job least recently polled (each poll moves its job to the end), so a long-running
+#: API never grows it without end and a job still being polled stays. Checked and filled
+#: under `_UNREADABLE_LOCK`: `get_job` is a sync route, so two polls of one job can run
+#: at once on FastAPI's threadpool.
+_UNREADABLE_LOGGED: OrderedDict[str, None] = OrderedDict()
+_UNREADABLE_LOGGED_MAX = 1024
+_UNREADABLE_LOCK = threading.Lock()
+
+
+def forget_unreadable_notes_logs() -> None:
+    """Forget which jobs' unreadable notes were logged: each test starts with none
+    (`tests/conftest.py`), as `forget_out_of_memory_logs` does for its own record."""
+    with _UNREADABLE_LOCK:
+        _UNREADABLE_LOGGED.clear()
 
 
 def _arranged_notes(job: Job) -> list[str]:
@@ -297,8 +313,18 @@ def _arranged_notes(job: Job) -> list[str]:
     try:
         return _ARRANGE_NOTES.validate_python(job.inputs.get(_NOTES_FIELD, []))
     except ValidationError:
-        # A row this build cannot read: no notes to say, but a drift between builds shows.
-        logger.warning("an arrange job's notes are unreadable", extra={"job_id": job.id})
+        # A row this build cannot read: no notes to say, but a drift between builds shows,
+        # once per job per process.
+        with _UNREADABLE_LOCK:
+            first = job.id not in _UNREADABLE_LOGGED
+            if first:
+                _UNREADABLE_LOGGED[job.id] = None
+                if len(_UNREADABLE_LOGGED) > _UNREADABLE_LOGGED_MAX:
+                    _UNREADABLE_LOGGED.popitem(last=False)
+            else:
+                _UNREADABLE_LOGGED.move_to_end(job.id)
+        if first:
+            logger.warning("an arrange job's notes are unreadable", extra={"job_id": job.id})
         return []
 
 
