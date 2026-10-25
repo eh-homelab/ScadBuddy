@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -286,10 +287,14 @@ class ModelDiagnostics(BaseModel):
 #: poll. So a row whose other fields this build cannot read still says its notes.
 _NOTES_FIELD = "notes"
 _ARRANGE_NOTES: TypeAdapter[list[str]] = TypeAdapter(list[str])
-#: The jobs whose unreadable notes were logged: once each, not on every poll. Bounded,
-#: forgetting the oldest, so a long-running API never grows it without end.
+#: The jobs whose unreadable notes this process logged: once per job per process (each
+#: replica, and each restart, logs a job once), not on every poll. Bounded, forgetting
+#: the oldest, so a long-running API never grows it without end. Checked and filled
+#: under `_UNREADABLE_LOCK`: `get_job` is a sync route, so two polls of one job can run
+#: at once on FastAPI's threadpool.
 _UNREADABLE_LOGGED: OrderedDict[str, None] = OrderedDict()
 _UNREADABLE_LOGGED_MAX = 1024
+_UNREADABLE_LOCK = threading.Lock()
 
 
 def _arranged_notes(job: Job) -> list[str]:
@@ -301,11 +306,14 @@ def _arranged_notes(job: Job) -> list[str]:
         return _ARRANGE_NOTES.validate_python(job.inputs.get(_NOTES_FIELD, []))
     except ValidationError:
         # A row this build cannot read: no notes to say, but a drift between builds shows,
-        # once per job.
-        if job.id not in _UNREADABLE_LOGGED:
-            _UNREADABLE_LOGGED[job.id] = None
-            if len(_UNREADABLE_LOGGED) > _UNREADABLE_LOGGED_MAX:
-                _UNREADABLE_LOGGED.popitem(last=False)
+        # once per job per process.
+        with _UNREADABLE_LOCK:
+            first = job.id not in _UNREADABLE_LOGGED
+            if first:
+                _UNREADABLE_LOGGED[job.id] = None
+                if len(_UNREADABLE_LOGGED) > _UNREADABLE_LOGGED_MAX:
+                    _UNREADABLE_LOGGED.popitem(last=False)
+        if first:
             logger.warning("an arrange job's notes are unreadable", extra={"job_id": job.id})
         return []
 
