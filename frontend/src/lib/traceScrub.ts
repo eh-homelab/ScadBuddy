@@ -1,7 +1,7 @@
 // frontend/src/lib/traceScrub.ts
 import type { AttributeValue, Attributes } from '@opentelemetry/api'
 import type { ExportResult } from '@opentelemetry/core'
-import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-trace-web'
+import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-trace'
 
 /**
  * The browser's `ScrubbingSpanExporter` (tracing spec 2026-10-01 §6), in front of
