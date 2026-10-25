@@ -453,13 +453,20 @@ async def test_a_miss_that_persists_counts_its_opens_in_a_row(
     # at INFO), the first open's two misses were counted too.
     caplog.clear()
 
+    # Each open answers the held copy while the file is away, and reads it once back.
     kept.rename(aside)
-    catalogue._load(kept)
-    catalogue._load(kept)
+    await cached_catalogue(bambuddy, tmp_path)
+    async with asyncio.timeout(5):
+        await asyncio.gather(*catalogue._refreshing.values())
+    kept.unlink(missing_ok=True)  # the refresh's own keep: still away, as before
+    await cached_catalogue(bambuddy, tmp_path)
+    async with asyncio.timeout(5):
+        await asyncio.gather(*catalogue._refreshing.values())
+    kept.unlink(missing_ok=True)
     aside.rename(kept)
-    assert catalogue._load(kept) is not None
+    await cached_catalogue(bambuddy, tmp_path)
     kept.rename(aside)
-    catalogue._load(kept)
+    await cached_catalogue(bambuddy, tmp_path)
 
     misses = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
     assert [r.__dict__["misses_in_a_row"] for r in misses] == [1, 2, 1]

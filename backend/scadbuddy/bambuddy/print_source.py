@@ -391,8 +391,11 @@ class PrintPipeline:
         the next reader starts anew.
 
         The fetch runs on the first reader's ``client``, which must outlive it, so every
-        reader must hand in that same client (checked): every caller today hands in the
-        one client of its request or activity."""
+        reader must hand in that same client (checked) for as long as the fetch is kept,
+        its answer included: a later reader with another client is refused even once the
+        fetch has ended. A fetch stopped and dropped takes its client with it, so the next
+        reader's client is the new one's. Every caller today hands in the one client of
+        its request or activity."""
         fetching = self._fetching
         if fetching is None:
             fetching = asyncio.ensure_future(_fetch_once(self, client))
