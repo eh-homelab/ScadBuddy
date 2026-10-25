@@ -103,6 +103,10 @@ CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Pla
 in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 `frontend-e2e-split` checks that the three selections add up to the whole `--list` and
 that each shard ran what it selected, as `backend-pytest-split` does.
+`e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
+e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
+images; weekly and on dispatch in `hot-path-e2e.yml`, never on PRs); `e2e/real-hot-path.spec.ts`
+skips without what it sets.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -423,6 +427,31 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `SliceWorkflow` histories replay from `tests/fixtures/slice_workflow_histories/`; a
   change goes behind `workflow.patched`. The worker is `workers/rust/`
   (`scadbuddy-slicer`, README "Slicer worker").
+- `backend/scadbuddy/printers/hot_path.py` — the native hot path (#3818 tier A, plan
+  `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md`): a print that
+  touches Bambuddy nowhere. `hot_path_native(settings, path)` decides per run from the
+  stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3` or
+  `bambuddy`) and the printer row's resolved path; there is no switch of its own. A
+  native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
+  state from the LAN report (`printers/reports.py`), and its filaments are the loaded
+  trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
+  off the path). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
+  plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
+  (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
+  command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
+  presets and a process preset's values in Bambuddy's shapes (`local` presets are not
+  offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
+  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  first read and its analysis, and the Prints page's queue and history panels ask
+  Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+- `e2e-stack/` — the real-stack e2e of the hot path (#4602): `compose.yaml` (ScadBuddy on
+  moto's S3, the Temporal dev server, the slicer worker, a fake LAN printer and a
+  Bambuddy recorder that fails every call), `run.sh` (builds, brings up, seeds with
+  `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
+  `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
+  `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
+  Run by `.github/workflows/hot-path-e2e.yml` weekly and on dispatch, not on PRs.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
