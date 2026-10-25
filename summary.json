@@ -1,0 +1,131 @@
+{
+ "checked_at": "2026-10-25T07:16:08.689Z",
+ "production": "https://scadbuddy.internal.nullreference.io",
+ "image": "ghcr.io/eh-homelab/scadbuddy:sha-81ba901@sha256:feb7a44ddb11d184410dea68f9d07b695fe10c14da9e8e89d060b3fcbc8c2fa6",
+ "slicer_image": "ghcr.io/eh-homelab/scadbuddy-slicer:sha-81ba901@sha256:390679c86cf519304393aaf09197b8d9133ca39ddcd9021e5c66b98762d78aeb",
+ "image_commit": "81ba901270368a81843dbe9c3da8512be6374f8a",
+ "contains": {
+  "#4653": "b9bca7203d8195e044e59d1765a27b4d3072d353",
+  "#4684": "aace0b6244f09fa4fe64d2a0c607496bc543fd15",
+  "#4702": "acc66022d37e3f3d04c7e38b694354bf9e38850d"
+ },
+ "settings": {
+  "slicer_backend": "native",
+  "library_backend": "bambuddy",
+  "store_backend": "s3"
+ },
+ "output": {
+  "id": "f542c216a3104334b252d4067e64ea11",
+  "name": "Hanukkah Menorah Play Set — Sari (by colour)",
+  "created_at": "2026-10-24T19:56:34Z",
+  "layout_plates": 10,
+  "made_before_fix": true,
+  "stored_3mf_states_printable_area": false,
+  "stored_3mf": {
+   "print_settings_id": "ScadBuddy",
+   "printer_settings_id": "Bambu Lab H2C 0.4 nozzle",
+   "printable_height": "325"
+  },
+  "case": "old file: the slice path lays the copy out with send._laid_out_for -> replate_3mf, which restates printable_area (#4653)"
+ },
+ "dialog_mode": "all 10 plates ticked; plate N previewed (its tick cleared and set again), so the pane slices plate N alone",
+ "write_guard": {
+  "allowed_non_get": [
+   "POST /api/v1/print/outputs/{id}/preview-slice (start the background slice)",
+   "POST /api/v1/commands/op-preview_slice-{64 hex}/updates/{32 hex} (the 202 follow: waits on that start's Update, reads its answer; no query string)",
+   "POST /api/v1/print/outputs/{id}/check (read-only pre-check; the dialog slices only once it passes)"
+  ],
+  "aborted": [
+   "POST /api/v1/analyzers/run",
+   "POST /telemetry/v1/traces"
+  ]
+ },
+ "plates": [
+  {
+   "plate": 2,
+   "object": "candle_05_alternating_arches",
+   "request_plate_id": 2,
+   "job_id": 129,
+   "status": "completed",
+   "slicer": "native",
+   "print_time_seconds": 1612,
+   "filament_used_g": 8.6,
+   "filament_changes": 0,
+   "slots": [
+    {
+     "slot_id": 1,
+     "grams": 8.6,
+     "side": null
+    }
+   ],
+   "warnings": [],
+   "screenshot": "plate-2-dialog.png"
+  },
+  {
+   "plate": 5,
+   "object": "candle_03_soft_chevrons",
+   "request_plate_id": 5,
+   "job_id": 130,
+   "status": "completed",
+   "slicer": "native",
+   "print_time_seconds": 1603,
+   "filament_used_g": 8.6,
+   "filament_changes": 0,
+   "slots": [
+    {
+     "slot_id": 1,
+     "grams": 8.6,
+     "side": null
+    }
+   ],
+   "warnings": [],
+   "screenshot": "plate-5-dialog.png"
+  },
+  {
+   "plate": 10,
+   "object": "shamash_smooth",
+   "request_plate_id": 10,
+   "job_id": 131,
+   "status": "completed",
+   "slicer": "native",
+   "print_time_seconds": 1944,
+   "filament_used_g": 10.4,
+   "filament_changes": 0,
+   "slots": [
+    {
+     "slot_id": 1,
+     "grams": 10.4,
+     "side": null
+    }
+   ],
+   "warnings": [],
+   "screenshot": "plate-10-dialog.png"
+  }
+ ],
+ "single_plate_selection": {
+  "note": "with only plate N ticked the run refused before slicing; a separate defect from #4638",
+  "plates": [
+   {
+    "plate": 2,
+    "operation": "7ebf69eda96845ba9f80ff3b7f98ae6d",
+    "status": "failed (refused before slicing)",
+    "detail": "Slot 1 has no spool chosen. Slot 2 has no spool chosen. Slot 3 has no spool chosen. Slot 4 has no spool chosen. Slot 5 has no spool chosen. Slot 6 has no spool chosen. Slot 8 has no spool chosen. Slot 9 has no spool chosen. Slot 10 has no spool chosen.",
+    "screenshot": "single-plate/plate-2-dialog.png"
+   },
+   {
+    "plate": 5,
+    "operation": "a1fb583f706348a490bde6865c2366e9",
+    "status": "failed (refused before slicing)",
+    "detail": "'0.20mm Standard @BBL H2C' is not a process Bambuddy has for a 0.4 mm nozzle.",
+    "screenshot": "single-plate/plate-5-dialog.png"
+   },
+   {
+    "plate": 10,
+    "operation": "05a828eed50a4cb2b320436d72fb2d59",
+    "status": "failed (refused before slicing)",
+    "detail": "Slot 1 has no spool chosen. Slot 2 has no spool chosen. Slot 3 has no spool chosen. Slot 4 has no spool chosen. Slot 5 has no spool chosen. Slot 7 has no spool chosen. Slot 8 has no spool chosen. Slot 9 has no spool chosen. Slot 10 has no spool chosen.",
+    "screenshot": "single-plate/plate-10-dialog.png"
+   }
+  ]
+ }
+}

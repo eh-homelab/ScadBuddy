@@ -1,0 +1,406 @@
+{
+ "output_id": "f542c216a3104334b252d4067e64ea11",
+ "slug": "hanukkah-play-menorah-with-storage-base-p1s-13-plates-v1-2-pretendplaylab-20261002",
+ "started": "2026-10-25T07:07:12.511Z",
+ "plates": [
+  {
+   "plate": 2,
+   "toggle_label": "",
+   "previewing": "candle_05_alternating_arches",
+   "elapsed_s": 236,
+   "slice": {
+    "status": "failed",
+    "failure": null,
+    "plate_id": null,
+    "prediction_s": null,
+    "weight_g": null,
+    "keys": [
+     "id",
+     "kind",
+     "subject",
+     "status",
+     "result",
+     "error",
+     "created_at",
+     "finished_at"
+    ]
+   },
+   "slice_section_text": "\nSlice\n\nSlot 1 has no spool chosen. Slot 2 has no spool chosen. Slot 3 has no spool chosen. Slot 4 has no spool chosen. Slot 5 has no spool chosen. Slot 6 has no spool chosen. Slot 8 has no spool chosen. Slot 9 has no spool chosen. Slot 10 has no spool chosen.\n\nCancel\nPrint",
+   "allowed": [
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "at": "2026-10-25T07:07:22.340Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 2,
+     "plates": null,
+     "at": "2026-10-25T07:07:23.282Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 2,
+     "plates": null,
+     "at": "2026-10-25T07:07:24.749Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 2,
+     "plates": null,
+     "at": "2026-10-25T07:07:30.674Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:07:33.973Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 2,
+     "plates": null,
+     "at": "2026-10-25T07:07:35.221Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:07:39.536Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:07:51.497Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:08:03.223Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:08:14.976Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:08:24.777Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:08:36.499Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-4376e861fdf25350c715bcbc80c52fc0dd4689f99aee56a2f3d3ba7736229405/updates/5208f042da04501e1ac7b3c6b857c496",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:08:48.241Z"
+    }
+   ],
+   "aborted": [
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:14.578Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:19.846Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:07:23.284Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:24.731Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:07:24.747Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:29.749Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:36.520Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:43.839Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:07:55.798Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:08:07.524Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:08:19.281Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:08:29.076Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:08:40.800Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:08:50.641Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:08:56.424Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:09:23.333Z"
+    }
+   ]
+  },
+  {
+   "plate": 5,
+   "toggle_label": "",
+   "previewing": "candle_03_soft_chevrons",
+   "elapsed_s": 34,
+   "slice": {
+    "status": "failed",
+    "failure": null,
+    "plate_id": null,
+    "prediction_s": null,
+    "weight_g": null,
+    "keys": [
+     "id",
+     "kind",
+     "subject",
+     "status",
+     "result",
+     "error",
+     "created_at",
+     "finished_at"
+    ]
+   },
+   "slice_section_text": "\nSlice\n\n'0.20mm Standard @BBL H2C' is not a process Bambuddy has for a 0.4 mm nozzle.\n\nCancel\nPrint",
+   "allowed": [
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "at": "2026-10-25T07:11:28.246Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 5,
+     "plates": null,
+     "at": "2026-10-25T07:11:29.534Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 5,
+     "plates": null,
+     "at": "2026-10-25T07:11:33.430Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 5,
+     "plates": null,
+     "at": "2026-10-25T07:11:37.443Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-1cc5240c718d6d1af8b9dc357c89834849d9140c8324fbca666d3186b76133a9/updates/06397c5ec2852ace55e229f54084f492",
+     "plate_id": null,
+     "plates": null,
+     "at": "2026-10-25T07:11:40.732Z"
+    }
+   ],
+   "aborted": [
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:11:19.575Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:11:24.590Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:11:29.536Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:11:29.782Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:11:33.429Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:11:34.844Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:11:38.271Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:11:46.035Z"
+    }
+   ]
+  },
+  {
+   "plate": 10,
+   "toggle_label": "",
+   "previewing": "shamash_smooth",
+   "elapsed_s": 156,
+   "slice": {
+    "status": "failed",
+    "failure": null,
+    "plate_id": null,
+    "prediction_s": null,
+    "weight_g": null,
+    "keys": [
+     "id",
+     "kind",
+     "subject",
+     "status",
+     "result",
+     "error",
+     "created_at",
+     "finished_at"
+    ]
+   },
+   "slice_section_text": "\nSlice\n\nSlot 1 has no spool chosen. Slot 2 has no spool chosen. Slot 3 has no spool chosen. Slot 4 has no spool chosen. Slot 5 has no spool chosen. Slot 7 has no spool chosen. Slot 8 has no spool chosen. Slot 9 has no spool chosen. Slot 10 has no spool chosen.\n\nCancel\nPrint",
+   "allowed": [
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "at": "2026-10-25T07:12:12.344Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 10,
+     "plates": null,
+     "at": "2026-10-25T07:12:13.055Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 10,
+     "plates": null,
+     "at": "2026-10-25T07:12:16.404Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 10,
+     "plates": null,
+     "at": "2026-10-25T07:12:23.024Z"
+    }
+   ],
+   "aborted": [
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:12:04.615Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:12:07.765Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:12:13.060Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:12:13.767Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:12:16.403Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:12:20.136Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:12:26.805Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:12:32.405Z"
+    }
+   ]
+  }
+ ],
+ "finished": "2026-10-25T07:14:48.716Z"
+}

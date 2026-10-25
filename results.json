@@ -1,0 +1,999 @@
+{
+ "mode": "all",
+ "output_id": "f542c216a3104334b252d4067e64ea11",
+ "slug": "hanukkah-play-menorah-with-storage-base-p1s-13-plates-v1-2-pretendplaylab-20261002",
+ "started": "2026-10-25T07:16:08.689Z",
+ "plates": [
+  {
+   "plate": 2,
+   "toggle_label": "",
+   "previewing": "candle_05_alternating_arches",
+   "elapsed_s": 175,
+   "slice": {
+    "job_id": 129,
+    "status": "completed",
+    "failure": null,
+    "plate_id": null,
+    "prediction_s": 1612,
+    "weight_g": null,
+    "keys": [
+     "job_id",
+     "status",
+     "failure",
+     "print_time_seconds",
+     "filament_used_g",
+     "slots",
+     "filament_changes",
+     "progress",
+     "warnings",
+     "slicer"
+    ]
+   },
+   "slice_section_text": "\nSlice\nTime\n26m\nFilament\n8.6 g\nFilament changes (purges)\nnone\nCancel\nPrint",
+   "allowed": [
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": false,
+      "plate_ids": [
+       1,
+       3,
+       4,
+       5,
+       6,
+       7,
+       8,
+       9,
+       10
+      ],
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:16:18.597Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:16:18.929Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [
+        {
+         "slot_id": 1,
+         "spool_id": 61
+        },
+        {
+         "slot_id": 2,
+         "spool_id": 4
+        },
+        {
+         "slot_id": 3,
+         "spool_id": 58
+        },
+        {
+         "slot_id": 4,
+         "spool_id": 57
+        },
+        {
+         "slot_id": 5,
+         "spool_id": 63
+        },
+        {
+         "slot_id": 6,
+         "spool_id": 26
+        },
+        {
+         "slot_id": 7,
+         "spool_id": 1
+        },
+        {
+         "slot_id": 8,
+         "spool_id": 24
+        },
+        {
+         "slot_id": 9,
+         "spool_id": 66
+        },
+        {
+         "slot_id": 10,
+         "spool_id": 102
+        }
+       ],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:16:21.910Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 2,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [
+        {
+         "slot_id": 1,
+         "spool_id": 61
+        },
+        {
+         "slot_id": 2,
+         "spool_id": 4
+        },
+        {
+         "slot_id": 3,
+         "spool_id": 58
+        },
+        {
+         "slot_id": 4,
+         "spool_id": 57
+        },
+        {
+         "slot_id": 5,
+         "spool_id": 63
+        },
+        {
+         "slot_id": 6,
+         "spool_id": 26
+        },
+        {
+         "slot_id": 7,
+         "spool_id": 1
+        },
+        {
+         "slot_id": 8,
+         "spool_id": 24
+        },
+        {
+         "slot_id": 9,
+         "spool_id": 66
+        },
+        {
+         "slot_id": 10,
+         "spool_id": 102
+        }
+       ],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 2,
+      "all_plates": false,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:16:31.757Z"
+    }
+   ],
+   "aborted": [
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:16:10.090Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:16:15.102Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:16:18.317Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:16:21.924Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:16:23.567Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:16:32.483Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:16:39.327Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:18:46.716Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:18:53.470Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:18:59.713Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:05.946Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:11.612Z"
+    }
+   ]
+  },
+  {
+   "plate": 5,
+   "toggle_label": "",
+   "previewing": "candle_03_soft_chevrons",
+   "elapsed_s": 88,
+   "slice": {
+    "job_id": 130,
+    "status": "completed",
+    "failure": null,
+    "plate_id": null,
+    "prediction_s": 1603,
+    "weight_g": null,
+    "keys": [
+     "job_id",
+     "status",
+     "failure",
+     "print_time_seconds",
+     "filament_used_g",
+     "slots",
+     "filament_changes",
+     "progress",
+     "warnings",
+     "slicer"
+    ]
+   },
+   "slice_section_text": "\nSlice\nTime\n26m\nFilament\n8.6 g\nFilament changes (purges)\nnone\nCancel\nPrint",
+   "allowed": [
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:19:21.582Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": false,
+      "plate_ids": [
+       1,
+       2,
+       3,
+       4,
+       6,
+       7,
+       8,
+       9,
+       10
+      ],
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:19:22.374Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:19:23.303Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [
+        {
+         "slot_id": 1,
+         "spool_id": 61
+        },
+        {
+         "slot_id": 2,
+         "spool_id": 4
+        },
+        {
+         "slot_id": 3,
+         "spool_id": 58
+        },
+        {
+         "slot_id": 4,
+         "spool_id": 57
+        },
+        {
+         "slot_id": 5,
+         "spool_id": 63
+        },
+        {
+         "slot_id": 6,
+         "spool_id": 26
+        },
+        {
+         "slot_id": 7,
+         "spool_id": 1
+        },
+        {
+         "slot_id": 8,
+         "spool_id": 24
+        },
+        {
+         "slot_id": 9,
+         "spool_id": 66
+        },
+        {
+         "slot_id": 10,
+         "spool_id": 102
+        }
+       ],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:19:25.420Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 5,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [
+        {
+         "slot_id": 1,
+         "spool_id": 61
+        },
+        {
+         "slot_id": 2,
+         "spool_id": 4
+        },
+        {
+         "slot_id": 3,
+         "spool_id": 58
+        },
+        {
+         "slot_id": 4,
+         "spool_id": 57
+        },
+        {
+         "slot_id": 5,
+         "spool_id": 63
+        },
+        {
+         "slot_id": 6,
+         "spool_id": 26
+        },
+        {
+         "slot_id": 7,
+         "spool_id": 1
+        },
+        {
+         "slot_id": 8,
+         "spool_id": 24
+        },
+        {
+         "slot_id": 9,
+         "spool_id": 66
+        },
+        {
+         "slot_id": 10,
+         "spool_id": 102
+        }
+       ],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 5,
+      "all_plates": false,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:19:32.651Z"
+    }
+   ],
+   "aborted": [
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:14.909Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:19.928Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:19:25.645Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:26.554Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:31.958Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:19:39.230Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:20:33.516Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:20:40.128Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:20:46.521Z"
+    }
+   ]
+  },
+  {
+   "plate": 10,
+   "toggle_label": "",
+   "previewing": "shamash_smooth",
+   "elapsed_s": 65,
+   "slice": {
+    "job_id": 131,
+    "status": "completed",
+    "failure": null,
+    "plate_id": null,
+    "prediction_s": 1944,
+    "weight_g": null,
+    "keys": [
+     "job_id",
+     "status",
+     "failure",
+     "print_time_seconds",
+     "filament_used_g",
+     "slots",
+     "filament_changes",
+     "progress",
+     "warnings",
+     "slicer"
+    ]
+   },
+   "slice_section_text": "\nSlice\nTime\n32m\nFilament\n10 g\nFilament changes (purges)\nnone\nCancel\nPrint",
+   "allowed": [
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": false,
+      "plate_ids": [
+       1,
+       2,
+       3,
+       4,
+       5,
+       6,
+       7,
+       8,
+       9
+      ],
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:21:00.020Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:21:00.551Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+     "plate_id": 1,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [
+        {
+         "slot_id": 1,
+         "spool_id": 61
+        },
+        {
+         "slot_id": 2,
+         "spool_id": 4
+        },
+        {
+         "slot_id": 3,
+         "spool_id": 58
+        },
+        {
+         "slot_id": 4,
+         "spool_id": 57
+        },
+        {
+         "slot_id": 5,
+         "spool_id": 63
+        },
+        {
+         "slot_id": 6,
+         "spool_id": 26
+        },
+        {
+         "slot_id": 7,
+         "spool_id": 1
+        },
+        {
+         "slot_id": 8,
+         "spool_id": 24
+        },
+        {
+         "slot_id": 9,
+         "spool_id": 66
+        },
+        {
+         "slot_id": 10,
+         "spool_id": 102
+        }
+       ],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 1,
+      "all_plates": true,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:21:02.146Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+     "plate_id": 10,
+     "plates": null,
+     "body": {
+      "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+      "printer_id": 1,
+      "filament_plan": {
+       "slots": [
+        {
+         "slot_id": 1,
+         "spool_id": 61
+        },
+        {
+         "slot_id": 2,
+         "spool_id": 4
+        },
+        {
+         "slot_id": 3,
+         "spool_id": 58
+        },
+        {
+         "slot_id": 4,
+         "spool_id": 57
+        },
+        {
+         "slot_id": 5,
+         "spool_id": 63
+        },
+        {
+         "slot_id": 6,
+         "spool_id": 26
+        },
+        {
+         "slot_id": 7,
+         "spool_id": 1
+        },
+        {
+         "slot_id": 8,
+         "spool_id": 24
+        },
+        {
+         "slot_id": 9,
+         "spool_id": 66
+        },
+        {
+         "slot_id": 10,
+         "spool_id": 102
+        }
+       ],
+       "force_colour_match": false
+      },
+      "choices": {
+       "nozzles": [
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        },
+        {
+         "size": "0.4",
+         "flow": "high_flow"
+        }
+       ],
+       "tier": "standard",
+       "process_name": null,
+       "bed_type": "Textured PEI Plate",
+       "filament_overrides": {}
+      },
+      "plate_id": 10,
+      "all_plates": false,
+      "rack_position": null,
+      "rack_algorithm": null
+     },
+     "at": "2026-10-25T07:21:08.732Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/commands/op-preview_slice-59f465aae37d6c26beb168fa7fd3aa504923f5467464392bf6f69f43befdfd41/updates/ec7779350d0865fca781f5508b960ec0",
+     "plate_id": null,
+     "plates": null,
+     "body": null,
+     "at": "2026-10-25T07:21:12.017Z"
+    }
+   ],
+   "aborted": [
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:20:56.183Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:20:59.361Z"
+    },
+    {
+     "method": "POST",
+     "path": "/api/v1/analyzers/run",
+     "at": "2026-10-25T07:21:02.153Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:21:04.372Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:21:09.951Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:21:17.321Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:21:44.725Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:21:50.970Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:21:55.246Z"
+    },
+    {
+     "method": "POST",
+     "path": "/telemetry/v1/traces",
+     "at": "2026-10-25T07:22:02.065Z"
+    }
+   ]
+  }
+ ],
+ "finished": "2026-10-25T07:22:05.609Z"
+}
