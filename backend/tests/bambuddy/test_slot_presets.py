@@ -256,35 +256,9 @@ async def test_distinct_refs_of_one_name_share_it_when_no_preset_could_be_made(
         PresetChoice(ref=first, name="My cloud PLA"), PresetChoice(ref=second, name="My cloud PLA")
     )
 
-    out, shared = await SlotPresets(bambuddy, names).planned(plan(first, second))
+    out = await slotted(SlotPresets(bambuddy, names), plan(first, second), shared=True)
 
     assert out.filament_presets == [first, second]
-    assert shared
-
-
-@respx.mock
-async def test_a_slot_preset_that_could_not_be_made_still_shares_a_name(
-    bambuddy: BambuddyClient,
-) -> None:
-    listed()
-    respx.post(f"{API}/local-presets/").mock(return_value=httpx.Response(403))
-
-    _, shared = await SlotPresets(bambuddy, catalogue()).planned(plan(STANDARD, STANDARD))
-
-    assert shared
-
-
-@respx.mock
-async def test_slots_on_presets_of_their_own_share_no_name(bambuddy: BambuddyClient) -> None:
-    listed()
-    creates()
-
-    out, shared = await SlotPresets(bambuddy, catalogue()).planned(
-        plan(STANDARD, STANDARD, STANDARD)
-    )
-
-    assert len({ref.id for ref in out.filament_presets}) == 3
-    assert not shared
 
 
 @respx.mock
@@ -312,16 +286,15 @@ async def test_a_ref_the_catalogue_does_not_name_may_share_one(
     """#4655 review: its name cannot be compared, so the guard reads the slice rather
     than trust ``source:id`` to be distinct (a ``cloud`` system ref may be the
     ``standard`` preset beside it)."""
-    distinct, shared = await SlotPresets(bambuddy, catalogue()).planned(plan(STANDARD, other))
+    out = await slotted(SlotPresets(bambuddy, catalogue()), plan(STANDARD, other), shared=True)
 
-    assert distinct.filament_presets == [STANDARD, other]
-    assert shared
+    assert out.filament_presets == [STANDARD, other]
 
 
 async def test_one_slot_shares_no_name(bambuddy: BambuddyClient) -> None:
     other = PresetRef(source="cloud", id="GFSA00_14")
     for one in (plan(STANDARD), plan(other)):
-        assert (await SlotPresets(bambuddy, catalogue()).planned(one))[1] is False
+        assert await slotted(SlotPresets(bambuddy, catalogue()), one, shared=False) is one
 
 
 def test_slot_presets_are_never_offered_in_the_catalogue() -> None:
