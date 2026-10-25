@@ -25,6 +25,7 @@ from scadbuddy.render.bambu3mf import (
     MAX_UNCOMPRESSED_BYTES,
     MODEL_SETTINGS_NAME,
     PLACEHOLDER_NOZZLE_DIAMETER,
+    PLATE_GAP,
     PLATE_PICK,
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
@@ -923,6 +924,7 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         "filament_settings_id": ["ScadBuddy", "ScadBuddy"],
         "nozzle_diameter": ["0.4"],
         "printable_height": "250",
+        "printable_area": ["0x0", "256x0", "256x256", "0x256"],
         "filament_diameter": ["1.75", "1.75"],
         "filament_is_support": ["0", "0"],
         "wipe_tower_x": ["98"],
@@ -1183,16 +1185,32 @@ def _placed_boxes(payload: bytes) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     return boxes
 
 
-def _studio_plate(low: np.ndarray, high: np.ndarray, count: int, plate: PlateGeometry) -> int:
-    """The first plate whose bed the box overlaps, as Bambu Studio assigns it."""
+#: The bed Bambu Studio's CLI lays a project's plates out on while it loads a 3MF that
+#: states no ``printable_area`` (#4638): ``reset_size`` to 200 x 200 in its log, plates
+#: 240 mm apart. Measured with the native slicer image's v02.08.02.61 CLI (`--debug 5`).
+CLI_DEFAULT_BED = (200.0, 200.0)
+
+
+def _studio_bed(payload: bytes) -> tuple[float, float]:
+    """The bed the CLI assigns ``payload``'s objects to plates on: the file's own
+    ``printable_area`` (`translate_old`/`shrink_to_new_bed` read it as the old bed),
+    else :data:`CLI_DEFAULT_BED`. The printer's bed is applied only after that."""
+    area = _settings_of_bytes(payload).get("printable_area")
+    if not isinstance(area, list) or not area:
+        return CLI_DEFAULT_BED
+    points = [tuple(float(v) for v in str(point).split("x")) for point in area]
+    return (max(x for x, _ in points), max(y for _, y in points))
+
+
+def _studio_plate(low: np.ndarray, high: np.ndarray, count: int, bed: tuple[float, float]) -> int:
+    """The first plate whose bed the box overlaps, as Bambu Studio assigns it on ``bed``
+    (:func:`_studio_bed`)."""
+    width, depth = int(bed[0]), int(bed[1])
+    columns = plate_columns(count)
     for index in range(1, count + 1):
-        x, y = plate_origin(index, count, plate)
-        if (
-            low[0] < x + int(plate.size[0])
-            and high[0] > x
-            and low[1] < y + int(plate.size[1])
-            and high[1] > y
-        ):
+        row, column = divmod(index - 1, columns)
+        x, y = column * width * (1.0 + PLATE_GAP), -row * depth * (1.0 + PLATE_GAP)
+        if low[0] < x + width and high[0] > x and low[1] < y + depth and high[1] > y:
             return index
     return 0
 
@@ -1237,8 +1255,9 @@ class TestMultiplePlates:
         payload = _write_plates(tmp_path / "maze.3mf").read_bytes()
         boxes = _placed_boxes(payload)
         # Assemblies take the ids after the three part objects: 4 and 5.
-        assert _studio_plate(*boxes["4"], 2, DEFAULT_PLATE) == 1
-        assert _studio_plate(*boxes["5"], 2, DEFAULT_PLATE) == 2
+        assert _studio_bed(payload) == DEFAULT_PLATE.size
+        assert _studio_plate(*boxes["4"], 2, _studio_bed(payload)) == 1
+        assert _studio_plate(*boxes["5"], 2, _studio_bed(payload)) == 2
         # Centred on its bed, sitting on z = 0.
         low, high = boxes["5"]
         assert (low[:2] + high[:2]) / 2 == pytest.approx((307.2 + 128.0, 128.0))
@@ -1278,13 +1297,37 @@ class TestMultiplePlates:
         assert len(settings["wipe_tower_x"]) == 2
         assert settings["wipe_tower_x"][1] == settings["wipe_tower_x"][0]
 
+    @pytest.mark.parametrize("printer", ["H2C", "P1S", "A1 mini"])
+    def test_every_plate_of_many_slices_on_its_own_bed(self, tmp_path: Path, printer: str) -> None:
+        """#4638: an arranged menorah's ten plates, one candle each from plate 2, sliced
+        only plate 1. The file stated no ``printable_area``, so Bambu Studio's CLI put
+        its objects on plates laid out on its 200 mm default bed (240 mm apart) and only
+        then took the printer's: the candle written for H2C plate 2 (x 560) landed on
+        plate 3, and plate 2 was "Nothing to be sliced". Plate 1 sits at the origin on
+        any bed, so it always sliced. The file now states the bed it was laid out on."""
+        candle = ColourPart(1, "Candle", "#FFFFFF", trimesh.creation.box(extents=(21, 21, 65)))
+        plates = [PlateParts((candle,), (1,)) for _ in range(10)]
+        out = tmp_path / "ten.3mf"
+        write_plates_3mf(plates, ["#FFFFFF"], out, thumbnails=None, plate=plate_for("H2C"))
+        target = plate_for(printer)
+        moved = replate_3mf(out.read_bytes(), target)
+        for payload, bed in ((out.read_bytes(), plate_for("H2C").size), (moved, target.size)):
+            assert _studio_bed(payload) == bed
+            boxes = _placed_boxes(payload)
+            # Each plate's one assembly takes the id after the ten part objects.
+            assert [
+                _studio_plate(*boxes[str(10 + index)], 10, _studio_bed(payload))
+                for index in range(1, 11)
+            ] == list(range(1, 11))
+
     def test_replating_moves_every_plate_onto_the_printers_stride(self, tmp_path: Path) -> None:
         written = _write_plates(tmp_path / "maze.3mf")
         h2c = plate_for("H2C")
         moved = replate_3mf(written.read_bytes(), h2c)
         boxes = _placed_boxes(moved)
-        assert _studio_plate(*boxes["4"], 2, h2c) == 1
-        assert _studio_plate(*boxes["5"], 2, h2c) == 2
+        assert _studio_bed(moved) == h2c.size
+        assert _studio_plate(*boxes["4"], 2, _studio_bed(moved)) == 1
+        assert _studio_plate(*boxes["5"], 2, _studio_bed(moved)) == 2
         low, high = boxes["5"]
         # Centred on the H2C's reachable area (x 25..325), one stride over.
         assert (low[0] + high[0]) / 2 == pytest.approx(396.0 + 175.0)

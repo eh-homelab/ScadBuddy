@@ -441,7 +441,10 @@ stays. A new `backend/scadbuddy/slicing/slice_info.py` reads `slice_info.config`
 ### 5.5 Failure surface
 
 A `SlicerError` with exit 192 is shown as the slicer's own message (the CLI prints the
-validation failure to stderr before exiting; `stderr_tail` carries it). The preview
+validation failure before exiting; `stderr_tail` carries it). Bambu Studio logs a
+failed plate's reason ("plate 2: Nothing to be sliced, …") to stdout, not stderr, so
+`stderr_tail` starts with the `[error]` lines of stdout's tail, their timestamps cut
+(#4638; measured on the v02.08.02.61 CLI, whose stderr was empty). The preview
 pane's `slice-error` alert shows it verbatim, and the run fails with it as its
 `failure`. The row's failure text decodes details for a `SlicerError` only: `"The slicer
 refused the plate: <stderr_tail>"` for 192, `"The slicer failed: <stderr_tail>"`

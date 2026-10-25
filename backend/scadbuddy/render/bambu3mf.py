@@ -547,6 +547,22 @@ def printer_preset(plate: PlateGeometry, nozzle: str) -> str:
     return f"{plate.model} {nozzle} nozzle" if plate.model else PRESET_PLACEHOLDER
 
 
+def printable_area(plate: PlateGeometry) -> list[str]:
+    """``plate``'s bed as ``printable_area`` states it (``["0x0", "330x0", ...]``), in
+    the file's ``project_settings.config`` (#4638).
+
+    Bambu Studio's CLI assigns each object to a plate while it loads the file, on the
+    bed the file states, and takes the printer's bed only after that (``translate_old``,
+    ``shrink_to_new_bed``). A file that states none is laid out on its 200 x 200 mm
+    default, 240 mm a plate, so every plate past the first lost its objects to another
+    plate or the gap between two ("Nothing to be sliced"). Measured 2026-10-24 with the
+    native slicer image's v02.08.02.61 CLI at ``--debug 5`` on output
+    ``f542c216a3104334b252d4067e64ea11``'s ten plates: ``reset_size`` 200 x 200 without
+    it; stating the H2C's bed, plates 1, 2 and 10 each sliced."""
+    width, depth = (_number(value) for value in plate.size)
+    return ["0x0", f"{width}x0", f"{width}x{depth}", f"0x{depth}"]
+
+
 def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
     """Every filament on extruder 1, as Bambu Studio 02.08.02.61 saved the maintainer's
     two-colour H2C keychain at 0.2 mm, which printed through the one 0.2 mm nozzle
@@ -608,6 +624,8 @@ def project_settings(
         "filament_settings_id": [PRESET_PLACEHOLDER for _ in colours],
         "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
         "printable_height": _number(plate.height),
+        # The bed the plates are laid out on, which the CLI lays them out by (#4638).
+        "printable_area": printable_area(plate),
         # Required-or-segfault on a slice with no profiles (#4089).
         **filament_vectors(len(colours)),
     }
@@ -1305,6 +1323,9 @@ def replate_3mf(
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
             settings["printable_height"] = _number(plate.height)
+            # And the bed the plates are now spaced by, which the CLI places them by
+            # (#4638); a file written before it states none.
+            settings["printable_area"] = printable_area(plate)
             # A file written before #4089 lacks these, and Bambuddy's preview slice
             # segfaults on it; a file that states them keeps its own.
             for key, value in filament_vectors(len(settings.get("filament_colour", []))).items():

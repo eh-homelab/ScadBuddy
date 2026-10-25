@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::models::{Arrange, SliceProgress};
 use crate::progress::{Line, LineBuffer};
 
-/// How much of the CLI's stderr is kept: its last lines name a validation failure.
+/// How much of each of the CLI's streams is kept: their last lines say why it failed.
 const STDERR_TAIL: usize = 8 * 1024;
 /// At most one progress callback a second; the last line seen is always delivered.
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
@@ -26,7 +26,7 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// repeats the last progress (zeroed before the first line), because Temporal delivers
 /// cancellation only on a heartbeat and fails an activity silent past its heartbeat timeout.
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
-/// How long stderr may stay open after the CLI exits (a straggler holding it).
+/// How long stderr and stdout may stay open after the CLI exits (a straggler holding them).
 pub const STDERR_GRACE: Duration = Duration::from_secs(1);
 /// The worker's variables the CLI sees, when set, besides `HOME` ([`cli_env`]). AppRun
 /// sets `LD_LIBRARY_PATH` and `LC_ALL` itself; it needs nothing else.
@@ -55,6 +55,8 @@ pub struct RunOutcome {
     /// The CLI's exit code, or 128 + the signal that ended it.
     pub exit_code: i32,
     pub warnings: Vec<String>,
+    /// Why the CLI failed, as it said: the `[error]` lines of its stdout's tail
+    /// ([`error_lines`]), then its stderr's tail.
     pub stderr_tail: String,
     pub elapsed: Duration,
 }
@@ -196,7 +198,8 @@ pub async fn run(
 
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let mut stderr_task = tokio::spawn(keep_tail(child.stderr.take(), stderr.clone()));
-    let stdout_task = tokio::spawn(keep_tail(child.stdout.take(), Arc::default()));
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let mut stdout_task = tokio::spawn(keep_tail(child.stdout.take(), stdout.clone()));
 
     let mut lines = LineBuffer::default();
     let mut progress = Coalesce::new(req.keepalive);
@@ -240,10 +243,19 @@ pub async fn run(
 
     // A stream still open past the grace is held by something the kill could not reach
     // (outside the group); its reader is stopped, not left running.
-    let _ = tokio::time::timeout(STDERR_GRACE, &mut stderr_task).await;
+    let _ = tokio::time::timeout(STDERR_GRACE, async {
+        let _ = tokio::join!(&mut stderr_task, &mut stdout_task);
+    })
+    .await;
     stderr_task.abort();
     stdout_task.abort();
-    let stderr_tail = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
+    let reasons = error_lines(&stdout.lock().expect("stdout lock"));
+    let stderr_tail = if reasons.is_empty() {
+        stderr
+    } else {
+        format!("{reasons}\n{stderr}")
+    };
 
     let exit_code = status
         .code()
@@ -372,6 +384,22 @@ fn take(
             Line::Other => {}
         }
     }
+}
+
+/// The messages of the `[error]` lines in `stdout`, one a line, without their timestamp
+/// and thread. Bambu Studio logs through boost to stdout, so why a plate failed ("plate 2:
+/// Nothing to be sliced, …") never reaches stderr, which a failed slice then reported
+/// empty (#4638).
+pub fn error_lines(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| {
+            line.split_once("[error]")
+                .map(|(_, message)| message.trim())
+        })
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Reads `stream` to its end, keeping its last `STDERR_TAIL` bytes in `tail`.

@@ -1142,10 +1142,15 @@ area its bounding box intersects (`src/slic3r/GUI/PartPlate.cpp`), and the CLI
 Bambuddy slices with runs the same code (`src/BambuStudio.cpp`). Plate *i*
 (0-based) of *n* sits at `(col * W * 1.2, -row * D * 1.2)`, where `W` x `D` is
 the printer's bed (`printable_area`, truncated to whole millimetres),
-`cols = ceil(sqrt(n))`, `row, col = divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. Because we write no
-`printable_area`, the CLI takes the printer's own as the file's
-(`old_printable_width = current_printable_width`), so there is no shrink and
-nothing moves (`shrink_to_new_bed == 0`). `compute_colum_count` does not spell
+`cols = ceil(sqrt(n))`, `row, col = divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. The CLI assigns
+objects to plates while it loads the file, on the bed the file's own `printable_area`
+states, and takes the printer's bed only after that. So the writer states the bed it
+laid the plates out on (`bambu3mf.printable_area`), and `replate_3mf` restates it for
+the printer it re-places for (#4638). A file that states none is laid out on the CLI's
+200 x 200 mm default, 240 mm a plate (`reset_size` in its log): every plate past the
+first lost its objects to another plate or a gap, and sliced as "Nothing to be sliced".
+Measured 2026-10-24 with the native slicer image's v02.08.02.61 CLI at `--debug 5` on a
+ten-plate arranged output, which before the fix sliced plate 1 only. `compute_colum_count` does not spell
 it `ceil`: it rounds `sqrt(n)` to the nearest whole number and adds one when that
 rounded down. Rounding a non-integer root up gives its ceiling, and rounding it
 down and adding one gives the same; a whole root is its own ceiling. So the two
@@ -1173,9 +1178,9 @@ So:
   geometry that is never on one bed. The result's `plate` and `plates` say which
   plate it is and how many there are.
 
-Not verified end to end: no Bambu Studio or Bambuddy runs in CI, so the layout
-rests on the source above, and slicing a multi-plate ScadBuddy file through
-Bambuddy is an acceptance check still to make on a live instance.
+No Bambu Studio or Bambuddy runs in CI, so the layout rests on the source above and
+on the #4638 measurement: a ten-plate H2C file and its P1S re-placement sliced plates
+2, 5 and 10 through the v02.08.02.61 CLI once it stated `printable_area`.
 
 ## 7. Bambuddy integration
 

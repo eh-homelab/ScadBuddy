@@ -1439,7 +1439,9 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
 - It serves `/healthz` and `/metrics` on `9090`.
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
-  details are always one `{"exit_code", "stderr_tail"}` object; exit 192, a
+  details are always one `{"exit_code", "stderr_tail"}` object, `stderr_tail` holding the
+  `[error]` lines of the CLI's stdout, where Bambu Studio logs why a plate failed (#4638),
+  before the tail of its stderr; exit 192, a
   validation failure, and exit 0 without the sliced 3MF are non-retryable),
   `SlicerWorkerError` (the worker's own failure, such as its temp directory or
   starting the CLI: retryable, a message and no details),

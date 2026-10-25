@@ -84,6 +84,25 @@ async fn a_slice_reports_progress_warnings_and_its_output() {
 }
 
 #[tokio::test]
+async fn a_failed_plates_reason_on_stdout_reaches_the_tail() {
+    // #4638: Bambu Studio logs why a plate failed to stdout, never stderr, so the quote
+    // read "The slicer failed:" and nothing else.
+    let (result, _seen, _p) = run_fake("empty-plate").await;
+    let outcome = result.unwrap();
+    assert_eq!(outcome.exit_code, 206);
+    assert!(
+        outcome.stderr_tail.starts_with(
+            "plate 2: Nothing to be sliced, Either the print is empty or no object is fully \
+             inside the print volume before apply.\n"
+        ),
+        "{:?}",
+        outcome.stderr_tail
+    );
+    assert!(outcome.stderr_tail.contains("fake stderr line"));
+    assert!(!outcome.stderr_tail.contains("Initializing"));
+}
+
+#[tokio::test]
 async fn a_progress_line_split_across_reads_is_read_whole() {
     let (result, seen, _p) = run_fake("split").await;
     let outcome = result.unwrap();

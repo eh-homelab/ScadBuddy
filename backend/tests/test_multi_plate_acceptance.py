@@ -39,7 +39,7 @@ from scadbuddy.render.jobs import JobResult
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.schema import ParamValue
 from tests.conftest import openscad_binary, render_once
-from tests.test_bambu3mf import _placed_boxes, _studio_plate
+from tests.test_bambu3mf import _placed_boxes, _studio_bed, _studio_plate
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 SLUG = "maze-puzzle"
@@ -99,9 +99,9 @@ def test_bambu_studio_puts_each_object_on_the_plate_the_3mf_lists_it_on(maze: Ma
     with zipfile.ZipFile(io.BytesIO(maze.payload)) as archive:
         listed = plate_settings(ET.fromstring(archive.read(MODEL_SETTINGS_NAME)))
     boxes = _placed_boxes(maze.payload)
-    h2c = plate_for("H2C")
+    assert _studio_bed(maze.payload) == plate_for("H2C").size
     placed = {
-        object_id: _studio_plate(*boxes[object_id], len(listed), h2c)
+        object_id: _studio_plate(*boxes[object_id], len(listed), _studio_bed(maze.payload))
         for plate in listed
         for object_id in plate.object_ids
     }
