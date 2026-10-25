@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
-	github.com/hanwen/go-fuse/v2 v2.12.0
+	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/microsoft/kiota-abstractions-go v1.11.4
 	github.com/microsoft/kiota-http-go v1.5.9
 	github.com/microsoft/kiota-serialization-json-go v1.1.5
