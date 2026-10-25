@@ -199,7 +199,11 @@ def _check_standard_tier(catalogue: PresetCatalogue) -> None:
     printers but no processes is not a shape it sends.
     It answers the same with no sidecar URL at all, which it cannot slice without either
     (its slice route needs one, ``library.py`` ``_run_slicer_with_fallback``), so the
-    message names that cause too."""
+    message names that cause too. Only a run or dialog that Bambuddy slices meets it: a
+    native one resolves against the image's catalogue (``slicing/catalogue.py``
+    ``catalogue_for`` given ``native``) and reads Bambuddy's only for names
+    (:func:`read_preset_names`, unchecked), so a native print with ``local`` presets
+    is not refused for want of a sidecar."""
     if _is_empty(catalogue.standard) and not _is_empty(catalogue.cloud):
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,

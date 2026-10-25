@@ -99,6 +99,12 @@ def _expire(cache: Path) -> None:
     os.utime(kept, (0, 0))
 
 
+async def _refreshes_done() -> None:
+    """Wait for this process's background refreshes: the one place these tests reach
+    into the module's running reads (#4717 review)."""
+    await asyncio.gather(*catalogue._refreshing.values())
+
+
 class _HeldPresets:
     """/slicer/presets held until ``release`` is set, counting the reads as they
     start: respx counts a call only once it has answered."""
@@ -257,7 +263,7 @@ async def test_an_expired_catalogue_answers_at_once_and_is_read_again_behind_it(
 
     asked.set()
     async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+        await _refreshes_done()
     assert local.call_count == 2
     assert not catalogue._refreshing
     assert catalogue._load(next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()))
@@ -273,7 +279,7 @@ async def test_a_failed_refresh_keeps_the_old_catalogue(
     presets.mock(return_value=httpx.Response(500))
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     assert presets.call_count == 2
     catalogue.forget_catalogues()
@@ -293,7 +299,7 @@ async def test_a_refresh_whose_local_presets_read_fails_keeps_the_old_catalogue(
     local.mock(return_value=httpx.Response(500))
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     assert local.call_count == 2
     assert kept.stat().st_mtime == 0  # not rewritten
@@ -433,7 +439,7 @@ async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
     assert len(catalogue._refreshing) == 1
     held.release.set()
     async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+        await _refreshes_done()
     assert held.started == 1
     assert kept.exists()
 
@@ -460,7 +466,7 @@ async def test_a_miss_that_persists_counts_its_opens_in_a_row(
         goes again, so the file stays away."""
         await cached_catalogue(bambuddy, tmp_path)
         async with asyncio.timeout(5):
-            await asyncio.gather(*catalogue._refreshing.values())
+            await _refreshes_done()
         kept.unlink(missing_ok=True)
 
     # Each open answers the held copy while the file is away, and reads it once back.
@@ -520,7 +526,7 @@ async def test_a_refresh_that_cannot_be_kept_still_answers_the_next_open(
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
     async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+        await _refreshes_done()
 
     assert await cached_catalogue(bambuddy, tmp_path) == fresh
 
@@ -536,7 +542,7 @@ async def test_a_malformed_refresh_keeps_the_old_catalogue_and_logs_only_its_typ
     presets.mock(return_value=httpx.Response(200, json={"cloud": "leaked-body-text"}))
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     (record,) = [r for r in caplog.records if "refresh" in r.getMessage()]
     assert record.__dict__["error"] == "ValidationError"
@@ -1031,7 +1037,7 @@ async def test_a_refresh_without_the_standard_tier_keeps_the_old_catalogue(
     presets.mock(return_value=_sidecar_unanswered())
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     assert presets.call_count == 2
     assert kept.stat().st_mtime == 0  # not rewritten
