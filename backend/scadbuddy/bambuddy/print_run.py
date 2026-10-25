@@ -2719,9 +2719,9 @@ async def plan_run(
         # the preview, the slice and a reprint's lookup all name the same refs.
         slot_presets = SlotPresets(client, catalogue)
         slotted: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
-        for plate_id, options, resolved, plan in ready:
-            plan, shared_names[plate_id] = await slot_presets.planned(plan)
-            slotted.append((plate_id, options, resolved, plan))
+        for plate_id, options, resolved, unslotted in ready:
+            slotted_plan, shared_names[plate_id] = await slot_presets.planned(unslotted)
+            slotted.append((plate_id, options, resolved, slotted_plan))
         ready = slotted
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
