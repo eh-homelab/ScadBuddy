@@ -95,7 +95,7 @@ def _sequence(archive: zipfile.ZipFile, index: int) -> list[int]:
         if len(data) > _MAX_SEQUENCE_BYTES:
             return []
         doc = json.loads(data)
-    except (zipfile.BadZipFile, ValueError):
+    except (zipfile.BadZipFile, ValueError, RecursionError):
         return []
     plate = doc.get(f"plate_{index}") if isinstance(doc, dict) else None
     sequence = plate.get("sequence") if isinstance(plate, dict) else None

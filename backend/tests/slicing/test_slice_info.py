@@ -1,3 +1,5 @@
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -92,3 +94,13 @@ def test_grams_stay_as_written_when_nothing_says_which_filament_is_first(header:
     plate's first filament is unknown: its grams are left on the ids the slicer wrote."""
     file = sliced_3mf(plates={1: (60, [0.2, 1.0, 2.0])}, gcode={1: header + b"M620 S1A\n"})
     assert read_sliced(file, 1).grams_by_slot == {1: 0.2, 2: 1.0, 3: 2.0}
+
+
+def test_a_sequence_too_deep_to_parse_reads_as_none() -> None:
+    """A ``filament_sequence.json`` nested past the parser's recursion limit is no
+    sequence: the plate still reads, its grams on the ids as written."""
+    file = io.BytesIO(sliced_3mf(plates={1: (60, [0.2, 1.0])}, gcode={1: b"M620 S1A\n"}))
+    with zipfile.ZipFile(file, "a") as archive:
+        archive.writestr("Metadata/filament_sequence.json", "[" * 100_000 + "]" * 100_000)
+    read = read_sliced(file.getvalue(), 1)
+    assert (read.grams_by_slot, read.filament_changes) == ({1: 0.2, 2: 1.0}, 0)
