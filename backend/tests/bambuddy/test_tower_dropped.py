@@ -179,7 +179,12 @@ class Bambuddy(Library):
 SHARED = PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
 
 
-def planned(slicer: str, filaments: tuple[PresetRef, ...] = (SHARED, SHARED)) -> PlannedRun:
+def planned(
+    slicer: str,
+    filaments: tuple[PresetRef, ...] = (SHARED, SHARED),
+    *,
+    shares_a_name: bool | None = True,
+) -> PlannedRun:
     plan = SlicePlan(
         printer_preset=PresetRef(source="standard", id="Bambu Lab H2C 0.4 nozzle"),
         process_preset=PROCESS,
@@ -194,7 +199,7 @@ def planned(slicer: str, filaments: tuple[PresetRef, ...] = (SHARED, SHARED)) ->
             "nozzle_size": "0.4",
             "copies": 1,
             "options": PrintOptions(),
-            "plates": [PlatePlan(plate_id=1, plan=plan)],
+            "plates": [PlatePlan(plate_id=1, plan=plan, slots_share_a_name=shares_a_name)],
             "slicer": slicer,
         }
     )
@@ -225,21 +230,25 @@ async def test_a_native_slice_is_not_read_for_it() -> None:
     assert bambuddy.downloads == []
 
 
+LOCAL_A = PresetRef(source="local", id="12")
+LOCAL_B = PresetRef(source="local", id="13")
+
+
 @pytest.mark.parametrize(
-    "filaments",
+    ("filaments", "shared"),
     [
-        (SHARED, PresetRef(source="local", id="12")),
-        (SHARED, PresetRef(source="standard", id="Bambu PETG Basic @BBL H2C")),
+        ((SHARED, LOCAL_A), False),
+        ((SHARED, PresetRef(source="standard", id="Bambu PETG Basic @BBL H2C")), False),
     ],
     ids=["own-slot-preset", "distinct-presets"],
 )
-async def test_slots_with_presets_of_their_own_are_not_read(
-    filaments: tuple[PresetRef, ...],
+async def test_slots_that_reach_the_cli_under_their_own_names_are_not_read(
+    filaments: tuple[PresetRef, ...], shared: bool
 ) -> None:
-    """#4649: the CLI drops the tower only for slots that share a preset's name, so a
-    plate whose slots each have their own is not downloaded."""
+    """#4649: the CLI drops the tower only for slots that share a preset's name, which
+    ``SlotPresets.shares_a_name`` decided when the run was planned."""
     bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
-    run = planned("bambuddy", filaments)
+    run = planned("bambuddy", filaments, shares_a_name=shared)
 
     queued = await queue_plate(
         cast(BambuddyClient, bambuddy), planned=run, plate=run.plates[0], sliced=9, rack=None
@@ -250,17 +259,21 @@ async def test_slots_with_presets_of_their_own_are_not_read(
 
 
 @pytest.mark.parametrize(
-    "filaments",
+    ("filaments", "shared"),
     [
-        (PresetRef(source="local", id="12"), PresetRef(source="local", id="12")),
-        (SHARED, PresetRef(source="cloud", id="GFA00")),
+        ((LOCAL_A, LOCAL_B), True),
+        ((SHARED, PresetRef(source="cloud", id="GFA00")), True),
+        ((LOCAL_A, LOCAL_B), None),
     ],
-    ids=["same-ref", "cloud-of-a-standard"],
+    ids=["distinct-refs-of-one-name", "cloud-of-a-standard", "planned-before-the-flag"],
 )
-async def test_slots_that_may_share_a_name_are_read(filaments: tuple[PresetRef, ...]) -> None:
-    """A ``cloud`` system preset carries a ``standard`` one's name (``slot_presets``)."""
+async def test_slots_that_share_a_name_are_read(
+    filaments: tuple[PresetRef, ...], shared: bool | None
+) -> None:
+    """#4655 review: two distinct refs of one name (a slot preset that could not be
+    made) are read, and a plan from before the flag reads every multi-slot plate."""
     bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
-    run = planned("bambuddy", filaments)
+    run = planned("bambuddy", filaments, shares_a_name=shared)
 
     queued = await queue_plate(
         cast(BambuddyClient, bambuddy), planned=run, plate=run.plates[0], sliced=9, rack=None
