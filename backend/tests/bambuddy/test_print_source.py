@@ -1222,6 +1222,22 @@ async def test_a_fetch_every_reader_gave_up_on_is_stopped_and_the_next_starts_an
     assert source.begun == 2
 
 
+async def test_a_fetch_given_up_on_takes_its_client_with_it() -> None:
+    """#4659 review: once a fetch is stopped and dropped, the next reader starts anew on
+    its own client, as it starts a fetch anew."""
+    source = _HeldFetch(b"not a 3mf")
+    first, other = cast(BambuddyClient, object()), cast(BambuddyClient, object())
+    given_up = asyncio.ensure_future(source.fetched_3mf(first))
+    await source.started.wait()
+    given_up.cancel()
+    await asyncio.gather(given_up, return_exceptions=True)
+    source.release.set()
+
+    async with asyncio.timeout(5):
+        assert await source.fetched_3mf(other) == b"not a 3mf"
+    assert source.begun == 2
+
+
 async def test_every_reader_of_a_fetch_hands_in_its_client() -> None:
     """#4623 review: the fetch runs on the first reader's client, so a reader with
     another (which might close first) is a caller's mistake, said at once."""
