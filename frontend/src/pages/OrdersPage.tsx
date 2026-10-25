@@ -4,7 +4,7 @@ import { Loader2Icon } from 'lucide-react'
 import { api } from '../api/client'
 import type { Customer, Order, OrderStatus } from '../api/types'
 import { CustomerPicker } from '../components/orders/CustomerPicker'
-import { useCustomerPicker } from '../components/orders/useCustomerPicker'
+import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustomerPicker'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { refusalText } from '../components/orders/refusal'
 import { DataTable, type Column } from '../components/records/DataTable'
@@ -74,7 +74,10 @@ export function OrdersPage() {
     setCreateError(null)
     try {
       // A customer made here stays picked when the order then fails, so a retry reuses it.
+      const making = picker.value === NEW_CUSTOMER
       const customerId = await picker.resolve()
+      // The list's names and Customer filter read `customers`: take the new one in.
+      if (making) customers.reload()
       const order = await api.createOrder({ customer_id: customerId, notes: newNotes, due_at: newDue ? `${newDue}T00:00:00Z` : null })
       setCreating(false)
       void navigate(`/orders/${order.id}`)
@@ -98,7 +101,7 @@ export function OrdersPage() {
     { key: 'customer', header: 'Customer', className: 'break-words', cell: (order) => names.get(order.customer_id) ?? order.customer_id },
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
     { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
-    { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? new Date(order.due_at).toLocaleDateString() : '') },
+    { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? dueDate(order.due_at) : '') },
   ]
 
   return (
@@ -217,4 +220,9 @@ export function OrdersPage() {
       </Dialog>
     </div>
   )
+}
+
+/** A due date is a day, stored as that day's UTC midnight: shown as that day everywhere. */
+function dueDate(dueAt: string): string {
+  return new Date(dueAt).toLocaleDateString(undefined, { timeZone: 'UTC' })
 }

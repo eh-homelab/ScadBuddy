@@ -142,8 +142,12 @@ describe('OrdersPage (#4249)', () => {
     const picker = within(dialog).getByRole('combobox', { name: 'Customer for the new order' })
     await choose(user, picker, 'New customer…')
     await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    const listed = vi.spyOn(api, 'customers')
     await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
+    // The list re-reads its customers, so its names and filter take the new one in.
+    await waitFor(() => expect(listed).toHaveBeenCalled())
+    listed.mockRestore()
     expect(picker).toHaveTextContent('Grace Hopper')
     expect(within(dialog).queryByLabelText('Customer name')).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Create order' }))

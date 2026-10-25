@@ -28,6 +28,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   const navigate = useNavigate()
   const customers = useAsync(() => (open ? api.customers() : Promise.resolve([] as Customer[])), [open])
   const picker = useCustomerPicker(customers.data)
+  const resetPicker = picker.reset
   const [orderId, setOrderId] = useState(NEW)
   const [quantity, setQuantity] = useState('1')
   const [busy, setBusy] = useState(false)
@@ -48,8 +49,10 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     if (!open) {
       setError(null)
       setBusy(false)
+      // Opened again, it starts empty, as New order does.
+      resetPicker()
     }
-  }, [open])
+  }, [open, resetPicker])
   useEffect(() => {
     // The newest open order of the customer, else a new one.
     setOrderId(openOrders[0]?.id ?? NEW)
