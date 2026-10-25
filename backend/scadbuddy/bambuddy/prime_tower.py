@@ -18,12 +18,22 @@ anyway, with a warning that the slicer may not take it (:func:`prime_tower_warni
 
 from __future__ import annotations
 
+import asyncio
+import io
+import logging
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from contextlib import aclosing
+from typing import Protocol
+
 from pydantic import BaseModel, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.filaments3mf import read_filaments
+from scadbuddy.bambuddy.models import PresetRef, PresetValues
 from scadbuddy.core.problems import ApiError
+
+logger = logging.getLogger(__name__)
 
 #: The Bambu Studio process keys a prime tower choice sets. ``frontend/src/lib/primeTower.ts``
 #: copies them (``PRIME_TOWER_KEYS``) to strike them in the template's slicer defaults;
@@ -130,3 +140,106 @@ _UNKNOWN_EFFECT: dict[str, tuple[str, str]] = {
         "the tower keeps its sparse layers",
     ),
 }
+
+
+#: A sliced file past this is not read for its prime tower, as the dialog bounds it.
+MAX_SLICED_BYTES = 128 * 1024 * 1024
+
+
+class SlicedFiles(Protocol):
+    """The reads :func:`tower_dropped` makes; ``BambuddyClient`` is one."""
+
+    def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]: ...
+
+    async def preset_values(self, ref: PresetRef) -> PresetValues: ...
+
+
+def may_share_a_name(refs: Sequence[PresetRef]) -> bool:
+    """Whether two of the slots' ``refs`` may reach Bambu Studio's CLI under one name,
+    the case in which it drops the tower (``slot_presets``), so :func:`tower_dropped` is
+    worth its download (#4649). Two equal refs do; so may a ``standard`` and a ``cloud``
+    ref, since a ``cloud`` system preset carries a ``standard`` one's name. Any other
+    distinct refs name distinct presets, as a slot's own preset does."""
+    keys = {(ref.source, ref.id) for ref in refs}
+    sources = {source for source, _ in keys}
+    return len(keys) < len(refs) or {"standard", "cloud"} <= sources
+
+
+async def tower_dropped(
+    client: SlicedFiles,
+    *,
+    sliced: int,
+    plate_id: int,
+    process: PresetRef,
+    process_overrides: Mapping[str, object],
+) -> list[FilamentWarning]:
+    """Say so when Bambuddy's slice of ``plate_id`` came back with no prime tower that
+    was asked for, on a plate printing two or more filaments (#3962). Bambu Studio's CLI
+    turns the tower off when every slot's preset has one name, and per-slot presets
+    (``slot_presets``) are what keeps it; this is how a slot that kept the shared one
+    shows. A warning, never a refusal, and it never raises: an unread file says nothing.
+
+    Asked for means ``enable_prime_tower`` ``"1"`` among the plan's process overrides,
+    or none at all, the slice's value not its system parent's
+    (:attr:`SlicedProfile.prime_tower_changed`) and ``process``'s own value ``"1"``: a
+    user preset that turns the tower off differs from its parent too (#4648), so the
+    preset is read, and one that cannot be read says nothing. A plate asked to print no
+    tower is not read."""
+    asked = process_overrides.get("enable_prime_tower")
+    if asked == "0":
+        return []
+    try:
+        data = bytearray()
+        async with aclosing(client.download_library_file(sliced)) as chunks:
+            async for chunk in chunks:
+                data += chunk
+                if len(data) > MAX_SLICED_BYTES:
+                    return []
+        read = await asyncio.to_thread(read_filaments, io.BytesIO(bytes(data)), sliced=True)
+    except Exception as error:
+        logger.info(
+            "the sliced file's prime tower could not be read",
+            extra={"library_file_id": sliced, "error": type(error).__name__},
+        )
+        return []
+    profile = read.profile
+    if profile is None or profile.prime_tower is not False:
+        return []
+    if asked != "1" and not profile.prime_tower_changed:
+        return []
+    plate = read.sliced.get(plate_id)
+    if plate is None and len(read.sliced) == 1:
+        plate = next(iter(read.sliced.values()))
+    filaments = len({filament.slot_id for filament in plate or []})
+    if filaments < 2:
+        return []
+    if asked != "1" and not await _process_tower_on(client, process):
+        return []
+    return [
+        FilamentWarning(
+            kind="prime-tower-not-applied",
+            message=(
+                f"Bambuddy's slicer dropped the prime tower from plate {plate_id}, which"
+                f" prints {filaments} filaments: the tower was asked for, and the sliced"
+                " file has none. Its slicer usually does this when the filament slots"
+                " share one preset."
+            ),
+        )
+    ]
+
+
+async def _process_tower_on(client: SlicedFiles, process: PresetRef) -> bool:
+    """Whether ``process``'s own ``enable_prime_tower`` is ``"1"``; ``False`` when it
+    cannot be read."""
+    try:
+        answer = await client.preset_values(process)
+    except Exception as error:
+        logger.info(
+            "the process preset's prime tower could not be read",
+            extra={"source": process.source, "error": type(error).__name__},
+        )
+        return False
+    value = answer.values.get("enable_prime_tower")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return answer.resolved and value == "1"

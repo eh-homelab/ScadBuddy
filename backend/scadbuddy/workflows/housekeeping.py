@@ -53,6 +53,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
+    from scadbuddy.workflows.operation_models import HEARTBEAT_THROTTLE
     from scadbuddy.workflows.registered import RegisteredActivities
 
 logger = logging.getLogger(__name__)
@@ -368,6 +369,8 @@ def library_worker(
         # A library command of a kind this build lacks waits for the build that has it
         # (#4139): a new API replica's request in the second before its build is current.
         interceptors=[RegisteredActivities(activities)],
+        # The library commands' ``Operation`` runs heartbeat against a 30 s timeout (#4635).
+        max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
     )
 
 

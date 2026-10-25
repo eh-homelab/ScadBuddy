@@ -23,6 +23,28 @@ def operation_unexpected_running_detail(where: str) -> str:
     )
 
 
+#: An operation's run that Temporal timed out on its heartbeat (#4635).
+OPERATION_INTERRUPTED_PROBLEM = "https://scadbuddy.dev/problems/operation-interrupted"
+
+
+def operation_interrupted(where: str) -> PrintRunError:
+    """An operation's run that missed its heartbeat (#4635). Its worker stopped (a
+    rollout), or Temporal did not record the heartbeats in time (a stalled history
+    shard). Nothing failed in ScadBuddy's code, so this is not the unexpected failure
+    whose logs would say why. The effect may have happened, and sending the request
+    again is the remedy once ``where`` is checked."""
+    return PrintRunError(
+        type=OPERATION_INTERRUPTED_PROBLEM,
+        status=503,
+        title="Service Unavailable",
+        detail=(
+            "ScadBuddy lost contact with this while it ran (its worker stopped, or "
+            "Temporal did not answer in time), so it may have been done. "
+            f"Check {where}, then try again."
+        ),
+    )
+
+
 #: An operation's check that timed out as an activity (#2065): its own budget
 #: (``CHECK_BUDGET_SECONDS``) answers a slow check as a refusal, so this is the worker
 #: not answering at all, not the check being slow. Nothing was written.

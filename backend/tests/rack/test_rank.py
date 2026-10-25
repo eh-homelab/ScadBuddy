@@ -366,6 +366,18 @@ def test_a_manual_pick_on_a_plate_with_no_rack_group_is_unused() -> None:
     ]
 
 
+def test_a_manual_pick_names_who_picks_what_scadbuddy_leaves() -> None:
+    """#4586 review: over the LAN the printer picks, so ``manual_for`` says so."""
+    _, unused = manual_for([], 4, "least_used", picker="the printer")
+    _, partial = manual_for([group(3), group(1)], 4, "bambuddy", picker="the printer")
+    assert [n.message for n in [*unused, *partial]] == [
+        "Rack pick left to the printer: manual rack pick unused: this plate does not "
+        "print from the rack.",
+        "The slice put the rack side in 2 nozzle groups: group 1 got position 4, and "
+        "the printer picks for group 3.",
+    ]
+
+
 def test_no_manual_pick_means_nothing_to_say() -> None:
     assert manual_for([group()], None, "least_used") == ({}, [])
 

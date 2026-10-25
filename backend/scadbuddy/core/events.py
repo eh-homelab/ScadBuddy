@@ -175,6 +175,24 @@ class PrintRunEvent(BaseEvent):
     run_id: str
 
 
+PrintOutcomeKind = Literal["finished", "failed", "cancelled", "unknown"]
+
+
+class PrintOutcome(BaseEvent):
+    """A print settled, recorded once (#2665): ``print_outcomes``' row for the run that
+    queued or started it, published in the transaction that wrote it, so it is heard
+    once however many replicas or attempts read the print settled. ``output_id`` is the
+    run subject, as on ``print.run``; ``printer`` the registry printer, when the run
+    named one. Flow triggers fire ``print.finished`` and ``print.failed`` on it."""
+
+    kind: Literal["print.outcome"] = "print.outcome"
+    output_id: str
+    slug: str
+    run_id: str
+    outcome: PrintOutcomeKind
+    printer: str | None = None
+
+
 class PrinterEvent(BaseEvent):
     """A registry printer changed (#3823): ``printer.changed`` for a write to its row
     (`api/printers.py`), ``printer.report`` when its LAN report changed in a way a card
@@ -357,6 +375,7 @@ Event = Annotated[
     | OutputEvent
     | PrintEvent
     | PrintRunEvent
+    | PrintOutcome
     | PrinterEvent
     | OperationEvent
     | FlowRunEvent

@@ -922,6 +922,7 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         "print_settings_id": "ScadBuddy",
         "filament_settings_id": ["ScadBuddy", "ScadBuddy"],
         "nozzle_diameter": ["0.4"],
+        "printable_area": ["0x0", "256x0", "256x256", "0x256"],
         "printable_height": "250",
         "filament_diameter": ["1.75", "1.75"],
         "filament_is_support": ["0", "0"],
@@ -1197,6 +1198,82 @@ def _studio_plate(low: np.ndarray, high: np.ndarray, count: int, plate: PlateGeo
     return 0
 
 
+#: The bed Bambu Studio's CLI takes a 3MF to have been laid out on when its
+#: ``project_settings.config`` states no ``printable_area``: "old printable size from
+#: 3mf: {200, 200, 325}" in its log (#4638, BambuStudio 02.08 in bambuddy-slicer).
+SLICER_UNSTATED_BED = (200, 200)
+
+
+def _many_plates(count: int = 10) -> tuple[list[PlateParts], list[str]]:
+    """A wide two-colour base on plate 1 and one small single-colour candle on each
+    plate after it, as Arrange laid out #4638's menorah."""
+    base = [
+        ColourPart(1, "Base", "#E4BD68", trimesh.creation.box(extents=(100, 90, 20))),
+        ColourPart(
+            2,
+            "Trim",
+            "#C12E1F",
+            trimesh.creation.box(extents=(10, 10, 10), transform=_translate(0, 0, 15)),
+        ),
+    ]
+    candles = [
+        ColourPart(
+            index,
+            f"Candle {index}",
+            f"#00{index:02X}00",
+            trimesh.creation.box(extents=(21, 21, 65)),
+        )
+        for index in range(3, count + 2)
+    ]
+    plates = [PlateParts(tuple(base), (1, 2))] + [
+        PlateParts((candle,), (candle.material_index,)) for candle in candles
+    ]
+    return plates, [part.colour for part in base] + [candle.colour for candle in candles]
+
+
+def _slicer_beds(payload: bytes, count: int) -> list[tuple[float, float, float, float]]:
+    """Each plate's bed as the slicer lays the file out, from the file alone: its stated
+    ``printable_area`` (or :data:`SLICER_UNSTATED_BED`), ``ceil(sqrt(count))`` columns,
+    rows towards -Y, a bed and a fifth apart (``PartPlateList::compute_shape_position``).
+    Deliberately not :func:`plate_origin`, which is what is under test."""
+    area = _settings_of_bytes(payload).get("printable_area")
+    if area is None:
+        width, depth = SLICER_UNSTATED_BED
+    else:
+        assert isinstance(area, list)
+        points = [[float(v) for v in str(point).split("x")] for point in area]
+        width, depth = int(max(p[0] for p in points)), int(max(p[1] for p in points))
+    columns = math.ceil(math.sqrt(count))
+    beds = []
+    for index in range(count):
+        row, column = divmod(index, columns)
+        x, y = column * width * 1.2, -row * depth * 1.2
+        beds.append((x, y, x + width, y + depth))
+    return beds
+
+
+def _misplaced_plates(payload: bytes, count: int) -> list[int]:
+    """The plates with an object ``model_settings.config`` puts there that does not lie
+    wholly inside that plate's bed: what the slicer checks before it slices a plate."""
+    beds = _slicer_beds(payload, count)
+    boxes = _placed_boxes(payload)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    misplaced = []
+    for plate in config.iter("plate"):
+        meta = {m.get("key"): m.get("value") for m in plate.findall("metadata")}
+        index = int(meta["plater_id"] or 0)
+        ids = [m.get("value") or "" for m in plate.iter("metadata") if m.get("key") == "object_id"]
+        x0, y0, x1, y1 = beds[index - 1]
+        inside = [
+            x0 <= low[0] and high[0] <= x1 and y0 <= low[1] and high[1] <= y1
+            for low, high in (boxes[object_id] for object_id in ids)
+        ]
+        if not inside or not all(inside):
+            misplaced.append(index)
+    return misplaced
+
+
 class TestMultiplePlates:
     @pytest.mark.parametrize(
         ("count", "columns"), [(1, 1), (2, 2), (3, 2), (4, 2), (5, 3), (9, 3), (10, 4), (16, 4)]
@@ -1297,6 +1374,45 @@ class TestMultiplePlates:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
         assert moved == direct.read_bytes()
         assert replate_3mf(moved, plate_for("H2C")) == moved
+
+    @pytest.mark.parametrize("model", ["H2C", "A1 mini", None])
+    def test_every_plates_objects_are_inside_that_plate_as_the_slicer_lays_it_out(
+        self, tmp_path: Path, model: str | None
+    ) -> None:
+        """#4638: ten plates, a wide part on plate 1 and a small one on each of 2-10,
+        as Arrange wrote the menorah. The slicer spaces the plates by the file's own
+        bed, so each plate's objects must lie inside it by that bed, not by ours."""
+        plate = plate_for(model)
+        plates, colours = _many_plates()
+        path = tmp_path / "arranged.3mf"
+        write_plates_3mf(plates, colours, path, thumbnails=None, plate=plate)
+        payload = path.read_bytes()
+        assert _settings_of_bytes(payload)["printable_area"] == bambu3mf.printable_area(plate)
+        assert _misplaced_plates(payload, len(plates)) == []
+
+    def test_a_replated_arrangement_keeps_each_plates_objects_inside_it(
+        self, tmp_path: Path
+    ) -> None:
+        plates, colours = _many_plates()
+        path = tmp_path / "arranged.3mf"
+        write_plates_3mf(plates, colours, path, thumbnails=None)
+        moved = replate_3mf(path.read_bytes(), plate_for("H2C"))
+        assert _settings_of_bytes(moved)["printable_area"] == [
+            "0x0",
+            "330x0",
+            "330x320",
+            "0x320",
+        ]
+        assert _misplaced_plates(moved, len(plates)) == []
+
+    def test_without_its_bed_stated_plate_two_is_empty_to_the_slicer(self, tmp_path: Path) -> None:
+        """What #4638 measured: a file with no ``printable_area`` is read as a 200 x
+        200 bed, and plate 2's object lies outside plate 2 ("Nothing to be sliced")."""
+        plates, colours = _many_plates()
+        path = tmp_path / "arranged.3mf"
+        write_plates_3mf(plates, colours, path, thumbnails=None, plate=plate_for("H2C"))
+        unstated = _restated(path.read_bytes(), printable_area=None)
+        assert 2 in _misplaced_plates(unstated, len(plates))
 
     def test_a_plate_too_big_for_the_printer_is_named(self, tmp_path: Path) -> None:
         tray = ColourPart(1, "Tray", "#FF6AC1", trimesh.creation.box(extents=(100, 100, 4)))

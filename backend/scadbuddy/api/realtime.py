@@ -129,6 +129,7 @@ from scadbuddy.core.events import (
     PresetsChanged,
     PrinterEvent,
     PrintEvent,
+    PrintOutcome,
     PrintRunEvent,
     SessionBusEvent,
     SettingsChanged,
@@ -233,7 +234,7 @@ def topics_of(event: Event) -> list[str]:
             return [f"model:{event.slug}"]
         case OutputEvent():
             return ["outputs", f"model:{event.slug}"]
-        case PrintEvent() | PrintRunEvent():
+        case PrintEvent() | PrintRunEvent() | PrintOutcome():
             return [f"print:{event.output_id}"]
         case FlowRunEvent():
             return ["workflow-runs", f"workflow-run:{event.run_id}"]

@@ -23,8 +23,14 @@ const schedule = z
   .describe('When it fires: `cron` or `interval_s`')
 const event = z
   .object({
-    kind: z.enum(['render.finished', 'model.changed']),
-    slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).optional().describe('Only for this template'),
+    kind: z
+      .enum(['render.finished', 'model.changed', 'print.finished', 'print.failed'])
+      .describe('A print that was cancelled fires neither print event'),
+    slug: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]{0,62}$/)
+      .optional()
+      .describe("Only for this template (a library file's print: `library-<file id>`)"),
   })
   .strict()
   .describe('Or the event it fires on')
@@ -83,7 +89,7 @@ export const flowTriggerTools: Tool[] = [
     description:
       'Make a trigger that starts runs of one flow version, always that version, with these inputs: on a ' +
       '`schedule` (cron or interval, time zone, catch-up window) or on an `event` (a render finished, a ' +
-      'template changed; the script reads it with `trigger()`). Its runs act as this principal, with its tiers as they are at each fire, and ' +
+      'template changed, a print finished or failed; the script reads it with `trigger()`). Its runs act as this principal, with its tiers as they are at each fire, and ' +
       'without this session. Their outward calls wait for the user unless the user approves a standing ' +
       'grant (attach_flow_trigger_grant).',
     input: z.object({
