@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api } from '../api/client'
 import type { OrderDetail, OrderItemDetail } from '../api/types'
+import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
@@ -39,6 +40,7 @@ export function OrderPage() {
   const [refusal, setRefusal] = useState<{ text: string; items: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [openItem, setOpenItem] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
@@ -118,6 +120,11 @@ export function OrderPage() {
                 Accept order
               </Button>
             )}
+            {editable && (
+              <Button variant="outline" disabled={busy} onClick={() => setAdding(true)}>
+                Add item
+              </Button>
+            )}
             {order.status === 'shipped' && (
               <Button disabled={busy} onClick={() => void act(() => api.closeOrder(order.id))}>
                 Close order
@@ -175,6 +182,7 @@ export function OrderPage() {
           exponent={order.minor_exponent}
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
+          canAdd={editable}
         />
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -338,6 +346,7 @@ export function OrderPage() {
           )}
         </section>
       </div>
+      {editable && <AddItemDialog open={adding} orderId={order.id} onAdded={reload} onClose={() => setAdding(false)} />}
       {current && <ItemDrawer key={current.id} detail={detail} item={current} onClose={() => setOpenItem(null)} onChanged={reload} />}
     </div>
   )

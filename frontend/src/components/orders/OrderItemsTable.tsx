@@ -25,6 +25,7 @@ export function OrderItemsTable({
   exponent,
   onOpen,
   onChanged,
+  canAdd = false,
 }: {
   orderId: string
   /** The order's status: a unit price is typed only while it is draft or quoted. */
@@ -38,6 +39,8 @@ export function OrderItemsTable({
   onOpen: (item: OrderItemDetail) => void
   /** After a price is recorded: the page reloads the order. */
   onChanged: () => void
+  /** The page offers Add item (a draft or quoted order): the empty table points at it. */
+  canAdd?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
   const columns: Column<OrderItemDetail>[] = [
@@ -112,7 +115,7 @@ export function OrderItemsTable({
       rowKey={(item) => item.id}
       rowTestId={(item) => `order-item-${item.id}`}
       onOpen={onOpen}
-      empty="No items yet. Add one from a template's Customize page (Add to order…) or from an output (Order this)."
+      empty={canAdd ? 'No items yet. Add one with Add item above.' : 'No items.'}
     />
   )
 }
