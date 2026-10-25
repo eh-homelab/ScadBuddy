@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes, useLocation } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
@@ -111,12 +111,23 @@ describe('OrderPage (#4249)', () => {
   })
 
   describe('a link to a line item (#4693)', () => {
+    const scrolls = vi.fn()
+    beforeEach(() => {
+      Element.prototype.scrollIntoView = scrolls
+    })
+    afterEach(() => {
+      scrolls.mockReset()
+      delete (Element.prototype as Partial<Element>).scrollIntoView
+    })
+
     it('opens the order with the item named by ?item= marked and open', async () => {
       render(ORDER_DRAFT, `?item=${ITEM_DRAFT}`)
       expect(await screen.findByRole('dialog', { name: 'Name Keychain' })).toBeInTheDocument()
       const row = screen.getByTestId(`order-item-${ITEM_DRAFT}`)
       expect(row).toHaveAttribute('id', `item-${ITEM_DRAFT}`)
       expect(row).toHaveAttribute('aria-current', 'true')
+      await waitFor(() => expect(scrolls).toHaveBeenCalledTimes(1))
+      expect(scrolls.mock.contexts[0]).toBe(row)
     })
 
     it('takes #item-<id> as the same, and moves it into the search on close', async () => {
@@ -134,6 +145,8 @@ describe('OrderPage (#4249)', () => {
       await screen.findByRole('dialog', { name: 'Name Keychain' })
       expect(screen.getByTestId('where')).toHaveTextContent(`/orders/${ORDER_DRAFT}?item=${ITEM_DRAFT}`)
       expect(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).toHaveAttribute('aria-current', 'true')
+      // A row clicked here is in view already: it does not jump.
+      expect(scrolls).not.toHaveBeenCalled()
     })
 
     it('opens nothing for an item the order does not have, and drops it from the URL', async () => {

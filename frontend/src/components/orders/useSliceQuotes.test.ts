@@ -31,7 +31,7 @@ describe('useSliceQuotes (#4693)', () => {
     const onQuoted = vi.fn()
     const { result } = renderHook(() => useSliceQuotes('order-1', undefined, onQuoted))
     act(() => void result.current.start('item-1', BODY, []))
-    expect(quoted).toHaveBeenCalledWith('order-1', 'item-1', BODY, expect.any(Function))
+    expect(quoted).toHaveBeenCalledWith('order-1', 'item-1', BODY, expect.any(Function), expect.any(AbortSignal))
     expect(result.current.runs.get('item-1')).toMatchObject({ error: null })
     await act(async () => pending.resolve({} as Quote))
     await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
@@ -104,5 +104,18 @@ describe('useSliceQuotes (#4693)', () => {
     expect(result.current.runs.size).toBe(1)
     rerender({ id: 'order-2' })
     await waitFor(() => expect(result.current.runs.size).toBe(0))
+  })
+
+  it('ends its follows with the page', () => {
+    let signal: AbortSignal | undefined
+    vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, _accepted, given) => {
+      signal = given
+      return new Promise<Quote>(() => undefined)
+    })
+    const { result, unmount } = renderHook(() => useSliceQuotes('order-1', undefined, vi.fn()))
+    act(() => void result.current.start('item-1', BODY, []))
+    expect(signal?.aborted).toBe(false)
+    unmount()
+    expect(signal?.aborted).toBe(true)
   })
 })

@@ -139,7 +139,7 @@ export function QuoteEditor({
         <p role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
           {slice.run.detached
-            ? `Still slicing and pricing, since ${startTime(slice.run.startedAt)}: the quote shows here when it lands.`
+            ? `No answer from the quote started at ${startTime(slice.run.startedAt)}: it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.`
             : `Slicing every plate and pricing it, since ${startTime(slice.run.startedAt)}…`}
           {/* No longer followed, so a failure would never show: the user may stop waiting. */}
           {slice.run.detached && (

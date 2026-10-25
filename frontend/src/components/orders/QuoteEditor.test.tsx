@@ -76,7 +76,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
         slice={{ run: { startedAt: Date.now(), error: null, detached: true, known: [] }, start: vi.fn(), dismiss }}
       />,
     )
-    expect(screen.getByTestId('quote-running')).toHaveTextContent(/Still slicing/)
+    expect(screen.getByTestId('quote-running')).toHaveTextContent(/may still be slicing/)
     await user.click(screen.getByRole('button', { name: 'Stop waiting' }))
     expect(dismiss).toHaveBeenCalledTimes(1)
   })

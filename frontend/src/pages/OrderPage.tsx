@@ -61,7 +61,11 @@ export function OrderPage() {
   const location = useLocation()
   const hashItem = location.hash.startsWith(ITEM_HASH) ? decoded(location.hash.slice(ITEM_HASH.length)) : null
   const openItem = search.get(ITEM_PARAM) || hashItem || null
+  // Scrolled to once per item a link names, when its row first renders: not on every
+  // reload, and not for a row clicked here, which is already in view.
+  const scrolled = useRef<string | null>(null)
   function setOpenItem(itemId: string | null) {
+    scrolled.current = itemId
     const next = new URLSearchParams(search)
     if (itemId) next.set(ITEM_PARAM, itemId)
     else next.delete(ITEM_PARAM)
@@ -69,8 +73,6 @@ export function OrderPage() {
     setSearch(next, { replace: true })
   }
   const slices = useSliceQuotes(id, view.data?.items, reload)
-  // Scrolled to once per item named, when its row first renders: not on every reload.
-  const scrolled = useRef<string | null>(null)
   const loaded = view.data !== undefined
   // A link to an item the order does not have names nothing: it leaves the address bar.
   const dead = openItem !== null && view.data !== undefined && !view.data.items.some((i) => i.id === openItem)

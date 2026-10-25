@@ -35,16 +35,22 @@ export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
 export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[] | undefined, onQuoted: () => void) {
   const [runs, setRuns] = useState<Map<string, SliceQuoteRun>>(() => new Map())
   const current = useRef(orderId)
+  // The follows of this order's quotes, ended with the page: their polls of
+  // `GET /operations/{id}` would otherwise run on for minutes after it is gone.
+  const follows = useRef(new AbortController())
   const quoted = useRef(onQuoted)
   useEffect(() => {
     quoted.current = onQuoted
   })
   useEffect(() => {
     current.current = orderId
+    const controller = new AbortController()
+    follows.current = controller
     // Another order's runs are not this one's.
     setRuns(new Map())
     return () => {
       current.current = ''
+      controller.abort()
     }
   }, [orderId])
 
@@ -68,10 +74,16 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
         let running = false
         update(orderId, itemId, run)
         api
-          .quoteItem(orderId, itemId, body, () => {
-            running = true
-            accepted()
-          })
+          .quoteItem(
+            orderId,
+            itemId,
+            body,
+            () => {
+              running = true
+              accepted()
+            },
+            follows.current.signal,
+          )
           .then(
             () => {
               update(orderId, itemId, null)

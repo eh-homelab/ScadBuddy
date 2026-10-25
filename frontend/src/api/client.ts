@@ -2118,10 +2118,10 @@ export const api = {
   /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the
    * dialog's choices, price with the book; followed to the quote as every command is. */
   /** `onAccepted` (#4693): the quote is running as its operation, past its check. */
-  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest, onAccepted?: () => void) =>
+  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest, onAccepted?: () => void, signal?: AbortSignal) =>
     command<Quote>(
       `/orders/${seg(orderId)}/items/${seg(itemId)}/quote`,
-      { method: 'POST', body: JSON.stringify(body) },
+      { method: 'POST', body: JSON.stringify(body), signal },
       undefined,
       undefined,
       onAccepted,
