@@ -42,9 +42,9 @@ def plan(*filaments: PresetRef) -> SlicePlan:
     )
 
 
-async def slotted(presets: SlotPresets, planned: SlicePlan) -> SlicePlan:
-    """The plan :meth:`SlotPresets.planned` makes of ``planned``."""
-    return (await presets.planned(planned))[0]
+async def slotted(presets: SlotPresets, unslotted: SlicePlan) -> SlicePlan:
+    """The plan :meth:`SlotPresets.planned` makes of ``unslotted``."""
+    return (await presets.planned(unslotted))[0]
 
 
 def stub(slot: int, base: str = PLA) -> dict[str, Any]:
