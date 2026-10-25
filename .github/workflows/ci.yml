@@ -1304,14 +1304,19 @@ jobs:
           cache-from: type=gha
 
       # What this shard selects, and what the suite collects: pytest prints
-      # "<selected>/<collected> tests collected (<n> deselected)".
+      # "<selected>/<collected> tests collected (<n> deselected)". It splits by
+      # results/durations.json, the copy of the committed timings the run splits
+      # by too, so the count and the run can never select differently.
       - name: Count this shard's tests
         run: |
           set -euo pipefail
-          line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
+          mkdir -p results && chmod 777 results
+          cp backend/.test_durations results/durations.json && chmod 666 results/durations.json
+          line=$(docker run --rm -v "$PWD/results:/results" \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            --collect-only -q --splits 6 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
+            --collect-only -q --splits 6 --group ${{ matrix.group }} \
+            --durations-path=/results/durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
           selected=${line%%/*}
           rest=${line#*/}
@@ -1338,12 +1343,11 @@ jobs:
       # test whatever its outcome, to set beside what the shard selected.
       #
       # `--store-durations --clean-durations`: results/durations.json starts as the
-      # committed timings, which the split reads, and ends as this shard's own
-      # tests timed on this runner, for `backend-pytest-split` to merge.
+      # committed timings (the step above copied them), which the split reads, and
+      # ends as this shard's own tests timed on this runner, for
+      # `backend-pytest-split` to merge.
       - name: pytest
         run: >-
-          mkdir -p results && chmod 777 results &&
-          cp backend/.test_durations results/durations.json && chmod 666 results/durations.json &&
           docker run --rm --network host --shm-size=1g
           -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
@@ -1366,8 +1370,8 @@ jobs:
           [ -f results/junit.xml ] && ran=$(grep -o '<testcase ' results/junit.xml | wc -l)
           echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.group }}.txt
           cat counts/shard-${{ matrix.group }}.txt
-          timed=0
-          [ -f results/durations.json ] && timed=$(jq length results/durations.json)
+          # A missing or truncated file (pytest died mid-write) counts as none.
+          timed=$(jq length results/durations.json 2>/dev/null || echo 0)
           if [ "$ran" -gt 0 ] && [ "$timed" -eq "$ran" ]; then
             cp results/durations.json counts/durations-${{ matrix.group }}.json
           else
@@ -1433,10 +1437,12 @@ jobs:
           [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
           echo "The six shards select and ran all ${totals} tests."
 
-      # Only from a run whose six shards each timed what they ran: a shard that
-      # failed early sends none, and a partial merge would split the next run worse.
+      # Only from a green run whose six shards each timed what they ran: a shard
+      # that failed early sends none, a partial merge would split the next run
+      # worse, and a red run's timings are not ones to commit.
       - name: Merge the shards' timings
         id: durations
+        if: ${{ needs.backend-pytest.result == 'success' }}
         run: |
           set -euo pipefail
           shopt -s nullglob
