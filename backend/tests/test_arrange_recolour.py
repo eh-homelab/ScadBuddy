@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -521,6 +522,35 @@ def test_a_jobs_status_reads_the_notes_field_with_its_own_type() -> None:
     """`api/jobs.py` reads `ArrangeInputs.notes` alone, by name and as `list[str]`."""
     assert jobs_api._NOTES_FIELD in ArrangeInputs.model_fields
     assert ArrangeInputs.model_fields[jobs_api._NOTES_FIELD].annotation == list[str]
+
+
+@pytest.fixture(autouse=True)
+def _no_logged_jobs() -> Iterator[None]:
+    """Each test starts with no job's unreadable notes logged (`api/jobs.py` keeps the
+    record per process), so an id one test logs never decides another's (#4709 review)."""
+    jobs_api._UNREADABLE_LOGGED.clear()
+    yield
+    jobs_api._UNREADABLE_LOGGED.clear()
+
+
+def _unreadable(job_id: str) -> Job:
+    return Job(
+        id=job_id, slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
+    )
+
+
+def test_a_job_forgotten_from_the_record_logs_again(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4709 review: the record is bounded; the oldest job is forgotten first, and a
+    forgotten job's unreadable notes are logged again."""
+    monkeypatch.setattr(jobs_api, "_UNREADABLE_LOGGED_MAX", 1)
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        for job_id in ("first", "second", "first"):
+            _job_status(_unreadable(job_id), None)
+    logged = [getattr(r, "job_id", None) for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert logged == ["first", "second", "first"]
+    assert list(jobs_api._UNREADABLE_LOGGED) == ["first"]
 
 
 def test_an_arrange_rows_unreadable_notes_are_logged(caplog: pytest.LogCaptureFixture) -> None:
