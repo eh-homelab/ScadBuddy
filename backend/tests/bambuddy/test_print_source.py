@@ -1238,6 +1238,27 @@ async def test_a_fetch_given_up_on_takes_its_client_with_it() -> None:
     assert source.begun == 2
 
 
+async def test_a_fetch_cancelled_from_outside_is_started_anew() -> None:
+    """#4695 review: a kept fetch that ended cancelled has no answer to give, so a reader
+    starts a fetch of its own rather than raise `CancelledError`.
+
+    No real path keeps a cancelled fetch today, so this puts one back by hand and guards
+    only the branch; a path that comes to keep one gets a test through that path."""
+    source = _HeldFetch(b"not a 3mf")
+    first = asyncio.ensure_future(source.fetched_3mf(None))
+    await source.started.wait()
+    fetching = source._fetching
+    assert fetching is not None
+    fetching.cancel()
+    await asyncio.gather(fetching, first, return_exceptions=True)
+    source._fetching = fetching  # kept, as no path here keeps one
+    source.release.set()
+
+    async with asyncio.timeout(5):
+        assert await source.fetched_3mf(None) == b"not a 3mf"
+    assert source.begun == 2
+
+
 async def test_a_settled_fetch_answers_a_reader_with_another_client() -> None:
     """#4659 review: once the fetch has ended no client is used, so a later reader with
     another client gets the kept answer, not a 500."""

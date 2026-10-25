@@ -453,16 +453,18 @@ async def test_a_miss_that_persists_counts_its_opens_in_a_row(
     # at INFO), the first open's two misses were counted too.
     caplog.clear()
 
+    async def open_while_away() -> None:
+        """An open that answers the held copy; the refresh it starts keeps a file, which
+        goes again, so the file stays away."""
+        await cached_catalogue(bambuddy, tmp_path)
+        async with asyncio.timeout(5):
+            await asyncio.gather(*catalogue._refreshing.values())
+        kept.unlink(missing_ok=True)
+
     # Each open answers the held copy while the file is away, and reads it once back.
     kept.rename(aside)
-    await cached_catalogue(bambuddy, tmp_path)
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
-    kept.unlink(missing_ok=True)  # the refresh's own keep: still away, as before
-    await cached_catalogue(bambuddy, tmp_path)
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
-    kept.unlink(missing_ok=True)
+    await open_while_away()
+    await open_while_away()
     aside.rename(kept)
     await cached_catalogue(bambuddy, tmp_path)
     kept.rename(aside)
