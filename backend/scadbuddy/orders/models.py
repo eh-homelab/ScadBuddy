@@ -278,6 +278,9 @@ class OrderItem(BaseModel):
     reference: Reference
     colours: list[ColourSlot]
     output_id: str | None
+    #: The image attachment a person marked as what was actually delivered (§6.2), one
+    #: of the item's own; None until one is marked, and again once it is removed.
+    delivered_attachment_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -352,6 +355,57 @@ class Shipment(BaseModel):
     notes: str
     created_at: datetime
     items: list[ShipmentItem]
+
+
+# -- attachments (§6.2, #4251) ----------------------------------------------------------
+
+#: What a file is, from its bytes (``orders/attachments.py`` ``sniff``): an ``image`` or
+#: ``video`` the browser can show, a ``document`` (a PDF), or ``other``, any file at all,
+#: which is only ever downloaded.
+AttachmentKind = Literal["image", "video", "document", "other"]
+#: Why it is kept: the customer's ``reference`` (a sketch, a logo, a drawing), a print's
+#: ``issue``, the ``finished`` object, the ``packed`` box, a ``timelapse``, or ``other``.
+AttachmentRole = Literal["reference", "issue", "finished", "packed", "timelapse", "other"]
+#: The longest caption, in characters, as a template's media (``library/media.py``).
+MAX_ATTACHMENT_CAPTION = 1000
+
+
+class Attachment(BaseModel):
+    id: str
+    order_id: str
+    #: ``order:<id>`` or ``order_item:<id>``: what it is attached to.
+    subject: str
+    #: The line item it is attached to, or None for the order's own.
+    item_id: str | None
+    kind: AttachmentKind
+    role: AttachmentRole
+    #: The name it was sent with, for display and the download.
+    filename: str
+    #: What its bytes are (sniffed), or what its name says for ``other``.
+    media_type: str
+    size_bytes: int
+    sha256: str
+    caption: str
+    created_at: datetime
+    created_by: Actor
+
+
+class AttachmentPatch(BaseModel):
+    """`PATCH …/attachments/{id}`: the caption and the role; a field left out stays."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    caption: str | None = Field(default=None, max_length=MAX_ATTACHMENT_CAPTION)
+    role: AttachmentRole | None = None
+
+
+class DeliveredBody(BaseModel):
+    """`PUT …/items/{item}/delivered`: the item's image attachment that shows what was
+    delivered, or None to clear the mark."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: str | None
 
 
 # -- the price book (§5.1, #4250) -----------------------------------------------------

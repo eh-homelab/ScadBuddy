@@ -30,7 +30,12 @@ from temporalio.common import (
     SearchAttributeUpdate,
     VersioningBehavior,
 )
-from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    TimeoutType,
+    is_cancelled_exception,
+)
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
@@ -58,6 +63,7 @@ with workflow.unsafe.imports_passed_through():
         OPERATION_CHECK_TIMED_OUT,
         OPERATION_UNEXPECTED_DETAIL,
         operation_cancelled_running,
+        operation_interrupted,
         operation_unexpected_running_detail,
         problem_of,
     )
@@ -89,6 +95,15 @@ RECORD_RETRY = RetryPolicy(
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
 SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
 STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
+
+
+def heartbeat_timed_out(error: BaseException) -> bool:
+    """Whether an activity's attempts ended on a heartbeat timeout (#4635)."""
+    return (
+        isinstance(error, ActivityError)
+        and isinstance(error.cause, TemporalTimeoutError)
+        and error.cause.type == TimeoutType.HEARTBEAT
+    )
 
 
 class UnregisteredKindError(Exception):
@@ -264,6 +279,10 @@ class OperationWorkflow:
             if is_cancelled_exception(error):
                 # The effect may have reached Bambuddy before the cancel (review #1063 2).
                 return FinishOp(operation_id=operation_id, error=operation_cancelled_running(where))
+            if heartbeat_timed_out(error):
+                # Not a failure of the run's code: its worker stopped, or Temporal did
+                # not record its heartbeats in time (#4635). Retryable, not unexpected.
+                return FinishOp(operation_id=operation_id, error=operation_interrupted(where))
             # A crash or timeout may come after Bambuddy took the write (review #1063
             # second review 1), so the unexpected failure says it may have been done.
             return FinishOp(

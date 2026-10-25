@@ -40,9 +40,13 @@ function every(seconds: number): string {
   return `every ${seconds} seconds`
 }
 
+type EventKind = NonNullable<FlowTriggerCreate['event']>['kind']
+
 const EVENT_TEXT: Record<string, string> = {
   'render.finished': 'When a render finishes',
   'model.changed': 'When a model changes',
+  'print.finished': 'When a print finishes',
+  'print.failed': 'When a print fails',
 }
 
 /** A trigger's timing, as one phrase. */
@@ -380,7 +384,7 @@ function NewTrigger({
                 ? { interval_s: Math.round(Number(minutes) * 60), ...timing }
                 : { cron: [cron.trim()], ...timing },
           }
-        : { event: { kind: event as 'render.finished' | 'model.changed', ...(slug.trim() ? { slug: slug.trim() } : {}) } }),
+        : { event: { kind: event as EventKind, ...(slug.trim() ? { slug: slug.trim() } : {}) } }),
     }
     setBusy(true)
     setError(undefined)
@@ -467,6 +471,8 @@ function NewTrigger({
                   <SelectContent>
                     <SelectItem value="render.finished">A render finishes</SelectItem>
                     <SelectItem value="model.changed">A model changes</SelectItem>
+                    <SelectItem value="print.finished">A print finishes</SelectItem>
+                    <SelectItem value="print.failed">A print fails</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

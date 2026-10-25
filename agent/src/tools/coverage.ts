@@ -284,6 +284,24 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'and added on the print detail page, which the agent has no file of; get_print lists them under ' +
       '`media.attachments`. Captioning, removing and promoting them land UI-first with the upload.',
   })),
+  ...(
+    [
+      'POST /api/v1/orders/{order_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
+      'GET /api/v1/orders/{order_id}/attachments',
+      'GET /api/v1/orders/{order_id}/attachments/{attachment_id}/content',
+      'GET /api/v1/orders/{order_id}/attachments/{attachment_id}/thumbnail',
+      'PATCH /api/v1/orders/{order_id}/attachments/{attachment_id}',
+      'DELETE /api/v1/orders/{order_id}/attachments/{attachment_id}',
+      'PUT /api/v1/orders/{order_id}/items/{item_id}/delivered',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "An order's files and an item's delivered photo (#4251), added on the order page from the person's own " +
+      'files and camera; order_get lists them under `attachments` and each item\'s `delivered_attachment_id`. ' +
+      "They land UI-first; spec 2026-10-18 §7.3's order_attach (by workspace_path, #2329) is a follow-up.",
+  })),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:

@@ -3,6 +3,7 @@ stored settings itself."""
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from pydantic import BaseModel
@@ -26,6 +27,12 @@ DEFER_RUN_PATCH = "op-defer-unregistered-run"
 #: The extern function a worker gives its workflows (`client.RegisteredActivities`):
 #: the names of the activities it registers.
 REGISTERED_ACTIVITIES = "scadbuddy_registered_activities"
+#: The longest a worker that runs operations holds a heartbeat back (#4635). The SDK
+#: sends at most one per ``min(0.8 x heartbeat timeout, this)``, and its default (60 s)
+#: left the 30 s ``RUN_HEARTBEAT`` one send per window with 6 s to spare: a history
+#: shard that stalled longer timed out a run whose worker was alive. At 10 s about three
+#: land in each window, so one late heartbeat no longer ends the run.
+HEARTBEAT_THROTTLE = timedelta(seconds=10)
 
 
 def check_activity(kind: str) -> str:

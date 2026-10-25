@@ -1439,7 +1439,9 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
 - It serves `/healthz` and `/metrics` on `9090`.
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
-  details are always one `{"exit_code", "stderr_tail"}` object; exit 192, a
+  details are always one `{"exit_code", "stderr_tail", "errors"}` object, `errors`
+  being the last three `[error]` lines of the CLI's log on stdout, which is the only
+  place it says a plate is empty (exit 206); exit 192, a
   validation failure, and exit 0 without the sliced 3MF are non-retryable),
   `SlicerWorkerError` (the worker's own failure, such as its temp directory or
   starting the CLI: retryable, a message and no details),
@@ -1486,6 +1488,53 @@ What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822
    of the printing dashboard charts the slices' duration and outcomes.
 5. To go back, set **Slicer** to "Bambuddy's slicer" the same way. Native slices already
    recorded stay as provenance and are swept with their rows.
+
+### The native hot path (#3818)
+
+A print that touches Bambuddy nowhere (its slice, its file, its printer state and its
+trays all ScadBuddy's own, over the LAN) takes four switches, in this order. Each is
+checked per run from the settings as they are then (`printers/hot_path.py`
+`hot_path_native`), so there is no fifth switch and no restart beyond the one noted:
+
+1. **`store_backend` `s3`** (the blob store; "Blob store and render workers" above), with
+   the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API and the print worker, which
+   seals the printer's access code.
+2. **`library_backend` `native`** (Settings → *Projects & files*, restart; "Choosing
+   ScadBuddy's own print library" above). A native run files its laid-out copy in the
+   native library; a project is a Bambuddy path's, so a native run refuses a
+   `project_id`.
+3. **`slicer_backend` `native`** (live; "Rolling out the native slicer" above), with the
+   slicer worker and the print worker on the same build as the API.
+4. **The printer**: Settings → Printers, link the printer by LAN (host and access code)
+   and set `preferred_path` to `native` (or `auto`, which picks the LAN when it
+   answers).
+
+`bambuddy_url` may stay set. A native run never builds a Bambuddy client; what still
+calls Bambuddy are the housekeeping sweeps and the spool providers' refresh (the
+`scadbuddy-spool-providers-<queue>` Schedule, `spool_overlay_refresh_seconds`, 300 s by
+default), on their own traces, and any run whose printer's path is `bambuddy`. The
+dialog's filament step reads the loaded trays from the LAN report and lays the cached
+spool records over them; an overlay older than 30 minutes shows trays only, with a note.
+To go back, set `preferred_path` to `bambuddy` (or `slicer_backend`/`library_backend`
+back); a Bambuddy print is unchanged.
+
+To check that a deployment's hot path is clear of Bambuddy, find the run's request trace
+in Tempo (`{ name = "POST /api/v1/print/outputs/{output_id}/run" }`) and then
+`{ trace:id = "<its id>" && name =~ "bambuddy\\..*" }`: it returns no spans.
+
+The same walk runs against a real stack, by hand and weekly, never on a PR:
+
+```bash
+e2e-stack/run.sh --mode both     # recorder, then no bambuddy_url; --keep leaves the stack up
+```
+
+It builds the `runtime`, `slicer` and `test` images, starts ScadBuddy on an S3 store and
+the native slicer worker with a fake LAN printer (`e2e-stack/fake-printer`) and a
+Bambuddy recorder (`e2e-stack/bambuddy-recorder`) that fails every call, and runs
+`frontend/e2e/real-hot-path.spec.ts`: a print goes through, and in the recorder pass the
+recorder saw nothing. It needs docker with compose v2, curl, python3 and the frontend's
+dependencies with Playwright's chromium; the header of `e2e-stack/run.sh` has the flags.
+CI runs it in `.github/workflows/hot-path-e2e.yml`; it is not in `CI Summary`.
 
 ### Switching continuous deploy off
 

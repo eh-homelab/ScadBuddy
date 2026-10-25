@@ -269,7 +269,8 @@ agent's follow a 202.
 | `POST /orders/{id}/accept`, `/cancel`, `/hold`, `/release`, `/close` | lifecycle (§3.5); `accept` publishes the event |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
-| `POST /orders/{id}/items/{item}/fulfilments/{f}/attachments` (multipart), `DELETE …/{attachment}` | §6.2; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line |
+| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order or an item; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. An attempt's own attachments (`…/fulfilments/{f}/attachments`) wait for the print path |
+| `PUT /orders/{id}/items/{item}/delivered` | §6.2: marks one of the item's own image attachments as what was delivered (`delivered_attachment_id`), or clears it with `null` |
 | `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
 | `GET /orders/{id}/costs` | the quote against the actuals (§6.4) |
@@ -426,7 +427,34 @@ and a new attempt returns it to `approved`.
 ### 6.2 Attachments
 
 A new table `attachments`, keyed by subject, is the "attach media to X" facility F9
-says does not exist:
+says does not exist.
+
+**As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
+attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'
+own attachments (`order_item_fulfilment:<id>`) wait for the print path. The row carries
+`order_id` beside `subject`, so an order's whole list is one index read and
+`OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
+`other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;
+HEIC and AVIF are photos, QuickTime a video), never the name or the browser's type; an
+`other` file's `media_type` is what its name suggests, for display only. Only what a
+browser shows and never runs (`INLINE`: the photo, video and PDF types) is served as
+itself and inline; every other file is `application/octet-stream` and a download, under
+a sandboxing `Content-Security-Policy` (not a PDF's, which a browser's viewer will not
+run under). `role` adds `reference` (the customer's sketch, logo or drawing) and `issue`
+(a print's problem) to the roles below. The blob is `attachment-<sha256>` (one file,
+`file`); identical bytes share it, and each row holds it. The `blob_refs` row
+`(attachment, <id>)` is written and deleted **in the attachment row's own transaction**
+(as `slicing/store.py` does), not before it as §3.4's quote holds are: the blob was
+written and touched just before, so the blob sweep's grace keeps it until both commit,
+and no reaper is needed. `subject` has no foreign key, so deleting a draft item removes
+its attachments and their holds in the same transaction, each on the audit line. Adding,
+captioning and removing are records, not steps: allowed in every state, on hold and after
+close. Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE
+SET NULL`) names the item's image a person marked as what was actually delivered; the
+order page shows it as the item's picture, before it the item's output's thumbnail, then
+its template's.
+
+The original design follows.
 
 - `subject` (`order:<id>`, `order_item:<id>`, `order_item_fulfilment:<id>`), `id`,
   `kind` (`photo`, `video`, `document`), `role` (`finished`, `packed`, `timelapse`,

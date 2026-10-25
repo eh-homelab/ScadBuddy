@@ -410,7 +410,14 @@ async def _queue_one(
 def _of_step(error: ApiError, item: BatchItem) -> str:
     """A refusal as this file's row says it: a stored step whose printer has been
     unlinked or re-linked since it was chosen names the step to pick it again in (#4551),
-    told by its problem type."""
+    told by its problem type.
+
+    A refusal answered before #4577 carried no such type (`about:blank`), so a run
+    refused then and followed again now reads as its own detail, ending "Pick the
+    printer again." without naming the step (#4590). That is kept on purpose: telling
+    it by the wording would also rephrase any other refusal that ends the same way
+    (`test_only_a_disagreeing_printer_names_the_step`), and the row still says what to
+    do."""
     reason = error.extensions.get("reason")
     if error.type == DISAGREEING_PRINTER_PROBLEM and isinstance(reason, str):
         return f"{reason} Edit {item.filename} and pick its printer again."

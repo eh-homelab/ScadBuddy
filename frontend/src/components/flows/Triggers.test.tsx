@@ -9,6 +9,7 @@ import {
   flowTriggerRequests,
   reset as resetFlowTriggers,
 } from '../../mocks/features/flowTriggers'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { FlowTriggers } from './Triggers'
 
@@ -147,6 +148,24 @@ describe('FlowTriggers', () => {
       },
     ])
     expect(await row(/Every 30 minutes, Europe\/London/)).toBeInTheDocument()
+  })
+
+  it('makes a trigger that fires when a print fails (#2665)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'New trigger…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New trigger' })
+    await user.click(within(dialog).getByLabelText('On an event'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Event' }), 'A print fails')
+    await user.type(within(dialog).getByLabelText('Only for model (optional)'), 'coaster')
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(flowTriggerRequests()).toEqual([
+      {
+        path: '/flow-triggers',
+        body: { definition_id: 'def-swap', overlap: 'skip', event: { kind: 'print.failed', slug: 'coaster' } },
+      },
+    ])
+    expect(await row(/When a print fails \(coaster\)/)).toBeInTheDocument()
   })
 
   // The browser bridge acts in the person's tab as the browser user: everything but

@@ -182,6 +182,9 @@ import type {
   FilamentPatch,
   Fulfilment,
   FulfilmentInput,
+  OrderAttachment,
+  OrderAttachmentPatch,
+  OrderAttachmentRole,
   ManualQuoteInput,
   Order,
   OrderCreate,
@@ -2060,6 +2063,42 @@ export const api = {
     request<void>(`/orders/${seg(orderId)}/items/${seg(itemId)}`, { method: 'DELETE' }),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
+  // -- an order's files (#4251, spec 2026-10-18 §6.2) ---------------------------------------
+  /** Any file, on the order or (with `itemId`) on one of its items; an upload as a command. */
+  addOrderAttachment: (
+    orderId: string,
+    itemId: string | null,
+    file: File,
+    fields: { role?: OrderAttachmentRole; caption?: string },
+    onProgress?: (fraction: number) => void,
+  ): Promise<OrderAttachment> =>
+    uploadForm<OrderAttachment>(
+      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        if (fields.role) body.append('role', fields.role)
+        if (fields.caption) body.append('caption', fields.caption)
+        return body
+      },
+      onProgress,
+    ),
+  updateOrderAttachment: (orderId: string, id: string, body: OrderAttachmentPatch) =>
+    request<OrderAttachment>(`/orders/${seg(orderId)}/attachments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteOrderAttachment: (orderId: string, id: string) =>
+    request<void>(`/orders/${seg(orderId)}/attachments/${seg(id)}`, { method: 'DELETE' }),
+  /** The file itself: inline for a photo, video or PDF; with `download`, always a download. */
+  orderAttachmentUrl: (orderId: string, id: string, download = false) =>
+    `${API_BASE}/orders/${seg(orderId)}/attachments/${seg(id)}/content${download ? '?download=true' : ''}`,
+  /** A PNG, JPEG or WebP photo shrunk to a WebP; 404 for anything else. */
+  orderAttachmentThumbnailUrl: (orderId: string, id: string) =>
+    `${API_BASE}/orders/${seg(orderId)}/attachments/${seg(id)}/thumbnail`,
+  /** Marks one of the item's images as what was delivered, or with null clears the mark. */
+  setItemDelivered: (orderId: string, itemId: string, attachmentId: string | null) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/delivered`, {
+      method: 'PUT',
+      body: JSON.stringify({ attachment_id: attachmentId }),
+    }),
   quoteOrderItem: (orderId: string, itemId: string, body: ManualQuoteInput) =>
     request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the

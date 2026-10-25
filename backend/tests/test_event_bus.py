@@ -234,6 +234,7 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "print.progress",
         "print.settled",
         "print.run",
+        "print.outcome",
         "operation.changed",
         "flow_run.changed",
         "library.changed",
