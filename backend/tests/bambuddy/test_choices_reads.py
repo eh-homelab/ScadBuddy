@@ -984,6 +984,7 @@ async def test_a_catalogue_read_without_its_standard_tier_is_bambuddy_unavailabl
     assert raised.value.type == UNAVAILABLE_PROBLEM
     assert is_transient(raised.value)
     assert "standard" in raised.value.detail
+    assert "not configured" in raised.value.detail
     assert not (tmp_path / catalogue.CATALOGUE_DIRNAME).exists()
     assert (await cached_catalogue(bambuddy, tmp_path)).process
     assert presets.call_count == 2
