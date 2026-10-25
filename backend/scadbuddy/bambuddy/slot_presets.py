@@ -97,17 +97,17 @@ class SlotPresets:
             return ref.id
         return self._names.get((ref.source, ref.id), f"{ref.source}:{ref.id}")
 
-    async def plan(self, plan: SlicePlan) -> SlicePlan:
-        """``plan`` with every repeat of a preset name after its first on its slot's own
-        preset; ``plan`` itself when nothing repeats or nothing could be made."""
-        return (await self.planned(plan))[0]
-
     async def planned(self, plan: SlicePlan) -> tuple[SlicePlan, bool]:
-        """:meth:`plan`, and whether two of its slots may still reach the CLI under one
-        name: a repeat whose own preset could not be made, or a ref the catalogue does
-        not name, whose name cannot be compared. Only then can the CLI have dropped the
-        tower, so only then is the slice read for it (``prime_tower.tower_dropped``,
-        #4649, #4655 review)."""
+        """``plan`` with every repeat of a preset name after its first on its slot's own
+        preset (``plan`` itself when nothing repeats or nothing could be made), and
+        whether two of its slots may still reach the CLI under one name: a repeat whose
+        own preset could not be made, or a ref the catalogue does not name, whose name
+        cannot be compared. Only then can the CLI have dropped the tower, so only then
+        is the slice read for it (``prime_tower.tower_dropped``, #4649, #4655 review).
+
+        A catalogue that could not be read, or is empty, names no ``cloud`` or ``local``
+        ref, so every multi-slot plate with one is read: on purpose, since a guard that
+        cannot compare names reads rather than stays silent (#4694 review)."""
         seen: set[str] = set()
         refs: list[PresetRef] = []
         shared = False
