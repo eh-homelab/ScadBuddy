@@ -254,6 +254,11 @@ the body.
   status follows. It is refused once the order has ended, and on an order past `quoted`
   for an item with no accepted quote (`item_not_priced`), since an accepted order holds
   priced items only.
+- Both reopens are allowed while the order is on hold, as a cancel is: undoing a
+  mistake does not advance the order.
+- A cancel's or a close's release drops its holds after its commit, under the orders'
+  row locks and only for quotes still released then (`OrderStore.drop_released_holds`),
+  so a reopen racing it keeps the holds it took.
 - A file the sweep took while a quote was released stays gone. The hold taken again
   keeps nothing, and the item needs a new quote before it prints.
 
