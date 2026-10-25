@@ -150,6 +150,8 @@ describe('OrderItemsTable · unit price', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     expect(screen.queryByRole('textbox', { name: 'Unit price for Name Keychain' })).not.toBeInTheDocument()
     expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[4]).toHaveTextContent('$9.00')
-    expect(within(row(ITEM_DRAFT)).getByText('not accepted')).toBeInTheDocument()
+    // In no sum: the line total says "not counted", and the unit price never "not accepted".
+    expect(within(row(ITEM_DRAFT)).getByText('not counted')).toBeInTheDocument()
+    expect(within(row(ITEM_DRAFT)).queryByText('not accepted')).not.toBeInTheDocument()
   })
 })

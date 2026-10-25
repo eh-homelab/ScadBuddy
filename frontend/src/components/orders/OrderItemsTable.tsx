@@ -125,10 +125,12 @@ function NotAccepted() {
 function UnitPrice({ item, currency, exponent }: { item: OrderItemDetail; currency: string; exponent: number }) {
   const price = unitPrice(item)
   if (price === null) return <span className="text-muted-foreground">—</span>
+  // A cancelled item's price is in no sum, accepted or not: the line total says so.
+  const cancelled = item.status === 'cancelled'
   return (
-    <span className="flex flex-col items-end">
+    <span className={cancelled ? 'flex flex-col items-end text-muted-foreground' : 'flex flex-col items-end'}>
       {formatMoney(price.minor, currency, exponent)}
-      {!price.accepted && <NotAccepted />}
+      {!price.accepted && !cancelled && <NotAccepted />}
     </span>
   )
 }
