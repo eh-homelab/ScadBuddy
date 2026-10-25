@@ -264,8 +264,7 @@ async def test_an_expired_catalogue_answers_at_once_and_is_read_again_behind_it(
     assert len(catalogue._refreshing) == 1
 
     asked.set()
-    async with asyncio.timeout(5):
-        await _refreshes_done()
+    await _refreshes_done()
     assert local.call_count == 2
     assert not catalogue._refreshing
     assert catalogue._load(next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()))
@@ -440,8 +439,7 @@ async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
     # Read again behind it, and kept for the next open.
     assert len(catalogue._refreshing) == 1
     held.release.set()
-    async with asyncio.timeout(5):
-        await _refreshes_done()
+    await _refreshes_done()
     assert held.started == 1
     assert kept.exists()
 
@@ -467,8 +465,7 @@ async def test_a_miss_that_persists_counts_its_opens_in_a_row(
         """An open that answers the held copy; the refresh it starts keeps a file, which
         goes again, so the file stays away."""
         await cached_catalogue(bambuddy, tmp_path)
-        async with asyncio.timeout(5):
-            await _refreshes_done()
+        await _refreshes_done()
         kept.unlink(missing_ok=True)
 
     # Each open answers the held copy while the file is away, and reads it once back.
@@ -527,8 +524,7 @@ async def test_a_refresh_that_cannot_be_kept_still_answers_the_next_open(
     monkeypatch.setattr(catalogue, "_keep", full)
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    async with asyncio.timeout(5):
-        await _refreshes_done()
+    await _refreshes_done()
 
     assert await cached_catalogue(bambuddy, tmp_path) == fresh
 
@@ -1029,20 +1025,24 @@ async def test_preset_names_still_read_without_the_standard_tier(
 
 @respx.mock
 async def test_a_refresh_without_the_standard_tier_keeps_the_old_catalogue(
-    bambuddy: BambuddyClient, tmp_path: Path
+    bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#4717: the dialog's kept copy is not replaced by a read the sidecar did not answer."""
+    """#4717: the dialog's kept copy is not replaced by a read the sidecar did not answer,
+    and the log says which problem refused it, so a busy sidecar shows as one."""
     presets, _ = _preset_routes()
     first = await cached_catalogue(bambuddy, tmp_path)
     (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
     _expire(tmp_path)
     presets.mock(return_value=_sidecar_unanswered())
+    caplog.set_level(logging.WARNING, logger=catalogue.__name__)
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
     await _refreshes_done()
 
     assert presets.call_count == 2
     assert kept.stat().st_mtime == 0  # not rewritten
+    (failed,) = [r for r in caplog.records if "could not refresh" in r.getMessage()]
+    assert failed.__dict__["problem"] == UNAVAILABLE_PROBLEM
     catalogue.forget_catalogues()
     assert await cached_catalogue(bambuddy, tmp_path) == first
 

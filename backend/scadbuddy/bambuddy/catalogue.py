@@ -475,9 +475,14 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
         await _keep_and_hold(path, catalogue)
     except Exception as error:
         # Nothing awaits this task, so whatever fails ends here, and only by its type:
-        # a pydantic error quotes Bambuddy's body (#3446).
+        # a pydantic error quotes Bambuddy's body (#3446). A problem's type is ScadBuddy's
+        # own constant URI, which tells a busy sidecar (#4717) from other failures.
         logger.warning(
-            "could not refresh the kept preset catalogue", extra={"error": type(error).__name__}
+            "could not refresh the kept preset catalogue",
+            extra={
+                "error": type(error).__name__,
+                "problem": error.type if isinstance(error, ApiError) else None,
+            },
         )
 
 
