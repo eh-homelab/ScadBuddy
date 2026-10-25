@@ -449,6 +449,9 @@ async def test_a_miss_that_persists_counts_its_opens_in_a_row(
     (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
     aside = kept.with_name("aside")
     caplog.set_level(logging.INFO, logger=catalogue.__name__)
+    # Only this test's own looks: where INFO is already captured (as in CI, which logs
+    # at INFO), the first open's two misses were counted too.
+    caplog.clear()
 
     kept.rename(aside)
     catalogue._load(kept)
