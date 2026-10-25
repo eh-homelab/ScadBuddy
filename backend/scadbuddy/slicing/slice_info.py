@@ -174,10 +174,13 @@ class PrintedFilaments:
 def printed_filaments(archive: zipfile.ZipFile, plate_id: int) -> PrintedFilaments:
     """Plate ``plate_id``'s :class:`PrintedFilaments`: the header's filaments, else the
     sequence's; first the sequence's first, else the header's one filament when it names
-    only one."""
+    only one, and none when that is not among the filaments printed."""
     sequence = _sequence(archive, plate_id)
     printed = frozenset(_header_filaments(archive, plate_id)) or frozenset(sequence)
     first = sequence[0] if sequence else (next(iter(printed)) if len(printed) == 1 else None)
+    if first not in printed:
+        # The sequence and the header disagree: nothing says which filament is first.
+        first = None
     return PrintedFilaments(printed=printed, first=first)
 
 

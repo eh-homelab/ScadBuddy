@@ -501,6 +501,24 @@ def test_a_phantom_with_no_first_filament_has_no_plan(caplog: pytest.LogCaptureF
     assert "has no first to join" in caplog.text
 
 
+def test_a_sequence_the_header_disagrees_with_has_no_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4716 review: a sequence whose first filament (4) is not one the G-code header
+    names (2, 3) says nothing of which is first, so the phantom ``id="1"`` has no slot."""
+
+    def first_is_4(name: str, data: bytes) -> bytes:
+        if name != "Metadata/filament_sequence.json":
+            return data
+        sequences = json.loads(data)
+        sequences["plate_2"]["sequence"] = [4, 2, 3]
+        return json.dumps(sequences).encode()
+
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(_rewritten("plate2-two-filaments", first_is_4), 2) is None
+    assert "has no first to join" in caplog.text
+
+
 def test_a_corrupt_gcode_still_reads_the_plan_from_the_sequence() -> None:
     """#4712: a G-code member that cannot be inflated says nothing of the header, and the
     plan is read from ``filament_sequence.json`` alone, never refused for it."""
