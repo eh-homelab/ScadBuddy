@@ -437,6 +437,36 @@ async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
 
 
 @respx.mock
+async def test_a_miss_that_persists_counts_its_opens_in_a_row(
+    bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4623 review: answered from memory, a file that stays unreadable would otherwise
+    log the same miss on every open; the count says it persists, and a read resets it."""
+    _preset_routes()
+    # Kept by the first open (whose two looks missed), read back by the second.
+    for _ in range(2):
+        await cached_catalogue(bambuddy, tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    aside = kept.with_name("aside")
+    caplog.set_level(logging.INFO, logger=catalogue.__name__)
+    # Only this test's own looks: where INFO is already captured (as in CI, which logs
+    # at INFO), the first open's two misses were counted too.
+    caplog.clear()
+
+    kept.rename(aside)
+    catalogue._load(kept)
+    catalogue._load(kept)
+    aside.rename(kept)
+    assert catalogue._load(kept) is not None
+    kept.rename(aside)
+    catalogue._load(kept)
+
+    misses = [r for r in caplog.records if "no kept preset catalogue" in r.getMessage()]
+    assert [r.__dict__["misses_in_a_row"] for r in misses] == [1, 2, 1]
+    assert all(r.__dict__["held"] for r in misses)
+
+
+@respx.mock
 async def test_a_process_that_has_read_nothing_still_waits_on_its_first_read(
     bambuddy: BambuddyClient, tmp_path: Path
 ) -> None:
@@ -471,11 +501,11 @@ async def test_a_refresh_that_cannot_be_kept_still_answers_the_next_open(
     async def read_fresh(client: BambuddyClient) -> catalogue.Catalogue:
         return fresh
 
-    def full(self: Path, target: Path) -> Path:
+    def full(path: Path, kept: catalogue.Catalogue) -> None:
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(catalogue, "_catalogue", read_fresh)
-    monkeypatch.setattr(Path, "replace", full)
+    monkeypatch.setattr(catalogue, "_keep", full)
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
     async with asyncio.timeout(5):
