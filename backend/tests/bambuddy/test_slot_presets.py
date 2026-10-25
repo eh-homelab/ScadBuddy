@@ -42,9 +42,12 @@ def plan(*filaments: PresetRef) -> SlicePlan:
     )
 
 
-async def slotted(presets: SlotPresets, unslotted: SlicePlan) -> SlicePlan:
-    """The plan :meth:`SlotPresets.planned` makes of ``unslotted``."""
-    return (await presets.planned(unslotted))[0]
+async def slotted(presets: SlotPresets, unslotted: SlicePlan, *, shared: bool) -> SlicePlan:
+    """The plan :meth:`SlotPresets.planned` makes of ``unslotted``, once its answer to
+    whether two slots may still share a name is ``shared``."""
+    out, answer = await presets.planned(unslotted)
+    assert answer is shared
+    return out
 
 
 def stub(slot: int, base: str = PLA) -> dict[str, Any]:
@@ -91,7 +94,7 @@ async def test_repeats_of_one_preset_ref_distinct_presets_inheriting_it(
 
     shared = plan(STANDARD, STANDARD, STANDARD)
 
-    out = await slotted(SlotPresets(bambuddy, catalogue()), shared)
+    out = await slotted(SlotPresets(bambuddy, catalogue()), shared, shared=False)
 
     # The first slot keeps the shared preset; each repeat refs its own.
     assert out.filament_presets == [
@@ -120,9 +123,9 @@ async def test_an_existing_preset_of_that_name_and_document_is_reused(
     create = creates()
     presets = SlotPresets(bambuddy, catalogue())
 
-    first = await slotted(presets, plan(STANDARD, STANDARD))
+    first = await slotted(presets, plan(STANDARD, STANDARD), shared=False)
     # A second plate of the same run asks nothing of Bambuddy again.
-    second = await slotted(presets, plan(STANDARD, STANDARD))
+    second = await slotted(presets, plan(STANDARD, STANDARD), shared=False)
 
     assert first.filament_presets == [STANDARD, PresetRef(source="local", id="40")]
     assert second.filament_presets == first.filament_presets
@@ -142,7 +145,7 @@ async def test_a_same_named_preset_holding_another_document_is_not_reused(
     )
     create = creates()
 
-    out = await slotted(SlotPresets(bambuddy, catalogue()), plan(STANDARD, STANDARD))
+    out = await slotted(SlotPresets(bambuddy, catalogue()), plan(STANDARD, STANDARD), shared=False)
 
     assert out.filament_presets == [STANDARD, PresetRef(source="local", id="500")]
     assert create.call_count == 1
@@ -168,7 +171,7 @@ async def test_a_preset_that_cannot_be_made_leaves_the_shared_ref(
         route.mock(return_value=answer)
     shared = plan(STANDARD, STANDARD)
 
-    out = await slotted(SlotPresets(bambuddy, catalogue()), shared)
+    out = await slotted(SlotPresets(bambuddy, catalogue()), shared, shared=True)
 
     assert out == shared
 
@@ -179,7 +182,7 @@ async def test_an_unreadable_list_leaves_the_shared_ref(bambuddy: BambuddyClient
     create = creates()
     shared = plan(STANDARD, STANDARD)
 
-    assert await slotted(SlotPresets(bambuddy, catalogue()), shared) == shared
+    assert await slotted(SlotPresets(bambuddy, catalogue()), shared, shared=True) == shared
     assert not create.called
 
 
@@ -194,7 +197,7 @@ async def test_a_local_presets_repeat_is_a_copy_of_its_document(bambuddy: Bambud
     local = PresetRef(source="local", id="7")
     names = catalogue(PresetChoice(ref=local, name="My PETG"))
 
-    out = await slotted(SlotPresets(bambuddy, names), plan(local, local))
+    out = await slotted(SlotPresets(bambuddy, names), plan(local, local), shared=False)
 
     assert out.filament_presets == [local, PresetRef(source="local", id="500")]
     assert sent(create)[0]["setting"] == {**own, "name": "My PETG (ScadBuddy slot 2)"}
@@ -211,7 +214,7 @@ async def test_a_cloud_ref_named_as_a_bundled_preset_counts_as_a_repeat_of_it(
     cloud = PresetRef(source="cloud", id="GFSA00_14")
     names = catalogue(PresetChoice(ref=cloud, name=PLA))
 
-    out = await slotted(SlotPresets(bambuddy, names), plan(STANDARD, cloud))
+    out = await slotted(SlotPresets(bambuddy, names), plan(STANDARD, cloud), shared=False)
 
     assert out.filament_presets == [STANDARD, PresetRef(source="local", id="500")]
     assert sent(create)[0]["setting"] == stub(2)
@@ -228,7 +231,7 @@ async def test_a_cloud_user_preset_is_left_shared_and_nothing_is_written(
     names = catalogue(PresetChoice(ref=cloud, name="My cloud PLA"))
     shared = plan(cloud, cloud)
 
-    assert await slotted(SlotPresets(bambuddy, names), shared) == shared
+    assert await slotted(SlotPresets(bambuddy, names), shared, shared=True) == shared
     assert not create.called
 
 
@@ -237,7 +240,7 @@ async def test_distinct_presets_ask_nothing_of_bambuddy(bambuddy: BambuddyClient
     other = PresetRef(source="standard", id="Bambu PETG HF @BBL H2C")
     distinct = plan(STANDARD, other)
 
-    assert await slotted(SlotPresets(bambuddy, catalogue()), distinct) is distinct
+    assert await slotted(SlotPresets(bambuddy, catalogue()), distinct, shared=False) is distinct
     assert not respx.calls
 
 
