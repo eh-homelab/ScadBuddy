@@ -60,7 +60,8 @@ def test_an_include_applies_between_the_parent_and_the_child(profiles: Profiles)
     the presets it names, so dropping them left fdm_machine_common's generic start,
     which loads no filament, and every plate's slice_info named filament 1."""
     out = profiles.machine("Test Printer with includes")
-    assert out["machine_start_gcode"].startswith(";===== machine: Test Printer")
+    start = out["machine_start_gcode"]
+    assert isinstance(start, str) and start.startswith(";===== machine: Test Printer")
     assert out["change_filament_gcode"] == "M620 S[next_extruder]A\nT[next_extruder]\n"
     # The child's own option wins over the included one, which wins over the parent's.
     assert out["machine_end_gcode"] == ";child end\n"
