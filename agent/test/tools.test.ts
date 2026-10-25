@@ -1657,6 +1657,19 @@ describe('arrange (#1864)', () => {
     expect(firstText(result)).toMatchObject({ job_id: JOB, slug: 'lid', plates: 2, output: { id: ARRANGED } })
   })
 
+  it("says the job's warnings, such as a planned spool the arrange did not use (#4684 review)", async () => {
+    const warning = 'filament_plan slot 1 (spool 7) is #E4BD68, which no copy prints in: that spool is not used'
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, () => HttpResponse.json(job('pending'), { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/${JOB}`, () => HttpResponse.json({ ...job('done'), warnings: [warning] })),
+      http.post(`${BACKEND}/api/v1/models/:slug/outputs`, () =>
+        HttpResponse.json({ id: ARRANGED, slug: 'lid' }, { status: 201 }),
+      ),
+    )
+    const result = await runTool(tool('arrange'), { objects: [{ output_id: A }] }, ctx({ pollIntervalMs: 1 }))
+    expect(firstText(result)).toMatchObject({ job_id: JOB, warnings: [warning] })
+  })
+
   it('names the outputs a re-render must come first for, and the files it cannot read yet', async () => {
     server.use(
       http.post(`${BACKEND}/api/v1/outputs/arrange`, () =>
