@@ -194,15 +194,16 @@ logger = logging.getLogger(__name__)
 OUT_OF_MEMORY_TRACEBACK_INTERVAL = 600.0
 #: When each subject's last traceback was logged, by `time.monotonic()`.
 _out_of_memory_logged: dict[str, float] = {}
-#: What those times are read from; a test sets its own.
-_clock = time.monotonic
 
 
-def _log_out_of_memory(subject: str, where: str) -> None:
+def _log_out_of_memory(
+    subject: str, where: str, *, clock: Callable[[], float] = time.monotonic
+) -> None:
     """Log a check's `MemoryError` (#4598): with its traceback at most once per
     :data:`OUT_OF_MEMORY_TRACEBACK_INTERVAL` per subject, else one line. Called inside
-    the ``except``, so the traceback is the error being handled."""
-    now = _clock()
+    the ``except``, so the traceback is the error being handled. ``clock`` is what the
+    interval is read from; a test hands in its own."""
+    now = clock()
     last = _out_of_memory_logged.get(subject)
     traceback = last is None or now - last >= OUT_OF_MEMORY_TRACEBACK_INTERVAL
     if traceback:
