@@ -52,6 +52,7 @@ from scadbuddy.bambuddy.models import (
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
+    LocalPreset,
     LocalPresetCatalogue,
     LocalPresetDetail,
     MoveResult,
@@ -188,6 +189,7 @@ Operation = Literal[
     "slice.job.status",
     "slice.start",
     "slicer.local_preset",
+    "slicer.local_preset.create",
     "slicer.local_presets",
     "slicer.preset_values",
     "slicer.presets",
@@ -534,6 +536,26 @@ class BambuddyClient:
             what=f"read local preset {preset_id}",
         )
         return LocalPresetDetail.model_validate(response.json())
+
+    async def create_local_preset(
+        self, name: str, preset_type: str, setting: Mapping[str, Any]
+    ) -> LocalPreset:
+        """``POST /api/v1/local-presets/``: a preset made from ``setting``, stored as it
+        is sent (``routes/local_presets.py`` ``create_local_preset``: no ``inherits``
+        resolution, unlike ``PUT``, which merges over OrcaSlicer's base), and sliced with
+        verbatim (:class:`LocalPresetDetail`). Bambuddy gates it on
+        ``Permission.SETTINGS_UPDATE``, which it never grants an API key while its auth
+        is on (``core/auth.py`` ``_APIKEY_DENIED_PERMISSIONS``, read on 2026-10-24): then
+        this is a 403, and the per-slot presets that call it go without (#3962)."""
+        response = await self._send(
+            "POST",
+            "/local-presets/",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_preset.create",
+            what=f"create local preset {name}",
+            json={"name": name, "preset_type": preset_type, "setting": dict(setting)},
+        )
+        return LocalPreset.model_validate(response.json())
 
     # --- inventory -----------------------------------------------------------
 

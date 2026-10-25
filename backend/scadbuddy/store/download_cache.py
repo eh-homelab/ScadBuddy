@@ -216,11 +216,12 @@ class DownloadCache:
         """The entry for ``sha256``, open at its start and marked used; None on a miss.
         A span says which, so a slow read shows in a trace as a miss, not a gap."""
         with span("download_cache.lookup", attributes={"scadbuddy.cache.what": what}) as current:
-            if not is_sha256(sha256):
+            # Bound first: `is_sha256` narrows only where it holds (#4580 review).
+            named = sha256 if is_sha256(sha256) else None
+            if named is None:
                 current.set_attribute("scadbuddy.cache.hit", False)
                 return None
-            assert sha256 is not None
-            path = self.path(sha256)
+            path = self.path(named)
             try:
                 handle = path.open("rb")
             except FileNotFoundError:
@@ -238,9 +239,9 @@ class DownloadCache:
         can write the shared directory can change them after the check. An entry whose
         bytes are not its name is dropped and reads as a miss."""
         handle = self.open(sha256, what=what)
-        if handle is None:
+        # `open` answers only a sha256; tested again here only to narrow its type.
+        if handle is None or sha256 is None:
             return False
-        assert sha256 is not None
         if not self.has_room(out.fileno(), os.fstat(handle.fileno()).st_size):
             handle.close()
             return False

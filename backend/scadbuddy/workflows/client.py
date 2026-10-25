@@ -37,6 +37,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
 from scadbuddy.workflows.operation import OperationWorkflow
+from scadbuddy.workflows.operation_models import HEARTBEAT_THROTTLE
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import (
     MigrateInputs,
@@ -185,6 +186,8 @@ def bambuddy_worker(
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),
         interceptors=[RegisteredActivities(activities)],
+        # An operation's run heartbeats against a 30 s timeout (#4635).
+        max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
     )
 
 

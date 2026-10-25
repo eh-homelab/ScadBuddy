@@ -401,17 +401,27 @@ def _size(group: RackGroup) -> str:
     return f"{size:g}" if size is not None else group.nozzle_diameter
 
 
+def _sentence(picker: str) -> str:
+    """``picker`` (worded mid-sentence) as it starts one: "the printer" -> "The printer"."""
+    return f"{picker[:1].upper()}{picker[1:]}"
+
+
 def manual_for(
-    groups: Sequence[RackGroup], position: int | None, algorithm: RackAlgorithm
+    groups: Sequence[RackGroup],
+    position: int | None,
+    algorithm: RackAlgorithm,
+    *,
+    picker: str = "Bambuddy",
 ) -> tuple[dict[int, int], list[FilamentWarning]]:
-    """The run's ``manual`` map from the dialog's one rack-side position (spec §5)."""
+    """The run's ``manual`` map from the dialog's one rack-side position (spec §5).
+    ``picker`` is who picks what ScadBuddy leaves, as in `rack_warnings`."""
     if position is None:
         return {}, []
     if not groups:
         return {}, [
             _warning(
                 "rack-left-to-bambuddy",
-                "Rack pick left to Bambuddy: manual rack pick unused: this plate does not "
+                f"Rack pick left to {picker}: manual rack pick unused: this plate does not "
                 "print from the rack.",
             )
         ]
@@ -419,7 +429,7 @@ def manual_for(
     first, rest = ids[0], ids[1:]
     if not rest:
         return {first: position}, []
-    then = "Bambuddy picks for" if algorithm == "bambuddy" else "ScadBuddy ranked"
+    then = f"{picker} picks for" if algorithm == "bambuddy" else "ScadBuddy ranked"
     noun = "group" if len(rest) == 1 else "groups"
     others = ", ".join(str(group_id) for group_id in rest)
     return {first: position}, [
@@ -483,7 +493,7 @@ def rack_warnings(
                 found.append(
                     _warning(
                         "rack-unsafe-material",
-                        f"{picker[:1].upper()}{picker[1:]} picks the nozzle and may use a "
+                        f"{_sentence(picker)} picks the nozzle and may use a "
                         f"non-hardened one for {_materials(group)}.",
                     )
                 )

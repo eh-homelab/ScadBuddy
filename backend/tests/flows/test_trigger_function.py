@@ -19,7 +19,12 @@ async def test_a_script_reads_its_event_by_kind() -> None:
         "    return 'by hand or on a schedule'",
         "if t['kind'] == 'model.changed':",
         "    return t['slug'] + '@' + t['commit']",
-        "return t['slug'] + ':' + t['job_id']",
+        "if t['kind'] == 'render.finished':",
+        "    return t['slug'] + ':' + t['job_id']",
+        "printer = t['printer'] or 'no printer'",
+        "if t['kind'] == 'print.failed':",
+        "    return 'failed ' + t['run_id'] + ' ' + t['output_id'] + ' ' + printer",
+        "return 'finished ' + t['run_id'] + ' ' + printer",
     )
     assert await check_script(script) == []
 
@@ -31,6 +36,10 @@ async def test_a_script_reads_its_event_by_kind() -> None:
         ["return t['slug']"],
         # A finished render names its job, not a commit.
         ["if t is not None and t['kind'] == 'render.finished':", "    return t['commit']"],
+        # A print's event names its run, not a render's job (#2665).
+        ["if t is not None and t['kind'] == 'print.failed':", "    return t['job_id']"],
+        # Nor may a render's be read without telling it from a print's.
+        ["if t is not None and t['kind'] != 'model.changed':", "    return t['job_id']"],
     ],
 )
 async def test_the_type_check_catches_misuse_of_the_event(lines: list[str]) -> None:
