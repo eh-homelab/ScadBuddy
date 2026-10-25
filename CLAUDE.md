@@ -1022,6 +1022,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `docker buildx imagetools inspect`). `lint-buildx-mirror.sh` checks both. The
   workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`;
   a service container has no such fallback, so a tag the mirror lacks fails the job.
+  So they are pinned by digest, `mirror.gcr.io/library/postgres:17@sha256:…`, all one
+  digest (#4729: the moving tag once reached a layer the mirror answered `unknown blob`
+  for, and every backend job failed). `postgres-pin.sh` checks the pins in the `lint`
+  job; with `--check`, the weekly `postgres-pin.yml` checks that the mirror holds every
+  blob of the pin's amd64 image and fails when `17` has moved, saying whether the mirror
+  holds the new digest's blobs yet. Move every pin together, only once it does.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
