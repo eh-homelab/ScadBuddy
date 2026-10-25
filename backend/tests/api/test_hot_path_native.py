@@ -371,6 +371,115 @@ def test_a_stale_report_runs_the_bambuddy_path(
     assert "GET /api/v1/printers/" in str(called.value)
 
 
+def test_the_first_reads_open_on_the_native_row_with_bambuddy_configured(
+    native_app: TestClient, model: str, spans: InMemorySpanExporter, fake_lan: FakeLan
+) -> None:
+    """AC1 in the browser (#4601): the dialog's first reads name no printer, and with
+    ``bambuddy_url`` set (Bambuddy answering nothing) and no Settings printer they open
+    on the registry row a run reaches natively, as they do with no URL, and ask
+    Bambuddy nothing. A Settings printer, the configured default, still wins; when
+    Bambuddy then fails, its problem names the native row to offer instead."""
+    row = lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    assert _state(native_app).settings_store.load().printer_id is None
+
+    with forbid_bambuddy(spans, BASE):
+        choices = native_app.get(f"/api/v1/print/outputs/{output}/choices")
+        assert choices.status_code == 200, choices.text
+        filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments")
+        assert filaments.status_code == 200, filaments.text
+
+    assert (choices.json()["printer_id"], choices.json()["lan_printers"]) == (None, [row])
+    assert filaments.json()["source"] == "trays"
+
+    # Settings' printer, which no row links, is Bambuddy's: its reads go there. Bambuddy
+    # failing, the problem names the row a run reaches natively, which the dialog then
+    # offers; asked for, it opens with no Bambuddy call.
+    configure(native_app, printer_id=7)
+    with pytest.raises(BambuddyCalledError), forbid_bambuddy(spans, BASE):
+        failed = native_app.get(f"/api/v1/print/outputs/{output}/choices")
+    assert failed.status_code == 502, failed.text
+    assert failed.json()["lan_printers"] == [row]
+    with forbid_bambuddy(spans, BASE):
+        picked = native_app.get(f"/api/v1/print/outputs/{output}/choices", params={"printer": row})
+    assert picked.status_code == 200, picked.text
+    assert picked.json()["lan_printers"] == [row]
+
+
+def test_the_dialogs_analysis_on_the_native_row_asks_bambuddy_nothing(
+    native_app: TestClient, model: str, spans: InMemorySpanExporter, fake_lan: FakeLan
+) -> None:
+    """The dialog's analyzers are on AC1's path (#4629): with ``bambuddy_url`` set and
+    Bambuddy answering nothing, a run for the native row reads its printer from the
+    registry, its trays from the LAN report and its spools from the overlay."""
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    body = run_body(row, filaments.json())
+
+    with forbid_bambuddy(spans, BASE):
+        report = native_app.post(
+            "/api/v1/analyzers/run",
+            json={"target": {"output_id": output}, "request": body, "detail": "advanced"},
+        )
+    assert report.status_code == 200, report.text
+    inputs = {row["name"]: row for row in report.json()["inputs"]}
+    for name in ("printer", "filaments", "inventory"):
+        assert inputs[name]["available"], inputs[name]
+
+
+def test_the_native_analysis_names_a_plan_spool_the_trays_do_not_hold(
+    native_app: TestClient, model: str, spans: InMemorySpanExporter, fake_lan: FakeLan
+) -> None:
+    """#4634 review: a plan slot whose spool is in no tray is named, not dropped."""
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    body = run_body(row, filaments.json())
+    gone = tray_spool_id(3, 3)
+    body["filament_plan"]["slots"][0]["spool_id"] = gone
+    slot = body["filament_plan"]["slots"][0]["slot_id"]
+
+    with forbid_bambuddy(spans, BASE):
+        report = native_app.post(
+            "/api/v1/analyzers/run",
+            json={"target": {"output_id": output}, "request": body, "detail": "advanced"},
+        )
+    assert report.status_code == 200, report.text
+    inputs = {row["name"]: row for row in report.json()["inputs"]}
+    assert not inputs["filaments"]["available"]
+    assert inputs["filaments"]["reason"] == (
+        f"slot {slot}'s spool {gone} is not in the printer's trays"
+    )
+
+
+@pytest.mark.parametrize("native_app", [False], indirect=True, ids=["no-url"])
+def test_an_analysis_naming_a_printer_the_registry_refuses_goes_on_without_it(
+    native_app: TestClient, model: str, fake_lan: FakeLan
+) -> None:
+    """#4634 review: a named row that is gone is the printer's reason, and the analysis
+    still answers on the rest."""
+    lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    report = native_app.post(
+        "/api/v1/analyzers/run",
+        json={
+            "target": {"output_id": output},
+            "request": {"printer": "no-such-row"},
+            "detail": "advanced",
+        },
+    )
+    assert report.status_code == 200, report.text
+    inputs = {row["name"]: row for row in report.json()["inputs"]}
+    assert not inputs["printer"]["available"]
+    assert "There is no printer no-such-row in the registry" in inputs["printer"]["reason"]
+    assert inputs["geometry"]["available"], inputs["geometry"]
+
+
 #: The app with no ``bambuddy_url`` (AC2), for `native_app`'s indirect parametrisation.
 NO_BAMBUDDY = pytest.mark.parametrize("native_app", [False], indirect=True, ids=["no-url"])
 
@@ -452,6 +561,8 @@ def test_the_dialog_reads_answer_without_bambuddy(
     filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments")
     assert filaments.status_code == 200, filaments.text
     assert filaments.json()["source"] == "trays"
+    # No Bambuddy, so no note that its spool records are missing (#4601).
+    assert filaments.json()["overlay_notes"] == []
     # The check judges the body alone; one naming no printer has nothing to judge.
     checked = native_app.post(
         f"/api/v1/print/outputs/{output}/check",

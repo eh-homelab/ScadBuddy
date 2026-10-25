@@ -525,7 +525,7 @@ describe('extractors', () => {
 
 describe('the harness projection', () => {
   const backend = setupServer()
-  beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+  beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
   afterEach(() => backend.resetHandlers())
   afterAll(() => backend.close())
 

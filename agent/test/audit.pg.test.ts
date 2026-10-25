@@ -23,7 +23,7 @@ import { browser } from './support/sessions.js'
 
 const HASH_KEY = Buffer.alloc(32, 7)
 const backend = setupServer()
-beforeAll(() => backend.listen({ onUnhandledRequest: 'bypass' }))
+beforeAll(() => backend.listen({ onUnhandledFrame: 'bypass' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
 

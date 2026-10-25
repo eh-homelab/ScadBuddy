@@ -2,9 +2,9 @@
 # #4593): e2e-stack/run.sh --mode both brings up ScadBuddy with the S3 store, its own
 # library and the native slicer worker, a fake LAN printer and a Bambuddy that fails
 # every call, and runs frontend/e2e/real-hot-path.spec.ts twice: with the recorder as
-# bambuddy_url (AC1: it sees no call) and with none (AC2). The recorder pass fails until
-# #4601 (with a URL set, the Customize page and the dialog's first read ask Bambuddy):
-# that failure is AC1's check working, not a flake.
+# bambuddy_url (AC1: it sees no call) and with none (AC2). A recorder pass that fails
+# names the calls it saw: that is AC1's check working, not a flake (#4629 removed the
+# last ones, from the dialog's analyzers and the Prints page).
 #
 # Weekly and on demand, never a PR check: it builds three images and prints twice, and
 # it is not in ci.yml's `CI Summary` needs (plan decision 6). On a PR that touches

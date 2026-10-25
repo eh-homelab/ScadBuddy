@@ -9,7 +9,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 // Flows (#1057): register, list and start flows, read their runs (backend/scadbuddy/api/flows.py).
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

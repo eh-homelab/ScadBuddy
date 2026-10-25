@@ -64,6 +64,7 @@ from scadbuddy.bambuddy.choices import (
     ChoicesView,
     choices_for_output,
     native_choices_for,
+    offering_lan_printers,
     with_lan_printers,
 )
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for, maybe_client
@@ -1195,12 +1196,14 @@ async def opening_route(
     printer: str | None,
     printer_id: int | None,
 ) -> RunRoute | None:
-    """`dialog_route`, and with no Bambuddy configured and no printer named (by the
-    request or Settings), the first registry row a run reaches natively (#3818 tier A,
-    AC2, `first_native_route`): Bambuddy's choices would open on a printer of its own,
-    and cannot be read. The dialog then opens on that row, as it does on a LAN-only one
-    (``lan_printers``)."""
-    if not settings.bambuddy_url and names_no_printer(settings, printer, printer_id):
+    """`dialog_route`, and with no printer named (by the request, the remembered choice
+    or Settings), the first registry row a run reaches natively (#3818 tier A, AC1 and
+    AC2, `first_native_route`), whether or not Bambuddy is configured: Bambuddy's
+    choices would open on a printer of its own, a Bambuddy call on the hot path (#4601),
+    and with no Bambuddy cannot be read at all. The dialog then opens on that row, as it
+    does on a LAN-only one (``lan_printers``). A Settings printer, the configured
+    default, still wins; with no native row the reads are Bambuddy's as before."""
+    if names_no_printer(settings, printer, printer_id):
         return await first_native_route(settings, printers.store, printers.reports)
     return await dialog_route(
         settings, printers.store, printers.reports, printer=printer, printer_id=printer_id
@@ -1313,7 +1316,7 @@ async def get_choices(
             rack=rack,
         )
         return await with_lan_printers(native_view, settings, printers)
-    async with client_for(settings) as client:
+    async with offering_lan_printers(settings, printers), client_for(settings) as client:
         view = await choices_for_output(
             client,
             outputs,

@@ -87,7 +87,7 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
   let audit: AuditLog
   let m: SessionManager
 
-  beforeAll(() => msw.listen({ onUnhandledRequest: 'bypass' }))
+  beforeAll(() => msw.listen({ onUnhandledFrame: 'bypass' }))
   afterAll(() => msw.close())
 
   beforeEach(async () => {

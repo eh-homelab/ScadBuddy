@@ -27,7 +27,7 @@ from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     _named_printer,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRunError, PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.batches.store import (
     BatchChoice,
@@ -434,14 +434,15 @@ async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_
     printer there. The refusal is `_named_printer`'s own, carried as the run's refusal
     is, through the workflow's problem document and back."""
 
-    refused: list[ApiError] = []
+    refused: list[PrintRunError] = []
 
     async def answers(*_: Any, **__: Any) -> Any:
         try:
             await _named_printer("garage", 1, StoredSettings(), cast(PrinterStore, _OneRow(linked)))
         except ApiError as error:
-            refused.append(error)
-            _answered(AcceptAnswer(refusal=problem(error)))
+            refusal = problem(error)
+            refused.append(refusal)
+            _answered(AcceptAnswer(refusal=refusal))
         raise AssertionError("the named printer was not refused")
 
     monkeypatch.setattr(print_batches, "start_library_run", answers)
@@ -456,9 +457,10 @@ async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_
         "refused",
         f"disagreeing printer: {why} Edit bracket.3mf and pick its printer again.",
     )
-    # #4589: either branch is the one problem type, its reason without PICK_AGAIN.
-    [error] = refused
-    assert (error.type, error.extensions["reason"]) == (
+    # #4589: either branch is the one problem type, its reason without PICK_AGAIN, and
+    # both survive the problem document the batch reads the refusal from.
+    [refusal] = refused
+    assert (refusal.type, refusal.extensions["reason"]) == (
         DISAGREEING_PRINTER_PROBLEM,
         f"disagreeing printer: {why}",
     )

@@ -28,7 +28,7 @@ const C2 = '2'.repeat(40)
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 
 const backend = setupServer()
-beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
 

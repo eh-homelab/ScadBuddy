@@ -1,7 +1,7 @@
 import { context } from '@opentelemetry/api'
 import { ExportResultCode, suppressTracing, type ExportResult } from '@opentelemetry/core'
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
-import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-web'
+import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace'
 
 /** The backend's browser relay (tracing spec 2026-10-01 §5.2), on the page's own origin. */
 export const RELAY_PATH = '/telemetry/v1/traces'
