@@ -173,7 +173,17 @@ export function OrderPage() {
           </p>
         )}
 
-        <OrderItemsTable orderId={order.id} items={items} attachments={attachments} currency={order.currency} exponent={order.minor_exponent} onOpen={(item) => setOpenItem(item.id)} canAdd={editable} />
+        <OrderItemsTable
+          orderId={order.id}
+          orderStatus={order.status}
+          items={items}
+          attachments={attachments}
+          currency={order.currency}
+          exponent={order.minor_exponent}
+          onOpen={(item) => setOpenItem(item.id)}
+          onChanged={reload}
+          canAdd={editable}
+        />
 
         <div className="grid gap-4 md:grid-cols-2">
           <Card size="sm">

@@ -397,6 +397,12 @@ class PrintPipeline:
         client with it, so the next reader's client is the new fetch's. Every caller
         today hands in the one client of its request or activity."""
         fetching = self._fetching
+        if fetching is not None and fetching.cancelled():
+            # Ended by a cancel from outside (no path here keeps one: the last reader's
+            # cancel drops it): no answer to keep, so the next reader starts anew
+            # (#4695 review).
+            fetching = self._fetching = None
+            self._fetch_client = None
         if fetching is not None and fetching.done():
             # Settled: the answer, or its failure, for any reader.
             self._fetch_client = None

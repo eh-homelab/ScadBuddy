@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -97,7 +97,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
 )
-from scadbuddy.workflows.models import MigrateResult
+from scadbuddy.workflows.models import ArrangeInputs, MigrateResult
 
 logger = logging.getLogger(__name__)
 
@@ -280,13 +280,37 @@ class ModelDiagnostics(BaseModel):
     diagnostics_dropped: int = Field(default_factory=int)
 
 
+#: `ArrangeInputs.notes`, read alone with its type (`test_arrange_recolour` pins the
+#: two together): a job's status reads only that field, never the whole arrange (every
+#: item, the provenance), on every poll.
+_NOTES_FIELD = "notes"
+if _NOTES_FIELD not in ArrangeInputs.model_fields:
+    raise ImportError(f"ArrangeInputs has no {_NOTES_FIELD!r} field for a job's warnings")
+_ARRANGE_NOTES: TypeAdapter[list[str]] = TypeAdapter(list[str])
+
+
 def _arranged_notes(job: Job) -> list[str]:
     """An arrange's own notes (`ArrangeInputs.notes`): what its request asked for that it
     leaves out, said beside the result's warnings."""
-    if job.kind != "arrange":
+    if job.kind != "arrange" or not job.inputs:
         return []
-    notes = (job.inputs or {}).get("notes")
-    return [str(note) for note in notes] if isinstance(notes, list) else []
+    try:
+        return _ARRANGE_NOTES.validate_python(job.inputs.get(_NOTES_FIELD, []))
+    except ValidationError:
+        # A row this build cannot read: no notes to say, but a drift between builds shows.
+        logger.warning("an arrange job's notes are unreadable", extra={"job_id": job.id})
+        return []
+
+
+def _warnings(job: Job) -> list[str] | None:
+    """A done job's result's warnings, else what a failed one could still say (#408),
+    with an arrange's notes after them. With none: a result's empty list, and ``None``
+    for a job with no result yet, as the field always said."""
+    base = job.result.warnings if job.result else job.warnings
+    every = [*base, *_arranged_notes(job)]
+    if every:
+        return every
+    return job.result.warnings if job.result else None
 
 
 def _job_status(job: Job, preview_url: str | None) -> JobStatus:
@@ -306,8 +330,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         preview_url=preview_url if result is not None else None,
         bbox_mm=result.bbox_mm if result else None,
         colors=result.colors if result else None,
-        warnings=[*(result.warnings if result else job.warnings), *_arranged_notes(job)]
-        or (result.warnings if result else None),
+        warnings=_warnings(job),
         notes=result.notes if result else None,
         parts=result.parts if result else None,
         plates=result.plates if result else None,
