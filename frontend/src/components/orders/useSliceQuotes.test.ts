@@ -4,7 +4,12 @@ import { api, ApiError, OPERATION_UNFINISHED } from '../../api/client'
 import type { OrderItemDetail, Quote, SliceQuoteRequest } from '../../api/types'
 import { useSliceQuotes } from './useSliceQuotes'
 
-const BODY = { printer_id: 1, filament_plan: { slots: [], force_colour_match: false }, choices: {}, filaments: {} } as unknown as SliceQuoteRequest
+const BODY: SliceQuoteRequest = {
+  printer_id: 1,
+  filament_plan: { slots: [], force_colour_match: false },
+  choices: { bed_type: 'Textured PEI Plate', nozzles: [], tier: null },
+  filaments: {},
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -25,20 +30,51 @@ describe('useSliceQuotes (#4693)', () => {
     const quoted = vi.spyOn(api, 'quoteItem').mockReturnValue(pending.promise)
     const onQuoted = vi.fn()
     const { result } = renderHook(() => useSliceQuotes('order-1', undefined, onQuoted))
-    act(() => result.current.start('item-1', BODY, []))
-    expect(quoted).toHaveBeenCalledWith('order-1', 'item-1', BODY)
+    act(() => void result.current.start('item-1', BODY, []))
+    expect(quoted).toHaveBeenCalledWith('order-1', 'item-1', BODY, expect.any(Function))
     expect(result.current.runs.get('item-1')).toMatchObject({ error: null })
     await act(async () => pending.resolve({} as Quote))
     await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
     expect(onQuoted).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps a failed run with its refusal until another starts', async () => {
+  it('settles start once the server accepts the quote, before it ends', async () => {
     const pending = deferred<Quote>()
-    vi.spyOn(api, 'quoteItem').mockReturnValue(pending.promise)
+    vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, onAccepted) => {
+      onAccepted?.()
+      return pending.promise
+    })
+    const { result } = renderHook(() => useSliceQuotes('order-1', undefined, vi.fn()))
+    let started!: Promise<void>
+    act(() => {
+      started = result.current.start('item-1', BODY, [])
+    })
+    await expect(started).resolves.toBeUndefined()
+    expect(result.current.runs.get('item-1')).toMatchObject({ error: null })
+  })
+
+  it('rejects start with a refusal before the quote ran, and keeps no run', async () => {
+    vi.spyOn(api, 'quoteItem').mockRejectedValue(new ApiError(409, 'Every slot needs a price-book filament.'))
+    const { result } = renderHook(() => useSliceQuotes('order-1', undefined, vi.fn()))
+    let started!: Promise<void>
+    act(() => {
+      started = result.current.start('item-1', BODY, [])
+    })
+    await act(async () => {
+      await expect(started).rejects.toThrow()
+    })
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
+  it('keeps a run that failed after it was accepted, with its refusal', async () => {
+    const pending = deferred<Quote>()
+    vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, onAccepted) => {
+      onAccepted?.()
+      return pending.promise
+    })
     const onQuoted = vi.fn()
     const { result } = renderHook(() => useSliceQuotes('order-1', undefined, onQuoted))
-    act(() => result.current.start('item-1', BODY, []))
+    act(() => void result.current.start('item-1', BODY, []))
     await act(async () => pending.reject(new Error('No printer.')))
     await waitFor(() => expect(result.current.runs.get('item-1')?.error).toMatch(/No printer/))
     expect(onQuoted).not.toHaveBeenCalled()
@@ -49,7 +85,7 @@ describe('useSliceQuotes (#4693)', () => {
     vi.spyOn(api, 'quoteItem').mockReturnValue(pending.promise)
     const before = [{ id: 'item-1', quotes: [{ id: 'q-old' }] }] as unknown as OrderItemDetail[]
     const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, vi.fn()), { initialProps: { items: before } })
-    act(() => result.current.start('item-1', BODY, ['q-old']))
+    act(() => void result.current.start('item-1', BODY, ['q-old']))
     await act(async () => pending.reject(new ApiError({ type: OPERATION_UNFINISHED, title: 'Still running', status: 504 })))
     await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ detached: true, error: null }))
     // The order's refresh without the quote yet: still running.
@@ -62,7 +98,7 @@ describe('useSliceQuotes (#4693)', () => {
   it("drops another order's runs", async () => {
     vi.spyOn(api, 'quoteItem').mockReturnValue(new Promise<Quote>(() => undefined))
     const { result, rerender } = renderHook(({ id }) => useSliceQuotes(id, undefined, vi.fn()), { initialProps: { id: 'order-1' } })
-    act(() => result.current.start('item-1', BODY, []))
+    act(() => void result.current.start('item-1', BODY, []))
     expect(result.current.runs.size).toBe(1)
     rerender({ id: 'order-2' })
     await waitFor(() => expect(result.current.runs.size).toBe(0))

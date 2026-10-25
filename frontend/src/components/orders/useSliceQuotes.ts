@@ -26,8 +26,11 @@ export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
  * operation and runs for minutes (its `QUOTE_TIMEOUT` is 30), so it is followed here,
  * on the page, rather than in the print dialog that chose it: the modal dialog waiting on
  * it held the whole page under its scroll lock until it finished. The dialog hands its
- * request to `start` and closes; the item's row and drawer show the run. `items` are the
- * order's as the page last read them, which end a detached run.
+ * request to `start`, waits only for the server to accept it (a refusal from its check
+ * rejects, so the dialog keeps its choices), and closes; the item's row and drawer show
+ * the run. `items` are the order's as the page last read them, which end a detached run.
+ * Runs are this page's state only: a reload, or leaving the order and coming back, shows a
+ * quote still slicing as idle until its quote lands.
  */
 export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[] | undefined, onQuoted: () => void) {
   const [runs, setRuns] = useState<Map<string, SliceQuoteRun>>(() => new Map())
@@ -59,19 +62,37 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   )
 
   const start = useCallback(
-    (itemId: string, body: SliceQuoteRequest, known: readonly string[]) => {
-      const run = { startedAt: Date.now(), error: null, known }
-      update(orderId, itemId, run)
-      api.quoteItem(orderId, itemId, body).then(
-        () => {
-          update(orderId, itemId, null)
-          if (current.current === orderId) quoted.current()
-        },
-        (cause: unknown) =>
-          // Not a failure while it may still be running: a second press would start a second.
-          update(orderId, itemId, mayHaveRun(cause) ? { ...run, detached: true } : { ...run, error: refusalText(cause) }),
-      )
-    },
+    (itemId: string, body: SliceQuoteRequest, known: readonly string[]) =>
+      new Promise<void>((accepted, refused) => {
+        const run = { startedAt: Date.now(), error: null, known }
+        let running = false
+        update(orderId, itemId, run)
+        api
+          .quoteItem(orderId, itemId, body, () => {
+            running = true
+            accepted()
+          })
+          .then(
+            () => {
+              update(orderId, itemId, null)
+              if (current.current === orderId) quoted.current()
+              accepted()
+            },
+            (cause: unknown) => {
+              if (mayHaveRun(cause)) {
+                // Not a failure while it may still be running: a second press would start a second.
+                update(orderId, itemId, { ...run, detached: true })
+                accepted()
+              } else if (running) {
+                update(orderId, itemId, { ...run, error: refusalText(cause) })
+              } else {
+                // Refused before it ran: the dialog that asked says why.
+                update(orderId, itemId, null)
+                refused(cause)
+              }
+            },
+          )
+      }),
     [orderId, update],
   )
 

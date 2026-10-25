@@ -55,7 +55,7 @@ export function QuoteEditor({
   /** What a slice quote slices: the item's output and its colours' filaments. */
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
-  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => void; dismiss: () => void }
+  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
 }) {
   const [slicing, setSlicing] = useState(false)
   const [price, setPrice] = useState('')
@@ -141,6 +141,12 @@ export function QuoteEditor({
           {slice.run.detached
             ? `Still slicing and pricing, since ${startTime(slice.run.startedAt)}: the quote shows here when it lands.`
             : `Slicing every plate and pricing it, since ${startTime(slice.run.startedAt)}…`}
+          {/* No longer followed, so a failure would never show: the user may stop waiting. */}
+          {slice.run.detached && (
+            <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
+              Stop waiting
+            </Button>
+          )}
         </p>
       )}
       {slice?.run?.error && (

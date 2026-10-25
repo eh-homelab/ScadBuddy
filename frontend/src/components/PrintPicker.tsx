@@ -108,6 +108,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { refusalText } from './orders/refusal'
 import { Spinner } from './ui/spinner'
 import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
@@ -239,14 +240,16 @@ interface Props {
    * Quote in place of Print, which posts the order item's `quote` with the dialog's own
    * printer, spools and choices and a price-book filament per slot (`filaments`, keyed by
    * the item's colour slot); every plate is sliced and priced, nothing is queued and no
-   * project is chosen. #4693: the dialog hands the request to `start` and closes; the
-   * order page follows the operation, so the modal never holds the page while it runs.
+   * project is chosen. #4693: the dialog hands the request to `start` and closes once the
+   * server accepts it; the order page follows the operation, so the modal never holds the
+   * page while it runs.
    */
   quote?: {
     orderId: string
     itemId: string
     filaments: Record<string, string | null>
-    start: (body: SliceQuoteRequest) => void
+    /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
+    start: (body: SliceQuoteRequest) => Promise<void>
   }
 }
 
@@ -839,11 +842,14 @@ export function PrintPicker({
   const quoting = quote !== undefined
   const priceBook = useAsync(() => (open && quoting ? api.priceBook() : Promise.resolve(null)), [open, quoting])
   const [priced, setPriced] = useState<Record<string, string>>({})
+  const [quoteBusy, setQuoteBusy] = useState(false)
+  const [quoteError, setQuoteError] = useState<string | null>(null)
   const quoteSeed = quote ? JSON.stringify(quote.filaments) : ''
   useEffect(() => {
     if (!open || !quoteSeed) return
     const seeded = JSON.parse(quoteSeed) as Record<string, string | null>
     setPriced(Object.fromEntries(Object.entries(seeded).filter((entry): entry is [string, string] => entry[1] !== null)))
+    setQuoteError(null)
   }, [open, quoteSeed])
   const unpriced = quoting && (filaments?.slots ?? []).some((slot) => !priced[String(slot.slot_id - 1)])
   // Only for the queue link while a run is unanswered (a result carries its own), so it
@@ -1315,17 +1321,26 @@ export function PrintPicker({
 
   /**
    * #4250 — Quote: the dialog's own choices, sliced on every plate and priced. #4693: the
-   * page runs it; the dialog closes at once rather than holding the page for minutes.
+   * page runs it; the dialog waits only for it to be accepted, not for minutes of slicing,
+   * and stays open with its choices when the check refuses it.
    */
-  function runQuote() {
+  async function runQuote() {
     if (!quote || !printChoices) return
-    quote.start({
-      printer_id: printerId,
-      filament_plan: { slots: plan, force_colour_match: false },
-      choices: printChoices,
-      filaments: priced,
-    })
-    close()
+    setQuoteBusy(true)
+    setQuoteError(null)
+    try {
+      await quote.start({
+        printer_id: printerId,
+        filament_plan: { slots: plan, force_colour_match: false },
+        choices: printChoices,
+        filaments: priced,
+      })
+      close()
+    } catch (cause) {
+      setQuoteError(refusalText(cause))
+    } finally {
+      setQuoteBusy(false)
+    }
   }
 
   function close() {
@@ -1333,7 +1348,7 @@ export function PrintPicker({
     // reopen with Print enabled and send the print a second time (#539 review).
     // Also ignored mid-create (#710 review): unmounting the picker would drop the
     // creating guard while its request is still in flight.
-    if (running || projectCreating) return
+    if (running || projectCreating || quoteBusy) return
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
@@ -1371,16 +1386,17 @@ export function PrintPicker({
   const split = (choices || source) && !result && unanswered === null
   const footer = quoting ? (
           <>
-            <Button type="button" variant="outline" onClick={close}>
+            <Button type="button" variant="outline" onClick={close} disabled={quoteBusy}>
               Cancel
             </Button>
             <Button
               type="button"
-              onClick={runQuote}
-              disabled={loading || !choices || !planReady || !printChoices || unpriced || Boolean(sliced)}
+              onClick={() => void runQuote()}
+              disabled={quoteBusy || loading || !choices || !planReady || !printChoices || unpriced || Boolean(sliced)}
               data-testid="run-quote"
               {...USER_ONLY}
             >
+              {quoteBusy && <Spinner />}
               Quote
             </Button>
           </>
@@ -2010,6 +2026,11 @@ export function PrintPicker({
           {runError && (
             <p role="alert" className="mt-3 text-sm text-destructive">
               {runError}
+            </p>
+          )}
+          {quoteError && (
+            <p role="alert" className="mt-3 text-sm text-destructive" data-testid="quote-error">
+              {quoteError}
             </p>
           )}
         </>
