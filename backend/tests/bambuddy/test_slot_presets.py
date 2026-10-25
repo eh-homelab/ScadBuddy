@@ -287,6 +287,20 @@ async def test_slots_on_presets_of_their_own_share_no_name(bambuddy: BambuddyCli
     assert not shared
 
 
+@respx.mock
+async def test_a_slot_made_later_keeps_an_earlier_shared_answer(bambuddy: BambuddyClient) -> None:
+    """#4706 review: an unnamed first slot, then a repeat that gets its own preset."""
+    listed()
+    creates()
+    unnamed = PresetRef(source="cloud", id="GFSA00_14")
+
+    out = await slotted(
+        SlotPresets(bambuddy, catalogue()), plan(unnamed, STANDARD, STANDARD), shared=True
+    )
+
+    assert out.filament_presets == [unnamed, STANDARD, PresetRef(source="local", id="500")]
+
+
 @pytest.mark.parametrize(
     "other",
     [PresetRef(source="cloud", id="GFSA00_14"), PresetRef(source="local", id="7")],
