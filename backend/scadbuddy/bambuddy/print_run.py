@@ -437,11 +437,20 @@ class PrintRunResult(BaseModel):
     lan: list[LanStarted] = Field(default_factory=list)
 
 
-def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
+async def known_slots(
+    source: PrintSource,
+) -> Callable[[int | None], FilamentRequirements] | None:
     """A library file's (#2550) or an output's (#2720) slots as read from the file
     itself, for every plate: every copy of it has the same slots, so they answer for
     whichever copy is read. ``None`` when they came from Bambuddy, which is then asked
-    per plate."""
+    per plate.
+
+    An output's are read here when nothing in this process has read them yet (#4710):
+    the background slice and the run plan from a fresh source, and the native library's
+    copy answers no slots, so each plate would otherwise need a spool for every colour
+    of the file, where the dialog and the check ask only for the plate's own."""
+    if isinstance(source, OutputSource):
+        await source.read_local()
     if isinstance(source, LibrarySource | OutputSource) and source.local is not None:
         return source.local.for_plate
     return None
@@ -521,7 +530,7 @@ async def filament_options(
             fallback_colours=list(source.colours),
             own_colours=file.own_colours,
             inventory=settled(inventory),
-            known=known_slots(source),
+            known=await known_slots(source),
         )
     finally:
         # Awaited even when a read failed, so the status read never outlives the call.
@@ -566,7 +575,7 @@ async def _tray_options(
         plate_ids=((await source.plate_ids(client)) or [1]) if asked is None else asked,
         fallback_colours=list(source.colours),
         own_colours=file.own_colours,
-        known=known_slots(source),
+        known=await known_slots(source),
         trays_from=status,
         overlay=overlay,
         provider_labels=labels,
@@ -913,7 +922,7 @@ async def _slot_errors(
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
         inventory=None if native else inventory,
-        known=known_slots(source),
+        known=await known_slots(source),
         native=source.native,
         # A native run's choices are its report's trays (D1), as the run resolves them.
         trays_from=prepared.printer_status if native else None,
@@ -2662,7 +2671,7 @@ async def plan_run(
         inventory=None if native_run else inventory,
         # The file's own slots when it was read (#2550, #2720): a plate's colours are the
         # model's, not the run's recoloured copy's, as the dialog showed them. Intended.
-        known=known_slots(source),
+        known=await known_slots(source),
         native=source.native,
         # A native run's choices are the report's trays (D1). The overlay adds only
         # weights and names, not presets (`trays.loaded_trays`), so the plan reads none.
@@ -2876,7 +2885,7 @@ async def _plan_sliced(
         printer_id=printer_id,
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
-        known=known_slots(source),
+        known=await known_slots(source),
     )
     per_plate = [with_trays(options, prepared.printer_status, printer_id) for options in per_plate]
     print_options = resolve_print_options(
