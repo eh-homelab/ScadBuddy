@@ -538,13 +538,7 @@ function ItemDrawer({
           </>
         )}
       </dl>
-      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item}
-        slice={{
-          run: slices.runs.get(item.id),
-          start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)),
-          dismiss: () => slices.dismiss(item.id),
-        }}
-      />
+      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} />
       <OrderAttachments
         orderId={order.id}

@@ -83,15 +83,17 @@ describe('useSliceQuotes (#4693)', () => {
   it('keeps a quote the page stopped following as running, until its quote shows on the item', async () => {
     const pending = deferred<Quote>()
     vi.spyOn(api, 'quoteItem').mockReturnValue(pending.promise)
-    const before = [{ id: 'item-1', quotes: [{ id: 'q-old' }] }] as unknown as OrderItemDetail[]
+    const before = [{ id: 'item-1', quotes: [{ id: 'q-old', source: 'slice' }] }] as unknown as OrderItemDetail[]
     const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, vi.fn()), { initialProps: { items: before } })
     act(() => void result.current.start('item-1', BODY, ['q-old']))
     await act(async () => pending.reject(new ApiError({ type: OPERATION_UNFINISHED, title: 'Still running', status: 504 })))
     await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ detached: true, error: null }))
-    // The order's refresh without the quote yet: still running.
+    // The order's refresh without the quote yet, or with a price typed by hand: still running.
     rerender({ items: [...before] })
     expect(result.current.runs.has('item-1')).toBe(true)
-    rerender({ items: [{ id: 'item-1', quotes: [{ id: 'q-old' }, { id: 'q-new' }] }] as unknown as OrderItemDetail[] })
+    rerender({ items: [{ id: 'item-1', quotes: [{ id: 'q-old', source: 'slice' }, { id: 'q-hand', source: 'manual' }] }] as unknown as OrderItemDetail[] })
+    expect(result.current.runs.has('item-1')).toBe(true)
+    rerender({ items: [{ id: 'item-1', quotes: [{ id: 'q-old', source: 'slice' }, { id: 'q-new', source: 'slice' }] }] as unknown as OrderItemDetail[] })
     await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
   })
 

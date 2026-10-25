@@ -12,7 +12,7 @@ export interface SliceQuoteRun {
   /**
    * Set when the page stopped following it but it may still be running (the client's
    * follow ended first, or its answer never arrived): it ends when the item shows a quote
-   * that `known` does not name, which the order's own refresh brings.
+   * from a slice that `known` does not name, which the order's own refresh brings.
    */
   detached?: boolean
   /** The item's quote ids as it started. */
@@ -98,13 +98,14 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
 
   const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
 
-  // A detached run ends when its quote shows on the item.
+  // A detached run ends when its quote shows on the item: a slice quote it did not have
+  // (one typed by hand meanwhile is not it).
   useEffect(() => {
     if (!items) return
     for (const [itemId, run] of runs) {
       if (!run.detached) continue
       const item = items.find((i) => i.id === itemId)
-      if (!item || item.quotes.some((q) => !run.known.includes(q.id))) dismiss(itemId)
+      if (!item || item.quotes.some((q) => q.source === 'slice' && !run.known.includes(q.id))) dismiss(itemId)
     }
   }, [items, runs, dismiss])
 
