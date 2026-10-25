@@ -358,6 +358,17 @@ class OrderStore:
             ).fetchone()
             return None if row is None else self._customer_of(c, row)
 
+    def unarchive_customer(self, customer_id: str, *, conn: Conn | None = None) -> Customer | None:
+        """Back in the pickers: ``archived_at`` cleared (a customer never archived is
+        returned as is)."""
+        with self._write(conn) as c:
+            row = c.execute(
+                "UPDATE customers SET archived_at = NULL, updated_at = now()"
+                f" WHERE id = %s RETURNING {_CUSTOMER}",
+                (customer_id,),
+            ).fetchone()
+            return None if row is None else self._customer_of(c, row)
+
     def customer(
         self, customer_id: str, *, conn: Conn | None = None, share: bool = False
     ) -> Customer | None:
@@ -763,6 +774,36 @@ class OrderStore:
             raise OrderNotFoundError(order_id)
         return Order.model_validate(row)
 
+    def hold_quote_files(self, conn: Conn, holder_kind: str, quotes: Sequence[Quote]) -> None:
+        """Hold each quote's sliced files (every plate's ``blob_key`` and its
+        ``sliced_blob_key``) under ``(holder_kind, <quote id>)``, in the caller's
+        transaction: a rollback leaves no hold, and a commit leaves every one. A row a
+        failed release left behind is taken over with a fresh ``created_at`` (and locked
+        until commit), so the reaper's grace counts from this hold, never the old one."""
+        for quote in quotes:
+            keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
+            for key in sorted(k for k in keys if isinstance(k, str) and k):
+                conn.execute(
+                    "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
+                    (key, holder_kind, quote.id),
+                )
+
+    def reopen_order_row(self, conn: Conn, order_id: str, status: OrderStatus) -> Order:
+        """A closed or cancelled order back to ``status``, its ``closed_at`` and
+        ``cancelled_at`` cleared, and ``accepted_at`` too when ``status`` is one before
+        acceptance (an accepted order that falls back to ``draft``)."""
+        row = conn.execute(
+            "UPDATE orders SET status = %s, closed_at = NULL, cancelled_at = NULL,"
+            " accepted_at = CASE WHEN %s IN ('draft', 'quoted') THEN NULL ELSE accepted_at END,"
+            " updated_at = now()"
+            f" WHERE id = %s RETURNING {_ORDER}",
+            (status, status, order_id),
+        ).fetchone()
+        if row is None:
+            raise OrderNotFoundError(order_id)
+        return Order.model_validate(row)
+
     # -- items (§3.3) -----------------------------------------------------------------
 
     def insert_item(
@@ -948,6 +989,36 @@ class OrderStore:
         if row is None:
             raise LookupError(f"no quote {quote_id} of item {item_id}")
         return Quote.model_validate(row)
+
+    def drop_released_holds(self, holder_kind: str, quote_ids: Sequence[str]) -> list[str]:
+        """Drop the ``holder_kind`` holds of those of ``quote_ids`` whose item is still
+        cancelled or whose order is still closed or cancelled (what a cancel or a close
+        released, after its commit), and return their ids. The orders' rows are locked
+        first, as every transition locks its order, so a reopen either committed before
+        the check (its quotes are left out) or waits for this commit and holds them again:
+        never a hold dropped after a reopen took it."""
+        if not quote_ids:
+            return []
+        ids = list(quote_ids)
+        with self.transaction() as c:
+            c.execute(
+                "SELECT o.id FROM orders o WHERE o.id IN (SELECT i.order_id"
+                " FROM order_item_quotes q JOIN order_items i ON i.id = q.order_item_id"
+                " WHERE q.id = ANY(%s)) ORDER BY o.id FOR SHARE",
+                (ids,),
+            )
+            rows = c.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id IN ("
+                "SELECT q.id FROM order_item_quotes q"
+                " JOIN order_items i ON i.id = q.order_item_id"
+                " JOIN orders o ON o.id = i.order_id"
+                " WHERE q.id = ANY(%s)"
+                " AND (i.status = 'cancelled' OR o.status IN ('closed', 'cancelled')))"
+                " RETURNING holder_id",
+                (holder_kind, ids),
+            ).fetchall()
+        dropped = {row["holder_id"] for row in rows}
+        return [quote_id for quote_id in ids if quote_id in dropped]
 
     def standing_quote_ids(self) -> set[str]:
         """The quotes whose sliced file §3.4 keeps (#4250 Ruling 3): each item's accepted
