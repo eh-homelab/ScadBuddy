@@ -256,12 +256,12 @@ def _plan(archive: zipfile.ZipFile, plate_id: int | None) -> SlicedRack | None:
                 ),
             )
         )
-    if not slots:
-        raise _UnresolvedError("the plate names no filament")
     filaments = _on_printed(
         filaments, printed_filaments(archive, _plate_index(plate, plate_id)), settings
     )
     slots = {f.slot_id: f.group_id for f in filaments if f.group_id is not None}
+    if not slots:
+        raise _UnresolvedError("the plate names no filament")
     if max(slots) > RACK_WIRE_SLOTS:
         raise _UnresolvedError("the plate has more slots than the wire carries")
     return SlicedRack(
