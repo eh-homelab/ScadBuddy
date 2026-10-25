@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 import zipfile
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -45,16 +44,6 @@ from tests.test_packing_and_outputs import _deps, _record
 
 GREEN, BLACK, MAGENTA = "#2E8B57", "#000000", "#FF00FF"
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
-
-
-@pytest.fixture(autouse=True)
-def _no_logged_jobs() -> Iterator[None]:
-    """Every test in this module starts with no job's unreadable notes logged
-    (`api/jobs.py` keeps the record per process), so an id one test logs never decides
-    another's (#4709 review)."""
-    jobs_api._UNREADABLE_LOGGED.clear()
-    yield
-    jobs_api._UNREADABLE_LOGGED.clear()
 
 
 def _part(key: str = "lib-a", colours: list[str] | None = None) -> Part:

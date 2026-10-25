@@ -298,6 +298,13 @@ _UNREADABLE_LOGGED_MAX = 1024
 _UNREADABLE_LOCK = threading.Lock()
 
 
+def forget_unreadable_notes_logs() -> None:
+    """Forget which jobs' unreadable notes were logged: each test starts with none
+    (`tests/conftest.py`), as `forget_out_of_memory_logs` does for its own record."""
+    with _UNREADABLE_LOCK:
+        _UNREADABLE_LOGGED.clear()
+
+
 def _arranged_notes(job: Job) -> list[str]:
     """An arrange's own notes (`ArrangeInputs.notes`): what its request asked for that it
     leaves out, said beside the result's warnings."""
