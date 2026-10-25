@@ -26,6 +26,7 @@ from scadbuddy.bambuddy import catalogue, choices
 from scadbuddy.bambuddy.catalogue import cached_catalogue
 from scadbuddy.bambuddy.choices import choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
 from scadbuddy.bambuddy.print_run import PrintRunRequest, check_print
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
@@ -948,3 +949,86 @@ async def test_the_checks_early_reads_fail_in_the_order_they_were_read_in(
     )
     with pytest.raises(expected, match=said):
         await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+
+
+def _sidecar_unanswered() -> httpx.Response:
+    """/slicer/presets as Bambuddy answered it while its slicer sidecar timed out
+    (#4717): ``_fetch_bundled_presets`` leaves the standard tier empty with no error or
+    status, and ``_enrich_cloud_metadata``, with no standard row to copy from, leaves
+    every cloud row's ``compatible_printers`` empty."""
+    body = recording("slicer-presets-h2c.json")
+    body["standard"] = {"printer": [], "process": [], "filament": []}
+    for slot in body["cloud"].values():
+        for row in slot:
+            row["compatible_printers"] = []
+    return httpx.Response(200, json=body)
+
+
+@respx.mock
+async def test_a_catalogue_read_without_its_standard_tier_is_bambuddy_unavailable(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4717: a read whose cloud tier lists presets but whose standard tier lists none is
+    a sidecar that did not answer, not a catalogue; kept, it refused every process as
+    "not a process Bambuddy has". It is a 503 that says why, and nothing is kept."""
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        side_effect=[_sidecar_unanswered(), _ok("slicer-presets-h2c.json")]
+    )
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    with pytest.raises(ApiError) as raised:
+        await cached_catalogue(bambuddy, tmp_path)
+
+    assert raised.value.status == 503
+    assert raised.value.type == UNAVAILABLE_PROBLEM
+    assert is_transient(raised.value)
+    assert "standard" in raised.value.detail
+    assert not (tmp_path / catalogue.CATALOGUE_DIRNAME).exists()
+    assert (await cached_catalogue(bambuddy, tmp_path)).process
+    assert presets.call_count == 2
+
+
+@respx.mock
+async def test_the_runs_fresh_read_without_its_standard_tier_is_bambuddy_unavailable(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4717: the run reads the catalogue fresh, and the same answer fails it the same way."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=_sidecar_unanswered())
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    with pytest.raises(ApiError) as raised:
+        await catalogue.read_catalogue(bambuddy)
+
+    assert raised.value.type == UNAVAILABLE_PROBLEM
+
+
+@respx.mock
+async def test_a_refresh_without_the_standard_tier_keeps_the_old_catalogue(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4717: the dialog's kept copy is not replaced by a read the sidecar did not answer."""
+    presets, _ = _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    _expire(tmp_path)
+    presets.mock(return_value=_sidecar_unanswered())
+
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+    await asyncio.gather(*catalogue._refreshing.values())
+
+    assert presets.call_count == 2
+    assert kept.stat().st_mtime == 0  # not rewritten
+    catalogue.forget_catalogues()
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_an_all_empty_catalogue_still_reads(bambuddy: BambuddyClient, tmp_path: Path) -> None:
+    """#4717: with no cloud presets either, an empty standard tier is no sign of a
+    sidecar that did not answer, and the catalogue reads as it did."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    read = await cached_catalogue(bambuddy, tmp_path)
+
+    assert not [row for row in read.process if row.ref.source in ("cloud", "standard")]

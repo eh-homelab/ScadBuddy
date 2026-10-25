@@ -23,18 +23,22 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from fastapi import status
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.concurrent import settled
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import (
     LocalPreset,
     LocalPresetCatalogue,
     Preset,
     PresetCatalogue,
     PresetRef,
+    PresetTier,
 )
 from scadbuddy.bambuddy.slot_presets import is_slot_preset
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
 
 logger = logging.getLogger(__name__)
@@ -164,8 +168,33 @@ async def _catalogue(client: BambuddyClient) -> Catalogue:
     presets, local_presets = await asyncio.gather(
         client.presets(), client.local_presets(), return_exceptions=True
     )
+    read = settled(presets)
+    _check_standard_tier(read)
     # Thousands of rows: built off the event loop, which every other request shares.
-    return await asyncio.to_thread(_build, settled(presets), settled(local_presets))
+    return await asyncio.to_thread(_build, read, settled(local_presets))
+
+
+def _is_empty(tier: PresetTier) -> bool:
+    return not (tier.printer or tier.process or tier.filament)
+
+
+def _check_standard_tier(catalogue: PresetCatalogue) -> None:
+    """Refuse a read whose cloud tier lists presets but whose standard tier lists none
+    (#4717). Bambuddy's ``_fetch_bundled_presets`` answers empty slots, with no error or
+    status, when its slicer sidecar's ``/profiles/bundled`` fails (a ReadTimeout while
+    the sidecar sliced, on prod 2026-10-25), and its ``_enrich_cloud_metadata`` then has
+    no standard row to copy ``compatible_printers`` from, so every cloud row declares no
+    printer and the resolver refuses every process as one Bambuddy lacks. That read is
+    Bambuddy unavailable, never a catalogue to resolve with or keep. With no cloud
+    presets either, an empty standard tier is no such sign."""
+    if _is_empty(catalogue.standard) and not _is_empty(catalogue.cloud):
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Bambuddy listed its cloud presets but none of its standard (bundled) ones: its "
+            "slicer sidecar did not answer it, so it could not say which printers each "
+            "preset fits. Try again once the sidecar is not busy.",
+            type_=UNAVAILABLE_PROBLEM,
+        )
 
 
 def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> Catalogue:
