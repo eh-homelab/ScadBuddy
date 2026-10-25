@@ -29,6 +29,7 @@ from scadbuddy.printers.nozzle_mapping import (
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.rack.rank import eligible, manual_for, rack_positions
 from tests.printers.test_status import row
+from tests.support.sliced3mf import with_corrupt_member
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SLICE_INFO = (FIXTURES / "rack-slice-info-h2c.config").read_text(encoding="utf-8")
@@ -503,19 +504,27 @@ def test_a_phantom_with_no_first_filament_has_no_plan(caplog: pytest.LogCaptureF
 def test_a_corrupt_gcode_still_reads_the_plan_from_the_sequence() -> None:
     """#4712: a G-code member that cannot be inflated says nothing of the header, and the
     plan is read from ``filament_sequence.json`` alone, never refused for it."""
-    out = io.BytesIO()
-    with (
-        zipfile.ZipFile(NATIVE / "plate3-one-filament.gcode.3mf") as original,
-        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive,
-    ):
-        for name in original.namelist():
-            archive.writestr(name, original.read(name))
-    payload = bytearray(out.getvalue())
-    with zipfile.ZipFile(io.BytesIO(bytes(payload))) as archive:
-        info = archive.getinfo("Metadata/plate_3.gcode")
-    # The member's data starts after its 30-byte local header, its name and its extra.
-    start = info.header_offset + 30 + len(info.filename) + len(info.extra)
-    payload[start : start + 16] = b"\xff" * 16
-    plan = read_rack_plan(io.BytesIO(bytes(payload)), 3)
+    payload = with_corrupt_member(
+        (NATIVE / "plate3-one-filament.gcode.3mf").read_bytes(), "Metadata/plate_3.gcode"
+    )
+    plan = read_rack_plan(io.BytesIO(payload), 3)
     assert plan is not None
     assert plan.slot_groups == [-1, -1, 1]
+
+
+def test_a_project_with_no_colour_for_the_slot_has_no_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#4712: a lone filament takes its slot's type and colour from the project; a
+    project that names none for that slot cannot say them, so no field is sent."""
+
+    def two_colours(name: str, data: bytes) -> bytes:
+        if name != "Metadata/project_settings.config":
+            return data
+        settings = json.loads(data)
+        settings["filament_colour"] = settings["filament_colour"][:2]
+        return json.dumps(settings).encode()
+
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(_rewritten("plate3-one-filament", two_colours), 3) is None
+    assert "names no filament_colour for slot 3" in caplog.text

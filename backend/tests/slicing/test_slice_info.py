@@ -6,7 +6,7 @@ import pytest
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.slice_info import filament_changes, plate_gcode, read_sliced
-from tests.support.sliced3mf import sliced_3mf
+from tests.support.sliced3mf import sliced_3mf, with_corrupt_member
 
 ONE = sliced_3mf(plates={1: (3600, [12.5, 3.0])}, gcode={1: b"M620 S0A\nM620 S1A\nM620 S0A\n"})
 
@@ -104,3 +104,13 @@ def test_a_sequence_too_deep_to_parse_reads_as_none() -> None:
         archive.writestr("Metadata/filament_sequence.json", "[" * 100_000 + "]" * 100_000)
     read = read_sliced(file.getvalue(), 1)
     assert (read.grams_by_slot, read.filament_changes) == ({1: 0.2, 2: 1.0}, 0)
+
+
+def test_a_gcode_that_cannot_be_inflated_reads_as_unknown_changes() -> None:
+    """#4716 review: a corrupt G-code member costs only what is read from it (the
+    changes); the grams still go on the filament the sequence says the plate prints."""
+    payload = with_corrupt_member(
+        (NATIVE / "plate3-one-filament.gcode.3mf").read_bytes(), "Metadata/plate_3.gcode"
+    )
+    read = read_sliced(payload, 3)
+    assert (read.grams_by_slot, read.filament_changes) == ({3: 0.5}, None)

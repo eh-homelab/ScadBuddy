@@ -28,3 +28,22 @@ def sliced_3mf(
         for index, data in gcode.items():
             archive.writestr(f"Metadata/plate_{index}.gcode", data)
     return buffer.getvalue()
+
+
+def with_corrupt_member(payload: bytes, member: str) -> bytes:
+    """``payload`` re-deflated, with the start of ``member``'s compressed stream
+    overwritten, so inflating it fails (``zlib.error`` or a bad CRC)."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as original,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive,
+    ):
+        for name in original.namelist():
+            archive.writestr(name, original.read(name))
+    corrupt = bytearray(out.getvalue())
+    with zipfile.ZipFile(io.BytesIO(bytes(corrupt))) as archive:
+        info = archive.getinfo(member)
+    # The member's data starts after its 30-byte local header, its name and its extra.
+    start = info.header_offset + 30 + len(info.filename) + len(info.extra)
+    corrupt[start : start + 16] = b"\xff" * 16
+    return bytes(corrupt)

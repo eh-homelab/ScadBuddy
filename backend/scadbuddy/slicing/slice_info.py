@@ -88,8 +88,17 @@ def _plate_files(payload: bytes | BinaryIO, plate_id: int) -> tuple[bytes | None
     (:func:`printed_filaments`), read in one pass over the archive."""
     try:
         with zipfile.ZipFile(_file(payload)) as archive:
-            return _gcode(archive, plate_id), printed_filaments(archive, plate_id)
-    except (zipfile.BadZipFile, KeyError) as error:
+            try:
+                gcode = _gcode(archive, plate_id)
+            except _MEMBER_ERRORS as error:
+                # Only the G-code is lost: the filaments are read from the rest.
+                logger.info(
+                    "the sliced plate's G-code could not be read",
+                    extra={"error": type(error).__name__},
+                )
+                gcode = None
+            return gcode, printed_filaments(archive, plate_id)
+    except (*_MEMBER_ERRORS, KeyError) as error:
         logger.info("the sliced file could not be read", extra={"error": type(error).__name__})
         return None, PrintedFilaments()
 

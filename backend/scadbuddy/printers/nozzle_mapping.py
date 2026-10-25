@@ -314,7 +314,9 @@ def _on_printed(
             colour = _project_value(settings, "filament_colour", slot)
             # Only the filament's own fields are filament 1's: its group, nozzle diameter
             # and volume type are the plate's real hotend, which the nozzle table has
-            # checked against the group above.
+            # checked against the group above. Of filament 1's own, only the type and
+            # colour are read (`FilamentRequirement` carries no ``tray_info_idx``), and
+            # both are replaced; the grams are the plate's, all of them this filament's.
             group = moved.group
             named[slot] = moved.model_copy(
                 update={
