@@ -95,7 +95,6 @@ from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
-    may_share_a_name,
     not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
@@ -2266,6 +2265,11 @@ class PlatePlan(BaseModel):
     filaments: QueueFilaments | None = None
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
+    #: Whether two of :attr:`plan`'s filament slots still share a preset name after
+    #: ``SlotPresets.shares_a_name`` (#4649): only then can Bambuddy's slicer have
+    #: dropped the prime tower, so only then is the slice read for it. ``None`` (a plan
+    #: from before it, or one no ``SlotPresets`` saw) reads every multi-slot plate.
+    slots_share_a_name: bool | None = None
 
 
 #: A run on the native slicer without Bambu Studio's profiles (a process outside the
@@ -2401,11 +2405,12 @@ async def queue_plate(
     if (
         planned.slicer == "bambuddy"
         and plate.plan is not None
-        and may_share_a_name(plate.plan.filament_presets)
+        and len(plate.plan.filament_presets) > 1
+        and plate.slots_share_a_name is not False
     ):
         # Before the queue call, which is made once: this never raises (#3962). Slots
-        # that each have a preset of their own keep the tower, so their slice is not
-        # downloaded to look (#4649).
+        # that each reach the CLI under a name of their own keep the tower, so their
+        # slice is not downloaded to look (#4649).
         notes += await tower_dropped(
             client,
             sliced=sliced,
@@ -2659,6 +2664,7 @@ async def plan_run(
         ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    shared_names: dict[int, bool] = {}
     if not native_slicing and not native_run and client is not None:
         # Bambuddy's slicer drops the prime tower when slots share one preset name
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
@@ -2668,6 +2674,9 @@ async def plan_run(
             (plate_id, options, resolved, await slot_presets.plan(plan))
             for plate_id, options, resolved, plan in ready
         ]
+        shared_names = {
+            plate_id: slot_presets.shares_a_name(plan) for plate_id, _, _, plan in ready
+        }
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.slicing.start import NativeSliceKeys
@@ -2732,6 +2741,7 @@ async def plan_run(
                 sliced_file_id=reused,
                 filaments=queue_filaments(options, request.filament_plan),
                 spools=_spools_by_slot(options, request.filament_plan),
+                slots_share_a_name=shared_names.get(plate_id),
             )
             for plate_id, options, _, plan, reused in planned
         ],
