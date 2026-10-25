@@ -1,0 +1,186 @@
+{
+ "checked_at": "2026-10-25T11:00:54.750Z",
+ "production": "https://scadbuddy.internal.nullreference.io",
+ "image": "ghcr.io/eh-homelab/scadbuddy:sha-0863648@sha256:537935c039ac2f6e6e12ea7abec123f21b23a1504c0e4a252e8128f8e6c7e8c5",
+ "image_commit": "0863648421a39d20b68a61854c6a32d41455cff3",
+ "contains": {
+  "#4713": "637bf9a981627591348e32085390d436a6369c06"
+ },
+ "output_id": "f542c216a3104334b252d4067e64ea11",
+ "dialog_mode": "None, then tick only plate N; its background slice runs alone",
+ "plates": [
+  {
+   "plate": 2,
+   "object": "candle_05_alternating_arches",
+   "job_id": 143,
+   "status": "completed",
+   "slicer": "native",
+   "print_time_seconds": 1891,
+   "filament_used_g": 8.5,
+   "slots": [
+    {
+     "slot_id": 7,
+     "grams": 8.5,
+     "side": null
+    }
+   ],
+   "ui_slot_line": "Slot 7: Bambu Lab PLA Basic — Mistletoe Green 8.5 g",
+   "warnings": [],
+   "preview_slice_body": [
+    {
+     "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+     "printer_id": 1,
+     "filament_plan": {
+      "slots": [
+       {
+        "slot_id": 7,
+        "spool_id": 1
+       }
+      ],
+      "force_colour_match": false
+     },
+     "choices": {
+      "nozzles": [
+       {
+        "size": "0.4",
+        "flow": "high_flow"
+       },
+       {
+        "size": "0.4",
+        "flow": "high_flow"
+       }
+      ],
+      "tier": "standard",
+      "process_name": null,
+      "bed_type": "Textured PEI Plate",
+      "filament_overrides": {}
+     },
+     "plate_id": 2,
+     "all_plates": false,
+     "rack_position": null,
+     "rack_algorithm": null
+    }
+   ],
+   "screenshot": "plate-2-dialog.png"
+  },
+  {
+   "plate": 10,
+   "object": "shamash_smooth",
+   "job_id": 144,
+   "status": "completed",
+   "slicer": "native",
+   "print_time_seconds": 2221,
+   "filament_used_g": 10.4,
+   "slots": [
+    {
+     "slot_id": 6,
+     "grams": 10.4,
+     "side": null
+    }
+   ],
+   "ui_slot_line": "Slot 6: Bambu Lab PLA Basic — Jade White 10 g",
+   "warnings": [],
+   "preview_slice_body": [
+    {
+     "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+     "printer_id": 1,
+     "filament_plan": {
+      "slots": [
+       {
+        "slot_id": 6,
+        "spool_id": 26
+       }
+      ],
+      "force_colour_match": false
+     },
+     "choices": {
+      "nozzles": [
+       {
+        "size": "0.4",
+        "flow": "high_flow"
+       },
+       {
+        "size": "0.4",
+        "flow": "high_flow"
+       }
+      ],
+      "tier": "standard",
+      "process_name": null,
+      "bed_type": "Textured PEI Plate",
+      "filament_overrides": {}
+     },
+     "plate_id": 10,
+     "all_plates": false,
+     "rack_position": null,
+     "rack_algorithm": null
+    }
+   ],
+   "screenshot": "plate-10-dialog.png"
+  },
+  {
+   "plate": 5,
+   "object": "candle_03_soft_chevrons",
+   "job_id": 145,
+   "status": "completed",
+   "slicer": "native",
+   "print_time_seconds": 1879,
+   "filament_used_g": 8.5,
+   "slots": [
+    {
+     "slot_id": 4,
+     "grams": 8.5,
+     "side": null
+    }
+   ],
+   "ui_slot_line": "Slot 4: Bambu Lab PLA Basic — Sunflower Yellow 8.5 g",
+   "warnings": [],
+   "preview_slice_body": [
+    {
+     "printer": "a94c3a42-66d5-432a-b819-4f7df1079f50",
+     "printer_id": 1,
+     "filament_plan": {
+      "slots": [
+       {
+        "slot_id": 4,
+        "spool_id": 57
+       }
+      ],
+      "force_colour_match": false
+     },
+     "choices": {
+      "nozzles": [
+       {
+        "size": "0.4",
+        "flow": "high_flow"
+       },
+       {
+        "size": "0.4",
+        "flow": "high_flow"
+       }
+      ],
+      "tier": "standard",
+      "process_name": null,
+      "bed_type": "Textured PEI Plate",
+      "filament_overrides": {}
+     },
+     "plate_id": 5,
+     "all_plates": false,
+     "rack_position": null,
+     "rack_algorithm": null
+    }
+   ],
+   "screenshot": "plate-5-dialog.png"
+  }
+ ],
+ "write_guard": {
+  "allowed": [
+   "POST /api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/check",
+   "POST /api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice"
+  ],
+  "aborted": [
+   "POST /api/v1/analyzers/run",
+   "POST /telemetry/v1/traces"
+  ],
+  "aborted_count": 34
+ }
+}

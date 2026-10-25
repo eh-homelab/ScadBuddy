@@ -1,0 +1,363 @@
+[
+ {
+  "t": 1792926479461,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slice",
+  "status": 202,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null,
+   "repeated": false
+  }
+ },
+ {
+  "t": 1792926480494,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926481531,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926482577,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926483612,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926484643,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926485689,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926486726,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926487765,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926488814,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926489863,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "running",
+   "result": null,
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": null
+  }
+ },
+ {
+  "t": 1792926490903,
+  "path": "/api/v1/operations/ba4ec53d2d1e4213ade423ec0a1128df",
+  "status": 200,
+  "body": {
+   "id": "ba4ec53d2d1e4213ade423ec0a1128df",
+   "kind": "preview_slice",
+   "subject": "f542c216a3104334b252d4067e64ea11",
+   "status": "succeeded",
+   "result": {
+    "job_id": 145,
+    "slicer": "native",
+    "plate_id": 5,
+    "nozzle_plan": {
+     "size": "0.4",
+     "slots": [
+      {
+       "name": "Sunflower Yellow",
+       "side": "R",
+       "colour": "#FEC600",
+       "by_hand": false,
+       "slot_id": 4,
+       "material": "PLA"
+      }
+     ],
+     "summary": "Sunflower Yellow → right · 0.4 High Flow",
+     "left_flow": "high_flow",
+     "right_flow": "high_flow",
+     "track_switch": true
+    }
+   },
+   "error": null,
+   "created_at": "2026-10-25T11:07:58.178314Z",
+   "finished_at": "2026-10-25T11:08:08.970365Z"
+  }
+ },
+ {
+  "t": 1792926490982,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": null,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926493067,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": null,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926495161,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": null,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926497228,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": 0,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926499341,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": 0,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926499355,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": 0,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926501469,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": 0,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926503560,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "running",
+   "failure": null,
+   "print_time_seconds": null,
+   "filament_used_g": null,
+   "slots": [],
+   "filament_changes": null,
+   "progress": 0,
+   "warnings": [],
+   "slicer": "native"
+  }
+ },
+ {
+  "t": 1792926506156,
+  "path": "/api/v1/print/outputs/f542c216a3104334b252d4067e64ea11/preview-slices/145?slicer=native",
+  "status": 200,
+  "body": {
+   "job_id": 145,
+   "status": "completed",
+   "failure": null,
+   "print_time_seconds": 1879,
+   "filament_used_g": 8.5,
+   "slots": [
+    {
+     "slot_id": 4,
+     "grams": 8.5,
+     "side": null
+    }
+   ],
+   "filament_changes": 1,
+   "progress": null,
+   "warnings": [],
+   "slicer": "native"
+  }
+ }
+]
