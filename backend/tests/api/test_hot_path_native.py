@@ -28,12 +28,15 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from scadbuddy.bambuddy.print_run import run_route
 from scadbuddy.bambuddy.trays import tray_spool_id
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
+from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.split import ColourPart
 from scadbuddy.spools.component import SPOOLS, Spools
 from scadbuddy.spools.models import SpoolSnapshot
 from tests.api.conftest import follow_operation, set_fake_env
@@ -316,6 +319,67 @@ def test_a_native_run_makes_no_bambuddy_call(
     sent = fake_lan.project_files()[-1]
     assert sent["ams_mapping"] == [0, 1]
     assert sent["use_ams"] is True
+
+
+def _a_colour_a_plate(paths: DataPaths, output: str) -> None:
+    """The output's 3MF laid out as an arranged one is (#4710): plate 1 prints only slot
+    1 and plate 2 only slot 2, both of the file's two filaments."""
+    [output_3mf] = paths.outputs.glob(f"*/{output}/model.3mf")
+    colours = ["#F5547C", "#FFFFFF"]
+    parts = [
+        ColourPart(index, f"Color {index + 1}", colour, trimesh.creation.box(extents=(10, 10, 5)))
+        for index, colour in enumerate(colours)
+    ]
+    plates = [PlateParts((parts[0],), (1,)), PlateParts((parts[1],), (2,))]
+    write_plates_3mf(plates, colours, output_3mf, thumbnails=None)
+
+
+def test_one_plate_of_several_slices_with_only_its_own_slots(
+    native_app: TestClient,
+    model: str,
+    paths: DataPaths,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+) -> None:
+    """#4710: for one plate the dialog sends a spool for that plate's slots only, and
+    `/check` judges the request so (#1050). The background slice and the run judged every
+    slot of the file instead: nothing read the output's own slots in their process, and
+    the native library's copy answers none, so every colour of the file counted as used."""
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app)
+    output = make_output(native_app, model)
+    _a_colour_a_plate(paths, output)
+    body = {
+        "printer": row,
+        "copies": 1,
+        "plate_id": 2,
+        "filament_plan": {"slots": [{"slot_id": 2, "spool_id": UNTAGGED}]},
+        "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+    }
+
+    with forbid_bambuddy(spans, BASE):
+        filaments = native_app.get(
+            f"/api/v1/print/outputs/{output}/filaments",
+            params={"printer": row, "plate_id": 2},
+        )
+        assert filaments.status_code == 200, filaments.text
+        assert [slot["slot_id"] for slot in filaments.json()["slots"]] == [2]
+        checked = native_app.post(f"/api/v1/print/outputs/{output}/check", json=body)
+        assert checked.status_code == 200, checked.text
+        assert checked.json()["errors"] == [], checked.json()
+        started = native_app.post(
+            f"/api/v1/print/outputs/{output}/preview-slice", json=body, headers=press()
+        )
+        assert started.status_code == 202, started.text
+        op = follow_operation(native_app, started.json(), timeout=60, poll=0.1)
+        assert op["status"] == "succeeded", op.get("error")
+        assert op["result"]["plate_id"] == 2
+        preview = wait_preview(native_app, output, op["result"]["job_id"])
+        assert preview["status"] == "completed", preview
+        run = accept_and_wait(native_app, output, body)
+
+    assert run["status"] == "succeeded", run
 
 
 def test_a_stale_overlay_still_prints(
