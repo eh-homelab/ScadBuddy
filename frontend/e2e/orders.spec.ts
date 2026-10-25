@@ -46,6 +46,21 @@ test.describe('orders', () => {
     await expect(page.getByText('Closed', { exact: true })).toBeVisible()
   })
 
+  test('prices an item in the items table', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
+    const items = page.getByRole('table', { name: 'Line items' })
+    const unit = items.getByRole('textbox', { name: 'Unit price for Name Keychain' })
+    await unit.fill('12.50')
+    await unit.press('Enter')
+    await expect(items.getByRole('button', { name: 'Accept unit price' })).toBeDisabled()
+    await expect(items.getByText('not accepted')).toHaveCount(0)
+    await expect(page.getByTestId('order-totals')).toContainText('25.00')
+    await page.getByRole('button', { name: 'Accept order' }).click()
+    await expect(unit).toHaveCount(0)
+    await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
+  })
+
   // #4251: the customer made inside the New order dialog, with the order's due date.
   test('a new order for a customer made in the dialog', async ({ page }) => {
     await page.goto('/orders')
