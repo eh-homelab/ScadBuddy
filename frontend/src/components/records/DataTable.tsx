@@ -29,11 +29,15 @@ export interface DataTableProps<Row> {
   label: string
   rowTestId?: (row: Row) => string
   onOpen?: (row: Row) => void
+  /** A row's element id, the target of a deep link to it (#4693). */
+  rowId?: (row: Row) => string
+  /** The key of the row the page has open: marked, and `aria-current`. */
+  selected?: string | null
   /** Shown in place of the table when there are no rows. */
   empty?: ReactNode
 }
 
-export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, empty }: DataTableProps<Row>) {
+export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty }: DataTableProps<Row>) {
   if (rows.length === 0 && empty !== undefined) {
     return (
       <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">{empty}</p>
@@ -55,8 +59,16 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
           <tbody>
             {rows.map((row) => {
               const open = onOpen ? () => onOpen(row) : undefined
+              const key = rowKey(row)
+              const current = selected != null && key === selected
               return (
-                <tr key={rowKey(row)} data-testid={rowTestId?.(row)} className={ROW}>
+                <tr
+                  key={key}
+                  id={rowId?.(row)}
+                  data-testid={rowTestId?.(row)}
+                  aria-current={current ? 'true' : undefined}
+                  className={current ? `${ROW} bg-muted/60` : ROW}
+                >
                   {columns.map((column) => {
                     const extra = typeof column.className === 'function' ? column.className(row) : column.className
                     return (

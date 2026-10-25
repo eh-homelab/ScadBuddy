@@ -17,7 +17,7 @@ import type {
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
-  Quote,
+  SliceQuoteRequest,
   SupportsChoice,
   PrimeTowerChoice,
   RackAlgorithm,
@@ -240,13 +240,16 @@ interface Props {
    * Quote in place of Print, which posts the order item's `quote` with the dialog's own
    * printer, spools and choices and a price-book filament per slot (`filaments`, keyed by
    * the item's colour slot); every plate is sliced and priced, nothing is queued and no
-   * project is chosen.
+   * project is chosen. #4693: the dialog hands the request to `start` and closes once the
+   * server accepts it; the order page follows the operation, so the modal never holds the
+   * page while it runs.
    */
   quote?: {
     orderId: string
     itemId: string
     filaments: Record<string, string | null>
-    onQuoted: (quote: Quote) => void
+    /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
+    start: (body: SliceQuoteRequest) => Promise<void>
   }
 }
 
@@ -1316,19 +1319,22 @@ export function PrintPicker({
     if (batch && choice) batch.onNext(choice)
   }
 
-  /** #4250 — Quote: the dialog's own choices, sliced on every plate and priced. */
+  /**
+   * #4250 — Quote: the dialog's own choices, sliced on every plate and priced. #4693: the
+   * page runs it; the dialog waits only for it to be accepted, not for minutes of slicing,
+   * and stays open with its choices when the check refuses it.
+   */
   async function runQuote() {
     if (!quote || !printChoices) return
     setQuoteBusy(true)
     setQuoteError(null)
     try {
-      const made = await api.quoteItem(quote.orderId, quote.itemId, {
+      await quote.start({
         printer_id: printerId,
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         filaments: priced,
       })
-      quote.onQuoted(made)
       close()
     } catch (cause) {
       setQuoteError(refusalText(cause))
