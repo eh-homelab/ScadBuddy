@@ -14,6 +14,7 @@ export function OrderItemsTable({
   currency,
   exponent,
   onOpen,
+  canAdd = false,
 }: {
   orderId: string
   items: OrderItemDetail[]
@@ -23,6 +24,8 @@ export function OrderItemsTable({
   /** The order's `minor_exponent`. */
   exponent: number
   onOpen: (item: OrderItemDetail) => void
+  /** The page offers Add item (a draft or quoted order): the empty table points at it. */
+  canAdd?: boolean
 }) {
   const columns: Column<OrderItemDetail>[] = [
     {
@@ -85,7 +88,7 @@ export function OrderItemsTable({
       rowKey={(item) => item.id}
       rowTestId={(item) => `order-item-${item.id}`}
       onOpen={onOpen}
-      empty="No items yet. Add one with Add item above."
+      empty={canAdd ? 'No items yet. Add one with Add item above.' : 'No items.'}
     />
   )
 }

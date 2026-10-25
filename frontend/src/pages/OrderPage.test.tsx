@@ -82,6 +82,15 @@ describe('OrderPage (#4249)', () => {
     expect(await within(screen.getByRole('table', { name: 'Line items' })).findByRole('button', { name: 'Ball Maze' })).toBeInTheDocument()
   })
 
+  it('points an empty table at Add item only where there is one', async () => {
+    const order = await api.createOrder({ customer_id: CUSTOMER_BOB })
+    await api.cancelOrder(order.id)
+    render(order.id)
+    await screen.findByRole('heading', { name: order.number })
+    expect(screen.getByText('No items.')).toBeInTheDocument()
+    expect(screen.queryByText(/Add one with Add item above/)).not.toBeInTheDocument()
+  })
+
   it('offers no Add item once the order is accepted', async () => {
     render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
