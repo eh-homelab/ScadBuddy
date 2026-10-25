@@ -4,8 +4,8 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
   StackContextManager,
-  WebTracerProvider,
-} from '@opentelemetry/sdk-trace-web'
+  TracerProvider,
+} from '@opentelemetry/sdk-trace'
 
 /**
  * A registered provider whose spans land in `exporter`, for tests of code that makes
@@ -14,8 +14,9 @@ import {
  */
 export function installTestTracing(): { exporter: InMemorySpanExporter; uninstall: () => void } {
   const exporter = new InMemorySpanExporter()
-  const provider = new WebTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] })
-  provider.register({ contextManager: new StackContextManager(), propagator: null })
+  const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] })
+  context.setGlobalContextManager(new StackContextManager().enable())
+  trace.setGlobalTracerProvider(provider)
   return {
     exporter,
     uninstall: () => {

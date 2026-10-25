@@ -42,7 +42,7 @@ const server = setupServer(
   }),
 )
 // Claude Code is another process; only the in-process tools' backend calls pass through here.
-beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'bypass' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

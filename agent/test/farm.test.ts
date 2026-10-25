@@ -10,7 +10,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 // with its outcome, and the spool inventory, read through backend/scadbuddy/api/farm.py.
 
 const server = setupServer()
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 

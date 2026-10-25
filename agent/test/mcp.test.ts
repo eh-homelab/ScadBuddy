@@ -17,7 +17,7 @@ const MODELS = [{ slug: 'keychain', name: 'Keychain', description: '', tags: [],
 const server = setupServer(
   http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json(MODELS, { headers: { 'X-Total-Count': String(MODELS.length) } })),
 )
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
@@ -302,7 +302,7 @@ describe('/mcp: oidc mode with nothing configured', () => {
 describe('/mcp: outward tools prepare; with no approval store, confirm is refused', () => {
   it('prepares a pending action instead of printing, and refuses to confirm it without the database', async () => {
     // No backend handler for the print routes: an attempt to call them would
-    // fail the test through onUnhandledRequest: 'error'.
+    // fail the test through onUnhandledFrame: 'error'.
     const { app, auth } = await bearerApp('outward')
     const client = await open(app, { headers: auth })
     const prepared = await client.callTool({
