@@ -122,7 +122,12 @@ def _summary_json(summary: BatchSummary | None) -> Jsonb | None:
 
 
 class PrintBatchStore:
-    """``print_batches`` and ``print_batch_items`` on the process's pool."""
+    """``print_batches`` and ``print_batch_items`` on the process's pool.
+
+    Lock order (#4639): every write that touches both tables locks the batch's row
+    first, through `_lock_batch`. The prune's and the delete's ``DELETE`` already lock
+    the batch's row before the cascade reaches the files'; a write taking a file's row
+    first deadlocks with them (#4657 review)."""
 
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
@@ -271,6 +276,8 @@ class PrintBatchStore:
 
     def _choose(self, batch_id: str, position: int, choice: BatchChoice) -> PrintBatch | None:
         with self._pool.connection() as conn, conn.transaction():
+            if not _lock_batch(conn, batch_id):
+                return None
             request = _request_json(choice.request)
             changed = conn.execute(
                 "UPDATE print_batch_items SET request = %s, skipped = %s, removed = %s,"
@@ -331,6 +338,8 @@ class PrintBatchStore:
                 None if was is None else Jsonb(was.model_dump(mode="json")),
             ]
         with self._pool.connection() as conn, conn.transaction():
+            if not _lock_batch(conn, batch_id):
+                return False
             updated = conn.execute(
                 # The choices a refusal is of, for _choose's stale (#3932 review).
                 "UPDATE print_batch_items SET outcome = %s,"
@@ -377,6 +386,18 @@ class PrintBatchStore:
         if found["deleted"]:
             return "deleted"
         return "pending" if found["kept"] else "missing"
+
+
+def _lock_batch(conn: Connection[DictRow], batch_id: str) -> bool:
+    """Lock the batch's row before a file's, in a write to both (#4639): the prune and
+    the delete lock the batch's row, then its cascade the files', so a write taking the
+    file's first deadlocked with them. False when the batch is gone."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM print_batches WHERE id = %s FOR NO KEY UPDATE", (batch_id,)
+        ).fetchone()
+        is not None
+    )
 
 
 Deleted = Literal["deleted", "pending", "missing"]

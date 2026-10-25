@@ -95,6 +95,7 @@ from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
+    may_share_a_name,
     not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
@@ -964,12 +965,13 @@ async def check_print(
     # are read beside it (#4196): awaited after it in the order they were read in, so a
     # failure surfaces where it did, and cancelled when it refuses. One inventory
     # read for the plan, the rack, the slot refusals and the spool warnings (#2722);
-    # none for a plan with no slots, whose slot refusals read their own. `_fetch` keeps a
-    # download only once it is done, so `prepare_run` must not fetch the 3MF itself here
-    # (it does not, with `refuse_manual_pick` off): it would download it a second time
+    # none for a plan with no slots, whose slot refusals read their own. Every read of the
+    # 3MF, `prepare_run`'s included, waits on the source's one fetch, even while it runs,
+    # and its failure (out of memory, #4581 review) answers them all
     # (`test_a_library_files_check_fetches_the_file_once`). Started before the check
     # knows whether it refuses, these reads may reach Bambuddy on a refused check too: the
-    # inventory's spools and assignments may already be asked for, then are cancelled.
+    # inventory's spools and assignments may already be asked for, then are cancelled,
+    # and a fetch no other read waits on stops with its task.
     laying_out = None if source.is_sliced else asyncio.create_task(source.states_nozzles(client))
     reading = (
         asyncio.create_task(read_inventory(client))
@@ -2399,13 +2401,16 @@ async def queue_plate(
     if (
         planned.slicer == "bambuddy"
         and plate.plan is not None
-        and len(plate.plan.filament_presets) > 1
+        and may_share_a_name(plate.plan.filament_presets)
     ):
-        # Before the queue call, which is made once: this never raises (#3962).
+        # Before the queue call, which is made once: this never raises (#3962). Slots
+        # that each have a preset of their own keep the tower, so their slice is not
+        # downloaded to look (#4649).
         notes += await tower_dropped(
             client,
             sliced=sliced,
             plate_id=plate.plate_id,
+            process=plate.plan.process_preset,
             process_overrides=plate.plan.process_overrides,
         )
     choice = (

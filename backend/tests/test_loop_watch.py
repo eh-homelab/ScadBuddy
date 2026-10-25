@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from scadbuddy.core import loop_watch
 from scadbuddy.core.loop_watch import LoopWatch
 from scadbuddy.core.metrics import Metrics
 
@@ -17,6 +18,13 @@ from scadbuddy.core.metrics import Metrics
 def _sample(metrics: Metrics, name: str) -> float:
     value = metrics.registry.get_sample_value(name)
     return value or 0.0
+
+
+def _watch_logs(caplog: pytest.LogCaptureFixture) -> str:
+    """What the watch itself logged. caplog takes every logger's records, and a pool an
+    earlier test left open logs its connect failures from a thread (``unused.invalid``,
+    #4653's CI), so "logs nothing" means nothing from the watch."""
+    return "\n".join(r.getMessage() for r in caplog.records if r.name == loop_watch.logger.name)
 
 
 def _blocks_the_loop(seconds: float) -> None:
@@ -27,7 +35,7 @@ async def test_a_blocked_loop_is_logged_with_the_stack_that_blocks_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     metrics = Metrics()
-    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    caplog.set_level(logging.WARNING, logger=loop_watch.logger.name)
     async with LoopWatch(metrics, threshold=0.2, interval=0.05):
         await asyncio.sleep(0.1)
         _blocks_the_loop(0.6)
@@ -42,11 +50,11 @@ async def test_a_blocked_loop_is_logged_with_the_stack_that_blocks_it(
 
 async def test_a_loop_that_keeps_running_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
     metrics = Metrics()
-    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    caplog.set_level(logging.WARNING, logger=loop_watch.logger.name)
     # A threshold far above any scheduling jitter under `pytest -n`.
     async with LoopWatch(metrics, threshold=1.0, interval=0.1):
         await asyncio.sleep(0.5)
-    assert not caplog.records
+    assert _watch_logs(caplog) == ""
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
     assert _sample(metrics, "scadbuddy_event_loop_lag_seconds_count") >= 3
 
@@ -62,7 +70,7 @@ async def test_a_full_default_executor_is_logged_with_what_holds_it(
     whose first await is one never starts while every thread is held (#3788's
     ``project``), with the loop itself running."""
     metrics = Metrics()
-    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    caplog.set_level(logging.WARNING, logger=loop_watch.logger.name)
     executor = ThreadPoolExecutor(max_workers=1)
     asyncio.get_running_loop().set_default_executor(executor)
     try:
@@ -104,7 +112,7 @@ async def test_a_beat_left_unrun_after_leaving_is_no_stall(
     """A beat posted just before the watch is left, and never run because the loop is
     held or closing, is the shutdown, not a stall to log with every stack."""
     metrics = Metrics()
-    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    caplog.set_level(logging.WARNING, logger=loop_watch.logger.name)
     watch = LoopWatch(metrics, threshold=0.3, interval=0.05)
     await watch.__aenter__()
     _blocks_the_loop(0.15)  # past `interval`: a beat is posted and left unrun
@@ -113,7 +121,7 @@ async def test_a_beat_left_unrun_after_leaving_is_no_stall(
     assert watch._thread is not None
     await asyncio.to_thread(watch._thread.join, 2)
     assert not watch._thread.is_alive()
-    assert not caplog.records, caplog.text
+    assert _watch_logs(caplog) == ""
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
 
 
@@ -123,7 +131,7 @@ async def test_a_probe_left_waiting_after_leaving_is_no_stall(
     """The executor's no-op, still queued behind held work when the watch is left, is
     the shutdown too: its beat runs after the stop, and must not report it."""
     metrics = Metrics()
-    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    caplog.set_level(logging.WARNING, logger=loop_watch.logger.name)
     executor = ThreadPoolExecutor(max_workers=1)
     loop = asyncio.get_running_loop()
     loop.set_default_executor(executor)
@@ -142,7 +150,7 @@ async def test_a_probe_left_waiting_after_leaving_is_no_stall(
         # the loop once its beat has run.
         watch._thread.join(2)
         assert not watch._thread.is_alive()
-        assert not caplog.records, caplog.text
+        assert _watch_logs(caplog) == ""
         assert _sample(metrics, "scadbuddy_default_executor_stalls_total") == 0
         await held
     finally:

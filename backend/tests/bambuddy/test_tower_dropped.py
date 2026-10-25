@@ -13,7 +13,12 @@ import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan
-from scadbuddy.bambuddy.models import FilamentRequirement, FilamentRequirements, PresetRef
+from scadbuddy.bambuddy.models import (
+    FilamentRequirement,
+    FilamentRequirements,
+    PresetRef,
+    PresetValues,
+)
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import tower_dropped
 from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, queue_plate
@@ -22,6 +27,8 @@ from scadbuddy.core.problems import ApiError
 #: Preview slice 140's own (issue #3962): the CLI turned the tower off, so it differs
 #: from the process preset's.
 DROPPED = {"enable_prime_tower": "0", "different_settings_to_system": ["enable_prime_tower", ""]}
+
+PROCESS = PresetRef(source="standard", id="0.20mm Standard @BBL H2C")
 
 
 def sliced_3mf(settings: dict[str, Any], *slots: int, plate: int = 1) -> bytes:
@@ -38,11 +45,24 @@ def sliced_3mf(settings: dict[str, Any], *slots: int, plate: int = 1) -> bytes:
 
 
 class Library:
-    """Bambuddy holding one sliced file."""
+    """Bambuddy holding one sliced file, and a process preset whose tower is on unless
+    ``tower`` says otherwise."""
 
-    def __init__(self, payload: bytes | Exception) -> None:
+    def __init__(
+        self, payload: bytes | Exception, tower: str | list[str] | Exception | None = "1"
+    ) -> None:
         self.payload = payload
+        self.tower = tower
         self.downloads: list[int] = []
+        self.presets_read: list[PresetRef] = []
+
+    async def preset_values(self, ref: PresetRef) -> PresetValues:
+        self.presets_read.append(ref)
+        if isinstance(self.tower, Exception):
+            raise self.tower
+        if self.tower is None:
+            return PresetValues(resolved=False, reason="sidecar_unavailable")
+        return PresetValues(resolved=True, values={"enable_prime_tower": self.tower})
 
     async def download_library_file(self, file_id: int) -> AsyncGenerator[bytes]:
         self.downloads.append(file_id)
@@ -53,7 +73,9 @@ class Library:
 
 
 async def warned(library: Library, overrides: dict[str, Any], plate_id: int = 1) -> list[str]:
-    found = await tower_dropped(library, sliced=9, plate_id=plate_id, process_overrides=overrides)
+    found = await tower_dropped(
+        library, sliced=9, plate_id=plate_id, process=PROCESS, process_overrides=overrides
+    )
     assert all(warning.kind == "prime-tower-not-applied" for warning in found)
     return [warning.message for warning in found]
 
@@ -71,7 +93,35 @@ async def test_a_tower_asked_for_and_sliced_off_is_warned() -> None:
 
 async def test_the_presets_own_tower_turned_off_by_the_slicer_is_warned() -> None:
     """No choice was made, so the preset's default (on) stood, and the CLI changed it."""
-    assert await warned(Library(sliced_3mf(DROPPED, 1, 3)), {})
+    library = Library(sliced_3mf(DROPPED, 1, 3), tower=["1"])
+
+    [message] = await warned(library, {})
+
+    assert message.endswith(
+        "Its slicer usually does this when the filament slots share one preset."
+    )
+    assert library.presets_read == [PROCESS]
+
+
+async def test_a_process_preset_that_turns_the_tower_off_says_nothing() -> None:
+    """#4648: a user preset off on purpose differs from its system parent, so
+    ``different_settings_to_system`` lists the key though the slicer changed nothing."""
+    assert await warned(Library(sliced_3mf(DROPPED, 1, 2), tower="0"), {}) == []
+
+
+@pytest.mark.parametrize(
+    "tower", [None, ApiError(502, "Bambuddy is down")], ids=["unresolved", "unanswered"]
+)
+async def test_a_process_preset_that_cannot_be_read_says_nothing(
+    tower: Exception | None,
+) -> None:
+    assert await warned(Library(sliced_3mf(DROPPED, 1, 2), tower=tower), {}) == []
+
+
+async def test_a_tower_asked_for_does_not_read_the_process_preset() -> None:
+    library = Library(sliced_3mf(DROPPED, 1, 2), tower="0")
+    assert await warned(library, {"enable_prime_tower": "1"})
+    assert library.presets_read == []
 
 
 async def test_a_tower_the_slice_kept_says_nothing() -> None:
@@ -126,12 +176,14 @@ class Bambuddy(Library):
         return type("Item", (), {"id": 31})()
 
 
-def planned(slicer: str) -> PlannedRun:
-    shared = PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
+SHARED = PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")
+
+
+def planned(slicer: str, filaments: tuple[PresetRef, ...] = (SHARED, SHARED)) -> PlannedRun:
     plan = SlicePlan(
         printer_preset=PresetRef(source="standard", id="Bambu Lab H2C 0.4 nozzle"),
-        process_preset=PresetRef(source="standard", id="0.20mm Standard @BBL H2C"),
-        filament_presets=[shared, shared],
+        process_preset=PROCESS,
+        filament_presets=list(filaments),
         filament_colours=["#FF0000", "#00FF00"],
         bed_type="Textured PEI Plate",
     )
@@ -171,3 +223,48 @@ async def test_a_native_slice_is_not_read_for_it() -> None:
 
     assert queued.warnings == []
     assert bambuddy.downloads == []
+
+
+@pytest.mark.parametrize(
+    "filaments",
+    [
+        (SHARED, PresetRef(source="local", id="12")),
+        (SHARED, PresetRef(source="standard", id="Bambu PETG Basic @BBL H2C")),
+    ],
+    ids=["own-slot-preset", "distinct-presets"],
+)
+async def test_slots_with_presets_of_their_own_are_not_read(
+    filaments: tuple[PresetRef, ...],
+) -> None:
+    """#4649: the CLI drops the tower only for slots that share a preset's name, so a
+    plate whose slots each have their own is not downloaded."""
+    bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
+    run = planned("bambuddy", filaments)
+
+    queued = await queue_plate(
+        cast(BambuddyClient, bambuddy), planned=run, plate=run.plates[0], sliced=9, rack=None
+    )
+
+    assert queued.warnings == []
+    assert bambuddy.downloads == []
+
+
+@pytest.mark.parametrize(
+    "filaments",
+    [
+        (PresetRef(source="local", id="12"), PresetRef(source="local", id="12")),
+        (SHARED, PresetRef(source="cloud", id="GFA00")),
+    ],
+    ids=["same-ref", "cloud-of-a-standard"],
+)
+async def test_slots_that_may_share_a_name_are_read(filaments: tuple[PresetRef, ...]) -> None:
+    """A ``cloud`` system preset carries a ``standard`` one's name (``slot_presets``)."""
+    bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
+    run = planned("bambuddy", filaments)
+
+    queued = await queue_plate(
+        cast(BambuddyClient, bambuddy), planned=run, plate=run.plates[0], sliced=9, rack=None
+    )
+
+    assert [w.kind for w in queued.warnings] == ["prime-tower-not-applied"]
+    assert bambuddy.downloads == [9]
