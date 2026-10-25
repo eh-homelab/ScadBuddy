@@ -2653,12 +2653,17 @@ async def plan_run(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "a native run was checked without its printer's report",
         )
-    if native_run and isinstance(source, OutputSource):
-        # The native library's copy answers no slots (#3827), so an output's are read
-        # from its own 3MF, as the check reads them (#4710): else each plate needs a
-        # spool for every colour of the file, where the dialog sends one for the
-        # plate's own. The background slice and the run plan from a fresh source.
-        await source.read_local()
+    # The native library's copy answers no slots (#3827), so an output's are read from
+    # its own 3MF, as the check reads them (#4710): else each plate needs a spool for
+    # every colour of the file, where the dialog sends one for the plate's own. The
+    # background slice and the run plan from a fresh source. An unreadable 3MF is said,
+    # so the #4710 refusal is recognised if it comes back.
+    if native_run and isinstance(source, OutputSource) and await source.read_local() is None:
+        logger.warning(
+            "a native run cannot read the output's slots, so every plate needs a spool"
+            " for every colour",
+            extra={"output_id": source.meta.id},
+        )
     per_plate = await gather_plate_options(
         client,
         library_file_id=library_file_id,

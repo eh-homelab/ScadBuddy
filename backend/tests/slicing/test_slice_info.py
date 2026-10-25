@@ -80,3 +80,15 @@ def test_what_a_plate_prints_before_its_first_change_is_its_first_filaments() ->
     read = read_sliced((NATIVE / "plate2-two-filaments.gcode.3mf").read_bytes(), 2)
     assert read.grams_by_slot == {2: 1.3, 3: 1.1}
     assert read.filament_used_g == 2.4
+
+
+@pytest.mark.parametrize(
+    "header",
+    [b"", b"; HEADER_BLOCK_START\n; filament: 2,3\n; HEADER_BLOCK_END\n"],
+    ids=["no-header", "several-and-no-sequence"],
+)
+def test_grams_stay_as_written_when_nothing_says_which_filament_is_first(header: bytes) -> None:
+    """With no ``filament_sequence.json``, and a header naming no filament or several, the
+    plate's first filament is unknown: its grams are left on the ids the slicer wrote."""
+    file = sliced_3mf(plates={1: (60, [0.2, 1.0, 2.0])}, gcode={1: header + b"M620 S1A\n"})
+    assert read_sliced(file, 1).grams_by_slot == {1: 0.2, 2: 1.0, 3: 2.0}

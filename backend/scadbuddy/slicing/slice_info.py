@@ -27,7 +27,7 @@ _HEADER_FILAMENTS = re.compile(rb"^; filament: ([\d,]+)\s*$", re.MULTILINE)
 _HEADER_BYTES = 64 * 1024
 #: The CLI's per-plate filament order, and the most of it that is read.
 _SEQUENCE = "Metadata/filament_sequence.json"
-MAX_SEQUENCE_BYTES = 16 * 1024 * 1024
+_MAX_SEQUENCE_BYTES = 16 * 1024 * 1024
 
 
 def _file(payload: bytes | BinaryIO) -> BinaryIO:
@@ -39,31 +39,40 @@ def _file(payload: bytes | BinaryIO) -> BinaryIO:
     return payload
 
 
+def _gcode(archive: zipfile.ZipFile, plate_id: int) -> bytes | None:
+    """:func:`plate_gcode` in an open archive."""
+    names = [
+        name for name in archive.namelist() if re.fullmatch(r"Metadata/plate_\d+\.gcode", name)
+    ]
+    wanted = f"Metadata/plate_{plate_id}.gcode"
+    name = wanted if wanted in names else (names[0] if len(names) == 1 else None)
+    if name is None:
+        return None
+    # Read no further than the bound, whatever the zip's header claims.
+    with archive.open(name) as member:
+        gcode = member.read(MAX_GCODE_BYTES + 1)
+    if len(gcode) > MAX_GCODE_BYTES:
+        logger.info("the sliced plate's G-code is past its bound")
+        return None
+    return gcode
+
+
 def plate_gcode(payload: bytes | BinaryIO, plate_id: int) -> bytes | None:
     """The sliced plate's G-code (``Metadata/plate_N.gcode``, else the only plate's);
     None when there is none, the file is not a zip, or it is past :data:`MAX_GCODE_BYTES`.
     ``payload`` is the file's bytes or the file itself."""
+    return _plate_files(payload, plate_id)[0]
+
+
+def _plate_files(payload: bytes | BinaryIO, plate_id: int) -> tuple[bytes | None, list[int]]:
+    """The plate's G-code (:func:`plate_gcode`) and its filament sequence
+    (:func:`_sequence`), read in one pass over the archive."""
     try:
         with zipfile.ZipFile(_file(payload)) as archive:
-            names = [
-                name
-                for name in archive.namelist()
-                if re.fullmatch(r"Metadata/plate_\d+\.gcode", name)
-            ]
-            wanted = f"Metadata/plate_{plate_id}.gcode"
-            name = wanted if wanted in names else (names[0] if len(names) == 1 else None)
-            if name is None:
-                return None
-            # Read no further than the bound, whatever the zip's header claims.
-            with archive.open(name) as member:
-                gcode = member.read(MAX_GCODE_BYTES + 1)
-            if len(gcode) > MAX_GCODE_BYTES:
-                logger.info("the sliced plate's G-code is past its bound")
-                return None
-            return gcode
+            return _gcode(archive, plate_id), _sequence(archive, plate_id)
     except (zipfile.BadZipFile, KeyError) as error:
         logger.info("the sliced file could not be read", extra={"error": type(error).__name__})
-        return None
+        return None, []
 
 
 def filament_changes(gcode: bytes) -> int:
@@ -73,20 +82,20 @@ def filament_changes(gcode: bytes) -> int:
     return max(len(loads) - 1, 0)
 
 
-def _sequence(payload: bytes | BinaryIO, index: int) -> list[int]:
+def _sequence(archive: zipfile.ZipFile, index: int) -> list[int]:
     """The 1-based filaments plate ``index`` prints, in the order it prints them
     (``Metadata/filament_sequence.json``'s ``plate_<index>.sequence``); empty when the
     file has none or it cannot be read."""
+    if _SEQUENCE not in archive.namelist():
+        return []
     try:
-        with zipfile.ZipFile(_file(payload)) as archive:
-            if _SEQUENCE not in archive.namelist():
-                return []
-            with archive.open(_SEQUENCE) as member:
-                data = member.read(MAX_SEQUENCE_BYTES + 1)
-        if len(data) > MAX_SEQUENCE_BYTES:
+        # Its own failure never costs the plate its G-code, read from the same archive.
+        with archive.open(_SEQUENCE) as member:
+            data = member.read(_MAX_SEQUENCE_BYTES + 1)
+        if len(data) > _MAX_SEQUENCE_BYTES:
             return []
         doc = json.loads(data)
-    except (zipfile.BadZipFile, KeyError, ValueError):
+    except (zipfile.BadZipFile, ValueError):
         return []
     plate = doc.get(f"plate_{index}") if isinstance(doc, dict) else None
     sequence = plate.get("sequence") if isinstance(plate, dict) else None
@@ -106,13 +115,9 @@ def _header_filaments(gcode: bytes | None) -> list[int]:
     return [int(n) for n in found.group(1).split(b",") if n.strip().isdigit() and int(n) >= 1]
 
 
-def _printed(
-    payload: bytes | BinaryIO, index: int, gcode: bytes | None
-) -> tuple[set[int], int | None]:
-    """The filaments plate ``index`` prints, and the one it prints first: the sequence's
-    first, else the header's one filament when it names only one; ``None`` when neither
-    says."""
-    sequence = _sequence(payload, index)
+def _printed(gcode: bytes | None, sequence: list[int]) -> tuple[set[int], int | None]:
+    """The filaments a plate prints, and the one it prints first: the sequence's first,
+    else the header's one filament when it names only one; ``None`` when neither says."""
     printed = set(_header_filaments(gcode)) or set(sequence)
     first = sequence[0] if sequence else (next(iter(printed)) if len(printed) == 1 else None)
     return printed, first
@@ -166,8 +171,8 @@ def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
         plate = found
     index = plate.index
     grams_by_slot = {slot.slot_id: slot.used_grams for slot in read.sliced.get(index, [])}
-    gcode = plate_gcode(payload, index)
-    grams_by_slot = _on_printed(grams_by_slot, *_printed(payload, index, gcode))
+    gcode, sequence = _plate_files(payload, index)
+    grams_by_slot = _on_printed(grams_by_slot, *_printed(gcode, sequence))
     return NativeSliceRead(
         plate_id=plate_id,
         print_time_seconds=plate.print_seconds,
