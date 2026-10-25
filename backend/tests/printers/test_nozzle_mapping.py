@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.printers import nozzle_mapping as nozzle_mapping_module
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.nozzle_mapping import (
     FIXED_NOZZLE_ID,
@@ -25,7 +26,7 @@ from scadbuddy.printers.nozzle_mapping import (
     read_rack_plan,
 )
 from scadbuddy.printers.status import status_from_report
-from scadbuddy.rack.rank import eligible, rack_positions
+from scadbuddy.rack.rank import eligible, manual_for, rack_positions
 from tests.printers.test_status import row
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -282,6 +283,27 @@ def test_a_declined_pick_says_the_printer_picks_an_abrasives_nozzle() -> None:
     assert unsafe == [
         "The printer picks the nozzle and may use a non-hardened one for PLA-CF, PLA."
     ]
+
+
+def test_the_hand_picked_positions_notes_name_the_printer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4586 review: over the LAN, `choose_nozzles` hands ``manual_for`` the printer as
+    the picker, never Bambuddy (#4630, #4650 reviews)."""
+    asked: list[dict[str, Any]] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        asked.append(kwargs)
+        return manual_for(*args, **kwargs)
+
+    monkeypatch.setattr(nozzle_mapping_module, "manual_for", recorded)
+    plan = read_rack_plan(sliced(), 1)
+    assert plan is not None
+    choose_nozzles(
+        plan, idle_status(), algorithm="bambuddy", manual_position=6, usage={}, spools={}
+    )
+    # The wording each picker gives is `tests/rack/test_rank.py`'s (#4600 review).
+    assert asked == [{"picker": "the printer"}]
 
 
 def test_a_file_with_no_slice_info_has_no_plan() -> None:

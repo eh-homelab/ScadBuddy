@@ -132,6 +132,8 @@ export const SLICED_PROFILES: Record<number, SlicedProfile> = {
     bed_type: 'Textured PEI Plate',
     nozzle_diameters: ['0.4'],
     plates: [{ index: 1, print_seconds: 2700, weight_g: 9.8, nozzle_diameters: ['0.4'] }],
+    prime_tower: null,
+    prime_tower_changed: false,
   },
 }
 

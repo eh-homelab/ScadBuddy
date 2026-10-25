@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.grants import GrantSpec, GrantStatus, RuleUse
 
-EventKind = Literal["render.finished", "model.changed"]
+EventKind = Literal["render.finished", "model.changed", "print.finished", "print.failed"]
 Overlap = Literal["skip", "allow_all"]
 TriggerKind = Literal["schedule", "event"]
 #: `admitted`: past the overlap and the rate cap, its run not yet started.

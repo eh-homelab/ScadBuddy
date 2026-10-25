@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteBlobs, RemoteOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
@@ -1059,6 +1060,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         newest_failed=newest_failed_from(
             print_runs, settings_store.load, latest=recent_runs.latest
         ),
+        record_outcome=PrintOutcomeStore(pool, events).record,
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys.
     native = native_slice_starter(settings)

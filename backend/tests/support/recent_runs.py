@@ -41,6 +41,7 @@ def record_recent_runs(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> l
 async def assert_hears(recent: RecentRuns, events: EventBus, timeout: float = 5.0) -> None:
     """``recent``, primed and holding its run, reads it again once ``events`` (started)
     carries the subject's ``print.run``."""
+    # Swaps in a counting store: this checks the bus wiring, not the production store.
     store = _CountingRuns()
     recent.runs = store  # type: ignore[assignment]
     recent.ttl = timeout * 10

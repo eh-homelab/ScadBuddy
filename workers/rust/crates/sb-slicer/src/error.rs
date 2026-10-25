@@ -45,23 +45,24 @@ pub(crate) fn transfer(e: TransferError) -> ActivityError {
 }
 
 /// The CLI exited non-zero: 192 is a validation failure, which no retry changes.
-pub(crate) fn slicer(exit_code: i32, stderr_tail: &str) -> ActivityError {
+/// `errors` is the CLI's own `[error]` log lines ([`crate::runner::cli_errors`]).
+pub(crate) fn slicer(exit_code: i32, stderr_tail: &str, errors: &str) -> ActivityError {
     failure(
         format!("the slicer exited with code {exit_code}"),
         SLICER_ERROR,
         exit_code == VALIDATION_EXIT,
-        Some(json!({"exit_code": exit_code, "stderr_tail": stderr_tail})),
+        Some(json!({"exit_code": exit_code, "stderr_tail": stderr_tail, "errors": errors})),
     )
 }
 
 /// The CLI exited 0 without the sliced 3MF (a plate with nothing to slice): the same
 /// input does the same again, so no retry helps.
-pub(crate) fn no_output(stderr_tail: &str) -> ActivityError {
+pub(crate) fn no_output(stderr_tail: &str, errors: &str) -> ActivityError {
     failure(
         "the slicer exited 0 without the sliced 3MF".to_owned(),
         SLICER_ERROR,
         true,
-        Some(json!({"exit_code": 0, "stderr_tail": stderr_tail})),
+        Some(json!({"exit_code": 0, "stderr_tail": stderr_tail, "errors": errors})),
     )
 }
 
@@ -124,20 +125,27 @@ mod tests {
     }
 
     #[test]
-    fn a_slicer_error_always_carries_its_exit_and_stderr() {
-        let details = json!({"exit_code": 1, "stderr_tail": "boom"});
+    fn a_slicer_error_always_carries_its_exit_stderr_and_errors() {
+        let details = json!({"exit_code": 1, "stderr_tail": "boom", "errors": ""});
         assert_eq!(
-            on_the_wire(slicer(1, "boom")),
+            on_the_wire(slicer(1, "boom", "")),
             (SLICER_ERROR.to_owned(), false, Some(details))
         );
-        let details = json!({"exit_code": 192, "stderr_tail": ""});
+        let details = json!({"exit_code": 192, "stderr_tail": "", "errors": ""});
         assert_eq!(
-            on_the_wire(slicer(VALIDATION_EXIT, "")),
+            on_the_wire(slicer(VALIDATION_EXIT, "", "")),
             (SLICER_ERROR.to_owned(), true, Some(details))
         );
-        let details = json!({"exit_code": 0, "stderr_tail": "empty plate"});
+        // An empty plate says why only in the CLI's log (#4638).
+        let details =
+            json!({"exit_code": 206, "stderr_tail": "", "errors": "plate 2: Nothing to be sliced"});
         assert_eq!(
-            on_the_wire(no_output("empty plate")),
+            on_the_wire(slicer(206, "", "plate 2: Nothing to be sliced")),
+            (SLICER_ERROR.to_owned(), false, Some(details))
+        );
+        let details = json!({"exit_code": 0, "stderr_tail": "empty plate", "errors": ""});
+        assert_eq!(
+            on_the_wire(no_output("empty plate", "")),
             (SLICER_ERROR.to_owned(), true, Some(details))
         );
     }

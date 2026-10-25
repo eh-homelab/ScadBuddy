@@ -276,11 +276,15 @@ async def library_filaments(
                         await asyncio.to_thread(downloads.put, file.file_hash, held)
                     except OSError:
                         logger.warning(
-                            "could not keep a library file", extra={"sha256": file.file_hash}
+                            "could not keep a library file",
+                            extra={"sha256": file.file_hash},
+                            exc_info=True,
                         )
                 return await _keep_filaments(cache, file, io.BytesIO(held), budget)
         except MemoryError:
-            # As the spool's below: read from disk instead (#4553 review).
+            # As the spool's below: read from disk instead (#4553 review). The caller's
+            # fetch keeps its failure (`PrintPipeline._fetch`), so its own read of the
+            # file fails at once too and never downloads it again (#4571 review).
             logger.warning(
                 "could not hold the library file to read its filament slots",
                 extra={"library_file_id": file.id},
