@@ -67,8 +67,8 @@ export const arrangeTools: Tool[] = [
       'twice (an output and its library file, say) are placed twice. `goal` picks the layout; ' +
       '`printer_id` packs for that printer\'s plate (omit for the configured one); `filament_plan` is the ' +
       "same spool-per-slot plan print_output takes, slots numbered by `colours` (omit for the first source's " +
-      "colours, then any the others add, and any colour a recolour brings; a source colour every copy swaps " +
-      'away is left out, so with recolour and filament_plan, send colours too). ' +
+      "colours, then any the others add, and any colour a recolour brings; a colour no copy prints in, a part " +
+      "left out or a colour every copy swaps away, is left out and the plan's slots follow their colours). " +
       "The result is filed under `slug`, one of the outputs' templates " +
       "(omit for the first object's); with a library file ScadBuddy did not make among them, it may be any template, and with library files alone it is required. Waits for the job; if it outlasts the wait, the still-running job " +
       'is returned: poll it with get_render_job, then save_output under its slug. An output saved before ' +
