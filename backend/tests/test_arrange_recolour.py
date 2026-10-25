@@ -10,6 +10,7 @@ import pytest
 import trimesh
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.api import jobs as jobs_api
 from scadbuddy.api.jobs import _job_status
 from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, arrange_inputs
 from scadbuddy.bambuddy.filaments import FilamentPlan
@@ -496,12 +497,39 @@ async def test_a_planned_slot_past_every_colour_is_said(tmp_path: Path) -> None:
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
         filament_plan=FilamentPlan.model_validate(
-            {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 5, "spool_id": 9}]}
+            {
+                "slots": [
+                    {"slot_id": 0, "spool_id": 4},
+                    {"slot_id": 1, "spool_id": 7},
+                    {"slot_id": 5, "spool_id": 9},
+                ]
+            }
         ),
     )
     _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
     assert inputs.filament_plan is not None
     assert inputs.filament_plan.slots == {1: 7}
+    # Below the list as above it (#4704 review): slot 0 names no colour either.
     assert inputs.notes == [
-        "filament_plan slot 5 (spool 9) names no colour: that spool is not used"
+        "filament_plan slot 0 (spool 4) names no colour: that spool is not used",
+        "filament_plan slot 5 (spool 9) names no colour: that spool is not used",
     ]
+
+
+def test_a_jobs_status_reads_the_notes_field_with_its_own_type() -> None:
+    """`api/jobs.py` reads `ArrangeInputs.notes` alone, by name and as `list[str]`."""
+    assert jobs_api._NOTES_FIELD in ArrangeInputs.model_fields
+    assert ArrangeInputs.model_fields[jobs_api._NOTES_FIELD].annotation == list[str]
+
+
+def test_an_arrange_rows_unreadable_notes_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """#4704 review: notes a row holds in a shape this build cannot read are not said,
+    and the drift is logged with the job's id rather than lost without a trace."""
+    job = Job(
+        id="j9", slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
+    )
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        assert _job_status(job, None).warnings is None
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert record.getMessage() == "an arrange job's notes are unreadable"
+    assert getattr(record, "job_id", None) == "j9"

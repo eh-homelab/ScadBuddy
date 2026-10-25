@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -280,15 +280,26 @@ class ModelDiagnostics(BaseModel):
     diagnostics_dropped: int = Field(default_factory=int)
 
 
+#: `ArrangeInputs.notes`, read alone with its type (`test_arrange_recolour` pins the
+#: two together): a job's status reads only that field, never the whole arrange (every
+#: item, the provenance), on every poll.
+_NOTES_FIELD = "notes"
+if _NOTES_FIELD not in ArrangeInputs.model_fields:
+    raise ImportError(f"ArrangeInputs has no {_NOTES_FIELD!r} field for a job's warnings")
+_ARRANGE_NOTES: TypeAdapter[list[str]] = TypeAdapter(list[str])
+
+
 def _arranged_notes(job: Job) -> list[str]:
     """An arrange's own notes (`ArrangeInputs.notes`): what its request asked for that it
     leaves out, said beside the result's warnings."""
     if job.kind != "arrange" or not job.inputs:
         return []
     try:
-        return ArrangeInputs.model_validate(job.inputs).notes
+        return _ARRANGE_NOTES.validate_python(job.inputs.get(_NOTES_FIELD, []))
     except ValidationError:
-        return []  # a row this build cannot read as an arrange's: no notes to say
+        # A row this build cannot read: no notes to say, but a drift between builds shows.
+        logger.warning("an arrange job's notes are unreadable", extra={"job_id": job.id})
+        return []
 
 
 def _warnings(job: Job) -> list[str] | None:
