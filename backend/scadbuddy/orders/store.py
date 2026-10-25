@@ -986,6 +986,24 @@ class OrderStore:
             raise LookupError(f"no quote {quote_id} of item {item_id}")
         return Quote.model_validate(row)
 
+    def still_released(self, quote_ids: Sequence[str]) -> list[str]:
+        """Of ``quote_ids``, those whose item is still cancelled or whose order is still
+        closed or cancelled: the holds a cancel or a close may drop now. A quote a reopen
+        brought back since is left out."""
+        if not quote_ids:
+            return []
+        with self._pool.connection() as c:
+            rows = c.execute(
+                "SELECT q.id FROM order_item_quotes q"
+                " JOIN order_items i ON i.id = q.order_item_id"
+                " JOIN orders o ON o.id = i.order_id"
+                " WHERE q.id = ANY(%s)"
+                " AND (i.status = 'cancelled' OR o.status IN ('closed', 'cancelled'))",
+                (list(quote_ids),),
+            ).fetchall()
+        kept = {row["id"] for row in rows}
+        return [quote_id for quote_id in quote_ids if quote_id in kept]
+
     def standing_quote_ids(self) -> set[str]:
         """The quotes whose sliced file §3.4 keeps (#4250 Ruling 3): each item's accepted
         quote and its newest unaccepted one, while the item is not cancelled and its
