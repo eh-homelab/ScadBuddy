@@ -251,7 +251,7 @@ export function OrderPage() {
                 <dd className="sb-num text-right font-medium">{formatMoney(totals.total_minor, order.currency, order.minor_exponent)}</dd>
                 <dt className="text-muted-foreground">Paid</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.paid_minor, order.currency, order.minor_exponent)}</dd>
-                <dt className="text-muted-foreground">Balance due</dt>
+                <dt className="text-muted-foreground">{(totals.pending_minor ?? 0) !== 0 ? 'Balance due (provisional)' : 'Balance due'}</dt>
                 <dd className="sb-num text-right">{formatMoney(totals.balance_minor, order.currency, order.minor_exponent)}</dd>
               </dl>
               {(totals.unpriced_items ?? []).length > 0 && (

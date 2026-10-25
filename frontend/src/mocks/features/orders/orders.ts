@@ -122,7 +122,7 @@ function detail(order: Order): OrderDetail {
   for (const i of items.filter((each) => each.status !== 'cancelled')) {
     const accepted = i.quotes.find((q) => q.accepted)
     // `item_price`'s newest: the latest by (created_at, id).
-    const newest = [...i.quotes].sort((a, b) => (a.created_at === b.created_at ? a.id.localeCompare(b.id) : a.created_at.localeCompare(b.created_at))).at(-1)
+    const newest = [...i.quotes].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id.localeCompare(b.id)).at(-1)
     if (accepted) subtotal += accepted.total_minor
     else if (newest) {
       subtotal += newest.unit_price_minor * i.quantity

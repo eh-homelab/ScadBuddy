@@ -83,6 +83,7 @@ describe('undoing an archive, a close and a cancel', () => {
     await waitFor(() => expect(totals).toHaveTextContent('of which not accepted'))
     // 12.50 a unit, two of them.
     expect(totals).toHaveTextContent('25.00')
+    expect(totals).toHaveTextContent('Balance due (provisional)')
     expect(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByText('not accepted')).toBeInTheDocument()
     expect(screen.queryByTestId('order-unpriced')).not.toBeInTheDocument()
   })
