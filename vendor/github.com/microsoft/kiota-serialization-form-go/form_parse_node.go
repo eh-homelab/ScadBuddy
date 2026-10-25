@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	abstractions "github.com/microsoft/kiota-abstractions-go"
+	"math"
+	"math/big"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,7 +16,7 @@ import (
 	absser "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// FormParseNode is a ParseNode implementation for JSON.
+// FormParseNode is a ParseNode implementation for URI form encoded.
 type FormParseNode struct {
 	value                     string
 	fields                    map[string]string
@@ -44,7 +46,7 @@ func loadFields(value string) (map[string]string, error) {
 	}
 	parts := strings.Split(value, "&")
 	for _, part := range parts {
-		keyValue := strings.Split(part, "=")
+		keyValue := strings.SplitN(part, "=", 2)
 		if len(keyValue) == 2 {
 			key, err := sanitizeKey(keyValue[0])
 			if err != nil {
@@ -121,10 +123,11 @@ func (n *FormParseNode) GetObjectValue(ctor absser.ParsableFactory) (absser.Pars
 			field := fields[key]
 			if field == nil {
 				if value != "" && isHolder {
+					decodedValue, err := url.QueryUnescape(value)
 					if err != nil {
 						return nil, err
 					}
-					itemAdditionalData[key] = value
+					itemAdditionalData[key] = decodedValue
 				}
 			} else {
 				childNode, err := n.GetChildNode(key)
@@ -174,7 +177,7 @@ func getPrimitiveValue(value string, targetType string) (interface{}, error) {
 		return getStringValue(value)
 	case "bool":
 		return getBoolValue(value)
-	case "uint8":
+	case "int8", "uint8":
 		return getInt8Value(value)
 	case "byte":
 		return getByteValue(value)
@@ -284,7 +287,7 @@ func (n *FormParseNode) GetByteValue() (*byte, error) {
 }
 
 func getByteValue(value string) (*byte, error) {
-	res, err := strconv.ParseInt(value, 10, 8)
+	res, err := strconv.ParseUint(value, 10, 8)
 	if err != nil {
 		return nil, err
 	}
@@ -336,15 +339,42 @@ func (n *FormParseNode) GetInt32Value() (*int32, error) {
 	return getInt32Value(n.value)
 }
 
+func parseNumberAsInt64(value string) (int64, error) {
+	if strings.ContainsAny(value, ".eE") {
+		v, err := getFloat64Value(value)
+		if err != nil {
+			return 0, err
+		}
+		if v == nil {
+			return 0, nil
+		}
+		if math.IsNaN(*v) || math.IsInf(*v, 0) {
+			return 0, &strconv.NumError{Func: "ParseInt", Num: value, Err: strconv.ErrRange}
+		}
+		r, ok := new(big.Rat).SetString(value)
+		if !ok {
+			return 0, &strconv.NumError{Func: "ParseInt", Num: value, Err: strconv.ErrSyntax}
+		}
+		var intPart big.Int
+		intPart.Quo(r.Num(), r.Denom())
+		if !intPart.IsInt64() {
+			return 0, &strconv.NumError{Func: "ParseInt", Num: value, Err: strconv.ErrRange}
+		}
+		return intPart.Int64(), nil
+	}
+	// Parse integer tokens directly before floating-point coercion can lose precision or accept non-integers.
+	return strconv.ParseInt(value, 10, 64)
+}
+
 func getInt32Value(value string) (*int32, error) {
-	v, err := getFloat64Value(value)
+	val, err := parseNumberAsInt64(value)
 	if err != nil {
 		return nil, err
 	}
-	if v == nil {
-		return nil, nil
+	if val > math.MaxInt32 || val < math.MinInt32 {
+		return nil, &strconv.NumError{Func: "ParseInt", Num: value, Err: strconv.ErrRange}
 	}
-	cast := int32(*v)
+	cast := int32(val)
 	return &cast, nil
 }
 
@@ -357,15 +387,11 @@ func (n *FormParseNode) GetInt64Value() (*int64, error) {
 }
 
 func getInt64Value(value string) (*int64, error) {
-	v, err := getFloat64Value(value)
+	val, err := parseNumberAsInt64(value)
 	if err != nil {
 		return nil, err
 	}
-	if v == nil {
-		return nil, nil
-	}
-	cast := int64(*v)
-	return &cast, nil
+	return &val, nil
 }
 
 // GetTimeValue returns a Time value from the nodes.

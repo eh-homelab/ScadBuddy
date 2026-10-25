@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.5](https://github.com/microsoft/kiota-serialization-form-go/compare/v1.1.4...v1.1.5) (2026-10-21)
+
+
+### Bug Fixes
+
+* **form:** allow scientific notation fallback on ParseInt range errors ([424c789](https://github.com/microsoft/kiota-serialization-form-go/commit/424c789ad544946fd8fa5d6ee401a08dabc4fd07))
+* **form:** improve int32 parsing and support int8 primitive collections ([60c8680](https://github.com/microsoft/kiota-serialization-form-go/commit/60c8680fe3bff66e05ba4c75b1b9f3f8e19d2e55))
+* **form:** improve int32 parsing and support int8 primitive collections ([464ea91](https://github.com/microsoft/kiota-serialization-form-go/commit/464ea91ea0e9461eaeb7679c3fa48297f2315aec))
+* **form:** validate float bounds before integer conversion and sequence float check ([75b6b0b](https://github.com/microsoft/kiota-serialization-form-go/commit/75b6b0b8b3cc99bad6196ecc718b454d05146d60))
+* **form:** validate full precision exponent tokens using big.Rat to prevent float64 rounding overflow ([66eff78](https://github.com/microsoft/kiota-serialization-form-go/commit/66eff78ac8132d50ab2ccf4f28e099cc4c14147c))
+
+## [1.1.4](https://github.com/microsoft/kiota-serialization-form-go/compare/v1.1.3...v1.1.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* preserve decoded form field values and embedded equals ([3b51599](https://github.com/microsoft/kiota-serialization-form-go/commit/3b51599fe1715386779c73eab79b1b0b88baca44))
+* preserve form field values during deserialization ([14e3f79](https://github.com/microsoft/kiota-serialization-form-go/commit/14e3f79f77c54b23ffe015c84eb9b9d6d8451503))
+* preserve int64 precision and unsigned byte values in form parsing ([51c2cf7](https://github.com/microsoft/kiota-serialization-form-go/commit/51c2cf794776f338335c9a6641c88626d490fd39))
+* preserve int64 precision and unsigned byte values in form parsing ([fca913c](https://github.com/microsoft/kiota-serialization-form-go/commit/fca913c8b2b4218e5ca7eab9b3aac9642953fe0b))
+* preserve range errors for form int64 values ([b353fb9](https://github.com/microsoft/kiota-serialization-form-go/commit/b353fb93332ac59f2821446e5815d94a5f3edafe))
+
 ## [1.1.3](https://github.com/microsoft/kiota-serialization-form-go/compare/v1.1.2...v1.1.3) (2026-03-13)
 
 
