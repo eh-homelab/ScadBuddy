@@ -22,8 +22,8 @@
     "gen:tools": "pnpm build && node dist/export-tools.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.302",
-    "@anthropic-ai/sdk": "^0.135.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.306",
+    "@anthropic-ai/sdk": "^1.0.0",
     "@hono/node-server": "^2.1.5",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@opentelemetry/api": "1.9.1",
@@ -41,7 +41,7 @@
     "@temporalio/workflow": "1.24.0",
     "cron-parser": "5.10.2",
     "hono": "^4.13.13",
-    "jose": "^6.2.12",
+    "jose": "^6.2.13",
     "openapi-fetch": "^0.17.0",
     "postgres": "^3.4.9",
     "quickjs-emscripten": "0.32.0",
@@ -52,17 +52,17 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opentelemetry/context-async-hooks": "2.12.0",
+    "@opentelemetry/context-async-hooks": "3.0.0",
     "@temporalio/testing": "1.24.0",
     "@types/node": "^24.19.2",
     "@types/turndown": "5.0.6",
     "@types/ws": "^8.18.2",
-    "eslint": "^10.12.0",
+    "eslint": "^10.13.0",
     "globals": "^17.13.0",
     "msw": "^2.15.0",
     "openapi-typescript": "^7.13.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.71.2",
+    "typescript-eslint": "^8.72.0",
     "vitest": "^5.0.5"
   }
 }

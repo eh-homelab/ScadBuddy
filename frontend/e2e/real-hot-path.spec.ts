@@ -16,8 +16,9 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  *   E2E_PRINTER_URL    the fake printer's control port (`GET /__received`)
  *   E2E_RECORDER_URL   the recorder (`GET /__recorded`), in recorder mode
  *
- * The recorder pass fails until #4601: with a URL set, the Customize page lists Bambuddy's
- * projects and the dialog's first read (no printer named) asks Bambuddy, which fails.
+ * With a URL set the native dialog's analyzers read the registry, the report and the
+ * overlay, and the Prints page reads Bambuddy's queue and history only once opened
+ * (#4629), so the recorder pass sees no call at all.
  *
  * It prints once per stack: the seed clears both fakes' lists, and a retry would find
  * the first attempt's print in them, so it never retries.
@@ -112,7 +113,9 @@ test.describe('native hot path (real stack)', () => {
     const received = (await (await request.get(`${printerUrl}/__received`)).json()) as Received
     const starts = received.mqtt.filter((message) => message.print?.command === 'project_file')
     expect(starts).toHaveLength(1)
-    const start = starts[0].print!
+    const start = starts[0]?.print
+    expect(start, 'the project_file command').toBeDefined()
+    if (!start) return
     expect(start.ams_mapping).toEqual([WHITE.tray, PINK.tray])
     expect(received.ftps).toHaveLength(1)
     expect(received.ftps[0].md5).toBe(start.md5?.toLowerCase())

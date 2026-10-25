@@ -14,6 +14,7 @@ run's failure, recorded with its text.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Mapping
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
@@ -26,11 +27,14 @@ from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_previe
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import OutputSource
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.kinds import KindsBuild, OperationKind
+from scadbuddy.library.operations import PIN_TIMEOUT
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
+from scadbuddy.orders import attachments
 from scadbuddy.orders.component import ORDERS
-from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT
+from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor
-from scadbuddy.orders.problems import PROBLEMS
+from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
     QuoteRun,
@@ -47,6 +51,7 @@ if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
 
 ORDER_ITEM_QUOTE = "order_item_quote"
+ORDER_ATTACHMENT_ADD = "order_attachment_add"
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -234,7 +239,68 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = quote.model_dump(mode="json")
         return dumped
 
+    async def attachment_check(request: dict[str, Any]) -> dict[str, Any]:
+        """The order, and the item when one is named, are there (nothing written)."""
+        store = components.get(ORDERS).store
+        order = await asyncio.to_thread(store.order, request["order_id"])
+        if order is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {request['order_id']!r}")
+        item_id = request["item_id"]
+        if item_id is not None:
+            item = await asyncio.to_thread(store.item, item_id)
+            if item is None or item.order_id != order.id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
+                )
+        return {}
+
+    async def attachment_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """The claimed upload kept as its blob, then the row with its hold (§6.2). A
+        failure after the blob is kept leaves a blob no row holds, which the blob sweep
+        takes once its grace is past."""
+        orders = components.get(ORDERS)
+        claims = ClaimStore(core.paths.claims)
+        try:
+            key = await attachments.keep(core.store.blobs, claims, request["file"], request["file"])
+        except LookupError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "this request's upload is no longer held; send it again",
+            ) from None
+        try:
+            attachment = await to_thread_to_end(
+                lambda: orders.lifecycle.add_attachment(
+                    request["order_id"],
+                    request["item_id"],
+                    Actor.model_validate(request["by"]),
+                    # Made here, not in the request, so a re-sent upload (the same
+                    # Idempotency-Key) is the same request; the run has one attempt.
+                    attachment_id=str(uuid.uuid4()),
+                    kind=request["kind"],
+                    role=request["role"],
+                    filename=request["filename"],
+                    media_type=request["media_type"],
+                    size_bytes=request["size"],
+                    sha256=request["file"],
+                    blob_key=key,
+                    caption=request["caption"],
+                )
+            )
+        except LifecycleError as error:
+            raise refused(error) from None
+        dumped: dict[str, Any] = attachment.model_dump(mode="json")
+        return dumped
+
     return [
+        OperationKind(
+            ORDER_ATTACHMENT_ADD,
+            attachment_check,
+            attachment_run,
+            queue="library",
+            # Moves (or copies) up to the upload limit into the blob store and publishes it.
+            run_timeout=PIN_TIMEOUT,
+            where="the order's attachments",
+        ),
         OperationKind(
             ORDER_ITEM_QUOTE,
             quote_check_kind,
@@ -246,7 +312,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             # The render and every plate's slice outlast the command deadline: the
             # caller follows the operation anyway.
             answers_running=True,
-        )
+        ),
     ]
 
 

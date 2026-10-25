@@ -288,8 +288,8 @@ def test_a_declined_pick_says_the_printer_picks_an_abrasives_nozzle() -> None:
 def test_the_hand_picked_positions_notes_name_the_printer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#4586 review: over the LAN, what ``manual_for`` says of the hand-picked position
-    names the printer, as `rack_warnings` does, never Bambuddy."""
+    """#4586 review: over the LAN, `choose_nozzles` hands ``manual_for`` the printer as
+    the picker, never Bambuddy (#4630, #4650 reviews)."""
     asked: list[dict[str, Any]] = []
 
     def recorded(*args: Any, **kwargs: Any) -> Any:

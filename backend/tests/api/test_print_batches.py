@@ -21,8 +21,13 @@ from scadbuddy.api import library_print, print_batches
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.print_batches import batch_request_id
 from scadbuddy.api.printing import STILL_CHECKING_DETAIL, _answered
-from scadbuddy.bambuddy.print_run import PICK_AGAIN, PrintRunRequest, _named_printer
-from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.print_run import (
+    DISAGREEING_PRINTER_PROBLEM,
+    PICK_AGAIN,
+    PrintRunRequest,
+    _named_printer,
+)
+from scadbuddy.bambuddy.runs import PrintRunError, PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.batches.store import (
     BatchChoice,
@@ -56,7 +61,8 @@ def _no_background_prune(monkeypatch: pytest.MonkeyPatch) -> None:
     """The app's prune Schedule runs once at boot whatever the sweep interval, and its
     claims sweep prunes the batches on this test's schema at any point of the test
     (#4639): it pruned the batch a test had aged before the test's own prune could, and
-    deadlocked with an outcome. These tests run the prune themselves."""
+    deadlocked with an outcome. These tests run the prune themselves. The stub is the
+    claims sweep's too, so no test here may rely on claims being swept (#4640 review)."""
 
     async def no_sweep(_state: object) -> None:
         return None
@@ -418,6 +424,7 @@ class _OneRow:
         # #4577 review: re-linked to another Bambuddy printer since, the other refusal.
         (2, "Garage is Bambuddy printer 2 now, not 1."),
     ],
+    ids=["unlinked", "relinked"],
 )
 async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_edit(
     monkeypatch: pytest.MonkeyPatch, linked: int | None, why: str
@@ -427,11 +434,15 @@ async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_
     printer there. The refusal is `_named_printer`'s own, carried as the run's refusal
     is, through the workflow's problem document and back."""
 
+    refused: list[PrintRunError] = []
+
     async def answers(*_: Any, **__: Any) -> Any:
         try:
             await _named_printer("garage", 1, StoredSettings(), cast(PrinterStore, _OneRow(linked)))
         except ApiError as error:
-            _answered(AcceptAnswer(refusal=problem(error)))
+            refusal = problem(error)
+            refused.append(refusal)
+            _answered(AcceptAnswer(refusal=refusal))
         raise AssertionError("the named printer was not refused")
 
     monkeypatch.setattr(print_batches, "start_library_run", answers)
@@ -445,6 +456,13 @@ async def test_a_step_whose_printer_was_unlinked_or_relinked_says_which_step_to_
     assert (result.status, result.detail) == (
         "refused",
         f"disagreeing printer: {why} Edit bracket.3mf and pick its printer again.",
+    )
+    # #4589: either branch is the one problem type, its reason without PICK_AGAIN, and
+    # both survive the problem document the batch reads the refusal from.
+    [refusal] = refused
+    assert (refusal.type, refusal.extensions["reason"]) == (
+        DISAGREEING_PRINTER_PROBLEM,
+        f"disagreeing printer: {why}",
     )
 
 

@@ -29,7 +29,7 @@ from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.store import file_type_of
 from scadbuddy.workflows import print_activities, printing
 from scadbuddy.workflows.print_models import NativeSliced, SlicedUploadInput, SliceRunInput
-from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status
+from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status, slice_failure
 from scadbuddy.workflows.slicing_activities import RunActivities, _refused
 from scadbuddy.workflows.slicing_models import SLICE_REFUSED
 
@@ -151,6 +151,44 @@ def test_failure_status(error: ApplicationError, expected: int) -> None:
     server's own lack 503, any other failure 502."""
     assert error.type in (SLICE_REFUSED, "SlicerError", "SomethingElse")
     assert failure_status(error) == expected
+
+
+def _slicer_error(**details: object) -> ApplicationError:
+    return ApplicationError("x", details, type="SlicerError")
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"exit_code": 139, "stderr_tail": "segfault\n"}, "The slicer failed: segfault"),
+        (
+            {"exit_code": 192, "stderr_tail": "plate 99 is empty"},
+            "The slicer refused the plate: plate 99 is empty",
+        ),
+        # #4638: an empty plate's reason is only in the CLI's log, never on stderr.
+        (
+            {
+                "exit_code": 206,
+                "stderr_tail": "",
+                "errors": "plate 2: Nothing to be sliced, Either the print is empty",
+            },
+            "The slicer failed: plate 2: Nothing to be sliced, Either the print is empty",
+        ),
+        # stderr, when it says anything, is still what is reported.
+        (
+            {"exit_code": 156, "stderr_tail": "The print is empty.", "errors": "partplate 5"},
+            "The slicer failed: The print is empty.",
+        ),
+        # Neither says why: the exit code does, never a bare "The slicer failed:".
+        (
+            {"exit_code": 206, "stderr_tail": " \n", "errors": ""},
+            "The slicer failed (exit code 206).",
+        ),
+        ({}, "The slicer failed."),
+    ],
+)
+def test_a_failed_slice_says_why(details: dict[str, object], expected: str) -> None:
+    assert slice_failure(_slicer_error(**details), "slicer") == expected
 
 
 def _timed_out(kind: TimeoutType, retry_state: RetryState = RetryState.TIMEOUT) -> ActivityError:

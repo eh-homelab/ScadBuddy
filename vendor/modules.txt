@@ -22,7 +22,7 @@ github.com/google/uuid
 github.com/grpc-ecosystem/grpc-gateway/v2/internal/httprule
 github.com/grpc-ecosystem/grpc-gateway/v2/runtime
 github.com/grpc-ecosystem/grpc-gateway/v2/utilities
-# github.com/hanwen/go-fuse/v2 v2.12.0
+# github.com/hanwen/go-fuse/v2 v2.12.1
 ## explicit; go 1.21
 github.com/hanwen/go-fuse/v2/fs
 github.com/hanwen/go-fuse/v2/fuse
@@ -35,25 +35,35 @@ github.com/hanwen/go-fuse/v2/internal/utimens
 github.com/hanwen/go-fuse/v2/internal/xattr
 github.com/hanwen/go-fuse/v2/splice
 # github.com/microsoft/kiota-abstractions-go v1.11.1
-## explicit; go 1.25.0
+## explicit; go 1.26.0
+# github.com/microsoft/kiota-abstractions-go v1.11.4
+## explicit; go 1.26.0
 github.com/microsoft/kiota-abstractions-go
 github.com/microsoft/kiota-abstractions-go/authentication
 github.com/microsoft/kiota-abstractions-go/serialization
 github.com/microsoft/kiota-abstractions-go/store
-# github.com/microsoft/kiota-http-go v1.5.7
-## explicit; go 1.25.0
+# github.com/microsoft/kiota-http-go v1.5.9
+## explicit; go 1.26.0
 github.com/microsoft/kiota-http-go
 # github.com/microsoft/kiota-serialization-form-go v1.1.3
-## explicit; go 1.23.0
+## explicit; go 1.25.0
+# github.com/microsoft/kiota-serialization-form-go v1.1.5
+## explicit; go 1.25.0
 github.com/microsoft/kiota-serialization-form-go
 # github.com/microsoft/kiota-serialization-json-go v1.1.4
-## explicit; go 1.23.0
+## explicit; go 1.25.0
+# github.com/microsoft/kiota-serialization-json-go v1.1.5
+## explicit; go 1.25.0
 github.com/microsoft/kiota-serialization-json-go
 # github.com/microsoft/kiota-serialization-multipart-go v1.1.2
-## explicit; go 1.23.0
+## explicit; go 1.25.0
+# github.com/microsoft/kiota-serialization-multipart-go v1.1.4
+## explicit; go 1.25.0
 github.com/microsoft/kiota-serialization-multipart-go
 # github.com/microsoft/kiota-serialization-text-go v1.1.3
-## explicit; go 1.23.0
+## explicit; go 1.25.0
+# github.com/microsoft/kiota-serialization-text-go v1.1.5
+## explicit; go 1.25.0
 github.com/microsoft/kiota-serialization-text-go
 # github.com/std-uritemplate/std-uritemplate/go/v2 v2.0.12
 ## explicit; go 1.20

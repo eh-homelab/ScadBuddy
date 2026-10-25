@@ -122,7 +122,12 @@ def _summary_json(summary: BatchSummary | None) -> Jsonb | None:
 
 
 class PrintBatchStore:
-    """``print_batches`` and ``print_batch_items`` on the process's pool."""
+    """``print_batches`` and ``print_batch_items`` on the process's pool.
+
+    Lock order (#4639): every write that touches both tables locks the batch's row
+    first, through `_lock_batch`. The prune's and the delete's ``DELETE`` already lock
+    the batch's row before the cascade reaches the files'; a write taking a file's row
+    first deadlocks with them (#4657 review)."""
 
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool

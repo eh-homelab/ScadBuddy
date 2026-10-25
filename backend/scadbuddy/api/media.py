@@ -470,7 +470,7 @@ MAX_CONCURRENT_THUMBNAILS = 2
 THUMBNAIL_CACHE_ITEMS = 512
 
 
-def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
+def shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
     """``file`` shrunk to a WebP no larger than ``side``, or None when Pillow
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
@@ -512,7 +512,7 @@ class _Thumbnail:
 
 
 def _thumbnail_of(path: FilePath, content_type: str, side: int = THUMBNAIL_SIDE) -> _Thumbnail:
-    """``path`` shrunk by `_shrink`, or as it is (typed ``content_type``) when it
+    """``path`` shrunk by `shrink`, or as it is (typed ``content_type``) when it
     cannot be. The stat and the bytes come from one open handle, so the legacy
     item's ETag describes what is served even if a thumbnail PUT replaces the file
     meanwhile (#1689). ``FileNotFoundError`` when the file is gone. The fallback is
@@ -520,7 +520,7 @@ def _thumbnail_of(path: FilePath, content_type: str, side: int = THUMBNAIL_SIDE)
     `MAX_CONCURRENT_THUMBNAILS` are held at once."""
     with path.open("rb") as file:
         stat = os.fstat(file.fileno())
-        small = _shrink(file, side)
+        small = shrink(file, side)
         if small is not None:
             return _Thumbnail(small, "image/webp", stat)
         file.seek(0)
@@ -561,6 +561,19 @@ class _ThumbnailCache:
             self._items.popitem(last=False)
 
 
+def decode_slots(request: Request) -> asyncio.Semaphore:
+    """The app's one limit on thumbnail decodes (`MAX_CONCURRENT_THUMBNAILS`), shared by
+    every route that shrinks an image, made on first use so it belongs to the loop that
+    serves the app. No await separates the read from the write, so two first requests
+    on the loop cannot make two."""
+    state = request.app.state
+    decodes: asyncio.Semaphore | None = getattr(state, "thumbnail_decodes", None)
+    if decodes is None:
+        decodes = asyncio.Semaphore(MAX_CONCURRENT_THUMBNAILS)
+        state.thumbnail_decodes = decodes
+    return decodes
+
+
 async def _bounded_thumbnail_of(
     request: Request, path: FilePath, content_type: str, side: int
 ) -> _Thumbnail:
@@ -570,10 +583,7 @@ async def _bounded_thumbnail_of(
     ahead of it made. The semaphore and the cache are the app's, made on first use,
     so they belong to the loop that serves the app."""
     state = request.app.state
-    decodes: asyncio.Semaphore | None = getattr(state, "thumbnail_decodes", None)
-    if decodes is None:
-        decodes = asyncio.Semaphore(MAX_CONCURRENT_THUMBNAILS)
-        state.thumbnail_decodes = decodes
+    decodes = decode_slots(request)
     cache: _ThumbnailCache | None = getattr(state, "thumbnail_cache", None)
     if cache is None:
         cache = _ThumbnailCache()

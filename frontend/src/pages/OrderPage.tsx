@@ -4,6 +4,8 @@ import { api } from '../api/client'
 import type { OrderDetail, OrderItemDetail } from '../api/types'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
+import { ItemPicture } from '../components/orders/ItemPicture'
+import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
 import { itemPrice } from '../components/orders/price'
@@ -80,7 +82,7 @@ export function OrderPage() {
       </div>
     )
   }
-  const { order, items, totals, charges, payments, shipments } = detail
+  const { order, items, totals, charges, payments, shipments, attachments } = detail
   const editable = OPEN_FOR_EDITS.has(order.status)
   const ended = ENDED.has(order.status)
   const titles = new Map(items.map((i) => [i.id, i.title]))
@@ -157,7 +159,7 @@ export function OrderPage() {
           </p>
         )}
 
-        <OrderItemsTable items={items} currency={order.currency} exponent={order.minor_exponent} onOpen={(item) => setOpenItem(item.id)} />
+        <OrderItemsTable orderId={order.id} items={items} attachments={attachments} currency={order.currency} exponent={order.minor_exponent} onOpen={(item) => setOpenItem(item.id)} />
 
         <div className="grid gap-4 md:grid-cols-2">
           <Card size="sm">
@@ -283,6 +285,12 @@ export function OrderPage() {
 
         <Card size="sm">
           <CardContent>
+            <OrderAttachments orderId={order.id} attachments={attachments.filter((a) => a.item_id === null)} onChanged={reload} />
+          </CardContent>
+        </Card>
+
+        <Card size="sm">
+          <CardContent>
             <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} onChanged={reload} />
           </CardContent>
         </Card>
@@ -365,6 +373,7 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
         )
       }
     >
+      <ItemPicture orderId={order.id} item={item} attachments={detail.attachments} size="lg" />
       <form
         className="flex flex-wrap items-end gap-2"
         onSubmit={(event) => {
@@ -410,6 +419,13 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
       </dl>
       <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} />
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} />
+      <OrderAttachments
+        orderId={order.id}
+        itemId={item.id}
+        attachments={detail.attachments.filter((a) => a.item_id === item.id)}
+        deliveredId={item.delivered_attachment_id ?? null}
+        onChanged={onChanged}
+      />
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}

@@ -30,7 +30,7 @@ from scadbuddy.api.media import (
     LEGACY_CACHE_CONTROL,
     MAX_CONCURRENT_THUMBNAILS,
     THUMBNAIL_VERSION,
-    _shrink,
+    shrink,
 )
 from scadbuddy.attachments.component import PrintAttachmentsDep
 from scadbuddy.bambuddy.attachments import file_path as attachment_file_path
@@ -239,7 +239,7 @@ async def _card_photo(
     async with decodes:
         if (kept := cache.get(key)) is not None:
             return kept
-        small = await asyncio.to_thread(_shrink, io.BytesIO(original), CARD_SIDE)
+        small = await asyncio.to_thread(shrink, io.BytesIO(original), CARD_SIDE)
     if small is None:
         return original, content_type
     cache.put(key, (small, "image/webp"))
