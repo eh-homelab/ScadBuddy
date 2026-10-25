@@ -290,6 +290,9 @@ class ArrangeInputs(BaseModel):
     provenance: dict[str, ManifestObject] = Field(default_factory=dict)
     #: The outputs the objects came from, then each plain library file as `library:<id>`.
     sources: list[str] = Field(default_factory=list)
+    #: What the request asked for that the arrange leaves out (a planned spool whose
+    #: colour no copy prints in): the job's `warnings` (`api/jobs.py` `_job_status`).
+    notes: list[str] = Field(default_factory=list)
 
 
 class OutputRef(BaseModel):

@@ -10,6 +10,7 @@ import pytest
 import trimesh
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.api.jobs import _job_status
 from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, arrange_inputs
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.library_objects import LibraryObjects, piece_key, publish_library_pieces
@@ -18,12 +19,13 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, bounding_box
-from scadbuddy.render.job_models import ManifestObject
+from scadbuddy.render.job_models import Job, ManifestObject, now
 from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.split import ColourPart
 from scadbuddy.template import Part
 from scadbuddy.workflows.arrange import arrange, part_of
 from scadbuddy.workflows.models import (
+    ArrangeInputs,
     Layout,
     LayoutPlate,
     OutputRequest,
@@ -447,3 +449,40 @@ async def test_a_subsets_plan_keeps_each_spool_on_its_colour(tmp_path: Path) -> 
     _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
     assert inputs.filament_plan is not None
     assert inputs.filament_plan.slots == {1: 9}
+    # The dropped slot's spool is said, not lost without a word (#4684 review).
+    assert inputs.notes == [
+        f"filament_plan slot 1 (spool 7) is {GOLD}, which no copy prints in: that spool is not used"
+    ]
+    assert inputs.notes == _job_status(_arrange_job(inputs), None).warnings
+
+
+def _arrange_job(inputs: ArrangeInputs) -> Job:
+    return Job(
+        id="j",
+        slug="demo",
+        kind="arrange",
+        inputs=inputs.model_dump(mode="json"),
+        created_at=now(),
+    )
+
+
+async def test_a_plan_with_a_recolour_follows_the_colours_left(tmp_path: Path) -> None:
+    """#4684 review: a recolour and a plan with no colours given. The source's colour is
+    swapped away (#3637), so its slot and its spool go, and the new colour's slot,
+    numbered after it in the source's order, becomes slot 1."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    own = entry.colours[0].upper()
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part, recolour={own: MAGENTA})],
+        filament_plan=FilamentPlan.model_validate(
+            {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 2, "spool_id": 9}]}
+        ),
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert inputs.colours == [MAGENTA]
+    assert inputs.filament_plan is not None
+    assert inputs.filament_plan.slots == {1: 9}
+    assert inputs.notes == [
+        f"filament_plan slot 1 (spool 7) is {own}, which no copy prints in: that spool is not used"
+    ]

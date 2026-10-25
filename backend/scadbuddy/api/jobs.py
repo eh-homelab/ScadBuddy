@@ -280,6 +280,15 @@ class ModelDiagnostics(BaseModel):
     diagnostics_dropped: int = Field(default_factory=int)
 
 
+def _arranged_notes(job: Job) -> list[str]:
+    """An arrange's own notes (`ArrangeInputs.notes`): what its request asked for that it
+    leaves out, said beside the result's warnings."""
+    if job.kind != "arrange":
+        return []
+    notes = (job.inputs or {}).get("notes")
+    return [str(note) for note in notes] if isinstance(notes, list) else []
+
+
 def _job_status(job: Job, preview_url: str | None) -> JobStatus:
     result = job.result
     return JobStatus(
@@ -297,7 +306,8 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         preview_url=preview_url if result is not None else None,
         bbox_mm=result.bbox_mm if result else None,
         colors=result.colors if result else None,
-        warnings=result.warnings if result else job.warnings or None,
+        warnings=[*(result.warnings if result else job.warnings), *_arranged_notes(job)]
+        or (result.warnings if result else None),
         notes=result.notes if result else None,
         parts=result.parts if result else None,
         plates=result.plates if result else None,
