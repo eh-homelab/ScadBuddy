@@ -118,6 +118,18 @@ test.describe('orders', () => {
     await expect(lines).toContainText('Filament')
   })
 
+  // #4693 — a link to a line item opens the order with that item marked and open, and
+  // opening a row puts it in the URL.
+  test('opens a line item from a link to it', async ({ page }) => {
+    await page.goto('/orders/0e5a3c1e-1111-4222-8333-944455556661?item=7b1c2d3e-4f50-4617-8829-aabbccddee01')
+    await expect(page.getByRole('dialog', { name: 'Name Keychain' })).toBeVisible()
+    await expect(page.locator('#item-7b1c2d3e-4f50-4617-8829-aabbccddee01')).toHaveAttribute('aria-current', 'true')
+    await page.getByRole('dialog', { name: 'Name Keychain' }).getByRole('button', { name: 'Close' }).click()
+    await expect(page).toHaveURL(/\/orders\/0e5a3c1e-1111-4222-8333-944455556661$/)
+    await page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Name Keychain' }).click()
+    await expect(page).toHaveURL(/\?item=7b1c2d3e-4f50-4617-8829-aabbccddee01$/)
+  })
+
   test('estimates an output from Add to order', async ({ page }) => {
     await page.goto('/m/name-keychain')
     const generate = page.getByTestId('generate')

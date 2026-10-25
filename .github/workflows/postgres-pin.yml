@@ -1,0 +1,25 @@
+# The workflows' Postgres service containers are pinned by digest (#4729): they pull
+# from mirror.gcr.io with no Docker Hub fallback, and a moving tag once reached a layer
+# the mirror lacked. This checks weekly that the mirror still holds every blob of the
+# pin and that postgres:17 has not moved; a failure is the reminder to move the pin in
+# a reviewed PR, as rust-toolchain-pin.yml is for its pin.
+name: Postgres pin
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Check the pin against the mirror
+        run: .github/scripts/postgres-pin.sh --check

@@ -1,13 +1,19 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { OrderItem, Quote } from '../../api/types'
+import type { OrderItem, Quote, SliceQuoteRequest } from '../../api/types'
 import { formatMoney } from '../../lib/money'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
 import { refusalText } from './refusal'
+import type { SliceQuoteRun } from './useSliceQuotes'
+
+function startTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
 
 /** A quote line's kind as the drawer names it (§3.4, #4250 Ruling 5). */
 const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
@@ -24,7 +30,8 @@ const LINE_KINDS: Record<Quote['lines'][number]['kind'], string> = {
  * A typed price for a line item (§3.4's `manual` quote, plan Ruling 1), a quote from a
  * slice of it (#4250: the print dialog in its quote mode, which slices every plate and
  * prices it with the price book), and the item's quotes with their lines and the accepted
- * one marked. `editable` while the order is draft or quoted.
+ * one marked. `editable` while the order is draft or quoted. The slice quote runs on the
+ * page (`slice`, #4693), so it outlives the dialog and this drawer.
  */
 export function QuoteEditor({
   orderId,
@@ -35,6 +42,7 @@ export function QuoteEditor({
   editable,
   onChanged,
   item,
+  slice,
 }: {
   orderId: string
   itemId: string
@@ -46,6 +54,8 @@ export function QuoteEditor({
   onChanged: () => void
   /** What a slice quote slices: the item's output and its colours' filaments. */
   item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'>
+  /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
+  slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
 }) {
   const [slicing, setSlicing] = useState(false)
   const [price, setPrice] = useState('')
@@ -125,13 +135,35 @@ export function QuoteEditor({
           ))}
         </ul>
       )}
-      {editable && item && (
+      {slice?.run && !slice.run.error && (
+        <p role="status" className="flex items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
+          <Spinner />
+          {slice.run.detached
+            ? `No answer from the quote started at ${startTime(slice.run.startedAt)}: it may still be slicing, and shows here when it lands. If it never started, stop waiting and quote again.`
+            : `Slicing every plate and pricing it, since ${startTime(slice.run.startedAt)}…`}
+          {/* No longer followed, so a failure would never show: the user may stop waiting. */}
+          {slice.run.detached && (
+            <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
+              Stop waiting
+            </Button>
+          )}
+        </p>
+      )}
+      {slice?.run?.error && (
+        <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn" data-testid="quote-error">
+          The slice quote failed: {slice.run.error}
+          <Button type="button" size="xs" variant="ghost" onClick={slice.dismiss}>
+            Dismiss
+          </Button>
+        </p>
+      )}
+      {editable && item && slice && (
         <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
             size="sm"
             variant="outline"
-            disabled={busy || !item.output_id}
+            disabled={busy || !item.output_id || (slice.run !== undefined && !slice.run.error)}
             onClick={() => setSlicing(true)}
             data-testid="quote-from-slice"
           >
@@ -142,7 +174,7 @@ export function QuoteEditor({
           )}
         </div>
       )}
-      {item?.output_id && slicing && (
+      {item?.output_id && slice && slicing && (
         <PrintPicker
           open
           source={{ kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }}
@@ -152,7 +184,7 @@ export function QuoteEditor({
             orderId,
             itemId,
             filaments: Object.fromEntries(item.colours.map((colour) => [String(colour.slot), colour.filament_id ?? null])),
-            onQuoted: onChanged,
+            start: slice.start,
           }}
         />
       )}
