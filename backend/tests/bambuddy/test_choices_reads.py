@@ -26,12 +26,14 @@ from scadbuddy.bambuddy import catalogue, choices
 from scadbuddy.bambuddy.catalogue import cached_catalogue
 from scadbuddy.bambuddy.choices import choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
 from scadbuddy.bambuddy.print_run import PrintRunRequest, check_print
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.slicing.conftest import PROFILES
@@ -95,6 +97,14 @@ def _expire(cache: Path) -> None:
     wall clock that steps back (WSL's does) reads as a file not yet written."""
     (kept,) = (cache / catalogue.CATALOGUE_DIRNAME).iterdir()
     os.utime(kept, (0, 0))
+
+
+async def _refreshes_done() -> None:
+    """Wait for this process's background refreshes: the one place these tests reach
+    into the module's running reads (#4717 review). A refresh that hangs fails the test
+    within 5 s rather than stalling it."""
+    async with asyncio.timeout(5):
+        await asyncio.gather(*catalogue._refreshing.values())
 
 
 class _HeldPresets:
@@ -254,8 +264,7 @@ async def test_an_expired_catalogue_answers_at_once_and_is_read_again_behind_it(
     assert len(catalogue._refreshing) == 1
 
     asked.set()
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
     assert local.call_count == 2
     assert not catalogue._refreshing
     assert catalogue._load(next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()))
@@ -271,7 +280,7 @@ async def test_a_failed_refresh_keeps_the_old_catalogue(
     presets.mock(return_value=httpx.Response(500))
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     assert presets.call_count == 2
     catalogue.forget_catalogues()
@@ -291,7 +300,7 @@ async def test_a_refresh_whose_local_presets_read_fails_keeps_the_old_catalogue(
     local.mock(return_value=httpx.Response(500))
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     assert local.call_count == 2
     assert kept.stat().st_mtime == 0  # not rewritten
@@ -430,8 +439,7 @@ async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
     # Read again behind it, and kept for the next open.
     assert len(catalogue._refreshing) == 1
     held.release.set()
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
     assert held.started == 1
     assert kept.exists()
 
@@ -457,8 +465,7 @@ async def test_a_miss_that_persists_counts_its_opens_in_a_row(
         """An open that answers the held copy; the refresh it starts keeps a file, which
         goes again, so the file stays away."""
         await cached_catalogue(bambuddy, tmp_path)
-        async with asyncio.timeout(5):
-            await asyncio.gather(*catalogue._refreshing.values())
+        await _refreshes_done()
         kept.unlink(missing_ok=True)
 
     # Each open answers the held copy while the file is away, and reads it once back.
@@ -517,8 +524,7 @@ async def test_a_refresh_that_cannot_be_kept_still_answers_the_next_open(
     monkeypatch.setattr(catalogue, "_keep", full)
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     assert await cached_catalogue(bambuddy, tmp_path) == fresh
 
@@ -534,7 +540,7 @@ async def test_a_malformed_refresh_keeps_the_old_catalogue_and_logs_only_its_typ
     presets.mock(return_value=httpx.Response(200, json={"cloud": "leaked-body-text"}))
 
     assert await cached_catalogue(bambuddy, tmp_path) == first
-    await asyncio.gather(*catalogue._refreshing.values())
+    await _refreshes_done()
 
     (record,) = [r for r in caplog.records if "refresh" in r.getMessage()]
     assert record.__dict__["error"] == "ValidationError"
@@ -948,3 +954,121 @@ async def test_the_checks_early_reads_fail_in_the_order_they_were_read_in(
     )
     with pytest.raises(expected, match=said):
         await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+
+
+def _sidecar_unanswered() -> httpx.Response:
+    """/slicer/presets as Bambuddy answered it while its slicer sidecar timed out
+    (#4717): ``_fetch_bundled_presets`` leaves the standard tier empty with no error or
+    status, and ``_enrich_cloud_metadata``, with no standard row to copy from, leaves
+    every cloud row's ``compatible_printers`` empty."""
+    body = recording("slicer-presets-h2c.json")
+    body["standard"] = {"printer": [], "process": [], "filament": []}
+    for slot in body["cloud"].values():
+        for row in slot:
+            row["compatible_printers"] = []
+    return httpx.Response(200, json=body)
+
+
+@respx.mock
+async def test_a_catalogue_read_without_its_standard_tier_is_bambuddy_unavailable(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4717: a read whose cloud tier lists presets but whose standard tier lists none is
+    a sidecar that did not answer, not a catalogue; kept, it refused every process as
+    "not a process Bambuddy has". It is a 503 that says why, and nothing is kept."""
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        side_effect=[_sidecar_unanswered(), _ok("slicer-presets-h2c.json")]
+    )
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    with pytest.raises(ApiError) as raised:
+        await cached_catalogue(bambuddy, tmp_path)
+
+    assert raised.value.status == 503
+    assert raised.value.type == UNAVAILABLE_PROBLEM
+    assert is_transient(raised.value)
+    assert "standard" in raised.value.detail
+    assert "not configured" in raised.value.detail
+    assert not (tmp_path / catalogue.CATALOGUE_DIRNAME).exists()
+    assert (await cached_catalogue(bambuddy, tmp_path)).process
+    assert presets.call_count == 2
+
+
+@respx.mock
+async def test_the_runs_fresh_read_without_its_standard_tier_is_bambuddy_unavailable(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4717: the run reads the catalogue fresh, and the same answer fails it the same way."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=_sidecar_unanswered())
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    with pytest.raises(ApiError) as raised:
+        await catalogue_for(bambuddy, native=None)
+
+    assert raised.value.type == UNAVAILABLE_PROBLEM
+
+
+@respx.mock
+async def test_preset_names_still_read_without_the_standard_tier(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4717: the native slicer reads only names, which need no standard tier, so a read
+    the sidecar did not answer still names a cloud ref."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=_sidecar_unanswered())
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    cloud = recording("slicer-presets-h2c.json")["cloud"]["process"][0]
+
+    names = await catalogue.read_preset_names(bambuddy)
+
+    assert names[("cloud", cloud["id"])] == cloud["name"]
+
+
+@respx.mock
+async def test_a_refresh_without_the_standard_tier_keeps_the_old_catalogue(
+    bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4717: the dialog's kept copy is not replaced by a read the sidecar did not answer,
+    and the log says which problem refused it, so a busy sidecar shows as one."""
+    presets, _ = _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    _expire(tmp_path)
+    presets.mock(return_value=_sidecar_unanswered())
+    caplog.set_level(logging.WARNING, logger=catalogue.__name__)
+
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+    await _refreshes_done()
+
+    assert presets.call_count == 2
+    assert kept.stat().st_mtime == 0  # not rewritten
+    (failed,) = [r for r in caplog.records if "could not refresh" in r.getMessage()]
+    assert failed.__dict__["problem"] == UNAVAILABLE_PROBLEM
+    catalogue.forget_catalogues()
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_a_failed_local_presets_read_beats_a_read_without_the_standard_tier(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4717 review: the reads' failures surface in their order (``settled``), so a
+    failed /local-presets/ read is still what a read without the standard tier says."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=_sidecar_unanswered())
+    respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(500))
+
+    with pytest.raises(ApiError) as raised:
+        await catalogue_for(bambuddy, native=None)
+
+    assert "local presets" in raised.value.detail
+
+
+@respx.mock
+async def test_an_all_empty_catalogue_still_reads(bambuddy: BambuddyClient, tmp_path: Path) -> None:
+    """#4717: with no cloud presets either, an empty standard tier is no sign of a
+    sidecar that did not answer, and the catalogue reads as it did."""
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    read = await cached_catalogue(bambuddy, tmp_path)
+
+    assert not [row for row in read.process if row.ref.source in ("cloud", "standard")]

@@ -205,8 +205,8 @@ def native_ref(profiles: Profiles, ref: PresetRef) -> PresetRef | None:
 
 async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | None) -> Catalogue:
     """The catalogue a run resolves against: the image's BBL profiles when ``native`` is
-    given (no Bambuddy call, #3818 tier A), else Bambuddy's, read fresh as
-    :func:`~scadbuddy.bambuddy.catalogue.read_catalogue` reads it."""
+    given (no Bambuddy call, #3818 tier A), else Bambuddy's, read fresh, with
+    every row saying which printers it fits (#4717)."""
     if native is not None:
         return await asyncio.to_thread(native_catalogue, native)
     if client is None:
