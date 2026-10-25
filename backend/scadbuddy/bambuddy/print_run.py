@@ -194,15 +194,16 @@ logger = logging.getLogger(__name__)
 OUT_OF_MEMORY_TRACEBACK_INTERVAL = 600.0
 #: When each subject's last traceback was logged, by `time.monotonic()`.
 _out_of_memory_logged: dict[str, float] = {}
-#: What those times are read from; a test sets its own.
-_clock = time.monotonic
 
 
-def _log_out_of_memory(subject: str, where: str) -> None:
+def _log_out_of_memory(
+    subject: str, where: str, *, clock: Callable[[], float] = time.monotonic
+) -> None:
     """Log a check's `MemoryError` (#4598): with its traceback at most once per
     :data:`OUT_OF_MEMORY_TRACEBACK_INTERVAL` per subject, else one line. Called inside
-    the ``except``, so the traceback is the error being handled."""
-    now = _clock()
+    the ``except``, so the traceback is the error being handled. ``clock`` is what the
+    interval is read from; a test hands in its own."""
+    now = clock()
     last = _out_of_memory_logged.get(subject)
     traceback = last is None or now - last >= OUT_OF_MEMORY_TRACEBACK_INTERVAL
     if traceback:
@@ -436,11 +437,20 @@ class PrintRunResult(BaseModel):
     lan: list[LanStarted] = Field(default_factory=list)
 
 
-def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
+async def known_slots(
+    source: PrintSource,
+) -> Callable[[int | None], FilamentRequirements] | None:
     """A library file's (#2550) or an output's (#2720) slots as read from the file
     itself, for every plate: every copy of it has the same slots, so they answer for
     whichever copy is read. ``None`` when they came from Bambuddy, which is then asked
-    per plate."""
+    per plate.
+
+    An output's are read here when nothing read them yet (:meth:`OutputSource.read_local`,
+    once per source). A quote's plan built its source fresh and read none, so every plate
+    asked Bambuddy for the same large copy's slots at once, and all of them timed out
+    (#4696)."""
+    if isinstance(source, OutputSource):
+        await source.read_local()
     if isinstance(source, LibrarySource | OutputSource) and source.local is not None:
         return source.local.for_plate
     return None
@@ -520,7 +530,7 @@ async def filament_options(
             fallback_colours=list(source.colours),
             own_colours=file.own_colours,
             inventory=settled(inventory),
-            known=known_slots(source),
+            known=await known_slots(source),
         )
     finally:
         # Awaited even when a read failed, so the status read never outlives the call.
@@ -565,7 +575,7 @@ async def _tray_options(
         plate_ids=((await source.plate_ids(client)) or [1]) if asked is None else asked,
         fallback_colours=list(source.colours),
         own_colours=file.own_colours,
-        known=known_slots(source),
+        known=await known_slots(source),
         trays_from=status,
         overlay=overlay,
         provider_labels=labels,
@@ -912,7 +922,7 @@ async def _slot_errors(
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
         inventory=None if native else inventory,
-        known=known_slots(source),
+        known=await known_slots(source),
         native=source.native,
         # A native run's choices are its report's trays (D1), as the run resolves them.
         trays_from=prepared.printer_status if native else None,
@@ -2313,7 +2323,7 @@ class PlatePlan(BaseModel):
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
     #: Whether two of :attr:`plan`'s filament slots still share a preset name after
-    #: ``SlotPresets.shares_a_name`` (#4649): only then can Bambuddy's slicer have
+    #: ``SlotPresets.planned`` (#4649): only then can Bambuddy's slicer have
     #: dropped the prime tower, so only then is the slice read for it. ``None`` (a plan
     #: from before it, or one no ``SlotPresets`` saw) reads every multi-slot plate.
     slots_share_a_name: bool | None = None
@@ -2652,6 +2662,17 @@ async def plan_run(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "a native run was checked without its printer's report",
         )
+    # The native library's copy answers no slots (#3827), so an output's are read from
+    # its own 3MF, as the check reads them (#4710): else each plate needs a spool for
+    # every colour of the file, where the dialog sends one for the plate's own. The
+    # background slice and the run plan from a fresh source. An unreadable 3MF is said,
+    # so the #4710 refusal is recognised if it comes back.
+    if native_run and isinstance(source, OutputSource) and await source.read_local() is None:
+        logger.warning(
+            "a native run cannot read the output's slots, so every plate needs a spool"
+            " for every colour",
+            extra={"output_id": source.meta.id},
+        )
     per_plate = await gather_plate_options(
         client,
         library_file_id=library_file_id,
@@ -2661,7 +2682,7 @@ async def plan_run(
         inventory=None if native_run else inventory,
         # The file's own slots when it was read (#2550, #2720): a plate's colours are the
         # model's, not the run's recoloured copy's, as the dialog showed them. Intended.
-        known=known_slots(source),
+        known=await known_slots(source),
         native=source.native,
         # A native run's choices are the report's trays (D1). The overlay adds only
         # weights and names, not presets (`trays.loaded_trays`), so the plan reads none.
@@ -2717,13 +2738,11 @@ async def plan_run(
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
         # the preview, the slice and a reprint's lookup all name the same refs.
         slot_presets = SlotPresets(client, catalogue)
-        ready = [
-            (plate_id, options, resolved, await slot_presets.plan(plan))
-            for plate_id, options, resolved, plan in ready
-        ]
-        shared_names = {
-            plate_id: slot_presets.shares_a_name(plan) for plate_id, _, _, plan in ready
-        }
+        slotted: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
+        for plate_id, options, resolved, unslotted in ready:
+            slotted_plan, shared_names[plate_id] = await slot_presets.planned(unslotted)
+            slotted.append((plate_id, options, resolved, slotted_plan))
+        ready = slotted
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.slicing.start import NativeSliceKeys
@@ -2877,7 +2896,7 @@ async def _plan_sliced(
         printer_id=printer_id,
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
-        known=known_slots(source),
+        known=await known_slots(source),
     )
     per_plate = [with_trays(options, prepared.printer_status, printer_id) for options in per_plate]
     print_options = resolve_print_options(

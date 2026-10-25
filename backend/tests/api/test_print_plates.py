@@ -410,7 +410,7 @@ def test_a_meta_json_without_plates_still_loads(
 # --- one filament plan across every plate -------------------------------------------
 
 
-def _plates_use(used: dict[int, set[int]], grams: float = 0) -> None:
+def _plates_use(used: dict[int, set[int]], grams: float = 0) -> respx.Route:
     """Each plate's requirements: the recording's two slots, marked used per plate,
     each needing ``grams`` (``0`` is Bambuddy's "unknown")."""
 
@@ -424,9 +424,9 @@ def _plates_use(used: dict[int, set[int]], grams: float = 0) -> None:
         return httpx.Response(200, json=body)
 
     # Registered after `inventory_routes`, so this one answers.
-    respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
-        side_effect=answer
-    )
+    return respx.route(
+        method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements"
+    ).mock(side_effect=answer)
 
 
 def _plan_run(
@@ -462,6 +462,37 @@ def _plan_run(
 
 @pytest.mark.requires_postgres
 @respx.mock
+def test_a_plan_reads_an_outputs_slots_from_its_own_3mf(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#4696: an output's plan never asks Bambuddy for a plate's slots. It asked for every
+    plate at once, and a 14 MB copy's ten reads all outlasted the request."""
+    configure(client)
+    output_id = make_output(client, model)
+    add_plate(_output_3mf(paths, output_id), 2)
+    upload_route()
+    run_routes()
+    asked = _plates_use({1: {1}, 2: {1}})
+    slice_routes()
+    queue = filament_queue_route()
+    response = run_print(
+        client,
+        output_id,
+        json=run_request(all_plates=True, filament_plan={"slots": [{"slot_id": 1, "spool_id": 9}]}),
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(queue.calls) == 2
+    # Only the sliced file (77) is read, by the check that each slot kept its filament
+    # (#4013); the laid-out copy's slots never are.
+    assert {call.request.url.path for call in asked.calls} == {
+        "/api/v1/library/files/77/filament-requirements"
+    }
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_one_plan_maps_the_same_slot_on_every_plate(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -483,6 +514,7 @@ def test_one_plan_maps_the_same_slot_on_every_plate(
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_a_slot_only_a_later_plate_uses_is_refused_before_anything_is_queued(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -499,6 +531,7 @@ def test_a_slot_only_a_later_plate_uses_is_refused_before_anything_is_queued(
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_the_filament_check_sums_what_every_plate_needs(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -513,6 +546,7 @@ def test_the_filament_check_sums_what_every_plate_needs(
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_one_plate_short_of_filament_is_still_warned_about(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -527,6 +561,7 @@ def test_one_plate_short_of_filament_is_still_warned_about(
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_plates_that_fit_the_spool_together_say_nothing_about_it(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

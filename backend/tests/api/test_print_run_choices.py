@@ -525,6 +525,7 @@ def test_a_choice_the_resolver_refuses_uploads_nothing(
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_every_slot_refused_is_a_422_with_nothing_sliced(client: TestClient, model: str) -> None:
     """No slot resolves, so ``filament_presets`` is empty: the run refuses rather than
     ever handing Bambuddy an empty (or ``null``-padded) preset array."""
@@ -678,6 +679,7 @@ def test_archives_with_null_and_mixed_timestamps_still_run_and_compare_the_plate
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_an_unknown_advanced_override_is_a_422_naming_the_slot_before_slicing(
     client: TestClient, model: str
 ) -> None:
@@ -703,6 +705,7 @@ def test_an_unknown_advanced_override_is_a_422_naming_the_slot_before_slicing(
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
     client: TestClient, model: str
 ) -> None:
@@ -743,6 +746,7 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_all_plates_pads_a_plate_that_uses_only_slot_2(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -1163,6 +1167,7 @@ def test_the_all_plates_filament_read_reads_the_spools_once(
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_all_plates_with_no_spool_for_a_later_plates_slot_is_a_422_naming_it(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -1211,6 +1216,7 @@ def test_all_plates_with_every_slot_chosen_slices_each_plate(
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_an_all_plates_run_reads_the_assignments_and_printer_once(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

@@ -1222,6 +1222,56 @@ async def test_a_fetch_every_reader_gave_up_on_is_stopped_and_the_next_starts_an
     assert source.begun == 2
 
 
+async def test_a_fetch_given_up_on_takes_its_client_with_it() -> None:
+    """#4659 review: once a fetch is stopped and dropped, the next reader starts anew on
+    its own client, as it starts a fetch anew."""
+    source = _HeldFetch(b"not a 3mf")
+    first, other = cast(BambuddyClient, object()), cast(BambuddyClient, object())
+    given_up = asyncio.ensure_future(source.fetched_3mf(first))
+    await source.started.wait()
+    given_up.cancel()
+    await asyncio.gather(given_up, return_exceptions=True)
+    source.release.set()
+
+    async with asyncio.timeout(5):
+        assert await source.fetched_3mf(other) == b"not a 3mf"
+    assert source.begun == 2
+
+
+async def test_a_fetch_cancelled_from_outside_is_started_anew() -> None:
+    """#4695 review: a kept fetch that ended cancelled has no answer to give, so a reader
+    starts a fetch of its own rather than raise `CancelledError`.
+
+    No real path keeps a cancelled fetch today, so this puts one back by hand and guards
+    only the branch; a path that comes to keep one gets a test through that path."""
+    source = _HeldFetch(b"not a 3mf")
+    first = asyncio.ensure_future(source.fetched_3mf(None))
+    await source.started.wait()
+    fetching = source._fetching
+    assert fetching is not None
+    fetching.cancel()
+    await asyncio.gather(fetching, first, return_exceptions=True)
+    source._fetching = fetching  # kept, as no path here keeps one
+    source.release.set()
+
+    async with asyncio.timeout(5):
+        assert await source.fetched_3mf(None) == b"not a 3mf"
+    assert source.begun == 2
+
+
+async def test_a_settled_fetch_answers_a_reader_with_another_client() -> None:
+    """#4659 review: once the fetch has ended no client is used, so a later reader with
+    another client gets the kept answer, not a 500."""
+    source = _HeldFetch(b"not a 3mf")
+    first, other = cast(BambuddyClient, object()), cast(BambuddyClient, object())
+    source.release.set()
+    assert await source.fetched_3mf(first) == b"not a 3mf"
+
+    async with asyncio.timeout(5):
+        assert await source.fetched_3mf(other) == b"not a 3mf"
+    assert source.begun == 1
+
+
 async def test_every_reader_of_a_fetch_hands_in_its_client() -> None:
     """#4623 review: the fetch runs on the first reader's client, so a reader with
     another (which might close first) is a caller's mistake, said at once."""
@@ -1236,3 +1286,41 @@ async def test_every_reader_of_a_fetch_hands_in_its_client() -> None:
             await source.fetched_3mf(other)
     source.release.set()
     assert await reading == b"not a 3mf"
+
+
+async def test_a_fresh_output_sources_slots_are_read_from_its_own_3mf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#4696: a quote's plan builds its source fresh and reads no slots before planning,
+    so every plate asked Bambuddy for the same large copy at once and all timed out.
+    ``known_slots`` reads them from the output's own 3MF, for every plate."""
+    from scadbuddy.bambuddy.print_run import known_slots
+    from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+
+    red = ColourPart(1, "Red", "#FF0000", trimesh.creation.box(extents=(10, 10, 4)))
+    blue = ColourPart(2, "Blue", "#0000FF", trimesh.creation.box(extents=(10, 10, 4)))
+    path = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts((red,), (1,)), PlateParts((blue,), (2,))],
+        ["#FF0000", "#0000FF"],
+        path,
+        thumbnails=None,
+    )
+    payload = path.read_bytes()
+
+    async def own_3mf(store: object, meta: object) -> bytes:
+        return payload
+
+    monkeypatch.setattr(print_source, "read_3mf", own_3mf)
+    meta: Any = _Meta()
+    unused: Any = object()
+    source = OutputSource(store=unused, uploads=unused, meta=meta, settings=StoredSettings())
+    assert source.local is None
+
+    known = await known_slots(source)
+
+    assert known is not None
+    used = {
+        plate: [f.slot_id for f in known(plate).filaments if f.used_in_plate] for plate in (1, 2)
+    }
+    assert used == {1: [1], 2: [2]}

@@ -23,18 +23,22 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from fastapi import status
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.concurrent import settled
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import (
     LocalPreset,
     LocalPresetCatalogue,
     Preset,
     PresetCatalogue,
     PresetRef,
+    PresetTier,
 )
 from scadbuddy.bambuddy.slot_presets import is_slot_preset
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
 
 logger = logging.getLogger(__name__)
@@ -160,12 +164,55 @@ class Catalogue:
         }
 
 
-async def _catalogue(client: BambuddyClient) -> Catalogue:
+async def _read(client: BambuddyClient) -> tuple[PresetCatalogue, LocalPresetCatalogue]:
     presets, local_presets = await asyncio.gather(
         client.presets(), client.local_presets(), return_exceptions=True
     )
+    return settled(presets), settled(local_presets)
+
+
+async def _catalogue(client: BambuddyClient) -> Catalogue:
+    """Bambuddy's catalogue, its rows saying which printers they fit
+    (:func:`_check_standard_tier`)."""
+    read, local = await _read(client)
+    _check_standard_tier(read)
     # Thousands of rows: built off the event loop, which every other request shares.
-    return await asyncio.to_thread(_build, settled(presets), settled(local_presets))
+    return await asyncio.to_thread(_build, read, local)
+
+
+def _is_empty(tier: PresetTier) -> bool:
+    return not (tier.printer or tier.process or tier.filament)
+
+
+def _check_standard_tier(catalogue: PresetCatalogue) -> None:
+    """Refuse a read whose cloud tier lists presets but whose standard tier lists none
+    (#4717). Bambuddy's ``_fetch_bundled_presets`` answers empty slots, with no error or
+    status, when its slicer sidecar's ``/profiles/bundled`` fails (a ReadTimeout while
+    the sidecar sliced, on prod 2026-10-25), and its ``_enrich_cloud_metadata`` then has
+    no standard row to copy ``compatible_printers`` from, so every cloud row declares no
+    printer and the resolver refuses every process as one Bambuddy lacks. That read is
+    Bambuddy unavailable, never a catalogue to resolve with or keep. With no cloud
+    presets either, an empty standard tier is no such sign.
+    The check is of the whole tier: ``_fetch_bundled_presets`` fills every slot from one
+    ``/profiles/bundled`` answer or returns them all empty (``backend/app/api/routes/
+    slicer_presets.py`` at maziggy/bambuddy@036f0a6, read 2026-10-25), so a tier with
+    printers but no processes is not a shape it sends.
+    It answers the same with no sidecar URL at all, which it cannot slice without either
+    (its slice route needs one, ``library.py`` ``_run_slicer_with_fallback``), so the
+    message names that cause too. Only a run or dialog that Bambuddy slices meets it: a
+    native one resolves against the image's catalogue (``slicing/catalogue.py``
+    ``catalogue_for`` given ``native``) and reads Bambuddy's only for names
+    (:func:`read_preset_names`, unchecked), so a native print with ``local`` presets
+    is not refused for want of a sidecar."""
+    if _is_empty(catalogue.standard) and not _is_empty(catalogue.cloud):
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Bambuddy listed its cloud presets but none of its standard (bundled) ones, "
+            "most likely because its slicer sidecar did not answer it (busy, down, or not "
+            "configured), so it could not say which printers each preset fits. Try again "
+            "once Bambuddy's slicer answers.",
+            type_=UNAVAILABLE_PROBLEM,
+        )
 
 
 def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> Catalogue:
@@ -205,10 +252,14 @@ NAME_KEY_INFO = b"scadbuddy:bambuddy:catalogue_name:v1"
 _ADAPTER = TypeAdapter(Catalogue)
 
 
-async def read_catalogue(client: BambuddyClient) -> Catalogue:
-    """The preset catalogue, read fresh from Bambuddy, as the run reads it;
-    :func:`cached_catalogue` is the print dialog's kept copy."""
-    return await _catalogue(client)
+async def read_preset_names(client: BambuddyClient) -> dict[tuple[str, str], str]:
+    """Every preset's name by its ref (:meth:`Catalogue.names`), read fresh from Bambuddy:
+    what the native slicer finds a ``cloud`` ref by when its id is not one of the
+    image's. Names need no standard tier, so a read without one (#4717) still answers.
+    The run's catalogue is ``slicing/catalogue.py`` ``catalogue_for``; the print
+    dialog's kept copy is :func:`cached_catalogue`."""
+    read, local = await _read(client)
+    return (await asyncio.to_thread(_build, read, local)).names()
 
 
 #: The catalogue this process last parsed, by its file and that file's mtime: one
@@ -424,9 +475,14 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
         await _keep_and_hold(path, catalogue)
     except Exception as error:
         # Nothing awaits this task, so whatever fails ends here, and only by its type:
-        # a pydantic error quotes Bambuddy's body (#3446).
+        # a pydantic error quotes Bambuddy's body (#3446). A problem's type is ScadBuddy's
+        # own constant URI, which tells a busy sidecar (#4717) from other failures.
         logger.warning(
-            "could not refresh the kept preset catalogue", extra={"error": type(error).__name__}
+            "could not refresh the kept preset catalogue",
+            extra={
+                "error": type(error).__name__,
+                "problem": error.type if isinstance(error, ApiError) else None,
+            },
         )
 
 

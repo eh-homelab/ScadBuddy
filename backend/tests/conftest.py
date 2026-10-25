@@ -30,6 +30,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.api.jobs import forget_unreadable_notes_logs
 from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
 from scadbuddy.core import settings as settings_module
@@ -88,6 +89,15 @@ def _forget_out_of_memory_logs() -> Iterator[None]:
     forget_out_of_memory_logs()
     yield
     forget_out_of_memory_logs()
+
+
+@pytest.fixture(autouse=True)
+def _forget_unreadable_notes_logs() -> Iterator[None]:
+    """An arrange row's unreadable notes are logged once per job per process (#4709);
+    each test starts with none logged, so no test inherits another's record."""
+    forget_unreadable_notes_logs()
+    yield
+    forget_unreadable_notes_logs()
 
 
 @pytest.fixture

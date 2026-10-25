@@ -22,6 +22,8 @@ from scadbuddy.activity.index import ActivityIndex, Attribution
 from scadbuddy.activity.models import ActivityRow, ActivityStatus
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy import print_source
+from scadbuddy.bambuddy.filaments3mf import UnreadableFilamentsError
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows.agent_tools import AgentTools, AgentToolsUnavailableError
 from scadbuddy.main import create_app
@@ -62,6 +64,20 @@ def set_fake_env(directory: Path, name: str, value: Any) -> None:
     target = directory / "fake-env.json"
     current = json.loads(target.read_text(encoding="utf-8")) if target.is_file() else {}
     target.write_text(json.dumps({**current, name: value}), encoding="utf-8")
+
+
+@pytest.fixture
+def slots_from_bambuddy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An output's slots read from Bambuddy, plate by plate, as for a 3MF whose slots
+    cannot be read here. A run reads an output's own slots first (#4696); a test that
+    sets each plate's slots through Bambuddy's ``filament-requirements`` answer (the
+    recording lists two slots, the one-colour test model has one) takes this, so the
+    plan judges what that answer says."""
+
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise UnreadableFilamentsError("read from Bambuddy in this test")
+
+    monkeypatch.setattr(print_source, "read_filaments", unreadable)
 
 
 @pytest.fixture(autouse=True)

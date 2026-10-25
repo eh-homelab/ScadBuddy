@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderItem, Quote } from '../../api/types'
-import { formatMoney, toMinor } from '../../lib/money'
+import { formatMoney } from '../../lib/money'
 import { PrintPicker } from '../PrintPicker'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
 import { refusalText } from './refusal'
 
 /** A quote line's kind as the drawer names it (§3.4, #4250 Ruling 5). */
@@ -53,16 +54,15 @@ export function QuoteEditor({
   const [error, setError] = useState<string | null>(null)
 
   async function record(accept: boolean) {
-    const minor = toMinor(price, exponent)
-    if (minor === null || minor < 0) {
-      setError('Enter a price per unit, such as 12.50.')
+    const minor = parseUnitPrice(price, exponent)
+    if (minor === null) {
+      setError(UNIT_PRICE_HINT)
       return
     }
     setBusy(true)
     setError(null)
     try {
-      const quote = await api.quoteOrderItem(orderId, itemId, { unit_price_minor: minor, ...(label.trim() ? { label: label.trim() } : {}) })
-      if (accept) await api.acceptOrderQuote(orderId, itemId, quote.id)
+      await recordQuote(orderId, itemId, { unit_price_minor: minor, ...(label.trim() ? { label: label.trim() } : {}) }, accept)
       setPrice('')
       setLabel('')
       onChanged()

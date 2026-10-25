@@ -1438,29 +1438,20 @@ def test_a_check_that_runs_out_of_memory_again_logs_its_traceback_once(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#4632: the dialog checks again on every change, so a file too large to hold here
-    logged the same stack each time. Within the interval it is one line; past it, and
-    for another file, the traceback again."""
+    logged the same stack each time. A second check of the file, at once, logs one line;
+    another file logs its own traceback. The interval is `_log_out_of_memory`'s test."""
     configure(client)
     library_file(89)
     library_file(90)
     run_routes()
-    clock = [1000.0]
-    monkeypatch.setattr(print_run, "_clock", lambda: clock[0])
 
     async def out_of_memory(self: LibrarySource, bambuddy: BambuddyClient | None) -> bytes:
         raise MemoryError
 
     monkeypatch.setattr(LibrarySource, "fetch_3mf", out_of_memory)
-    steps = [
-        (0.0, 89),
-        (1.0, 89),
-        (1.0, 90),
-        (print_run.OUT_OF_MEMORY_TRACEBACK_INTERVAL, 89),
-    ]
 
     with caplog.at_level(logging.WARNING, logger=print_run.logger.name):
-        for step, file_id in steps:
-            clock[0] += step
+        for file_id in (89, 89, 90):
             check = client.post(f"/api/v1/print/library/{file_id}/check", json=body())
             assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
 
@@ -1469,10 +1460,7 @@ def test_a_check_that_runs_out_of_memory_again_logs_its_traceback_once(
         ("library:89", True),
         ("library:89", False),
         ("library:90", True),
-        ("library:89", True),
     ]
-    # Past the interval, 90's entry went when 89's traceback was logged again.
-    assert set(print_run._out_of_memory_logged) == {"library:89"}
 
 
 @respx.mock

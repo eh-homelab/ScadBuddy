@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -10,19 +11,23 @@ import pytest
 import trimesh
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.api import jobs as jobs_api
+from scadbuddy.api.jobs import _job_status
 from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, arrange_inputs
+from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.library_objects import LibraryObjects, piece_key, publish_library_pieces
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, bounding_box
-from scadbuddy.render.job_models import ManifestObject
+from scadbuddy.render.job_models import Job, ManifestObject, now
 from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.split import ColourPart
 from scadbuddy.template import Part
 from scadbuddy.workflows.arrange import arrange, part_of
 from scadbuddy.workflows.models import (
+    ArrangeInputs,
     Layout,
     LayoutPlate,
     OutputRequest,
@@ -397,3 +402,185 @@ async def test_a_colour_every_copy_swaps_away_takes_no_slot(tmp_path: Path) -> N
     )
     _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
     assert MAGENTA in inputs.colours and own not in [c.upper() for c in inputs.colours]
+
+
+GOLD = "#E4BD68"
+
+
+def _with_a_gold_base(paths: DataPaths, output_id: str) -> None:
+    """The output also holds a gold part, first in its colour list: the menorah's base."""
+    directory = OutputStore(paths).directory(output_id)
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    gold = {**manifest[0], "part": "gold-base", "colours": [GOLD]}
+    (directory / "manifest.json").write_text(json.dumps([gold, *manifest]), encoding="utf-8")
+    stored = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    stored["colors"] = [GOLD, *stored["colors"]]
+    (directory / "meta.json").write_text(json.dumps(stored), encoding="utf-8")
+
+
+async def test_a_subset_takes_only_the_colours_its_parts_print_in(tmp_path: Path) -> None:
+    """#4636: the menorah's candles arranged without its gold base kept all ten of the
+    source's colours, gold first, so the order item had a slot no plate prints and its
+    slice quote refused it. A subset's colours are those its copies print in, in the
+    source's order."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    own = entry.colours[0].upper()
+    _with_a_gold_base(paths, meta.id)
+    store = OutputStore(paths)
+    subset = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part=entry.part)])
+    _, inputs = arrange_inputs(store, subset, plate_model=None)
+    assert [c.upper() for c in inputs.colours] == [own]
+    whole = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id)])
+    _, inputs = arrange_inputs(store, whole, plate_model=None)
+    assert [c.upper() for c in inputs.colours] == [GOLD, own]
+
+
+async def test_a_subsets_plan_keeps_each_spool_on_its_colour(tmp_path: Path) -> None:
+    """#4636: with no colours given, a plan names slots in the source's colour order, so
+    a slot the subset drops takes its spool with it and the rest follow their colours."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    _with_a_gold_base(paths, meta.id)
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
+        filament_plan=FilamentPlan.model_validate(
+            {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 2, "spool_id": 9}]}
+        ),
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert inputs.filament_plan is not None
+    assert inputs.filament_plan.slots == {1: 9}
+    # The dropped slot's spool is said, not lost without a word (#4684 review).
+    assert inputs.notes == [
+        f"filament_plan slot 1 (spool 7) is {GOLD}, which no copy prints in: that spool is not used"
+    ]
+    assert inputs.notes == _job_status(_arrange_job(inputs), None).warnings
+
+
+def _arrange_job(inputs: ArrangeInputs) -> Job:
+    return Job(
+        id="j",
+        slug="demo",
+        kind="arrange",
+        inputs=inputs.model_dump(mode="json"),
+        created_at=now(),
+    )
+
+
+async def test_a_plan_with_a_recolour_follows_the_colours_left(tmp_path: Path) -> None:
+    """#4684 review: a recolour and a plan with no colours given. The source's colour is
+    swapped away (#3637), so its slot and its spool go, and the new colour's slot,
+    numbered after it in the source's order, becomes slot 1."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    own = entry.colours[0].upper()
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part, recolour={own: MAGENTA})],
+        filament_plan=FilamentPlan.model_validate(
+            {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 2, "spool_id": 9}]}
+        ),
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert inputs.colours == [MAGENTA]
+    assert inputs.filament_plan is not None
+    assert inputs.filament_plan.slots == {1: 9}
+    assert inputs.notes == [
+        f"filament_plan slot 1 (spool 7) is {own}, which no copy prints in: that spool is not used"
+    ]
+
+
+async def test_a_planned_slot_past_every_colour_is_said(tmp_path: Path) -> None:
+    """#4702 review: a plan slot past the colour list names no colour; its spool goes
+    unused, and a note says so rather than dropping it without a word."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
+        filament_plan=FilamentPlan.model_validate(
+            {
+                "slots": [
+                    {"slot_id": 0, "spool_id": 4},
+                    {"slot_id": 1, "spool_id": 7},
+                    {"slot_id": 5, "spool_id": 9},
+                ]
+            }
+        ),
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert inputs.filament_plan is not None
+    assert inputs.filament_plan.slots == {1: 7}
+    # Below the list as above it (#4704 review): slot 0 names no colour either.
+    assert inputs.notes == [
+        "filament_plan slot 0 (spool 4) names no colour: that spool is not used",
+        "filament_plan slot 5 (spool 9) names no colour: that spool is not used",
+    ]
+
+
+def test_a_jobs_status_reads_the_notes_field_with_its_own_type() -> None:
+    """`api/jobs.py` reads `ArrangeInputs.notes` alone, by name and as `list[str]`."""
+    assert jobs_api._NOTES_FIELD in ArrangeInputs.model_fields
+    assert ArrangeInputs.model_fields[jobs_api._NOTES_FIELD].annotation == list[str]
+
+
+def _unreadable(job_id: str) -> Job:
+    return Job(
+        id=job_id, slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
+    )
+
+
+def test_a_job_forgotten_from_the_record_logs_again(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4709 review: the record is bounded; the oldest job is forgotten first, and a
+    forgotten job's unreadable notes are logged again."""
+    monkeypatch.setattr(jobs_api, "_UNREADABLE_LOGGED_MAX", 1)
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        for job_id in ("first", "second", "first"):
+            _job_status(_unreadable(job_id), None)
+    logged = [getattr(r, "job_id", None) for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert logged == ["first", "second", "first"]
+    assert list(jobs_api._UNREADABLE_LOGGED) == ["first"]
+
+
+def test_a_job_still_polled_stays_in_the_record(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4709 review: the record forgets the job least recently polled, not the one first
+    logged, so a job polled again while newer ones come in is not logged again."""
+    monkeypatch.setattr(jobs_api, "_UNREADABLE_LOGGED_MAX", 2)
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        for job_id in ("polled", "other", "polled", "newest", "polled"):
+            _job_status(_unreadable(job_id), None)
+    logged = [getattr(r, "job_id", None) for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert logged == ["polled", "other", "newest"]
+    assert list(jobs_api._UNREADABLE_LOGGED) == ["newest", "polled"]
+
+
+def test_an_arrange_rows_unreadable_notes_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """#4704 review: notes a row holds in a shape this build cannot read are not said,
+    and the drift is logged with the job's id rather than lost without a trace."""
+    job_id = uuid.uuid4().hex
+    job = Job(
+        id=job_id, slug="demo", kind="arrange", inputs={"notes": "not a list"}, created_at=now()
+    )
+    with caplog.at_level("WARNING", logger="scadbuddy.api.jobs"):
+        assert _job_status(job, None).warnings is None
+        # Polled again: logged once per job, not on every poll (#4707 review).
+        assert _job_status(job, None).warnings is None
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.api.jobs"]
+    assert record.getMessage() == "an arrange job's notes are unreadable"
+    assert getattr(record, "job_id", None) == job_id
+
+
+def test_a_rows_notes_are_said_though_its_other_fields_are_unreadable() -> None:
+    """#4707 review: only `notes` is read, so a row whose items this build cannot read
+    as an arrange's still says its notes."""
+    job = Job(
+        id="j10",
+        slug="demo",
+        kind="arrange",
+        inputs={"items": "not a list", "notes": ["slot 5 names no colour"]},
+        created_at=now(),
+    )
+    assert _job_status(job, None).warnings == ["slot 5 names no colour"]

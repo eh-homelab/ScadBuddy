@@ -3,6 +3,7 @@ and the lifecycle's refusals as 409 problems naming their ids."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -12,7 +13,7 @@ from tests.api.conftest import wait_for_job
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_send import make_output
-from tests.api.test_versions import SECOND, SLUG, put_source, upload
+from tests.api.test_versions import SECOND, SLUG, THIRD, put_source, upload
 from tests.support.operations import press
 
 # A committed template: an upload is a revision of the models repository, where the
@@ -188,6 +189,36 @@ def test_an_item_by_hand_and_its_edits(client: TestClient) -> None:
     assert deleted.status_code == 204
     assert client.get(f"/api/v1/orders/{order['id']}").json()["items"] == []
     assert client.delete(f"/api/v1/orders/{order['id']}/items/{item['id']}").status_code == 404
+
+
+def test_an_item_at_the_listed_revision_with_default_inputs(client: TestClient) -> None:
+    """#4251: the order page's "Add item" sends the catalogue listing's ``version`` (a
+    full commit, never ``HEAD``, Ruling 1) with no parameters at the template's
+    ``inputs_version``; the item pins that commit, and a later edit leaves it there."""
+    upload(client)
+    assert put_source(client, SECOND).status_code == 200
+    customer = create_customer(client)
+    order = create_order(client, customer["id"])
+    listed = next(m for m in client.get("/api/v1/models").json() if m["slug"] == SLUG)
+    commit = listed["version"]
+    assert re.fullmatch(r"[0-9a-f]{40}", commit), commit
+    item = add_item(
+        client,
+        order["id"],
+        slug=SLUG,
+        commit=commit,
+        inputs={"params": {}, "v": listed["inputs_version"]},
+        quantity=2,
+    )
+    assert item["reference"]["commit"] == commit
+    assert item["reference"]["inputs"] == {"params": {}, "v": listed["inputs_version"]}
+    assert item["title"] == listed["name"]
+    assert item["output_id"] is None
+    assert item["colours"] == []
+    assert put_source(client, THIRD).status_code == 200
+    assert client.get(f"/api/v1/models/{SLUG}").json()["version"] != commit
+    kept = client.get(f"/api/v1/orders/{order['id']}").json()["items"][0]
+    assert kept["reference"]["commit"] == commit
 
 
 def test_a_bad_reference_is_422_naming_the_field(client: TestClient) -> None:

@@ -250,5 +250,7 @@ updates:
       # The slicer stages run Bambu Studio's ubuntu24.04 AppImage (BAMBU_STUDIO_ASSET),
       # and their runtime libraries were measured on 24.04 (Dockerfile `slicer`). The
       # base moves with that asset, re-measured, never on its own (#4604's review).
+      # Dependabot reads 24.04 -> 24.10 as a minor update (#4686, an EOL interim
+      # release), so minors are ignored too; 24.04 digest refreshes still come.
       - dependency-name: "ubuntu"
-        update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

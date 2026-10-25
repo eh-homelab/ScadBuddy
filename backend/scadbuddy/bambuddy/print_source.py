@@ -390,10 +390,23 @@ class PrintPipeline:
         A fetch whose every reader was cancelled (a check refused first) is stopped, and
         the next reader starts anew.
 
-        The fetch runs on the first reader's ``client``, which must outlive it, so every
-        reader must hand in that same client (checked): every caller today hands in the
-        one client of its request or activity."""
+        The fetch runs on the first reader's ``client``, which must outlive it, so while
+        it runs every reader must hand in that same client (checked). Once it has ended
+        its answer is kept and no client is used any more: any reader gets the answer,
+        whatever client it hands in (#4659 review). A fetch stopped and dropped takes its
+        client with it, so the next reader's client is the new fetch's. Every caller
+        today hands in the one client of its request or activity."""
         fetching = self._fetching
+        if fetching is not None and fetching.cancelled():
+            # Ended by a cancel from outside (no path here keeps one: the last reader's
+            # cancel drops it): no answer to keep, so the next reader starts anew
+            # (#4695 review).
+            fetching = self._fetching = None
+            self._fetch_client = None
+        if fetching is not None and fetching.done():
+            # Settled: the answer, or its failure, for any reader.
+            self._fetch_client = None
+            return fetching.result()
         if fetching is None:
             fetching = asyncio.ensure_future(_fetch_once(self, client))
             self._fetching = fetching
@@ -413,6 +426,7 @@ class PrintPipeline:
                 fetching.cancel()
                 if self._fetching is fetching:
                     self._fetching = None
+                    self._fetch_client = None
 
     def _printable(self: _Fetching, client: BambuddyClient | None) -> Printable:
         async def fetch() -> bytes:

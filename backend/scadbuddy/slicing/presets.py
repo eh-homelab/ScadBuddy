@@ -55,7 +55,7 @@ from typing import Literal
 from fastapi import status
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import read_catalogue
+from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
@@ -132,7 +132,7 @@ class _Names:
         if self._client is None:
             return None
         if self._names is None:
-            self._names = (await read_catalogue(self._client)).names()
+            self._names = await read_preset_names(self._client)
         return self._names.get((ref.source, ref.id))
 
 
@@ -184,8 +184,9 @@ async def _resolve(
         raise ProfileError(
             f"Bambuddy could not read {ref.source} process preset {name}: {values.reason}"
         )
-    # Already flattened by Bambuddy's slicer; flatten() checks every value is text.
-    own = {key: value for key, value in values.values.items() if key != "inherits"}
+    # Already flattened by Bambuddy's slicer, its parent and includes applied (#4714);
+    # flatten() checks every value is text.
+    own = {key: value for key, value in values.values.items() if key not in ("inherits", "include")}
     return flatten(name, {name: own}.get), True
 
 
@@ -297,6 +298,12 @@ async def build_presets(
     )
 
 
+#: How :func:`~scadbuddy.slicing.profiles.flatten` reads the image's presets, in every
+#: native slice's key: raised when a change to it changes the files a plan slices with.
+#: 2 applies ``include`` (#4714).
+FLATTEN_REVISION = 2
+
+
 def native_preset_key(
     plan: SlicePlan, plate_id: int, version: str, from_bambuddy: Mapping[str, str] | None = None
 ) -> str:
@@ -314,7 +321,11 @@ def native_preset_key(
     which sets each slot's colour in the sliced file and decides whether slots of one
     preset keep the prime tower, so a recolour slices again rather than reuse a file
     that names the old colours. Keys of slices from before then never match, and those
-    slices, without the tower, are not reused."""
+    slices, without the tower, are not reused.
+
+    :data:`FLATTEN_REVISION` ends it (#4714): the image's version does not change when
+    :func:`~scadbuddy.slicing.profiles.flatten` does, and a slice flattened before
+    ``include`` was applied carries another machine's G-code, so it is never reused."""
     key = f"native@{version}/" + slice_request(plan, plate_id).preset_key
     held = from_bambuddy or {}
     slots = [
@@ -327,4 +338,4 @@ def native_preset_key(
             key += f"/bambuddy-{slot}={held[slot]}"
     if plan.filament_colours:
         key += "/colours=" + ",".join(colour.upper() for colour in plan.filament_colours)
-    return key
+    return key + f"/flatten={FLATTEN_REVISION}"

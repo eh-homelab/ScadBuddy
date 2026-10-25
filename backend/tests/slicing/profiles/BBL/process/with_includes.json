@@ -2,9 +2,9 @@
     "type": "process",
     "name": "with_includes",
     "inherits": "fdm_process_root",
-    "includes": [
-        "fdm_process_root"
-    ],
     "from": "system",
-    "instantiation": "true"
+    "instantiation": "true",
+    "include": [
+        "no_such_process_template"
+    ]
 }

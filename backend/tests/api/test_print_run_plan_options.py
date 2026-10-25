@@ -23,6 +23,7 @@ pytestmark = pytest.mark.requires_postgres
 
 
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_a_plan_run_queues_the_remembered_options_and_the_plans_overrides(
     client: TestClient, model: str
 ) -> None:

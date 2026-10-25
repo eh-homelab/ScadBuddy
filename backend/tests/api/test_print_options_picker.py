@@ -119,6 +119,7 @@ def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, m
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("slots_from_bambuddy")
 def test_with_no_printer_named_the_configured_one_prints_with_its_options(
     client: TestClient, model: str
 ) -> None:

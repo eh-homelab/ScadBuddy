@@ -46,6 +46,37 @@ test.describe('orders', () => {
     await expect(page.getByText('Closed', { exact: true })).toBeVisible()
   })
 
+  test('prices an item in the items table', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
+    const items = page.getByRole('table', { name: 'Line items' })
+    const unit = items.getByRole('textbox', { name: 'Unit price for Name Keychain' })
+    await unit.fill('12.50')
+    await unit.press('Enter')
+    await expect(items.getByRole('button', { name: 'Accept unit price' })).toBeDisabled()
+    await expect(items.getByText('not accepted')).toHaveCount(0)
+    await expect(page.getByTestId('order-totals')).toContainText('25.00')
+    await page.getByRole('button', { name: 'Accept order' }).click()
+    await expect(unit).toHaveCount(0)
+    await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
+  })
+
+  // #4251: the customer made inside the New order dialog, with the order's due date.
+  test('a new order for a customer made in the dialog', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('button', { name: 'New order' }).click()
+    const dialog = page.getByRole('dialog', { name: 'New order' })
+    await choose(page, dialog.getByRole('combobox', { name: 'Customer for the new order' }), 'New customer…')
+    await dialog.getByLabel('Customer name').fill('Grace Hopper')
+    await dialog.getByLabel('Email').fill('grace@example.com')
+    await dialog.getByLabel('Due').fill('2026-12-01')
+    await dialog.getByRole('button', { name: 'Create order' }).click()
+    await expect(page).toHaveURL(/\/orders\/o-/)
+    // The mocks live in the page, so the customer is checked on the order, not after a reload.
+    await expect(page.getByRole('link', { name: 'Grace Hopper' })).toBeVisible()
+    await expect(page.getByLabel('Due')).toHaveValue('2026-12-01')
+  })
+
   test('adds the generated output to an order from Customize', async ({ page }) => {
     await page.goto('/m/name-keychain')
     const generate = page.getByTestId('generate')
@@ -98,6 +129,38 @@ test.describe('orders', () => {
     const dialog = page.getByRole('dialog', { name: 'Add to order' })
     await choose(page, dialog.getByRole('combobox', { name: 'Estimate with' }), /Sunflower Yellow/)
     await expect(dialog.getByTestId('order-estimate')).toContainText(/An estimate: about [\d.]+ g/)
+  })
+
+  // #4251 — "Add item" on the order page: an output of a template, then a template's
+  // current version with its defaults, without leaving the order.
+  test('adds items from the order page', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-3' })).toBeVisible()
+    const rows = page.getByRole('table', { name: 'Line items' }).getByRole('row')
+    await expect(rows).toHaveCount(2)
+
+    await page.getByRole('button', { name: 'Add item' }).click()
+    let dialog = page.getByRole('dialog', { name: 'Add item' })
+    await dialog.getByLabel('Template').fill('keychain')
+    await dialog.getByRole('button', { name: /Name Keychain/ }).click()
+    await dialog.getByRole('radio', { name: 'Nova' }).click()
+    await dialog.getByLabel('Quantity').fill('2')
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+    await dialog.getByRole('button', { name: 'Add item' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(rows).toHaveCount(3)
+
+    await page.getByRole('button', { name: 'Add item' }).click()
+    dialog = page.getByRole('dialog', { name: 'Add item' })
+    await dialog.getByLabel('Template').fill('maze')
+    await dialog.getByRole('button', { name: /Ball Maze/ }).click()
+    await expect(dialog.getByRole('radio', { name: 'Current version, default settings' })).toBeChecked()
+    await dialog.getByRole('button', { name: 'Add item' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(rows).toHaveCount(4)
+    await expect(page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Ball Maze' })).toBeVisible()
   })
 
   test('on a phone the orders page fits', async ({ page }) => {
