@@ -350,6 +350,14 @@ jobs:
       - name: Test the buildx mirror check
         run: .github/scripts/lint-buildx-mirror.test.sh
 
+      # The Postgres service containers pull from the mirror with no Docker Hub
+      # fallback, so they are pinned by a digest it holds (#4729).
+      - name: Check that the Postgres service image is pinned by digest
+        run: .github/scripts/postgres-pin.sh
+
+      - name: Test the Postgres pin check
+        run: .github/scripts/postgres-pin.test.sh
+
       # The Claude Code hook (.claude/settings.json) that bumps a plugin's
       # version on its first change in a branch, then lints it (#896).
       - name: Test the plugin edit hook
@@ -606,7 +614,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17
+        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -750,7 +758,7 @@ jobs:
     timeout-minutes: 35
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17
+        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -897,7 +905,7 @@ jobs:
     # too, since the app will not start without it.
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17
+        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -1252,7 +1260,7 @@ jobs:
         group: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17
+        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
