@@ -211,7 +211,7 @@ def test_an_item_at_the_listed_revision_with_default_inputs(client: TestClient) 
         quantity=2,
     )
     assert item["reference"]["commit"] == commit
-    assert item["reference"]["inputs"] == {"params": {}, "v": 0}
+    assert item["reference"]["inputs"] == {"params": {}, "v": listed["inputs_version"]}
     assert item["title"] == listed["name"]
     assert item["output_id"] is None
     assert item["colours"] == []

@@ -197,7 +197,7 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
             </div>
           )}
 
-          {model && choice && choice !== CURRENT && <RoughEstimate key={choice} outputId={choice} idPrefix="add-item-estimate" />}
+          {model && choice && choice !== CURRENT && <RoughEstimate outputId={choice} idPrefix="add-item-estimate" />}
 
           {(error ?? models.error?.message) && (
             <p role="alert" className="text-[13px] text-warn">

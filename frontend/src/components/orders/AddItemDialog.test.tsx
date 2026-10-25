@@ -4,6 +4,7 @@ import { api } from '../../api/client'
 import { MAZE_SLUG } from '../../mocks/fixtures'
 import { resetMockState } from '../../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../../mocks/features/orders/state'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { AddItemDialog } from './AddItemDialog'
 
@@ -59,6 +60,25 @@ describe('AddItemDialog (#4251)', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled())
     expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { output_id: NOVA, quantity: 1 })
     add.mockRestore()
+  })
+
+  it('keeps the estimate\'s filament when another output is picked, and estimates that one', async () => {
+    const priceBook = vi.spyOn(api, 'priceBook')
+    const estimate = vi.spyOn(api, 'orderEstimate')
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'keychain')
+    await user.click(await within(dialog).findByRole('button', { name: /Name Keychain/ }))
+    expect(await within(dialog).findByRole('radio', { name: 'Reagan' })).toBeChecked()
+    const filament = await within(dialog).findByRole('combobox', { name: 'Estimate with' })
+    await choose(user, filament, /Sunflower Yellow/)
+    await waitFor(() => expect(within(dialog).getByTestId('order-estimate')).toBeInTheDocument())
+    await user.click(within(dialog).getByRole('radio', { name: 'Nova' }))
+    await waitFor(() => expect(estimate).toHaveBeenLastCalledWith(NOVA, expect.any(String)))
+    expect(within(dialog).getByRole('combobox', { name: 'Estimate with' })).toHaveTextContent(/Sunflower Yellow/)
+    expect(priceBook).toHaveBeenCalledTimes(1)
+    priceBook.mockRestore()
+    estimate.mockRestore()
   })
 
   it("shows the order's refusal and stays open", async () => {
