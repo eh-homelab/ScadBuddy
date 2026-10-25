@@ -48,6 +48,7 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.rack.rank import Pick, Usage, diameter, manual_for, rack_groups, rank_rack
 from scadbuddy.rack.rank import rack_warnings as rank_warnings
+from scadbuddy.slicing.slice_info import PrintedFilaments, printed_filaments
 
 logger = logging.getLogger(__name__)
 
@@ -257,12 +258,72 @@ def _plan(archive: zipfile.ZipFile, plate_id: int | None) -> SlicedRack | None:
         )
     if not slots:
         raise _UnresolvedError("the plate names no filament")
+    filaments = _on_printed(
+        filaments, printed_filaments(archive, _plate_index(plate, plate_id)), settings
+    )
+    slots = {f.slot_id: f.group_id for f in filaments if f.group_id is not None}
     if max(slots) > RACK_WIRE_SLOTS:
         raise _UnresolvedError("the plate has more slots than the wire carries")
     return SlicedRack(
         slot_groups=[slots.get(slot, -1) for slot in range(1, max(slots) + 1)],
         filaments=sorted(filaments, key=lambda f: f.slot_id),
     )
+
+
+def _plate_index(plate: ET.Element, plate_id: int | None) -> int:
+    """The plate's own ``index``, else the one asked for (1 when none was)."""
+    for meta in plate.findall("metadata"):
+        if meta.get("key") == "index":
+            return _int(meta.get("value"))
+    return plate_id or 1
+
+
+def _project_value(settings: dict[str, Any], key: str, slot: int) -> str:
+    """Project filament ``slot``'s ``key`` (``filament_type``, ``filament_colour``)."""
+    values = settings.get(key)
+    if not isinstance(values, list) or not 1 <= slot <= len(values):
+        raise _UnresolvedError(f"project_settings.config names no {key} for slot {slot}")
+    return str(values[slot - 1])
+
+
+def _on_printed(
+    filaments: list[FilamentRequirement],
+    printed: PrintedFilaments,
+    settings: dict[str, Any],
+) -> list[FilamentRequirement]:
+    """``filaments`` on the slots the plate prints (#4712), as `read_sliced` reads its
+    grams (#4711): a filament ``slice_info.config`` names that the plate does not print
+    is the plate's first filament. It joins that filament when the plate names it too,
+    in the same group; one in another group cannot be placed with confidence. One the
+    plate does not name otherwise (a plate of one filament, all ``id="1"``) takes the
+    first filament's slot, and its type and colour from the project's, since
+    ``slice_info.config`` wrote filament 1's."""
+    named = {f.slot_id: f for f in filaments if printed.slot(f.slot_id) == f.slot_id}
+    for moved in (f for f in filaments if printed.slot(f.slot_id) != f.slot_id):
+        slot = printed.slot(moved.slot_id)
+        known = named.get(slot)
+        if known is None:
+            colour = _project_value(settings, "filament_colour", slot)
+            group = moved.group
+            named[slot] = moved.model_copy(
+                update={
+                    "slot_id": slot,
+                    "type": _project_value(settings, "filament_type", slot) or None,
+                    "color": colour or None,
+                    "group": None
+                    if group is None
+                    else group.model_copy(update={"filament_color": colour}),
+                }
+            )
+        elif known.group_id != moved.group_id:
+            raise _UnresolvedError(
+                "a filament the plate does not print is in another group than its first"
+            )
+        else:
+            named[slot] = known.model_copy(
+                update={"used_grams": round(known.used_grams + moved.used_grams, 2)}
+            )
+    return list(named.values())
 
 
 def read_rack_plan(file: IO[bytes], plate_id: int | None) -> SlicedRack | None:

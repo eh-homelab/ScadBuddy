@@ -416,3 +416,59 @@ def test_a_plate_on_the_fixed_hotend_only_sends_no_mapping() -> None:
         plan, idle_status(), algorithm="least_used", manual_position=None, usage={}, spools={}
     )
     assert chosen.mapping is None
+
+
+#: Real Bambu Studio CLI slices for the H2C (#4711, `tests/slicing/test_slice_info.py`).
+NATIVE = Path(__file__).parents[1] / "fixtures" / "native_slices"
+
+
+def test_a_one_filament_plates_plan_is_on_the_slot_it_prints() -> None:
+    """#4712: the CLI names a one-filament plate's filament ``id="1"`` whatever it prints;
+    plate 3 prints filament 3 from the rack (group 1), so slot 3 is on the rack and slot
+    1 is not printed. Keyed on ``id="1"``, the wire put the rack nozzle on slot 1."""
+    with (NATIVE / "plate3-one-filament.gcode.3mf").open("rb") as file:
+        plan = read_rack_plan(file, 3)
+    assert plan is not None
+    assert plan.slot_groups == [-1, -1, 1]
+    [filament] = plan.filaments
+    assert (filament.slot_id, filament.group_id) == (3, 1)
+    # Filament 3's colour, not the #F5547C slice_info.config wrote (filament 1's).
+    assert filament.color == "#00AE42"
+    assert filament.group is not None and filament.group.filament_color == "#00AE42"
+
+
+def test_a_phantom_filament_1_joins_the_plates_first_filament() -> None:
+    """#4712: plate 2 prints filaments 2 (rack, group 1) then 3 (fixed, group 0); the
+    CLI's phantom ``id="1"`` (what it extruded before its first change) is filament 2's,
+    in filament 2's group."""
+    with (NATIVE / "plate2-two-filaments.gcode.3mf").open("rb") as file:
+        plan = read_rack_plan(file, 2)
+    assert plan is not None
+    assert plan.slot_groups == [-1, 1, 0]
+    assert [(f.slot_id, f.group_id, f.used_grams) for f in plan.filaments] == [
+        (2, 1, 1.39),
+        (3, 0, 1.1),
+    ]
+
+
+def test_a_phantom_filament_in_another_group_has_no_plan(caplog: pytest.LogCaptureFixture) -> None:
+    """#4712: a phantom ``id="1"`` whose group is not the first filament's cannot be
+    placed with confidence, so no field is sent."""
+    with zipfile.ZipFile(NATIVE / "plate2-two-filaments.gcode.3mf") as original:
+        members = {name: original.read(name) for name in original.namelist()}
+    info = members["Metadata/slice_info.config"].decode()
+    members["Metadata/slice_info.config"] = info.replace(
+        '<filament id="1" tray_info_idx="GFA00" type="PLA" color="#F5547C" used_m="0.05" '
+        'used_g="0.15" group_id="1"',
+        '<filament id="1" tray_info_idx="GFA00" type="PLA" color="#F5547C" used_m="0.05" '
+        'used_g="0.15" group_id="0"',
+    ).encode()
+    assert members["Metadata/slice_info.config"] != info.encode()
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    out.seek(0)
+    with caplog.at_level(logging.WARNING):
+        assert read_rack_plan(out, 2) is None
+    assert "nozzle_mapping not sent" in caplog.text
