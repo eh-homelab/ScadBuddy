@@ -161,6 +161,11 @@ _RECOLORED = "~"
 #: copy uploaded before that, which slices a painted slot with another's preset, is
 #: not reused for one.
 _SLOT_HINTS = ";slots"
+#: Follows the plate in every :attr:`Target.key` of a copy laid out since the file
+#: states the bed its plates are spaced by (``printable_area``, #4638). A copy recorded
+#: before has none: Bambu Studio's CLI takes it for a 200 x 200 bed, so every plate past
+#: the first slices empty, and a reused one kept failing after the fix (#4638).
+_BED_STATED = "#bed"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
@@ -203,10 +208,10 @@ class Target:
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        Without a nozzle this is the plate's own key, so a file recorded before #126 is
-        still reused for the same plate.
+        It starts with the plate's own key and :data:`_BED_STATED`, so a copy recorded
+        before #4638, whose file states no bed, is never reused.
         """
-        key = self.plate.key
+        key = f"{self.plate.key}{_BED_STATED}"
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
