@@ -111,10 +111,11 @@ async def test_an_object_with_its_own_plates_is_refused_by_name(tmp_path: Path) 
     assert "its own 3 plates" in raised.value.detail
 
 
-async def test_a_planned_slot_no_part_uses_keeps_its_place(tmp_path: Path) -> None:
+async def test_a_planned_slot_no_part_uses_takes_no_slot(tmp_path: Path) -> None:
     """An arranged output's `colors` can name a slot no part uses (Task 3), so `colors`
-    and `parts` differ in length: the default order is the slots', by position, and
-    never paired with `parts` by index."""
+    and `parts` differ in length and are never paired by index. Arranged again with no
+    colours given, that slot is left out (#4636): an order item made from the result
+    would have a slot no plate prints, which its slice quote refuses."""
     paths, meta, written = await saved_output(tmp_path)
     own = written.result.colors[0]
     store = OutputStore(paths)
@@ -127,7 +128,7 @@ async def test_a_planned_slot_no_part_uses_keeps_its_place(tmp_path: Path) -> No
         objects=[ArrangeObject(output_id=meta.id, part=written.manifest[0].part, count=1)]
     )
     _, inputs = arrange_inputs(store, body, plate_model=None)
-    assert inputs.colours == ["#123456", own]
+    assert inputs.colours == [own]
 
 
 async def test_a_printer_model_sets_the_plate(tmp_path: Path) -> None:
