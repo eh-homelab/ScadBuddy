@@ -234,21 +234,11 @@ LOCAL_A = PresetRef(source="local", id="12")
 LOCAL_B = PresetRef(source="local", id="13")
 
 
-@pytest.mark.parametrize(
-    ("filaments", "shared"),
-    [
-        ((SHARED, LOCAL_A), False),
-        ((SHARED, PresetRef(source="standard", id="Bambu PETG Basic @BBL H2C")), False),
-    ],
-    ids=["own-slot-preset", "distinct-presets"],
-)
-async def test_slots_that_reach_the_cli_under_their_own_names_are_not_read(
-    filaments: tuple[PresetRef, ...], shared: bool
-) -> None:
+async def test_a_plate_planned_with_no_shared_name_is_not_read() -> None:
     """#4649: the CLI drops the tower only for slots that share a preset's name, which
-    ``SlotPresets.shares_a_name`` decided when the run was planned."""
+    ``SlotPresets.planned`` decided when the run was planned; the flag alone decides."""
     bambuddy = Bambuddy(sliced_3mf(DROPPED, 1, 2))
-    run = planned("bambuddy", filaments, shares_a_name=shared)
+    run = planned("bambuddy", (SHARED, LOCAL_A), shares_a_name=False)
 
     queued = await queue_plate(
         cast(BambuddyClient, bambuddy), planned=run, plate=run.plates[0], sliced=9, rack=None
