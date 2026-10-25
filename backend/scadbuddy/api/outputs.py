@@ -612,8 +612,11 @@ def arrange_inputs(
             notes = [
                 f"filament_plan slot {slot} (spool {spool}) is {colours[slot - 1]}, which no"
                 " copy prints in: that spool is not used"
+                if 1 <= slot <= len(colours)
+                else f"filament_plan slot {slot} (spool {spool}) names no colour: that spool is"
+                " not used"
                 for slot, spool in sorted(plan.slots.items())
-                if slot not in kept and 1 <= slot <= len(colours)
+                if slot not in kept
             ]
             plan = SlotPlan(
                 slots={

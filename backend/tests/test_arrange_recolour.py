@@ -486,3 +486,22 @@ async def test_a_plan_with_a_recolour_follows_the_colours_left(tmp_path: Path) -
     assert inputs.notes == [
         f"filament_plan slot 1 (spool 7) is {own}, which no copy prints in: that spool is not used"
     ]
+
+
+async def test_a_planned_slot_past_every_colour_is_said(tmp_path: Path) -> None:
+    """#4702 review: a plan slot past the colour list names no colour; its spool goes
+    unused, and a note says so rather than dropping it without a word."""
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
+        filament_plan=FilamentPlan.model_validate(
+            {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 5, "spool_id": 9}]}
+        ),
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert inputs.filament_plan is not None
+    assert inputs.filament_plan.slots == {1: 7}
+    assert inputs.notes == [
+        "filament_plan slot 5 (spool 9) names no colour: that spool is not used"
+    ]
