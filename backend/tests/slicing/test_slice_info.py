@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -104,6 +105,24 @@ def test_a_sequence_too_deep_to_parse_reads_as_none() -> None:
         archive.writestr("Metadata/filament_sequence.json", "[" * 100_000 + "]" * 100_000)
     read = read_sliced(file.getvalue(), 1)
     assert (read.grams_by_slot, read.filament_changes) == ({1: 0.2, 2: 1.0}, 0)
+
+
+def test_a_sequence_the_header_disagrees_with_leaves_the_grams_as_written() -> None:
+    """#4716 review: plate 2's header names filaments 2 and 3; a sequence starting with
+    filament 4 says nothing of which is first, so the phantom ``id="1"`` stays put."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(NATIVE / "plate2-two-filaments.gcode.3mf") as original,
+        zipfile.ZipFile(out, "w") as archive,
+    ):
+        for name in original.namelist():
+            data = original.read(name)
+            if name == "Metadata/filament_sequence.json":
+                sequences = json.loads(data)
+                sequences["plate_2"]["sequence"] = [4, 2, 3]
+                data = json.dumps(sequences).encode()
+            archive.writestr(name, data)
+    assert read_sliced(out.getvalue(), 2).grams_by_slot == {1: 0.1, 2: 1.2, 3: 1.1}
 
 
 def test_a_gcode_that_cannot_be_inflated_reads_as_unknown_changes() -> None:
