@@ -120,6 +120,8 @@ def test_patch_edits_notes_due_addresses_and_charges(client: TestClient) -> None
     assert [c["amount_minor"] for c in detail["charges"]] == [500, -200]
     assert detail["totals"] == {
         "subtotal_minor": 0,
+        "pending_minor": 0,
+        "unpriced_items": [],
         "charges_minor": 300,
         "total_minor": 300,
         "paid_minor": 0,

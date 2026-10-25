@@ -194,9 +194,17 @@ class ItemDetail(OrderItem):
 
 
 class OrderTotals(BaseModel):
-    """§3.4: the accepted quotes' totals, the charges on top, what was paid."""
+    """§3.4: the items' prices, the charges on top, what was paid. Every item not
+    cancelled counts at its accepted quote's total or, before one is accepted (a draft
+    or quoted order), at its newest quote's unit price times its quantity now, so a
+    draft adds up as it is entered; ``pending_minor`` is the part of the subtotal no
+    accepted quote stands behind yet, and ``unpriced_items`` the items with no quote."""
 
     subtotal_minor: Money
+    #: The part of ``subtotal_minor`` from quotes not yet accepted.
+    pending_minor: Money = 0
+    #: The items not cancelled with no quote at all, in no sum.
+    unpriced_items: list[str] = Field(default_factory=list)
     charges_minor: Money
     total_minor: Money
     paid_minor: Money
@@ -493,18 +501,39 @@ async def estimate(
     )
 
 
+def item_price(item: ItemDetail) -> tuple[Money, bool] | None:
+    """The item's price and whether an accepted quote stands behind it: the accepted
+    quote's total, else the newest quote's unit price times the item's quantity now;
+    None with no quote."""
+    accepted = next((quote for quote in item.quotes if quote.accepted), None)
+    if accepted is not None:
+        return accepted.total_minor, True
+    newest = max(item.quotes, key=lambda quote: (quote.created_at, quote.id), default=None)
+    if newest is None:
+        return None
+    return newest.unit_price_minor * item.quantity, False
+
+
 def _totals(items: list[ItemDetail], charges: list[Charge], payments: list[Payment]) -> OrderTotals:
-    subtotal = sum(
-        quote.total_minor
-        for item in items
-        if item.status != "cancelled"
-        for quote in item.quotes
-        if quote.accepted
-    )
+    subtotal = pending = 0
+    unpriced: list[str] = []
+    for item in items:
+        if item.status == "cancelled":
+            continue
+        priced = item_price(item)
+        if priced is None:
+            unpriced.append(item.id)
+            continue
+        amount, accepted = priced
+        subtotal += amount
+        if not accepted:
+            pending += amount
     charged = sum(charge.amount_minor for charge in charges)
     paid = sum(payment.amount_minor for payment in payments)
     return OrderTotals(
         subtotal_minor=subtotal,
+        pending_minor=pending,
+        unpriced_items=unpriced,
         charges_minor=charged,
         total_minor=subtotal + charged,
         paid_minor=paid,
@@ -608,6 +637,25 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
     _path(order_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.close_order(order_id, by))
+
+
+@router.post(
+    "/{order_id}/reopen",
+    response_model=Order,
+    summary="Reopen a closed or cancelled order",
+    description=(
+        "Undoes a close or a cancel. A closed order takes the status its items and "
+        "shipments give it (`shipped`, as it closed, unless a row changed since). A "
+        "cancelled one goes back to the status it was cancelled from, with the items "
+        "that cancel took (an item cancelled on its own before stays cancelled), and "
+        "then follows its rows. 409 `order_not_ended` for an order neither closed nor "
+        "cancelled."
+    ),
+)
+async def reopen_order(order_id: str, orders: OrdersDep) -> Order:
+    _path(order_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.reopen_order(order_id, by))
 
 
 @router.post(
@@ -773,6 +821,23 @@ async def delete_item(order_id: str, item_id: str, orders: OrdersDep) -> Respons
     by = current_actor()
     await _run(lambda: orders.lifecycle.delete_item(order_id, item_id, by))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/reopen",
+    response_model=OrderItem,
+    summary="Reopen a cancelled line item",
+    description=(
+        "Undoes a cancel: the item takes the state its quotes and attempts give it "
+        "(`approved`, `failed`, `quoted` or `draft`). 409 `item_not_cancelled`, "
+        "`item_not_priced` (an order past `quoted` takes back a priced item only), and "
+        "`order_closed`/`order_cancelled`."
+    ),
+)
+async def reopen_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
+    _path(order_id, item_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.reopen_item(order_id, item_id, by))
 
 
 @router.post(

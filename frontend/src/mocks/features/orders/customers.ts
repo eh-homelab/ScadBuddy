@@ -165,4 +165,11 @@ export const handlers = [
     found.updated_at = now()
     return HttpResponse.json(found)
   }),
+  http.post('/api/v1/customers/:id/unarchive', ({ request, params }) => {
+    const found = state.customers.find((c) => c.id === params.id)
+    if (!found) return problem(request, 404, `no customer '${String(params.id)}'`)
+    found.archived_at = null
+    found.updated_at = now()
+    return HttpResponse.json(found)
+  }),
 ]

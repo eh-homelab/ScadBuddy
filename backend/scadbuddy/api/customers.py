@@ -193,6 +193,16 @@ async def archive_customer(customer_id: str, orders: OrdersDep) -> Customer:
     return customer
 
 
+@router.post("/{customer_id}/unarchive", response_model=Customer, summary="Unarchive a customer")
+async def unarchive_customer(customer_id: str, orders: OrdersDep) -> Customer:
+    """Back in the pickers, so a new order can name them again (§3.1)."""
+    _no_nul_path(customer_id)
+    customer = await asyncio.to_thread(orders.store.unarchive_customer, customer_id)
+    if customer is None:
+        raise _not_found(customer_id)
+    return customer
+
+
 def _no_nul_path(*values: str) -> None:
     if any("\x00" in value for value in values):
         raise ApiError(status.HTTP_400_BAD_REQUEST, "a path value holds a NUL byte")
