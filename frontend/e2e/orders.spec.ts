@@ -58,7 +58,7 @@ test.describe('orders', () => {
     await expect(page.getByTestId('order-totals')).toContainText('25.00')
     await page.getByRole('button', { name: 'Accept order' }).click()
     await expect(unit).toHaveCount(0)
-    await expect(items.getByRole('cell', { name: '$12.50' })).toBeVisible()
+    await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
   })
 
   test('adds the generated output to an order from Customize', async ({ page }) => {

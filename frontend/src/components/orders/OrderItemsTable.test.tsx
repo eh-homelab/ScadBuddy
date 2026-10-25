@@ -138,8 +138,12 @@ describe('OrderItemsTable · unit price', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.type(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' }), '12.50{Enter}')
     expect(await within(row(ITEM_DRAFT)).findByRole('alert')).toHaveTextContent(/on hold/)
-    // The quote stands, not accepted, as the backend keeps it.
+    // The quote stands, not accepted, as the backend keeps it, and the row reloads to show
+    // it: 12.50 a unit, 25.00 for two, with the refusal still there.
     expect(quotesOfDraft().map((q) => q.accepted)).toEqual([false])
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$25.00'))
+    expect(within(row(ITEM_DRAFT)).getByText('not accepted')).toBeInTheDocument()
+    expect(within(row(ITEM_DRAFT)).getByRole('alert')).toHaveTextContent(/on hold/)
   })
 
   it('shows a cancelled item’s price without an editor', async () => {

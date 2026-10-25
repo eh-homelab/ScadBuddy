@@ -176,6 +176,10 @@ function UnitPriceEditor({
       onChanged()
     } catch (err) {
       setError(refusalText(err))
+      // A refused accept still recorded the quote: reload, so the row shows it and a
+      // retry accepts that price rather than recording a second one. The typed text and
+      // the refusal stay.
+      onChanged()
     } finally {
       setBusy(false)
     }
