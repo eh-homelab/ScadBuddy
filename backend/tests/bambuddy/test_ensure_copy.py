@@ -28,7 +28,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.plate import DEFAULT_PLATE
+from scadbuddy.render.plate import DEFAULT_PLATE, plate_for
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.provenance import PROVENANCE_KEY
 
@@ -287,6 +287,48 @@ async def test_a_two_filament_copy_from_before_slot_hints_is_not_reused(
     assert printed.created and printed.library_file_id != before.id
     assert (again.created, again.library_file_id) == (False, printed.library_file_id)
     assert (filed.created, filed.library_file_id) == (False, printed.library_file_id)
+
+
+async def test_a_copy_from_before_the_bed_was_stated_is_not_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4638: a copy laid out before the file stated its bed (``printable_area``) slices
+    every plate past the first empty, and reusing it kept the quote failing after the
+    fix. It is uploaded again, and the new copy is the one reused."""
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy = SlowBambuddy()
+    uploads = MemoryUploads()
+    meta = output("b").model_copy(update={"colors": ["#FF0000", "#00FF00"]})
+    target = Target(plate_for("H2C"), "0.4", colours=("#ff0000", "#00ff00"))
+    assert target.key.startswith("Bambu Lab H2C#bed@0.4")
+    bambuddy.uploaded.append("Demo.3mf")
+    # As #4638's copy 5394 was recorded: the same key, less the marker. Sliced from, so
+    # it is kept beside the new copy rather than superseded.
+    before = LibraryCopy(
+        id=1,
+        folder_id=FOLDER,
+        target_key=target.key.replace("#bed", "", 1),
+        sliced=[SlicedCopy(id=98)],
+    )
+    uploads.copies[meta.id] = [before]
+
+    async def ensure() -> send.EnsuredCopy:
+        return await ensure_copy(
+            cast(BambuddyClient, bambuddy),
+            cast(OutputStore, None),
+            cast(BambuddyUploadStore, uploads),
+            meta,
+            StoredSettings(library_folder_id=2),
+            target=target,
+            folder_id=FOLDER,
+            stem="Demo",
+        )
+
+    printed = await ensure()
+    again = await ensure()
+    assert printed.created and printed.library_file_id != before.id
+    assert (again.created, again.library_file_id) == (False, printed.library_file_id)
 
 
 async def test_an_uncoloured_copy_from_before_slot_hints_is_not_reused(
