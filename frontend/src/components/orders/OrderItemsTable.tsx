@@ -9,6 +9,8 @@ import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
 import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT, unitPrice } from './price'
 import { refusalText } from './refusal'
+import { itemAnchor } from './itemLink'
+import type { SliceQuoteRuns } from './useSliceQuotes'
 
 /**
  * An order's line items (§3.3): picture, title, status, quantity, unit price and line
@@ -26,6 +28,8 @@ export function OrderItemsTable({
   onOpen,
   onChanged,
   canAdd = false,
+  selected = null,
+  quoting,
 }: {
   orderId: string
   /** The order's status: a unit price is typed only while it is draft or quoted. */
@@ -41,6 +45,10 @@ export function OrderItemsTable({
   onChanged: () => void
   /** The page offers Add item (a draft or quoted order): the empty table points at it. */
   canAdd?: boolean
+  /** The item open in the page's drawer (#4693). */
+  selected?: string | null
+  /** The page's slice quotes: a running one shows on its row (#4693). */
+  quoting?: SliceQuoteRuns
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
   const columns: Column<OrderItemDetail>[] = [
@@ -60,7 +68,24 @@ export function OrderItemsTable({
         </Button>
       ),
     },
-    { key: 'status', header: 'Status', cell: (item) => <ItemStatusBadge status={item.status} /> },
+    {
+      key: 'status',
+      header: 'Status',
+      cell: (item) => {
+        const run = quoting?.get(item.id)
+        return (
+          <span className="flex flex-col items-start gap-0.5">
+            <ItemStatusBadge status={item.status} />
+            {run && !run.error && (
+              <span className="text-[11px] text-muted-foreground" data-testid={`item-quoting-${item.id}`}>
+                Quoting…
+              </span>
+            )}
+            {run?.error && <span className="text-[11px] text-warn">Quote failed</span>}
+          </span>
+        )
+      },
+    },
     { key: 'quantity', header: 'Qty', className: 'sb-num', cell: (item) => item.quantity },
     {
       key: 'unit',
@@ -114,6 +139,8 @@ export function OrderItemsTable({
       rows={items}
       rowKey={(item) => item.id}
       rowTestId={(item) => `order-item-${item.id}`}
+      rowId={(item) => itemAnchor(item.id)}
+      selected={selected}
       onOpen={onOpen}
       empty={canAdd ? 'No items yet. Add one with Add item above.' : 'No items.'}
     />

@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../../api/client'
+import { ApiError } from '../../api/client'
+import type { SliceQuoteRequest } from '../../api/types'
 import { resetMockState } from '../../mocks/handlers'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
@@ -14,12 +15,11 @@ vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plat
 describe('QuoteEditor · a quote from a slice (#4250)', () => {
   beforeEach(() => resetMockState())
 
-  it('quotes with the dialog’s choices and a filament per slot', async () => {
-    const quoted = vi.spyOn(api, 'quoteItem')
-    const onChanged = vi.fn()
+  it('hands the dialog’s choices and a filament per slot to the page, and closes (#4693)', async () => {
+    const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockResolvedValue(undefined)
     const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 })
     const { user } = renderPage(
-      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={onChanged} item={draft} />,
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} />,
     )
     await user.click(screen.getByTestId('quote-from-slice'))
     const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
@@ -32,14 +32,94 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     await waitFor(() => expect(quote).toBeEnabled())
     expect(within(dialog).queryByRole('button', { name: 'Print' })).toBeNull()
     await user.click(quote)
-    await waitFor(() => expect(onChanged).toHaveBeenCalled())
-    const body = quoted.mock.calls[0]?.[2]
+    // The dialog does not wait on the operation: its modal would hold the page (#4693).
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Quote from a slice' })).toBeNull())
+    expect(start).toHaveBeenCalledTimes(1)
+    const body = start.mock.calls[0]?.[0]
     expect(body?.filaments).toEqual(
       Object.fromEntries(slots.map((_, index) => [String(index), index % 2 === 0 ? FILAMENT_PLA : FILAMENT_PETG])),
     )
     expect(body?.filament_plan.slots?.length).toBeGreaterThan(0)
     expect(body).not.toHaveProperty('project_id')
-    quoted.mockRestore()
+  })
+
+  it('keeps the dialog and its choices open when the check refuses the quote (#4693)', async () => {
+    const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockRejectedValue(new ApiError(409, 'The order is not open for quotes.'))
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} />,
+    )
+    await user.click(screen.getByTestId('quote-from-slice'))
+    const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    const slots = await within(dialog).findAllByRole('combobox', { name: /^Filament for slot/ })
+    for (const slot of slots) await selectOption(user, slot, /^Bambu PLA/)
+    const quote = within(dialog).getByTestId('run-quote')
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    expect(await within(dialog).findByTestId('quote-error')).toHaveTextContent('The order is not open for quotes.')
+    expect(screen.getByRole('dialog', { name: 'Quote from a slice' })).toBeInTheDocument()
+  })
+
+  it('offers to stop waiting on a quote the page no longer follows (#4693)', async () => {
+    const dismiss = vi.fn()
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    const { user } = renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run: { startedAt: Date.now(), error: null, detached: true, known: [] }, start: vi.fn(), dismiss }}
+      />,
+    )
+    expect(screen.getByTestId('quote-running')).toHaveTextContent(/may still be slicing/)
+    await user.click(screen.getByRole('button', { name: 'Stop waiting' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a running slice quote and holds its button (#4693)', () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run: { startedAt: Date.now(), error: null, known: [] }, start: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+    expect(screen.getByTestId('quote-running')).toHaveTextContent(/Slicing every plate/)
+    expect(screen.getByTestId('quote-from-slice')).toBeDisabled()
+  })
+
+  it('shows a failed slice quote, and offers another and a dismiss (#4693)', async () => {
+    const dismiss = vi.fn()
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft')
+    const { user } = renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={[]}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        slice={{ run: { startedAt: Date.now(), error: 'No printer.', known: [] }, start: vi.fn(), dismiss }}
+      />,
+    )
+    expect(screen.getByTestId('quote-error')).toHaveTextContent('No printer.')
+    expect(screen.getByTestId('quote-from-slice')).toBeEnabled()
+    await user.click(within(screen.getByTestId('quote-error')).getByRole('button', { name: 'Dismiss' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
   })
 
   it('shows a slice quote’s lines and the digest of its file', () => {
