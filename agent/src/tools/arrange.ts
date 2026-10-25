@@ -68,7 +68,8 @@ export const arrangeTools: Tool[] = [
       '`printer_id` packs for that printer\'s plate (omit for the configured one); `filament_plan` is the ' +
       "same spool-per-slot plan print_output takes, slots numbered by `colours` (omit for the first source's " +
       "colours, then any the others add, and any colour a recolour brings; a colour no copy prints in, a part " +
-      "left out or a colour every copy swaps away, is left out and the plan's slots follow their colours). " +
+      "left out or a colour every copy swaps away, is left out and the plan's slots follow their colours; a " +
+      "planned spool whose colour is left out is named in the result's warnings). " +
       "The result is filed under `slug`, one of the outputs' templates " +
       "(omit for the first object's); with a library file ScadBuddy did not make among them, it may be any template, and with library files alone it is required. Waits for the job; if it outlasts the wait, the still-running job " +
       'is returned: poll it with get_render_job, then save_output under its slug. An output saved before ' +
@@ -171,7 +172,15 @@ export const arrangeTools: Tool[] = [
             headers,
           }),
         )
-        return json({ job_id: job.id, slug: job.slug, plates: Math.max(1, (job.plates ?? []).length), output })
+        // What the arrange left out of the request (a planned spool no copy prints in) is said.
+        const warnings = job.warnings ?? []
+        return json({
+          job_id: job.id,
+          slug: job.slug,
+          plates: Math.max(1, (job.plates ?? []).length),
+          output,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        })
       } finally {
         releaseWhenSettled(ctx, submitted, lastJob, release)
       }
