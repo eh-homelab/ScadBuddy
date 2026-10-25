@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { DataTable, type Column } from '../records/DataTable'
 import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
-import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, recordQuote, UNIT_PRICE_HINT, unitPrice } from './price'
+import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT, unitPrice } from './price'
 import { refusalText } from './refusal'
 
 /**
@@ -138,9 +138,9 @@ function UnitPrice({ item, currency, exponent }: { item: OrderItemDetail; curren
 
 /**
  * The unit price, typed: Enter (or Accept) accepts the item's pending quote when the
- * price is that quote's (a slice quote keeps its sliced file and cost), else records a
- * `manual` quote at it and accepts that (`recordQuote`). Escape puts back the price the
- * item has. A refusal shows under it.
+ * price is that quote's and it is for the item's quantity (a slice quote keeps its sliced
+ * file and cost), else records a `manual` quote at it and accepts that, as `recordQuote`
+ * does. Escape puts back the price the item has. A refusal shows under it.
  */
 function UnitPriceEditor({
   orderId,
@@ -173,21 +173,23 @@ function UnitPriceEditor({
     }
     setBusy(true)
     setError(null)
+    // The pending quote is accepted as it is only while it still prices this item: at the
+    // typed price and at the item's quantity (a quantity change leaves it `quote_stale`).
+    const pending = pricingQuote(item)
+    const reuse = pending && !pending.accepted && pending.quote.quantity === item.quantity && pending.quote.unit_price_minor === minor ? pending.quote : null
+    let recorded = false
     try {
-      const pending = pricingQuote(item)
-      if (pending && !pending.accepted && pending.quote.unit_price_minor === minor) {
-        await api.acceptOrderQuote(orderId, item.id, pending.quote.id)
-      } else {
-        await recordQuote(orderId, item.id, { unit_price_minor: minor }, true)
-      }
+      const quote = reuse ?? (await api.quoteOrderItem(orderId, item.id, { unit_price_minor: minor }))
+      recorded = reuse === null
+      await api.acceptOrderQuote(orderId, item.id, quote.id)
       setTyped(null)
       onChanged()
     } catch (err) {
       setError(refusalText(err))
-      // A refused accept still recorded the quote: reload, so the row shows it and a
-      // retry accepts that price rather than recording a second one. The typed text and
-      // the refusal stay.
-      onChanged()
+      // A refused accept after a recorded quote: reload, so the row shows it and a retry
+      // accepts that price rather than recording a second one. The typed text and the
+      // refusal stay.
+      if (recorded) onChanged()
     } finally {
       setBusy(false)
     }

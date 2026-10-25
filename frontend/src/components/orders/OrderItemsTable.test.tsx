@@ -175,6 +175,22 @@ describe('OrderItemsTable · unit price', () => {
     await waitFor(() => expect(quotesOfDraft().map((q) => [q.unit_price_minor, q.accepted])).toEqual([[1250, true]]))
   })
 
+  it('records a fresh quote when the pending one is for an old quantity', async () => {
+    // Priced for two; the item is now three, so that quote would be `quote_stale`.
+    state.quotes.push(manual('q-old', 900, '2026-10-24T23:00:00Z'))
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)
+    if (draft) draft.quantity = 3
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveValue('9.00')
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' }))
+    await waitFor(() => expect(quotesOfDraft().find((q) => q.accepted)?.quantity).toBe(3))
+    const accepted = quotesOfDraft().find((q) => q.accepted)
+    expect(accepted?.id).not.toBe('q-old')
+    expect(accepted?.unit_price_minor).toBe(900)
+    expect(within(row(ITEM_DRAFT)).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('shows a cancelled item’s price without an editor', async () => {
     state.quotes.push(manual('q-pending', 900, '2026-10-24T23:00:00Z'))
     const draft = state.items.find((i) => i.id === ITEM_DRAFT)
