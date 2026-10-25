@@ -10,6 +10,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { CustomerPicker } from './CustomerPicker'
+import { useCustomerPicker } from './useCustomerPicker'
 import { filamentLabel } from './FilamentsEditor'
 import { refusalText } from './refusal'
 
@@ -25,8 +27,7 @@ const NEW = '__new__'
 export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open: boolean; outputId: string; outputName?: string | null; onClose: () => void }) {
   const navigate = useNavigate()
   const customers = useAsync(() => (open ? api.customers() : Promise.resolve([] as Customer[])), [open])
-  const [customerId, setCustomerId] = useState('')
-  const [customerName, setCustomerName] = useState('')
+  const picker = useCustomerPicker(customers.data)
   const [orderId, setOrderId] = useState(NEW)
   const [quantity, setQuantity] = useState('1')
   const [busy, setBusy] = useState(false)
@@ -37,7 +38,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     () => (open && filamentId ? api.orderEstimate(outputId, filamentId) : Promise.resolve(null as OrderEstimate | null)),
     [open, outputId, filamentId],
   )
-  const chosen = customerId && customerId !== NEW ? customerId : ''
+  const chosen = picker.chosen
   const orders = useAsync(
     () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })),
     [chosen],
@@ -60,14 +61,11 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
       setError('Enter how many to make, 1 or more.')
       return
     }
-    if (!customerId || (customerId === NEW && !customerName.trim())) {
-      setError('Pick a customer, or name a new one.')
-      return
-    }
     setBusy(true)
     setError(null)
     try {
-      const customer = customerId === NEW ? (await api.createCustomer({ display_name: customerName.trim() })).id : customerId
+      // A customer made here stays picked when a later step fails, so a retry reuses it.
+      const customer = await picker.resolve()
       const order = orderId === NEW ? (await api.createOrder({ customer_id: customer })).id : orderId
       await api.addOrderItem(order, { output_id: outputId, quantity: count })
       onClose()
@@ -86,28 +84,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
           <DialogDescription>{outputName ? `${outputName} becomes a line item` : 'This output becomes a line item'} of an order, pinned to its template revision and inputs.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="order-customer">Customer</Label>
-            <Select value={customerId} onValueChange={setCustomerId}>
-              <SelectTrigger id="order-customer" aria-label="Customer">
-                <SelectValue placeholder={customers.loading ? 'Loading…' : 'Pick a customer'} />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                {(customers.data ?? []).map((c) => (
-                  <SelectItem key={c.id} value={c.id}>
-                    {c.display_name}
-                  </SelectItem>
-                ))}
-                <SelectItem value={NEW}>New customer…</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          {customerId === NEW && (
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="order-customer-name">Customer name</Label>
-              <Input id="order-customer-name" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
-            </div>
-          )}
+          <CustomerPicker picker={picker} id="order-customer" label="Customer" loading={customers.loading} disabled={busy} />
           {chosen && (
             <div className="flex flex-col gap-1">
               <Label htmlFor="order-pick">Order</Label>

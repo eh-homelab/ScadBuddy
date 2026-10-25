@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { useLocation } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/features/orders/state'
 import { choose } from '../test/select'
@@ -63,5 +64,74 @@ describe('OrdersPage (#4249)', () => {
     await choose(user, screen.getByRole('combobox', { name: 'Customer for the new order' }), 'Bob Builder')
     await user.click(screen.getByRole('button', { name: 'Create order' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
+  })
+
+  // #4251: the customer made inside the dialog, with the order's notes and due date.
+  it('makes a new customer inline, then the order for them', async () => {
+    const createOrder = vi.spyOn(api, 'createOrder')
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+    await screen.findByRole('table', { name: 'Orders' })
+    await user.click(screen.getByRole('button', { name: 'New order' }))
+    const dialog = screen.getByRole('dialog', { name: 'New order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer for the new order' }), 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.type(within(dialog).getByLabelText('Email'), 'grace@example.com')
+    await user.type(within(dialog).getByLabelText('Due'), '2026-12-01')
+    await user.type(within(dialog).getByLabelText('Notes'), 'Gift wrap')
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
+    const [grace, ...others] = await api.customers({ q: 'grace' })
+    expect(others).toHaveLength(0)
+    expect(grace?.contacts).toEqual([expect.objectContaining({ kind: 'email', value: 'grace@example.com', primary: true })])
+    expect(createOrder).toHaveBeenCalledWith({ customer_id: grace?.id, notes: 'Gift wrap', due_at: '2026-12-01T00:00:00Z' })
+    createOrder.mockRestore()
+  })
+
+  it('refuses a new customer with no name, and makes nothing', async () => {
+    const createCustomer = vi.spyOn(api, 'createCustomer')
+    const { user } = renderPage(<OrdersPage />, { route: '/orders' })
+    await screen.findByRole('table', { name: 'Orders' })
+    await user.click(screen.getByRole('button', { name: 'New order' }))
+    const dialog = screen.getByRole('dialog', { name: 'New order' })
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Pick a customer, or make a new one.')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer for the new order' }), 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), '   ')
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('Name the new customer.'))
+    expect(createCustomer).not.toHaveBeenCalled()
+    createCustomer.mockRestore()
+  })
+
+  it('keeps the customer it made when the order fails, so a retry makes no second', async () => {
+    const createOrder = vi.spyOn(api, 'createOrder').mockRejectedValueOnce(new Error('The server is away.'))
+    const { user } = renderPage(
+      <>
+        <OrdersPage />
+        <Location />
+      </>,
+      { route: '/orders' },
+    )
+    await screen.findByRole('table', { name: 'Orders' })
+    await user.click(screen.getByRole('button', { name: 'New order' }))
+    const dialog = screen.getByRole('dialog', { name: 'New order' })
+    const picker = within(dialog).getByRole('combobox', { name: 'Customer for the new order' })
+    await choose(user, picker, 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
+    expect(picker).toHaveTextContent('Grace Hopper')
+    expect(within(dialog).queryByLabelText('Customer name')).toBeNull()
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
+    expect(await api.customers({ q: 'grace' })).toHaveLength(1)
+    expect(createOrder).toHaveBeenCalledTimes(2)
+    createOrder.mockRestore()
   })
 })
