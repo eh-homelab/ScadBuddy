@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # postgres-pin.sh against fixture workflows and a stub curl serving a fake registry
 # (#4729): a digest pin passes, a bare tag or two different digests fail naming the
-# line, and --check fails on a blob the mirror lacks and on a moved tag. No network.
+# line, and --check fails on a blob the mirror lacks, on a manifest it cannot read and
+# on a moved tag. No network.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mktemp -d)"
@@ -80,6 +81,14 @@ PATH="$work/bin:$PATH" "$here/postgres-pin.sh" --check "$work/ci.yml" >/dev/null
 rm "$reg/blobs/sha256:layer-2"
 fails "a blob the mirror lacks" "sha256:layer-2 (HTTP 404)" --check "$work/ci.yml"
 touch "$reg/blobs/sha256:layer-2"
+
+# A manifest the mirror will not serve is an error, never "every blob is there".
+mv "$reg/manifests/sha256:amd64-a" "$work/amd64-a"
+fails "an amd64 manifest that cannot be read" "could not read the linux/amd64 manifest sha256:amd64-a" --check "$work/ci.yml"
+mv "$work/amd64-a" "$reg/manifests/sha256:amd64-a"
+mv "$reg/manifests/$pin" "$work/index"
+fails "an index that cannot be read" "could not read the index $pin" --check "$work/ci.yml"
+mv "$work/index" "$reg/manifests/$pin"
 
 image "$other" sha256:amd64-b sha256:config-b sha256:layer-1 sha256:layer-3
 echo "$other" >"$reg/manifests/17.digest"

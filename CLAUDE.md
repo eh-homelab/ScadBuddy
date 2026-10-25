@@ -1023,7 +1023,7 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`;
   a service container has no such fallback, so a tag the mirror lacks fails the job.
   So they are pinned by digest, `mirror.gcr.io/library/postgres:17@sha256:…`, all one
-  digest (#4729: the moving tag once reached a layer the mirror answered `unknown blob`
+  digest, as is `e2e-stack/compose.yaml`'s (#4729: the moving tag once reached a layer the mirror answered `unknown blob`
   for, and every backend job failed). `postgres-pin.sh` checks the pins in the `lint`
   job; with `--check`, the weekly `postgres-pin.yml` checks that the mirror holds every
   blob of the pin's amd64 image and fails when `17` has moved, saying whether the mirror

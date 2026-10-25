@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # postgres-pin.sh [--check] [workflow.yml...]: the workflows' Postgres service containers
-# (default: every .github/workflows/*.y*ml) are pinned by digest (#4729). A service
+# (default: every .github/workflows/*.y*ml, and e2e-stack/compose.yaml's, which runs the
+# same image) are pinned by digest (#4729). A service
 # container pulls from mirror.gcr.io with no Docker Hub fallback (#3370), so when the
 # moving `postgres:17` tag reached a layer the mirror did not yet hold, every job with
 # the service failed before any test ran. A digest whose every blob the mirror holds
@@ -18,7 +19,7 @@ check=0
 if [ "${1:-}" = --check ]; then check=1; shift; fi
 if [ "$#" = 0 ]; then
   root="$(cd "$(dirname "$0")/../.." && pwd)"
-  set -- "$root"/.github/workflows/*.y*ml
+  set -- "$root"/.github/workflows/*.y*ml "$root"/e2e-stack/compose.yaml
 fi
 
 image='mirror.gcr.io/library/postgres:17'
@@ -53,19 +54,28 @@ index_types='application/vnd.oci.image.index.v1+json, application/vnd.docker.dis
 manifest_types='application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
 
 # missing <index digest>: prints each blob of its linux/amd64 image the mirror lacks.
+# A manifest it cannot read exits 2: an empty answer must mean every blob was checked.
 missing() {
-  local amd64 blob code
-  amd64="$(curl -fsS --retry 3 -H "Accept: $index_types" "$registry/manifests/$1" \
-    | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')"
+  local index amd64 blobs blob code
+  index="$(curl -fsS --retry 3 -H "Accept: $index_types" "$registry/manifests/$1")" || {
+    echo "could not read the index $1 from the mirror" >&2; exit 2
+  }
+  amd64="$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' <<<"$index")" || {
+    echo "the index $1 on the mirror is not an image index" >&2; exit 2
+  }
   if [ -z "$amd64" ]; then echo "$1 (no linux/amd64 manifest)"; return; fi
-  for blob in $(curl -fsS --retry 3 -H "Accept: $manifest_types" "$registry/manifests/$amd64" \
-    | jq -r '.config.digest, .layers[].digest'); do
-    code="$(curl -sSIL --retry 3 -o /dev/null -w '%{http_code}' "$registry/blobs/$blob")"
+  blobs="$(curl -fsS --retry 3 -H "Accept: $manifest_types" "$registry/manifests/$amd64" \
+    | jq -r '.config.digest, .layers[].digest')" || {
+    echo "could not read the linux/amd64 manifest $amd64 of $1 from the mirror" >&2; exit 2
+  }
+  if [ -z "$blobs" ]; then echo "the linux/amd64 manifest $amd64 of $1 names no blobs" >&2; exit 2; fi
+  for blob in $blobs; do
+    code="$(curl -sSIL --retry 3 -o /dev/null -w '%{http_code}' "$registry/blobs/$blob")" || true
     if [ "$code" != 200 ]; then echo "$blob (HTTP $code)"; fi
   done
 }
 
-lacking="$(missing "$pin")"
+lacking="$(missing "$pin")" || exit $?
 if [ -n "$lacking" ]; then
   echo "the mirror lacks blobs of the pinned $pin, so every job with the postgres service fails:" >&2
   echo "$lacking" >&2
@@ -78,7 +88,7 @@ tag="$(curl -fsS --retry 3 -o /dev/null -D - -H "Accept: $index_types" "$registr
 if [ -z "$tag" ]; then echo "the mirror gave no digest for postgres:17" >&2; exit 2; fi
 echo "postgres:17 on the mirror: $tag"
 if [ "$tag" != "$pin" ]; then
-  lacking="$(missing "$tag")"
+  lacking="$(missing "$tag")" || exit $?
   if [ -n "$lacking" ]; then
     echo "postgres:17 moved to $tag, but the mirror lacks some of its blobs; keep the pin until it holds them:" >&2
     echo "$lacking" >&2
