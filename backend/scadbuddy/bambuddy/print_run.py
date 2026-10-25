@@ -2266,7 +2266,7 @@ class PlatePlan(BaseModel):
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
     #: Whether two of :attr:`plan`'s filament slots still share a preset name after
-    #: ``SlotPresets.shares_a_name`` (#4649): only then can Bambuddy's slicer have
+    #: ``SlotPresets.planned`` (#4649): only then can Bambuddy's slicer have
     #: dropped the prime tower, so only then is the slice read for it. ``None`` (a plan
     #: from before it, or one no ``SlotPresets`` saw) reads every multi-slot plate.
     slots_share_a_name: bool | None = None
@@ -2670,13 +2670,11 @@ async def plan_run(
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
         # the preview, the slice and a reprint's lookup all name the same refs.
         slot_presets = SlotPresets(client, catalogue)
-        ready = [
-            (plate_id, options, resolved, await slot_presets.plan(plan))
-            for plate_id, options, resolved, plan in ready
-        ]
-        shared_names = {
-            plate_id: slot_presets.shares_a_name(plan) for plate_id, _, _, plan in ready
-        }
+        slotted: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
+        for plate_id, options, resolved, plan in ready:
+            plan, shared_names[plate_id] = await slot_presets.planned(plan)
+            slotted.append((plate_id, options, resolved, plan))
+        ready = slotted
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.slicing.start import NativeSliceKeys
