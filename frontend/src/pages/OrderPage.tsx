@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { OrderDetail, OrderItemDetail } from '../api/types'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
@@ -8,11 +8,13 @@ import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
+import { itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
 import { itemPrice } from '../components/orders/price'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
+import { useSliceQuotes, type SliceQuoteRuns } from '../components/orders/useSliceQuotes'
 import { RecordDrawer } from '../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -29,8 +31,24 @@ const OPEN_FOR_EDITS = new Set(['draft', 'quoted'])
 const ENDED = new Set(['closed', 'cancelled'])
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
+/** #4693 — the search parameter naming the open line item: `/orders/<id>?item=<item id>`. */
+const ITEM_PARAM = 'item'
+const ITEM_HASH = `#${itemAnchor('')}`
 
-/** `/orders/:id` (spec 2026-10-18 §9): the order whole, its items in a drawer, and its audit line. */
+/** A hash's item id; a malformed escape names no item rather than failing the page. */
+function decoded(text: string): string | null {
+  try {
+    return decodeURIComponent(text)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * `/orders/:id` (spec 2026-10-18 §9): the order whole, its items in a drawer, and its audit
+ * line. The open item is `?item=<id>` (#4693), so a link opens the order with that row
+ * marked, scrolled to and open; `#item-<id>` is taken as the same.
+ */
 export function OrderPage() {
   const { id = '' } = useParams()
   const view = useAsync(() => api.order(id), [id], [`order:${id}`])
@@ -39,7 +57,28 @@ export function OrderPage() {
   const customer = useAsync(() => (detail ? api.customer(detail.order.customer_id) : Promise.resolve(undefined)), [detail?.order.customer_id])
   const [refusal, setRefusal] = useState<{ text: string; items: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
-  const [openItem, setOpenItem] = useState<string | null>(null)
+  const [search, setSearch] = useSearchParams()
+  const location = useLocation()
+  const hashItem = location.hash.startsWith(ITEM_HASH) ? decoded(location.hash.slice(ITEM_HASH.length)) : null
+  const openItem = search.get(ITEM_PARAM) || hashItem || null
+  function setOpenItem(itemId: string | null) {
+    const next = new URLSearchParams(search)
+    if (itemId) next.set(ITEM_PARAM, itemId)
+    else next.delete(ITEM_PARAM)
+    // Replaced, so the hash form becomes the search form and Back leaves the order.
+    setSearch(next, { replace: true })
+  }
+  const slices = useSliceQuotes(id, reload)
+  // Scrolled to once per item named, when its row first renders: not on every reload.
+  const scrolled = useRef<string | null>(null)
+  const loaded = view.data !== undefined
+  useEffect(() => {
+    if (!loaded || !openItem || scrolled.current === openItem) return
+    const row = document.getElementById(itemAnchor(openItem))
+    if (!row) return
+    scrolled.current = openItem
+    row.scrollIntoView?.({ block: 'center' })
+  }, [loaded, openItem])
   const [adding, setAdding] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
@@ -183,6 +222,8 @@ export function OrderPage() {
           onOpen={(item) => setOpenItem(item.id)}
           onChanged={reload}
           canAdd={editable}
+          selected={current?.id ?? null}
+          quoting={slices.runs}
         />
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -347,12 +388,26 @@ export function OrderPage() {
         </section>
       </div>
       {editable && <AddItemDialog open={adding} orderId={order.id} onAdded={reload} onClose={() => setAdding(false)} />}
-      {current && <ItemDrawer key={current.id} detail={detail} item={current} onClose={() => setOpenItem(null)} onChanged={reload} />}
+      {current && (
+        <ItemDrawer key={current.id} detail={detail} item={current} slices={slices} onClose={() => setOpenItem(null)} onChanged={reload} />
+      )}
     </div>
   )
 }
 
-function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail; item: OrderItemDetail; onClose: () => void; onChanged: () => void }) {
+function ItemDrawer({
+  detail,
+  item,
+  slices,
+  onClose,
+  onChanged,
+}: {
+  detail: OrderDetail
+  item: OrderItemDetail
+  slices: { runs: SliceQuoteRuns; start: ReturnType<typeof useSliceQuotes>['start'] }
+  onClose: () => void
+  onChanged: () => void
+}) {
   const { order } = detail
   const editable = OPEN_FOR_EDITS.has(order.status)
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
@@ -470,7 +525,9 @@ function ItemDrawer({ detail, item, onClose, onChanged }: { detail: OrderDetail;
           </>
         )}
       </dl>
-      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} />
+      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item}
+        slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body) }}
+      />
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} />
       <OrderAttachments
         orderId={order.id}

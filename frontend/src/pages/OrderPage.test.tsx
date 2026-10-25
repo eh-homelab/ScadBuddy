@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { Route, Routes } from 'react-router'
+import { Route, Routes, useLocation } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
@@ -7,13 +7,26 @@ import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT } from '../mocks/
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
-function render(id: string) {
+function render(id: string, suffix = '') {
   return renderPage(
     <Routes>
-      <Route path="/orders/:id" element={<OrderPage />} />
+      <Route
+        path="/orders/:id"
+        element={
+          <>
+            <OrderPage />
+            <Where />
+          </>
+        }
+      />
     </Routes>,
-    { route: `/orders/${id}` },
+    { route: `/orders/${id}${suffix}` },
   )
+}
+
+function Where() {
+  const location = useLocation()
+  return <output data-testid="where">{`${location.pathname}${location.search}${location.hash}`}</output>
 }
 
 describe('OrderPage (#4249)', () => {
@@ -95,5 +108,38 @@ describe('OrderPage (#4249)', () => {
     render(ORDER_ACCEPTED)
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
     expect(screen.queryByRole('button', { name: 'Add item' })).not.toBeInTheDocument()
+  })
+
+  describe('a link to a line item (#4693)', () => {
+    it('opens the order with the item named by ?item= marked and open', async () => {
+      render(ORDER_DRAFT, `?item=${ITEM_DRAFT}`)
+      expect(await screen.findByRole('dialog', { name: 'Name Keychain' })).toBeInTheDocument()
+      const row = screen.getByTestId(`order-item-${ITEM_DRAFT}`)
+      expect(row).toHaveAttribute('id', `item-${ITEM_DRAFT}`)
+      expect(row).toHaveAttribute('aria-current', 'true')
+    })
+
+    it('takes #item-<id> as the same, and moves it into the search on close', async () => {
+      const { user } = render(ORDER_DRAFT, `#item-${ITEM_DRAFT}`)
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+      await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Name Keychain' })).toBeNull())
+      expect(screen.getByTestId('where')).toHaveTextContent(new RegExp(`^/orders/${ORDER_DRAFT}$`))
+    })
+
+    it('puts the open item in the URL, so the link can be copied', async () => {
+      const { user } = render(ORDER_DRAFT)
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))
+      await screen.findByRole('dialog', { name: 'Name Keychain' })
+      expect(screen.getByTestId('where')).toHaveTextContent(`/orders/${ORDER_DRAFT}?item=${ITEM_DRAFT}`)
+      expect(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).toHaveAttribute('aria-current', 'true')
+    })
+
+    it('opens nothing for an item the order does not have', async () => {
+      render(ORDER_DRAFT, '?item=not-an-item')
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
   })
 })
