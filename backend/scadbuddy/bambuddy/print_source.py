@@ -391,16 +391,18 @@ class PrintPipeline:
         the next reader starts anew.
 
         The fetch runs on the first reader's ``client``, which must outlive it, so every
-        reader must hand in that same client (asserted): every caller today hands in the
+        reader must hand in that same client (checked): every caller today hands in the
         one client of its request or activity."""
         fetching = self._fetching
         if fetching is None:
             fetching = asyncio.ensure_future(_fetch_once(self, client))
             self._fetching = fetching
             self._fetch_client = client
-        # The contract above, checked: a reader with a client of its own could see the
-        # fetch fail when the first reader's client closed (#4623 review).
-        assert client is self._fetch_client, "every reader of a source shares its client"
+        # The contract above, checked in every deployment (not an `assert`, which `-O`
+        # drops): a reader with a client of its own could see the fetch fail when the
+        # first reader's client closed (#4623, #4659 reviews).
+        if client is not self._fetch_client:
+            raise _misuse("every reader of a source's 3MF must share its client")
         self._waiting += 1
         try:
             # Shielded: one reader cancelled does not cancel the fetch the others wait on.

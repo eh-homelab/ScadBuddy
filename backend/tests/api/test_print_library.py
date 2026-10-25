@@ -1442,6 +1442,7 @@ def test_a_check_that_runs_out_of_memory_again_logs_its_traceback_once(
     for another file, the traceback again."""
     configure(client)
     library_file(89)
+    library_file(90)
     run_routes()
     clock = [1000.0]
     monkeypatch.setattr(print_run, "_clock", lambda: clock[0])
@@ -1450,16 +1451,28 @@ def test_a_check_that_runs_out_of_memory_again_logs_its_traceback_once(
         raise MemoryError
 
     monkeypatch.setattr(LibrarySource, "fetch_3mf", out_of_memory)
+    steps = [
+        (0.0, 89),
+        (1.0, 89),
+        (1.0, 90),
+        (print_run.OUT_OF_MEMORY_TRACEBACK_INTERVAL, 89),
+    ]
 
     with caplog.at_level(logging.WARNING, logger=print_run.logger.name):
-        for step in (0.0, 1.0, print_run.OUT_OF_MEMORY_TRACEBACK_INTERVAL):
+        for step, file_id in steps:
             clock[0] += step
-            check = client.post("/api/v1/print/library/89/check", json=body())
+            check = client.post(f"/api/v1/print/library/{file_id}/check", json=body())
             assert check.json()["errors"] == [str(ReadOutOfMemoryError())]
 
     logged = [r for r in caplog.records if "ran out of memory" in r.getMessage()]
-    assert [bool(r.exc_info) for r in logged] == [True, False, True]
-    assert [r.__dict__["subject"] for r in logged] == ["library:89"] * 3
+    assert [(r.__dict__["subject"], bool(r.exc_info)) for r in logged] == [
+        ("library:89", True),
+        ("library:89", False),
+        ("library:90", True),
+        ("library:89", True),
+    ]
+    # Past the interval, 90's entry went when 89's traceback was logged again.
+    assert set(print_run._out_of_memory_logged) == {"library:89"}
 
 
 @respx.mock

@@ -206,6 +206,14 @@ def _log_out_of_memory(subject: str, where: str) -> None:
     last = _out_of_memory_logged.get(subject)
     traceback = last is None or now - last >= OUT_OF_MEMORY_TRACEBACK_INTERVAL
     if traceback:
+        # Kept bounded in a long-lived process (#4659 review): an entry past the interval
+        # would log its traceback anyway, so it goes.
+        for stale in [
+            key
+            for key, at in _out_of_memory_logged.items()
+            if now - at >= OUT_OF_MEMORY_TRACEBACK_INTERVAL
+        ]:
+            del _out_of_memory_logged[stale]
         _out_of_memory_logged[subject] = now
     logger.warning(
         "print check ran out of memory %s",

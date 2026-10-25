@@ -1231,7 +1231,7 @@ async def test_every_reader_of_a_fetch_hands_in_its_client() -> None:
     await source.started.wait()
 
     # Bounded: without the check, this reader would wait on the held fetch.
-    with pytest.raises(AssertionError, match="shares its client"):
+    with pytest.raises(ApiError, match="share its client"):
         async with asyncio.timeout(5):
             await source.fetched_3mf(other)
     source.release.set()
