@@ -108,6 +108,10 @@ export function OrdersPage() {
           <h1 className="text-xl font-semibold tracking-tight">Orders</h1>
           <Button
             onClick={() => {
+              // Each New order starts empty: a cancelled attempt's choices do not carry over.
+              picker.reset()
+              setNewDue('')
+              setNewNotes('')
               setCreateError(null)
               setCreating(true)
             }}

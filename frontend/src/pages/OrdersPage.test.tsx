@@ -93,6 +93,24 @@ describe('OrdersPage (#4249)', () => {
     createOrder.mockRestore()
   })
 
+  it('opens New order empty after a cancelled attempt', async () => {
+    const { user } = renderPage(<OrdersPage />, { route: '/orders' })
+    await screen.findByRole('table', { name: 'Orders' })
+    await user.click(screen.getByRole('button', { name: 'New order' }))
+    let dialog = screen.getByRole('dialog', { name: 'New order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer for the new order' }), 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.type(within(dialog).getByLabelText('Due'), '2026-12-01')
+    await user.type(within(dialog).getByLabelText('Notes'), 'Gift wrap')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New order' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'New order' }))
+    dialog = screen.getByRole('dialog', { name: 'New order' })
+    expect(within(dialog).queryByLabelText('Customer name')).toBeNull()
+    expect(within(dialog).getByLabelText('Due')).toHaveValue('')
+    expect(within(dialog).getByLabelText('Notes')).toHaveValue('')
+  })
+
   it('refuses a new customer with no name, and makes nothing', async () => {
     const createCustomer = vi.spyOn(api, 'createCustomer')
     const { user } = renderPage(<OrdersPage />, { route: '/orders' })

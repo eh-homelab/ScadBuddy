@@ -32,6 +32,9 @@ export interface CustomerPickerState {
    * does not make a second. Throws `CustomerChoiceError` when there is nothing to send.
    */
   resolve: () => Promise<string>
+  /** Back to nothing picked and an empty draft, for a dialog opened afresh; a customer
+   *  this picker made stays offered. */
+  reset: () => void
 }
 
 /** The body a new customer is made with (§3.1): a name, and an email and a phone as primary contacts. */
@@ -55,6 +58,8 @@ export function useCustomerPicker(customers: Customer[] | undefined): CustomerPi
   }, [customers, made])
   const setDraft = useCallback((patch: Partial<NewCustomerDraft>) => setDraftState((was) => ({ ...was, ...patch })), [])
 
+  // `value` and `draft` are read as this render saw them: the dialog disables the picker
+  // while it submits, so neither changes between the click and the call.
   const resolve = useCallback(async () => {
     if (!value) throw new CustomerChoiceError('Pick a customer, or make a new one.')
     if (value !== NEW_CUSTOMER) return value
@@ -66,5 +71,10 @@ export function useCustomerPicker(customers: Customer[] | undefined): CustomerPi
     return customer.id
   }, [value, draft])
 
-  return { value, setValue, chosen: value === NEW_CUSTOMER ? '' : value, draft, setDraft, options, resolve }
+  const reset = useCallback(() => {
+    setValue('')
+    setDraftState(EMPTY_DRAFT)
+  }, [])
+
+  return { value, setValue, chosen: value === NEW_CUSTOMER ? '' : value, draft, setDraft, options, resolve, reset }
 }
