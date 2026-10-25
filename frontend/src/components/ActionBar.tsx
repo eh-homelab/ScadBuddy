@@ -33,7 +33,7 @@ import { PrintPicker } from './PrintPicker'
 import { breadcrumbs, useProjectList } from '../lib/projects'
 import { useSubscription } from '../lib/realtime'
 import { useAsync, type AsyncState } from '../lib/useAsync'
-import { listsNativeFolders } from '../lib/printerRegistry'
+import { listsNativeFolders, nativeBackends } from '../lib/printerRegistry'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Hint } from './Hint'
@@ -199,10 +199,13 @@ export function ActionBar({
   const nativeLibrary = listsNativeFolders(backends.data)
   /**
    * Fetched once here and shared by both pickers, so the dialog does not list it again.
-   * Bambuddy's projects only once a picker opens (#4601): a page load on the hot path asks
-   * Bambuddy nothing. ScadBuddy's own folders are read at once, as they ask it nothing.
+   * On the hot path's backends Bambuddy's projects are read only once a picker opens or the
+   * agent names one (#4601): a page load there asks Bambuddy nothing. Every other
+   * deployment reads them at load, as before; ScadBuddy's own folders are read at once,
+   * as they ask Bambuddy nothing.
    */
-  const list = useProjectList(undefined, settled, nativeLibrary, !nativeLibrary)
+  const lazyProjects = !nativeLibrary && nativeBackends(backends.data)
+  const list = useProjectList(undefined, settled, nativeLibrary, lazyProjects)
   // Loading until it is read, settings first: a list not yet asked for is not an empty one.
   const projects = useMemo(() => (settled ? list : { ...list, loading: true }), [settled, list])
   const listed = projects.choices?.projects
@@ -450,6 +453,8 @@ export function ActionBar({
     subject,
     projectPath,
     listed,
+    projectsError: projects.error,
+    requestProjects: projects.request,
   })
 
   // #254 — Generate, and opening (never confirming) the print and send dialogs.
@@ -476,6 +481,14 @@ export function ActionBar({
             `with project_id ${clash.chosen} to file it in ${path(clash.chosen)}, or ${clash.remembered} to file ` +
             `it in ${path(clash.remembered)}.`,
         )
+      }
+      // A lazy list nobody opened yet (#4601): read it now, so the id below can be checked.
+      if (project_id !== undefined && project_id !== null && !live.current.listed) {
+        live.current.requestProjects()
+        await waitFor(() => (live.current.listed || live.current.projectsError ? true : undefined), {
+          timeout: timeout_ms,
+          what: 'the project list',
+        })
       }
       // An id Bambuddy does not list would be saved and then fail to file: refuse it first.
       if (project_id !== undefined && project_id !== null && !live.current.listed?.some((p) => p.id === project_id)) {

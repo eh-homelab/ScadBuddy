@@ -1,9 +1,9 @@
 import { trace } from '@opentelemetry/api'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import type { ComponentProps } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useState, type ComponentProps } from 'react'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Job, Output } from '../api/types'
+import type { Job, Output, Settings } from '../api/types'
 import { bridge } from '../agent/bridge'
 import { NO_EXTRA, type InputsExtra } from '../lib/inputs'
 import { outputs } from '../mocks/fixtures'
@@ -17,6 +17,7 @@ import { fakeRealtime } from '../lib/realtime.fake'
 import { http } from 'msw'
 import { server } from '../mocks/server'
 import { setHotPath } from '../mocks/features/hotPath'
+import { mockSettings } from '../mocks/handlers'
 
 const job: Job = {
   id: 'a'.repeat(32),
@@ -508,25 +509,86 @@ describe('ActionBar destinations on the hot path', () => {
     }
   })
 
-  it("asks Bambuddy for its projects only once the picker opens (#4601)", async () => {
+  /** The hot path's backends with a Bambuddy URL set: Bambuddy's projects, read lazily (#4601). */
+  const hybrid = () => ({
+    settings: {
+      data: {
+        ...mockSettings(),
+        bambuddy_url: 'http://bambuddy.test',
+        slicer_backend: 'native',
+        library_backend: 'native',
+        store_backend: 's3',
+      } as Settings,
+      error: undefined,
+    },
+  })
+  /** The project-list reads, as they start. */
+  function projectReads() {
     const asked: string[] = []
     const listener = ({ request }: { request: Request }) => {
       const url = new URL(request.url)
       if (url.pathname === '/api/v1/print/projects') asked.push(`${url.pathname}${url.search}`)
     }
     server.events.on('request:start', listener)
-    try {
-      const { user } = setup()
-      const picker = await screen.findByTestId('customize-project-select')
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      // A Bambuddy URL is set (the default mock): the page load lists nothing of it.
-      expect(asked).toEqual([])
-      await user.click(picker)
-      await waitFor(() => expect(asked).toEqual(['/api/v1/print/projects']))
-      expect(await screen.findByTestId('customize-project-select-list')).toBeInTheDocument()
-    } finally {
+    onTestFinished(() => {
       server.events.removeListener('request:start', listener)
+    })
+    return asked
+  }
+
+  it("asks Bambuddy for its projects only once the picker opens, on the hot path's backends (#4601)", async () => {
+    const asked = projectReads()
+    const { user } = setup(false, job, undefined, hybrid())
+    const picker = await screen.findByTestId('customize-project-select')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(asked).toEqual([])
+    await user.click(picker)
+    await waitFor(() => expect(asked).toEqual(['/api/v1/print/projects']))
+    expect(await screen.findByTestId('customize-project-select-list')).toBeInTheDocument()
+  })
+
+  it('reads the projects at load off the hot path, as before', async () => {
+    const asked = projectReads()
+    setup()
+    await waitFor(() => expect(asked).toEqual(['/api/v1/print/projects']))
+  })
+
+  it("files the agent's generate in a project on a page whose picker was never opened (#4601)", async () => {
+    const asked = projectReads()
+    vi.spyOn(api, 'createOutput').mockResolvedValue(outputs[0]!)
+    const filed = vi
+      .spyOn(api, 'fileIntoProject')
+      .mockResolvedValue({ file_id: 1, folder_id: 2, name: 'x.3mf' } as never)
+    // The page shows what Generate saved, as CustomizePage does.
+    function Page() {
+      const [saved, setSaved] = useState<Output | undefined>()
+      return (
+        <ActionBar
+          slug="name-keychain"
+          job={job}
+          rendering={false}
+          output={saved}
+          capture={async () => null}
+          captureImage={async () => null}
+          viewSize={() => ({ width: 800, height: 500 })}
+          extra={NO_EXTRA}
+          fit={undefined}
+          onPrinterModel={() => undefined}
+          onGenerated={setSaved}
+          onSent={() => undefined}
+          onRan={() => undefined}
+          {...hybrid()}
+        />
+      )
     }
+    renderPage(<Page />)
+    await screen.findByTestId('customize-project-select')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(asked).toEqual([])
+    const result = await bridge.call('generate', { timeout_ms: 5000, project_id: 1 })
+    expect(result).toMatchObject({ ok: true, result: { output: { id: outputs[0]!.id } } })
+    expect(asked).toEqual(['/api/v1/print/projects'])
+    expect(filed).toHaveBeenCalledWith(outputs[0]!.id, 1)
   })
 
   it("takes the page's Settings read in place of its own", async () => {

@@ -39,8 +39,8 @@ export interface ProjectList {
  * `onLoaded`, so the parent can seed its value. `enabled` false fetches nothing, for a
  * picker handed a list by its parent. `native` (#3818, plan 2026-10-18 D6) reads
  * ScadBuddy's own library folders instead, with no projects, and asks Bambuddy nothing.
- * `lazy` (#4601) reads nothing until `request()`: Bambuddy's projects are asked for when
- * a picker opens, never by a page load on the hot path. Not loading until then: a list
+ * `lazy` (#4601) reads nothing until `request()`: on the hot path's backends Bambuddy's
+ * projects are asked for when a picker opens (or the agent names one), never by a page load. Not loading until then: a list
  * nobody asked for is shown as no list, not as one on its way.
  */
 export function useProjectList(
@@ -50,7 +50,9 @@ export function useProjectList(
   lazy = false,
 ): ProjectList {
   const [choices, setChoices] = useState<ProjectChoices | null>(null)
-  const [wanted, setWanted] = useState(!lazy)
+  // Only `request()` sets it: a list that turns lazy once Settings answer must not read
+  // because it started out eager.
+  const [wanted, setWanted] = useState(false)
   const [loading, setLoading] = useState(enabled && !lazy)
   const [error, setError] = useState<string | null>(null)
 
@@ -93,7 +95,10 @@ export function useProjectList(
   useEffect(() => {
     if (enabled && (wanted || !lazy)) void fetchList(true)
   }, [enabled, wanted, lazy, fetchList])
-  const request = useCallback(() => setWanted(true), [])
+  // A no-op on an eager list: flipping `wanted` there would read it again.
+  const request = useCallback(() => {
+    if (lazy) setWanted(true)
+  }, [lazy])
 
   /** A re-read in flight, which a second caller joins rather than starting another. */
   const inFlight = useRef<Promise<void> | null>(null)
