@@ -5,6 +5,8 @@ after commit."""
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -1126,3 +1128,41 @@ def test_a_cancels_late_release_never_drops_a_reopens_holds(shop: Shop) -> None:
     # Without the reopen, the same release drops them.
     shop.lifecycle.cancel_item(order.id, item.id, BY)
     assert _held_keys(shop) == {}
+
+
+def test_a_reopen_racing_the_late_release_keeps_its_holds(shop: Shop) -> None:
+    """The drop checks and deletes under the order's lock: a reopen holding that lock
+    (its holds' insert found the old rows and did nothing) makes the drop wait, and the
+    drop then sees the item reopened and leaves the holds."""
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item, key="quote-locked")
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    told = shop.lifecycle._told
+    deferred: list[Any] = []
+    shop.lifecycle._told = deferred.append  # type: ignore[method-assign, assignment]
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    shop.lifecycle._told = told  # type: ignore[method-assign]
+    accepted = shop.rows.quotes(item.id)
+    with shop.rows.transaction() as conn:
+        # A reopen in flight: the order locked, the item back, the holds "taken" again.
+        shop.rows.lock_order(conn, order.id)
+        conn.execute("UPDATE order_items SET status = 'approved' WHERE id = %s", (item.id,))
+        shop.rows.hold_quote_files(conn, QUOTE_HOLDER, accepted)
+        late = threading.Thread(target=told, args=(deferred[0],))
+        late.start()
+        assert shop.refs is not None
+        deadline = time.monotonic() + 10
+        with shop.refs.pool.connection() as watch:
+            while True:
+                waiting = watch.execute(
+                    "SELECT count(*) AS n FROM pg_stat_activity"
+                    " WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                ).fetchone()
+                if waiting is not None and waiting["n"] > 0:
+                    break
+                assert late.is_alive() and time.monotonic() < deadline
+                time.sleep(0.01)
+    late.join(timeout=10)
+    assert not late.is_alive()
+    assert _held_keys(shop) == {quote.id: {"quote-a", "quote-locked"}}

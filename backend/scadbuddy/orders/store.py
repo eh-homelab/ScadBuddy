@@ -986,23 +986,35 @@ class OrderStore:
             raise LookupError(f"no quote {quote_id} of item {item_id}")
         return Quote.model_validate(row)
 
-    def still_released(self, quote_ids: Sequence[str]) -> list[str]:
-        """Of ``quote_ids``, those whose item is still cancelled or whose order is still
-        closed or cancelled: the holds a cancel or a close may drop now. A quote a reopen
-        brought back since is left out."""
+    def drop_released_holds(self, holder_kind: str, quote_ids: Sequence[str]) -> list[str]:
+        """Drop the ``holder_kind`` holds of those of ``quote_ids`` whose item is still
+        cancelled or whose order is still closed or cancelled (what a cancel or a close
+        released, after its commit), and return their ids. The orders' rows are locked
+        first, as every transition locks its order, so a reopen either committed before
+        the check (its quotes are left out) or waits for this commit and holds them again:
+        never a hold dropped after a reopen took it."""
         if not quote_ids:
             return []
-        with self._pool.connection() as c:
+        ids = list(quote_ids)
+        with self.transaction() as c:
+            c.execute(
+                "SELECT o.id FROM orders o WHERE o.id IN (SELECT i.order_id"
+                " FROM order_item_quotes q JOIN order_items i ON i.id = q.order_item_id"
+                " WHERE q.id = ANY(%s)) ORDER BY o.id FOR SHARE",
+                (ids,),
+            )
             rows = c.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id IN ("
                 "SELECT q.id FROM order_item_quotes q"
                 " JOIN order_items i ON i.id = q.order_item_id"
                 " JOIN orders o ON o.id = i.order_id"
                 " WHERE q.id = ANY(%s)"
-                " AND (i.status = 'cancelled' OR o.status IN ('closed', 'cancelled'))",
-                (list(quote_ids),),
+                " AND (i.status = 'cancelled' OR o.status IN ('closed', 'cancelled')))"
+                " RETURNING holder_id",
+                (holder_kind, ids),
             ).fetchall()
-        kept = {row["id"] for row in rows}
-        return [quote_id for quote_id in quote_ids if quote_id in kept]
+        dropped = {row["holder_id"] for row in rows}
+        return [quote_id for quote_id in ids if quote_id in dropped]
 
     def standing_quote_ids(self) -> set[str]:
         """The quotes whose sliced file §3.4 keeps (#4250 Ruling 3): each item's accepted
