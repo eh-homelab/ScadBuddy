@@ -101,6 +101,10 @@ describe('undoing an archive, a close and a cancel', () => {
     const target = state.orders.find((o) => o.id === ORDER_DRAFT)
     if (target) target.status = 'accepted'
     await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+    // A cancelled item is in no sum: its price is struck through, not "not accepted".
+    const row = screen.getByTestId(`order-item-${ITEM_DRAFT}`)
+    expect(await within(row).findByText('not counted')).toBeInTheDocument()
+    expect(within(row).queryByText('not accepted')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Put on hold' }))
     await user.click(screen.getByRole('button', { name: 'Release hold' }))
     await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))

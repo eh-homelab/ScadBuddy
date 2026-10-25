@@ -437,6 +437,8 @@ export const handlers = [
       order.status = base
       order.closed_at = null
       order.cancelled_at = null
+      // `reopen_order_row`: an order back before acceptance is no longer accepted.
+      if (base === 'draft' || base === 'quoted') order.accepted_at = null
       order.updated_at = now()
       const before = state.events.length
       rederive(order)
