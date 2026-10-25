@@ -4,7 +4,7 @@ import { command } from './command.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
-import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
+import { BYTES_NEVER_AN_ARGUMENT, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Mesh models (#2146, spec docs/superpowers/specs/2026-10-11-mesh-models-design.md):
 // a 3MF/STL opened as a model whose scene.json compiles to its model.scad. Routes:
@@ -58,8 +58,7 @@ export const meshModelTools: Tool[] = [
       'Open a mesh as an editable model: a Bambuddy library file (library_file_id, from list_library), an output ' +
       '(output_id), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a ' +
       'scene object you can cut, join with a peg and socket, lay flat, add to or subtract from with edit_scene, then ' +
-      'render and print like any template. Nothing is written to Bambuddy. Bytes are never an argument: a mesh ' +
-      "reaches the workspace by the user's upload in the assistant panel, http_request `save_to_workspace`, or workspace_save.",
+      'render and print like any template. Nothing is written to Bambuddy. ' + BYTES_NEVER_AN_ARGUMENT,
     input: z
       .object({
         name: z.string().min(1).max(200),

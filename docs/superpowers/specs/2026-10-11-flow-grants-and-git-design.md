@@ -882,17 +882,37 @@ beyond Temporal's retention.
 |---|---|---|
 | `render.finished` | `job.done` | `job:<job id>` |
 | `model.changed` | `version.committed` | `commit:<slug>:<commit>` |
+| `print.finished` | `print.outcome`, outcome `finished` | `print:<run id>` |
+| `print.failed` | `print.outcome`, outcome `failed` | `print:<run id>` |
 
-- **Print finished or failed is not in this first set** (Ruling 22, #2665).
-  `print.settled` is published per process by `ProgressObserver`'s in-memory comparison,
-  carries no outcome, and two replicas reading one print can each publish it. A print
-  trigger first needs the settle recorded once, with its outcome.
+- **A print's outcome is recorded once** (#2665). `print.settled` is published per
+  process by `ProgressObserver`'s in-memory comparison, carries no outcome, and two
+  replicas reading one print can each publish it, so the print triggers are not built on
+  it. Instead the follow's settled read (`bambuddy/follow.py` `Follower`, which every
+  print's `FollowPrint` runs, Bambuddy's queue and the LAN alike) writes
+  `print_outcomes` (`bambuddy/outcomes.py`): one row per print, keyed by the run that
+  queued or started it (the subject's newest `succeeded` `print_runs` row, and only when
+  the settled read names one of that run's queue items, its slice job or its LAN start),
+  with its outcome (`finished`, `failed`, `cancelled` or `unknown`), its subject, slug
+  and registry printer. `print.outcome` is published in the same transaction, so a
+  second replica, a poke's old attempt or a follow started again records nothing and
+  publishes nothing. The workflow is unchanged: the record is in its activity. A print
+  with no run on record (one from before #1049, or pruned) records nothing.
+- **A cancelled print fires neither event** (Ruling 24), nor does one whose end is
+  `unknown` (a slice job Bambuddy dropped, a LAN printer that moved on or went quiet).
+  A run that failed before it queued anything was never a print and is not followed, so
+  it fires nothing either. A LAN print stopped on the printer reports `FAILED`, so it
+  fires `print.failed`: the printer does not tell a stop from a fault.
+- A print's slug is its output's template, or `library-<file id>` for a library file's
+  print, as its `print.*` events carry.
 - An event the bus lost while its LISTEN connection was down (`bus.resync`) fires
   nothing: a trigger fires at most once per event.
 - The event's facts (kind, slug, job or commit) are recorded on the fire and shown with
   the run. The script reads them with the host function `trigger()` (#2666): a
-  `ModelChanged` (`slug`, `commit`) or a `RenderFinished` (`slug`, `job_id`) told apart by
-  `kind`, or None for a run started by hand or on a schedule. They come from the run's
+  `ModelChanged` (`slug`, `commit`), a `RenderFinished` (`slug`, `job_id`), a
+  `PrintFinished` or a `PrintFailed` (`slug`, `run_id`, `output_id`, `printer`) told
+  apart by `kind`, or None for a run started by hand or on a schedule. A print's two
+  are separate types, as each other event is one (Ruling 25). They come from the run's
   start message, as `inputs()`'s values do, and are data only: §12.4's authority is
   untouched.
 
@@ -1001,6 +1021,18 @@ edits a trigger) carry `USER_ONLY`; #2653 tracks the server-side half.
     fire to wait for its run (polling) or own it (a run is not a child workflow), so they
     are left out.
 22. **The first event set is `render.finished` and `model.changed`.** Print finished and
-    failed wait for a settle recorded once with its outcome (#2665).
+    failed waited for a settle recorded once with its outcome, and joined it with #2665
+    (§12.3).
 23. **A triggered run has no starter session** (§12.4), so no parent hop: the session
     that made a trigger is not there when it fires.
+24. **(user-approved scope, #2665) A cancelled print fires neither `print.finished` nor
+    `print.failed`.** A person stopped it: a decision, not a failure, and a flow that
+    retries or reports failures should not answer it. Its outcome is still recorded
+    (`cancelled`), so a `print.cancelled` event can be added on the same record if one is
+    wanted.
+25. **`trigger()` returns `PrintFinished` or `PrintFailed`, not one `PrintSettled` with an
+    outcome.** The trigger's kind already is the outcome, each other event is one type
+    per kind, and a script narrows on `kind` alone. Widening the union means a script
+    that read `job_id` in the branch left after `model.changed` must now check
+    `render.finished` too: such a version no longer type-checks, and its trigger's fires
+    fail with that reason until a new version is pinned.

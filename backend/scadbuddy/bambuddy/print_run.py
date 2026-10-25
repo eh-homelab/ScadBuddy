@@ -95,10 +95,12 @@ from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
+    may_share_a_name,
     not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
     template_keys_dropped,
+    tower_dropped,
 )
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
@@ -119,6 +121,7 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.slot_presets import SlotPresets
 from scadbuddy.bambuddy.supports import (
     SUPPORT_KEYS,
     SupportsChoice,
@@ -962,12 +965,13 @@ async def check_print(
     # are read beside it (#4196): awaited after it in the order they were read in, so a
     # failure surfaces where it did, and cancelled when it refuses. One inventory
     # read for the plan, the rack, the slot refusals and the spool warnings (#2722);
-    # none for a plan with no slots, whose slot refusals read their own. `_fetch` keeps a
-    # download only once it is done, so `prepare_run` must not fetch the 3MF itself here
-    # (it does not, with `refuse_manual_pick` off): it would download it a second time
+    # none for a plan with no slots, whose slot refusals read their own. Every read of the
+    # 3MF, `prepare_run`'s included, waits on the source's one fetch, even while it runs,
+    # and its failure (out of memory, #4581 review) answers them all
     # (`test_a_library_files_check_fetches_the_file_once`). Started before the check
     # knows whether it refuses, these reads may reach Bambuddy on a refused check too: the
-    # inventory's spools and assignments may already be asked for, then are cancelled.
+    # inventory's spools and assignments may already be asked for, then are cancelled,
+    # and a fetch no other read waits on stops with its task.
     laying_out = None if source.is_sliced else asyncio.create_task(source.states_nozzles(client))
     reading = (
         asyncio.create_task(read_inventory(client))
@@ -995,7 +999,9 @@ async def check_print(
             return PrintCheck(errors=[error.detail])
         if isinstance(error, MemoryError):
             # As the layout's read below (#4576 review): a read of the file that runs out
-            # of memory is the check's refusal, never a 500.
+            # of memory is the check's refusal, never a 500. Logged, as the allocation
+            # that failed may not have been a read of the file.
+            logger.warning("print check ran out of memory preparing the run", exc_info=True)
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     if laying_out is None:
@@ -1011,6 +1017,7 @@ async def check_print(
         if isinstance(error, MemoryError):
             # The file too large to hold here (#4562 review): refused as a read of it is,
             # saying how to bound it, never a 500.
+            logger.warning("print check ran out of memory laying out the file", exc_info=True)
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
     inventory = await reading if reading is not None else None
@@ -2391,6 +2398,21 @@ async def queue_plate(
         else None
     )
     notes: list[FilamentWarning] = []
+    if (
+        planned.slicer == "bambuddy"
+        and plate.plan is not None
+        and may_share_a_name(plate.plan.filament_presets)
+    ):
+        # Before the queue call, which is made once: this never raises (#3962). Slots
+        # that each have a preset of their own keep the tower, so their slice is not
+        # downloaded to look (#4649).
+        notes += await tower_dropped(
+            client,
+            sliced=sliced,
+            plate_id=plate.plate_id,
+            process=plate.plan.process_preset,
+            process_overrides=plate.plan.process_overrides,
+        )
     choice = (
         await rack_chooser(
             client,
@@ -2637,6 +2659,15 @@ async def plan_run(
         ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    if not native_slicing and not native_run and client is not None:
+        # Bambuddy's slicer drops the prime tower when slots share one preset name
+        # (#3962): each repeat gets a preset of its own, before any key is taken, so
+        # the preview, the slice and a reprint's lookup all name the same refs.
+        slot_presets = SlotPresets(client, catalogue)
+        ready = [
+            (plate_id, options, resolved, await slot_presets.plan(plan))
+            for plate_id, options, resolved, plan in ready
+        ]
 
     # Here, not at the top: see the `TYPE_CHECKING` import.
     from scadbuddy.slicing.start import NativeSliceKeys

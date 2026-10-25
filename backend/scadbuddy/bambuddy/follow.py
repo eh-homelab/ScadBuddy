@@ -91,6 +91,9 @@ Ended = Literal["settled", "gone", "deleted", "quiet"]
 #: Awaited on each read that finds a print settled (#836): after its ``print.settled``
 #: is published. Given the print's subject, an output's or a library file's (#1073).
 SettledHook = Callable[[PrintSubject], Awaitable[None]]
+#: Records a settled print's outcome once (#2665, `outcomes.PrintOutcomeStore.record`):
+#: given the run subject, its slug and the settled read.
+OutcomeRecorder = Callable[[str, str, PrintProgress], Awaitable[object]]
 
 
 def _now() -> datetime:
@@ -122,6 +125,7 @@ class Follower:
         settle_timeout: float = SETTLE_TIMEOUT,
         read_library: LibraryReader | None = None,
         newest_failed: NewestFailed | None = None,
+        record_outcome: OutcomeRecorder | None = None,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -148,6 +152,10 @@ class Follower:
         #: settle then emits no ``print.settled`` on that subject: the subject shows the
         #: newer failure, not the older print, and that is intended (#2015).
         self.newest_failed = newest_failed
+        #: Records how the print ended, once across replicas and attempts, before the
+        #: hooks run (#2665): what flow triggers fire ``print.finished`` and
+        #: ``print.failed`` on. A core service, not a hook, so every follow has it.
+        self.record_outcome = record_outcome
 
     async def follow(
         self,
@@ -213,6 +221,7 @@ class Follower:
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
                 # progress None: a print never queued has no picks.
+                await self._record(key, slug, progress, active, heartbeat)
                 await self._settled(subject, active, heartbeat)
             if progress is None or progress.settled:
                 return "settled"
@@ -244,6 +253,26 @@ class Follower:
         meta = await self.outputs.get(subject.id)
         return meta.id, meta.slug, self.read(meta)
 
+    async def _record(
+        self,
+        key: str,
+        slug: str,
+        progress: PrintProgress,
+        active: datetime,
+        heartbeat: Callable[[datetime], None],
+    ) -> None:
+        if self.record_outcome is None:
+            return
+        try:
+            await self._bounded(self.record_outcome(key, slug, progress), active, heartbeat)
+        except Exception as exc:
+            # Type only, as the hooks (#836). Not retried now: the next settled read of
+            # this print (the progress route's follow, a retried attempt) records it.
+            logger.warning(
+                "a settled print's outcome could not be recorded",
+                extra={"subject": key, "error": type(exc).__name__},
+            )
+
     async def _settled(
         self, subject: PrintSubject, active: datetime, heartbeat: Callable[[datetime], None]
     ) -> None:
@@ -258,7 +287,7 @@ class Follower:
                 )
 
     async def _bounded(
-        self, work: Awaitable[None], active: datetime, heartbeat: Callable[[datetime], None]
+        self, work: Awaitable[object], active: datetime, heartbeat: Callable[[datetime], None]
     ) -> None:
         """Await ``work`` for at most `settle_timeout` (`TimeoutError` past it),
         heartbeating ``active`` at least every `HEARTBEAT_SLICE` meanwhile."""

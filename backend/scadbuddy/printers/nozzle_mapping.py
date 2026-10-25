@@ -325,7 +325,7 @@ def choose_nozzles(
     groups = rack_groups(plan.filaments, spools)
     if not groups:
         return NozzleChoice(mapping=None)
-    manual, notes = manual_for(groups, manual_position, algorithm)
+    manual, notes = manual_for(groups, manual_position, algorithm, picker="the printer")
     picks = rank_rack(groups, status.nozzle_rack, algorithm, usage, manual)
     found = rank_warnings(
         groups, status.nozzle_rack, algorithm, picks, manual, picker="the printer"

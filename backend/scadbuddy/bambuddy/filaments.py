@@ -94,6 +94,8 @@ WarningKind = Literal[
     "hf-unsupported",
     "hf-mounted",
     "rack-unsafe-material",
+    # The slug is historical: over the LAN its message says "the printer" (#4586), and
+    # it is kept for clients that key on it (#4600 review).
     "rack-left-to-bambuddy",
     "rack-manual-partial",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).
@@ -105,7 +107,8 @@ WarningKind = Literal[
     "supports-not-applied",
     # #3628: a prime tower setting the process preset has no value for, sent anyway.
     "prime-tower-unconfirmed",
-    # #3628: a prime tower chosen for an already-sliced file, which queues as it is.
+    # #3628: a prime tower chosen for an already-sliced file, which queues as it is;
+    # #3962: a tower asked for that Bambuddy's slicer dropped from the slice.
     "prime-tower-not-applied",
     # A sliced file queued as it is (#2671), never refused: what to set right first.
     "sliced-other-model",

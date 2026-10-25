@@ -16,6 +16,7 @@ from temporalio.client import Client
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import Follower
+from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
@@ -462,6 +463,7 @@ def _build_core(settings: Settings) -> AppState:
             newest_failed=newest_failed_from(
                 print_run_store, settings_store.load, latest=recent_runs.latest
             ),
+            record_outcome=PrintOutcomeStore(pool, transactional_events(events)).record,
         ),
         print_runs=PrintCommands(
             store=print_run_store,
