@@ -246,6 +246,8 @@ def test_an_accepted_order_with_nothing_open_reopens_as_a_draft(client: TestClie
     # ...reopens open for edits, as `accept_order` would refuse it accepted.
     reopened = client.post(f"/api/v1/orders/{order['id']}/reopen")
     assert reopened.json()["status"] == "draft"
+    # A draft again, not accepted: accepting it stamps `accepted_at` anew.
+    assert reopened.json()["accepted_at"] is None
     # Its item, cancelled before the order, reopens on its own.
     back = client.post(f"/api/v1/orders/{order['id']}/items/{item['id']}/reopen")
     assert back.json()["status"] == "approved"

@@ -77,6 +77,16 @@ export function OrderItemsTable({
       cell: (item) => {
         const price = itemPrice(item)
         if (price === null) return <span className="text-muted-foreground">Not priced</span>
+        // A cancelled item is in no sum: its price shows struck through, so the column
+        // adds up to the subtotal.
+        if (item.status === 'cancelled') {
+          return (
+            <span className="flex flex-col items-end text-muted-foreground">
+              <s>{formatMoney(price.amount, currency, exponent)}</s>
+              <span className="text-[11px]">not counted</span>
+            </span>
+          )
+        }
         const accepted = item.quotes.find((quote) => quote.accepted)
         return (
           <span className="flex flex-col items-end">
