@@ -40,6 +40,8 @@ function replaceRows<Row extends { id: string; position: number }, Input extends
 }
 
 function patch(customer: Customer, body: CustomerPatch): Customer | string {
+  // `ContactInput.value`: `Field(min_length=1, max_length=500)`.
+  if ((body.contacts ?? []).some((c) => !c.value || c.value.length > 500)) return 'contacts: a contact value has 1 to 500 characters'
   const primary = onePrimaryPerKind(body.contacts ?? undefined)
   if (primary) return `contacts: ${primary}`
   const defaults = oneDefaultPerRole(body.addresses ?? undefined)
@@ -120,6 +122,7 @@ export const handlers = [
       }
     }
     if (!body.display_name) return fieldProblem(request, 'display_name', 'Field required')
+    if (body.display_name.length > 200) return fieldProblem(request, 'display_name', 'String should have at most 200 characters')
     if ([...(body.contacts ?? []), ...(body.addresses ?? [])].some((row) => row.id)) {
       return fieldProblem(request, 'contacts', "a new customer's contacts and addresses have no ids yet")
     }

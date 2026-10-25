@@ -61,6 +61,22 @@ test.describe('orders', () => {
     await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
   })
 
+  // #4251: the customer made inside the New order dialog, with the order's due date.
+  test('a new order for a customer made in the dialog', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('button', { name: 'New order' }).click()
+    const dialog = page.getByRole('dialog', { name: 'New order' })
+    await choose(page, dialog.getByRole('combobox', { name: 'Customer for the new order' }), 'New customer…')
+    await dialog.getByLabel('Customer name').fill('Grace Hopper')
+    await dialog.getByLabel('Email').fill('grace@example.com')
+    await dialog.getByLabel('Due').fill('2026-12-01')
+    await dialog.getByRole('button', { name: 'Create order' }).click()
+    await expect(page).toHaveURL(/\/orders\/o-/)
+    // The mocks live in the page, so the customer is checked on the order, not after a reload.
+    await expect(page.getByRole('link', { name: 'Grace Hopper' })).toBeVisible()
+    await expect(page.getByLabel('Due')).toHaveValue('2026-12-01')
+  })
+
   test('adds the generated output to an order from Customize', async ({ page }) => {
     await page.goto('/m/name-keychain')
     const generate = page.getByTestId('generate')

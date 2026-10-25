@@ -376,8 +376,12 @@ class ArrangeRequest(BaseModel):
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     #: The filament order the plan's slots refer to; omitted means the first object's
-    #: output's colours, then any colour the others add. Omitted, a source colour every
-    #: copy swaps away (`recolour`) is left out; given, every slot named keeps its place.
+    #: output's colours, then any colour the others add, less every colour no copy
+    #: prints in (a part left out, or a colour every copy swaps away with `recolour`).
+    #: Omitted, `filament_plan`'s slots are numbered in that order before any colour is
+    #: left out, and renumbered with their colours (#4636); a slot whose colour is left
+    #: out is dropped, and the job's `warnings` name it. Given, every slot named keeps
+    #: its place.
     colours: list[str] | None = None
     name: str | None = Field(default=None, max_length=200)
     #: The template the result is filed under (#1864): one of the outputs', omitted the
@@ -593,12 +597,32 @@ def arrange_inputs(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing to arrange: every count is 0"
         )
+    plan = SlotPlan.of(body.filament_plan)
+    notes: list[str] = []
     if body.colours is None:
-        # A source's colour every copy swapped away prints nowhere: no slot for it
-        # (#3637). A slot no part used before keeps its place, as it always has.
+        # Only a colour a copy prints in takes a slot: not the colours of a source's
+        # parts left out of a subset (#4636; an order item's slot no plate prints is one
+        # its slice quote refuses), nor a source colour every copy swapped away (#3637).
+        # Each keeps its order, and a plan's slots, numbered in the source's order, follow
+        # their colours.
         drawn = {c.upper() for item in items for c in item.colours()}
-        gone = {c for item in items for c in item.recolour} - drawn
-        colours = [c for c in colours if c.upper() not in gone]
+        kept = [slot for slot, c in enumerate(colours, start=1) if c.upper() in drawn]
+        if plan is not None:
+            # A spool whose colour no copy prints in is said, not dropped without a word.
+            notes = [
+                f"filament_plan slot {slot} (spool {spool}) is {colours[slot - 1]}, which no"
+                " copy prints in: that spool is not used"
+                for slot, spool in sorted(plan.slots.items())
+                if slot not in kept and 1 <= slot <= len(colours)
+            ]
+            plan = SlotPlan(
+                slots={
+                    kept.index(slot) + 1: spool
+                    for slot, spool in plan.slots.items()
+                    if slot in kept
+                }
+            )
+        colours = [colours[slot - 1] for slot in kept]
     try:
         _check_copies(sum(item.count for item in items))
     except ValueError as too_many:
@@ -624,8 +648,9 @@ def arrange_inputs(
         goal=body.goal,
         plate=plate_size(plate_model),
         plate_model=plate_model,
-        filament_plan=SlotPlan.of(body.filament_plan),
+        filament_plan=plan,
         colours=colours,
+        notes=notes,
         name=body.name,
         provenance=provenance,
         # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
