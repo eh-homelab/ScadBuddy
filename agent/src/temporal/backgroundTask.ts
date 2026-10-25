@@ -126,7 +126,9 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
     )
   let waitingSince: number | undefined
   while (ended === undefined) {
-    await condition(() => pending || ended !== undefined, waitingSince === undefined ? undefined : retryMs)
+    const woken = () => pending || ended !== undefined
+    // The same as passing an undefined timeout, which `condition`'s types no longer take.
+    await (waitingSince === undefined ? condition(woken) : condition(woken, retryMs))
     pending = false
     const sent = await acts.bg_deliver({ taskId, waitedMs: waitingSince === undefined ? 0 : Date.now() - waitingSince })
     if (sent.result === 'end') {

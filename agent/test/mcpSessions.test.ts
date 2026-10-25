@@ -16,7 +16,7 @@ import { appFetch, BACKEND, connect, MCP_URL, testApp } from './helpers/mcp.js'
 // against the real mounted endpoint (review 5861456943).
 
 const backend = setupServer()
-beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
 
@@ -82,7 +82,7 @@ describe('graceful shutdown with open /mcp sessions', () => {
   // These talk to a real socket on loopback, and msw's fetch interception
   // buffers the standing SSE stream, so it is switched off around them.
   beforeAll(() => backend.close())
-  afterAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+  afterAll(() => backend.listen({ onUnhandledFrame: 'error' }))
 
   async function listening(app: ReturnType<typeof testApp>['app']) {
     const server = await new Promise<ReturnType<typeof serve>>((resolve) => {

@@ -9,6 +9,7 @@ import {
   proxyActivities,
   setHandler,
   upsertSearchAttributes,
+  type RetryPolicy,
 } from '@temporalio/workflow'
 import { defineSearchAttributeKey } from '@temporalio/common'
 import {
@@ -56,7 +57,7 @@ const STATUS = defineSearchAttributeKey('ScadbuddyStatus', 'KEYWORD')
 type Activities = Record<string, (input: unknown) => Promise<unknown>>
 
 // No maximumAttempts: retried until it lands (the TypeScript SDK's unlimited default).
-const RECORD_RETRY = { initialInterval: '1s', maximumInterval: '30s', backoffCoefficient: 2 }
+const RECORD_RETRY: RetryPolicy = { initialInterval: '1s', maximumInterval: '30s', backoffCoefficient: 2 }
 
 /** The problem an activity reported (`Refused`/`Failed` details), else the unexpected one. */
 function problemOf(err: unknown): OperationProblem {

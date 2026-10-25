@@ -1,4 +1,5 @@
 import { CancellationScope, condition, defineQuery, defineSignal, defineUpdate, setHandler, workflowInfo } from '@temporalio/workflow'
+import type { Duration } from '@temporalio/common'
 import { durableRequestId } from '../../src/gate/ids.js'
 import type { Owner } from '../../src/sessions/protocol.js'
 import { type GateCall, type GateHost, type GateSettings, type GateTurn, type Resolution, SessionGate } from '../../src/temporal/session/gate.js'
@@ -17,7 +18,7 @@ export type HarnessInput = {
   turnTools?: string[]
   settings?: GateSettings
   taskQueue?: string
-  grantCheckWait?: string
+  grantCheckWait?: Duration
 }
 
 export type Decision = { callId: string; allow: boolean; approver?: string | undefined }

@@ -226,7 +226,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
   `MCP resource subscriptions over the Postgres bus${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
   () => {
     const backend = setupServer(http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json([])))
-    beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+    beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
     afterAll(() => backend.close())
 
     let db: Database

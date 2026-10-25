@@ -45,7 +45,7 @@ const backend = setupServer(
     HttpResponse.json({ bambuddy_url: 'https://bambuddy.lan', has_api_key: true, api_key: 'leak-me-not' }),
   ),
 )
-beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
 

@@ -23,7 +23,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 const MODELS = [{ slug: 'keychain', name: 'Keychain', origin: 'mine', has_thumbnail: false, has_readme: false, updated_at: '2026-09-28T00:00:00Z' }]
 
 const backend = setupServer(http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json(MODELS)))
-beforeAll(() => backend.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => backend.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => backend.resetHandlers())
 afterAll(() => backend.close())
 
