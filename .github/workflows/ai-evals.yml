@@ -172,7 +172,7 @@ jobs:
       # uv; without it it skips. uv is pinned as in ci.yml's `agent` job; bump together.
       - name: Set up uv
         if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
-        uses: astral-sh/setup-uv@v10.3.1
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock

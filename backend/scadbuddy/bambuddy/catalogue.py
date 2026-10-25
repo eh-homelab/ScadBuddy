@@ -214,6 +214,10 @@ async def read_catalogue(client: BambuddyClient) -> Catalogue:
 #: The catalogue this process last parsed, by its file and that file's mtime: one
 #: entry, so a changed Bambuddy URL or key does not keep the old one alive (#3447).
 _parsed: dict[Path, tuple[int, Catalogue]] = {}
+#: How many opens in a row could not read each file, so a miss that persists (a volume
+#: that cannot be read, say) shows as one in its log line, not as one miss after another
+#: each answered from memory (#4623 review).
+_misses: dict[Path, int] = {}
 #: The background reads running in this process, one per file.
 _refreshing: dict[Path, asyncio.Task[None]] = {}
 #: The first reads running in this process, one per file with nothing kept yet, which
@@ -306,6 +310,7 @@ def _load(path: Path) -> tuple[float, Catalogue] | None:
         # on a fresh read with this file on the shared volume, and nothing said why (#4196).
         # The name is a digest with no key in it (#3313).
         last = _parsed.get(path)
+        _misses[path] = _misses.get(path, 0) + 1
         logger.info(
             "no kept preset catalogue could be read",
             extra={
@@ -313,9 +318,11 @@ def _load(path: Path) -> tuple[float, Catalogue] | None:
                 "errno": getattr(error, "errno", None),
                 "file": path.name,
                 "held": last is not None,
+                "misses_in_a_row": _misses[path],
             },
         )
         return None if last is None else (math.inf, last[1])
+    _misses.pop(path, None)
     return time.time() - stat.st_mtime, held[1]
 
 
@@ -323,7 +330,9 @@ def _hold(path: Path, catalogue: Catalogue) -> None:
     """Hold ``catalogue``, just read fresh, as this process's last read of ``path``
     (#4528), under the mtime its file has now: once kept, the file it wrote, so the next
     open does not parse it back; not kept, the older file left there (#4623 review), so
-    the fresh read is what answers until a refresh replaces that file; no file, none.
+    the fresh read is what answers until a refresh replaces that file; no file (none
+    kept yet, or the directory could not be made), none, and the fresh read then answers
+    every later open, as a held copy, until a keep succeeds.
     Another replica that renames its own read in between is held under ours, which is
     the same catalogue read at the same time."""
     try:
@@ -440,3 +449,4 @@ def forget_catalogues() -> None:
     _refreshing.clear()
     _reading.clear()
     _parsed.clear()
+    _misses.clear()
