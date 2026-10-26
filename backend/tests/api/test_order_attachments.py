@@ -305,6 +305,8 @@ def test_deleting_a_draft_item_removes_its_files_and_their_holds(client: TestCli
 
     assert client.delete(f"/api/v1/orders/{order['id']}/items/{item['id']}").status_code == 204
     detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    # `Lifecycle.delete_item` takes the item's files by subject (`subject_attachments`,
+    # #4724): the order's own file stays, with its hold.
     assert [a["id"] for a in detail["attachments"]] == [on_order["id"]]
     assert holders(client) == {on_order["id"]: f"attachment-{on_order['sha256']}"}
     removed = [

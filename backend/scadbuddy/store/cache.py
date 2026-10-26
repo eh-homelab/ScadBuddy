@@ -131,7 +131,9 @@ class CachedBlobStore:
 
     async def claim(self, key: str) -> bool:
         # Touched before the row is read: a sweep whose `delete_if_stale` comes after
-        # the read finds it fresh, and one that came before leaves no row to find.
+        # the read finds it fresh, and one that came before leaves no row to find. A
+        # row on another backend (mid `/store/migrate`) is not this store's blob, as
+        # for `_row`: the caller writes the bytes again, which costs only an upload.
         await self.content.touch(key)
         return await asyncio.to_thread(self._row, key) is not None
 
