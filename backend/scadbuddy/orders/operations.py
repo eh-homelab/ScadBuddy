@@ -296,6 +296,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             ORDER_ATTACHMENT_ADD,
             attachment_check,
             attachment_run,
+            # A second attempt after a partial failure would only repeat the same
+            # claimed bytes: the caller re-sends instead.
+            run_attempts=1,
             queue="library",
             # Moves (or copies) up to the upload limit into the blob store and publishes it.
             run_timeout=PIN_TIMEOUT,

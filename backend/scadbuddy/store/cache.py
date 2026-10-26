@@ -129,6 +129,12 @@ class CachedBlobStore:
         async with self._lock(key):
             return await self._fetch(key) is not None
 
+    async def claim(self, key: str) -> bool:
+        # Touched before the row is read: a sweep whose `delete_if_stale` comes after
+        # the read finds it fresh, and one that came before leaves no row to find.
+        await self.content.touch(key)
+        return await asyncio.to_thread(self._row, key) is not None
+
     async def checkout(self, key: str) -> str | None:
         async with self._lock(key):
             sha = await self._fetch(key)

@@ -460,7 +460,8 @@ and a new attempt returns it to `approved`.
 ### 6.2 Attachments
 
 A new table `attachments`, keyed by subject, is the "attach media to X" facility F9
-says does not exist.
+says does not exist. (As built it is `order_attachments`, renamed by #4678 so it does
+not read as a print's `print_attachments`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'
@@ -470,19 +471,30 @@ own attachments (`order_item_fulfilment:<id>`) wait for the print path. The row 
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;
 HEIC and AVIF are photos, QuickTime a video), never the name or the browser's type; an
 `other` file's `media_type` is what its name suggests, for display only. Only what a
-browser shows and never runs (`INLINE`: the photo, video and PDF types) is served as
-itself and inline; every other file is `application/octet-stream` and a download, under
-a sandboxing `Content-Security-Policy` (not a PDF's, which a browser's viewer will not
-run under). `role` adds `reference` (the customer's sketch, logo or drawing) and `issue`
+browser shows and never runs (`orders/models.py` `INLINE`: the photo, video and PDF
+types) is served as itself and inline. A photo or video is served under a sandboxing
+`Content-Security-Policy`. A PDF is served inline without it: a browser's PDF viewer
+does not run under `sandbox` or `default-src 'none'`, so with the policy a PDF could
+only be downloaded (the decision recorded on #4661's review). With `nosniff`, a file
+sniffed as `%PDF-` goes only to the viewer, never to the HTML parser, and
+`?download=true` still makes it a download. Every other file, of any type, is
+`application/octet-stream` and a download, under the same sandboxing policy. The spec
+publishes `INLINE`, `SHOWN_IMAGES` and `THUMBNAILED` on `Attachment.media_type`
+(`x-inline`, `x-shown-images`, `x-thumbnailed`), and the browser's copy is tested
+against them (`attachmentMedia.test.ts`, #4679). `role` adds `reference` (the customer's sketch, logo or drawing) and `issue`
 (a print's problem) to the roles below. The blob is `attachment-<sha256>` (one file,
 `file`); identical bytes share it, and each row holds it. The `blob_refs` row
 `(attachment, <id>)` is written and deleted **in the attachment row's own transaction**
 (as `slicing/store.py` does), not before it as §3.4's quote holds are: the blob was
 written and touched just before, so the blob sweep's grace keeps it until both commit,
 and no reaper is needed. `subject` has no foreign key, so deleting a draft item removes
-its attachments and their holds in the same transaction, each on the audit line. Adding,
-captioning and removing are records, not steps: allowed in every state, on hold and after
-close. Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE
+its attachments and their holds in the same transaction, each on the audit line. Nothing
+cascades a hold, so `order_id`'s foreign key is `ON DELETE RESTRICT` (#4678): an order's
+delete, which no route does yet, must first remove each attachment through
+`OrderStore.delete_attachment`. Adding, captioning, re-roling and removing are records,
+not steps: allowed in every state, on hold and after close, and each is on the audit
+line (`attachment.added`, `attachment.caption`, `attachment.role`,
+`attachment.removed`). Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE
 SET NULL`) names the item's image a person marked as what was actually delivered; the
 order page shows it as the item's picture, before it the item's output's thumbnail, then
 its template's.

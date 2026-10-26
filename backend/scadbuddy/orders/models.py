@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, computed_field
 
 from scadbuddy.core.settings import decimal_string
 from scadbuddy.library.libraries import ModelLibrary
@@ -369,6 +369,33 @@ AttachmentRole = Literal["reference", "issue", "finished", "packed", "timelapse"
 #: The longest caption, in characters, as a template's media (``library/media.py``).
 MAX_ATTACHMENT_CAPTION = 1000
 
+#: The types served as themselves, inline: what a browser shows and never runs. Every
+#: other file is a download (``api/order_attachments.py``).
+INLINE = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+        "image/heic",
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+        "application/pdf",
+    }
+)
+#: The image types a browser draws: the UI shows them, and only one of them may be
+#: marked delivered.
+SHOWN_IMAGES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"})
+#: The ones the server shrinks to a thumbnail; a GIF or AVIF is shown as it is.
+THUMBNAILED = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+
+def _listed(types: frozenset[str]) -> list[JsonValue]:
+    """A type set as the spec carries it, sorted so the export is stable."""
+    return [each for each in sorted(types)]
+
 
 class Attachment(BaseModel):
     id: str
@@ -381,8 +408,16 @@ class Attachment(BaseModel):
     role: AttachmentRole
     #: The name it was sent with, for display and the download.
     filename: str
-    #: What its bytes are (sniffed), or what its name says for ``other``.
-    media_type: str
+    #: What its bytes are (sniffed), or what its name says for ``other``. The spec
+    #: carries the three type sets, so the browser's copy is tested against them
+    #: (``attachmentMedia.test.ts``, #4679).
+    media_type: str = Field(
+        json_schema_extra={
+            "x-inline": _listed(INLINE),
+            "x-shown-images": _listed(SHOWN_IMAGES),
+            "x-thumbnailed": _listed(THUMBNAILED),
+        }
+    )
     size_bytes: int
     sha256: str
     caption: str

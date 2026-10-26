@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from scadbuddy.orders.attachments import INLINE, SHOWN_IMAGES, clean_filename, sniff
+from scadbuddy.orders.attachments import clean_filename, sniff
+from scadbuddy.orders.models import INLINE, SHOWN_IMAGES, THUMBNAILED
 
 
 @pytest.mark.parametrize(
@@ -36,7 +37,7 @@ def test_sniff(head: bytes, name: str, expected: tuple[str, str]) -> None:
 def test_only_sniffed_types_are_inline_and_never_a_page() -> None:
     assert "image/svg+xml" not in INLINE
     assert "text/html" not in INLINE
-    assert SHOWN_IMAGES <= INLINE
+    assert THUMBNAILED <= SHOWN_IMAGES <= INLINE
 
 
 @pytest.mark.parametrize(

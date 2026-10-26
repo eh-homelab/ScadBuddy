@@ -614,9 +614,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order or a line item,
-  `attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
-  `orders/attachments.py` `sniff`; only `INLINE` types are served as themselves, the rest
-  as downloads), uploaded through the claim store and the `order_attachment_add` kind (the
+  `order_attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
+  `orders/attachments.py` `sniff`; only `orders/models.py` `INLINE` types are served as
+  themselves, the rest as downloads; the spec carries the type sets, which
+  `attachmentMedia.test.ts` checks the browser's copy against), uploaded through the claim store and the `order_attachment_add` kind (the
   blob `attachment-<sha256>`, its `blob_refs` row written in the attachment's own
   transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
   (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,

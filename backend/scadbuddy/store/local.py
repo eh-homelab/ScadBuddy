@@ -67,6 +67,16 @@ class LocalBlobStore:
         # One volume: the directory is the blob.
         return self.exists(key)
 
+    async def claim(self, key: str) -> bool:
+        # One volume: the directory is the blob. One with nothing visible in it was
+        # made by `dir_for` for a write that never finished, and holds no blob.
+        path = self._path(key)
+        try:
+            os.utime(path, None)
+            return any(not entry.name.startswith(".") for entry in path.iterdir())
+        except FileNotFoundError:
+            return False
+
     async def checkout(self, key: str) -> str | None:
         if not self.exists(key):
             raise PieceStateLostError(key)

@@ -264,12 +264,15 @@ def test_caption_and_role_are_edited_and_refusals_are_answered(client: TestClien
     )
     assert client.patch(base, json={"role": "nonsense"}).status_code == 422
     assert client.patch(base, json={"filename": "x"}).status_code == 422
-    role = next(
-        e
-        for e in client.get(f"/api/v1/orders/{order['id']}/events").json()
-        if e["kind"] == "attachment.role"
-    )
+    # The same caption again is no change, so it is not on the audit line twice.
+    assert client.patch(base, json={"caption": "the customer's drawing"}).status_code == 200
+    events = client.get(f"/api/v1/orders/{order['id']}/events").json()
+    role = next(e for e in events if e["kind"] == "attachment.role")
     assert role["detail"] == {"attachment_id": added["id"], "from_role": "other", "to": "reference"}
+    # #4676: a caption edit is on the audit line too.
+    assert [e["detail"] for e in events if e["kind"] == "attachment.caption"] == [
+        {"attachment_id": added["id"], "from_caption": "", "to": "the customer's drawing"}
+    ]
 
     assert attach(client, order["id"], PDF, "x.pdf", role="bogus").status_code == 422
     assert attach(client, "no-such-order", PDF, "x.pdf").status_code == 404

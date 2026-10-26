@@ -1308,8 +1308,8 @@ class OrderStore:
             (blob_key, ATTACHMENT_HOLDER, attachment_id),
         )
         row = conn.execute(
-            "INSERT INTO attachments (id, order_id, subject, kind, role, filename, media_type,"
-            " size_bytes, sha256, blob_key, caption, created_by)"
+            "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
+            " media_type, size_bytes, sha256, blob_key, caption, created_by)"
             f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ATTACHMENT}",
             (
                 attachment_id,
@@ -1335,7 +1335,7 @@ class OrderStore:
         """The attachment and its blob key, or None."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_ATTACHMENT} FROM attachments WHERE id = %s", (attachment_id,)
+                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE id = %s", (attachment_id,)
             ).fetchone()
         return None if row is None else _attachment_of(row)
 
@@ -1343,9 +1343,20 @@ class OrderStore:
         """Every attachment of the order and of its items, oldest first."""
         with self._read(conn) as c:
             rows = c.execute(
-                f"SELECT {_ATTACHMENT} FROM attachments WHERE order_id = %s"
+                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE order_id = %s"
                 " ORDER BY created_at, id",
                 (order_id,),
+            ).fetchall()
+        return [_attachment_of(r)[0] for r in rows]
+
+    def subject_attachments(self, subject: str, *, conn: Conn | None = None) -> list[Attachment]:
+        """Every attachment of one subject (``order:<id>`` or ``order_item:<id>``),
+        oldest first."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE subject = %s"
+                " ORDER BY created_at, id",
+                (subject,),
             ).fetchall()
         return [_attachment_of(r)[0] for r in rows]
 
@@ -1359,7 +1370,7 @@ class OrderStore:
     ) -> Attachment:
         row = _update(
             conn,
-            "attachments",
+            "order_attachments",
             attachment_id,
             {"caption": caption, "role": role},
             _ATTACHMENT,
@@ -1370,12 +1381,15 @@ class OrderStore:
 
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
         """The row and its hold on the file, together; the blob sweep takes the bytes
-        once nothing else holds them."""
+        once nothing else holds them. The one way an attachment goes: nothing cascades
+        the holds, so an order's delete (none is written yet) must run this for each
+        of its attachments first, which the foreign key (``ON DELETE RESTRICT``,
+        #4678) enforces."""
         conn.execute(
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (ATTACHMENT_HOLDER, attachment_id),
         )
-        conn.execute("DELETE FROM attachments WHERE id = %s", (attachment_id,))
+        conn.execute("DELETE FROM order_attachments WHERE id = %s", (attachment_id,))
 
     def set_delivered(self, conn: Conn, item_id: str, attachment_id: str | None) -> OrderItem:
         row = _update(
