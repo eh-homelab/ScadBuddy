@@ -11,19 +11,36 @@ import logging
 from collections.abc import Callable
 
 from fastapi import APIRouter, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.models import Printer
+from scadbuddy.bambuddy.models import Printer, VirtualPrinter, VirtualPrinterDiagnostic
+from scadbuddy.bambuddy.virtual_printers import (
+    VirtualPrinterCreate,
+    VirtualPrinterDeleted,
+    VirtualPrintersView,
+    VirtualPrinterUpdate,
+    VirtualPrinterView,
+    seal_access_code,
+)
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.bambuddy_sync import (
     PrinterSyncResult,
     fill_lan_after_link,
     sync_printers,
 )
-from scadbuddy.printers.component import PrintersDep
+from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.lan_link import LanProbeFailedError, probe_and_link
 from scadbuddy.printers.models import (
     BambuddyLink,
@@ -174,6 +191,198 @@ async def sync_bambuddy(
     settings = await asyncio.to_thread(store.load)
     async with client_for(settings) as client:
         return await sync_printers(printers, client, dry_run=dry_run)
+
+
+# ── Bambuddy's virtual printers (#4747 item 4) ───────────────────────────────────────
+# Declared before ``/{printer_id}``, which would otherwise take ``virtual`` for an id.
+
+
+def _views(vps: list[VirtualPrinter], rows: list[PrinterRow]) -> list[VirtualPrinterView]:
+    by_vp = {row.bambuddy_vp_id: row.id for row in rows if row.bambuddy_vp_id is not None}
+    by_bambuddy = {
+        row.bambuddy_printer_id: row.id for row in rows if row.bambuddy_printer_id is not None
+    }
+    return [
+        VirtualPrinterView(
+            **vp.model_dump(),
+            printer_id=by_vp.get(vp.id),
+            target=None if vp.target_printer_id is None else by_bambuddy.get(vp.target_printer_id),
+        )
+        for vp in vps
+    ]
+
+
+async def _resync(printers: Printers, store: SettingsStoreDep) -> None:
+    """After a virtual printer's write, the registry follows it (#4747): best effort,
+    as the housekeeping sync is the backstop."""
+    try:
+        async with client_for(await asyncio.to_thread(store.load)) as client:
+            await sync_printers(printers, client)
+    except Exception:
+        logger.warning("could not sync the printers after a virtual printer's write")
+
+
+@router.get(
+    "/virtual",
+    response_model=VirtualPrintersView,
+    summary="Bambuddy's virtual printers",
+    description=(
+        "Bambuddy's virtual printers with the registry row each is and its target as a "
+        "registry printer, the models Bambuddy offers, and whether Bambuddy's auth is on "
+        "(then no API key can change a virtual printer). Never an access code. 409 "
+        "without a Bambuddy."
+    ),
+)
+async def list_virtual_printers(
+    printers: PrintersDep, store: SettingsStoreDep
+) -> VirtualPrintersView:
+    async with client_for(await asyncio.to_thread(store.load)) as client:
+        listed = await client.virtual_printers()
+        auth = await client.auth_enabled()
+    rows = await _call(printers.store.list)
+    return VirtualPrintersView(
+        printers=_views(listed.printers, rows), models=listed.models, auth_enabled=auth
+    )
+
+
+@router.get(
+    "/virtual/{vp_id}",
+    response_model=VirtualPrinterView,
+    summary="One of Bambuddy's virtual printers",
+)
+async def get_virtual_printer(
+    printers: PrintersDep, store: SettingsStoreDep, vp_id: int
+) -> VirtualPrinterView:
+    async with client_for(await asyncio.to_thread(store.load)) as client:
+        vp = await client.virtual_printer(vp_id)
+    return _views([vp], await _call(printers.store.list))[0]
+
+
+@router.get(
+    "/virtual/{vp_id}/diagnostic",
+    response_model=VirtualPrinterDiagnostic,
+    summary="Bambuddy's diagnostic checks for a virtual printer",
+)
+async def diagnose_virtual_printer(store: SettingsStoreDep, vp_id: int) -> VirtualPrinterDiagnostic:
+    async with client_for(await asyncio.to_thread(store.load)) as client:
+        return await client.virtual_printer_diagnostic(vp_id)
+
+
+def _sealed(printers: Printers, code: str | None, subject: str) -> str | None:
+    """The access code sealed for the operation's request (`seal_access_code`): it is
+    never recorded, or sent to Temporal, in the clear."""
+    if code is None:
+        return None
+    if printers.kek is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING)
+    return seal_access_code(printers.kek, code, subject)
+
+
+VP_WRITES = (
+    "A write needs Bambuddy's `settings:update`, which no API key holds while Bambuddy's "
+    "auth is on: then it is the scope problem naming `Settings (admin only)`. Bambuddy's "
+    "own refusals (an invalid mode, a bind IP in use, no target in proxy mode) are 422. "
+    "The registry follows each write (the printer sync runs after it)."
+)
+
+
+@router.post(
+    "/virtual",
+    response_model=VirtualPrinter,
+    responses=OPERATION_RESPONSES,
+    summary="Create a Bambuddy virtual printer",
+    description=(
+        "`target` is a registry printer linked to a Bambuddy printer, or null for a "
+        "virtual printer Bambuddy's queue dispatches to any free printer of its model. "
+        "`access_code` (exactly 8 characters, write-only) is for an untargeted one: a "
+        "targeted one uses its target's. " + VP_WRITES
+    ),
+)
+async def create_virtual_printer(
+    response: Response,
+    ops: OperationsDep,
+    printers: PrintersDep,
+    store: SettingsStoreDep,
+    body: VirtualPrinterCreate,
+    idempotency_key: IdempotencyKey = None,
+) -> VirtualPrinter | JSONResponse:
+    fields = body.model_dump(mode="json", exclude={"access_code"})
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["bambuddy_vp_create"],
+        subject="bambuddy_vp:new",
+        request={"fields": fields, "access_code": _sealed(printers, body.access_code, "new")},
+        idempotency_key=idempotency_key,
+    )
+    if not isinstance(result, OperationAccepted):
+        await _resync(printers, store)
+    return operation_answer(result, VirtualPrinter)
+
+
+@router.put(
+    "/virtual/{vp_id}",
+    response_model=VirtualPrinter,
+    responses=OPERATION_RESPONSES,
+    summary="Change a Bambuddy virtual printer",
+    description="Only the fields sent change; `target` sent as null takes it off. " + VP_WRITES,
+)
+async def update_virtual_printer(
+    response: Response,
+    ops: OperationsDep,
+    printers: PrintersDep,
+    store: SettingsStoreDep,
+    vp_id: int,
+    body: VirtualPrinterUpdate,
+    idempotency_key: IdempotencyKey = None,
+) -> VirtualPrinter | JSONResponse:
+    fields = body.model_dump(mode="json", exclude={"access_code"}, exclude_unset=True)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["bambuddy_vp_update"],
+        subject=f"bambuddy_vp:{vp_id}",
+        request={
+            "vp_id": vp_id,
+            "fields": fields,
+            "access_code": _sealed(printers, body.access_code, str(vp_id)),
+        },
+        idempotency_key=idempotency_key,
+    )
+    if not isinstance(result, OperationAccepted):
+        await _resync(printers, store)
+    return operation_answer(result, VirtualPrinter)
+
+
+@router.delete(
+    "/virtual/{vp_id}",
+    response_model=VirtualPrinterDeleted,
+    responses=OPERATION_RESPONSES,
+    summary="Delete a Bambuddy virtual printer",
+    description=(
+        "Its registry row stays (the sync never deletes one) and is reported as no "
+        "longer listed. " + VP_WRITES
+    ),
+)
+async def delete_virtual_printer(
+    response: Response,
+    ops: OperationsDep,
+    printers: PrintersDep,
+    store: SettingsStoreDep,
+    vp_id: int,
+    idempotency_key: IdempotencyKey = None,
+) -> VirtualPrinterDeleted | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["bambuddy_vp_delete"],
+        subject=f"bambuddy_vp:{vp_id}",
+        request={"vp_id": vp_id},
+        idempotency_key=idempotency_key,
+    )
+    if not isinstance(result, OperationAccepted):
+        await _resync(printers, store)
+    return operation_answer(result, VirtualPrinterDeleted)
 
 
 @router.get("/{printer_id}", response_model=PrinterRow, summary="One printer")

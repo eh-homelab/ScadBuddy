@@ -55,6 +55,11 @@ class Scope(StrEnum):
     #: a person confirmed it is in (#2164; Bambuddy ``auth.py`` maps
     #: ``INVENTORY_UPDATE`` to it).
     MANAGE_INVENTORY = "Manage Inventory"
+    #: Bambuddy's ``settings:update``, which a virtual printer's writes need (#4747). No
+    #: API key can hold it: it is admin-only and absent from ``_APIKEY_SCOPE_BY_PERMISSION``
+    #: (``backend/app/core/auth.py`` lines 79-82, maziggy/bambuddy v1.3.0b1-daily.20261025),
+    #: so such a write works only while Bambuddy's auth is off.
+    ADMIN_SETTINGS = "Settings (admin only)"
 
 
 def not_configured(detail: str) -> ApiError:
@@ -145,6 +150,17 @@ def _mapped(
     suffix = f": {detail}" if detail else ""
 
     if code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+        if scope == Scope.ADMIN_SETTINGS:
+            return ApiError(
+                status.HTTP_409_CONFLICT,
+                f"Bambuddy refused the API key when asked to {what}. No Bambuddy API key can"
+                " change its settings while Bambuddy's auth is on: turn its auth off, or"
+                f" make the change in Bambuddy{suffix}",
+                title="Bambuddy API key scope",
+                type_=SCOPE_PROBLEM,
+                bambuddy_status=code,
+                required_scope=scope.value,
+            )
         return ApiError(
             status.HTTP_409_CONFLICT,
             f"Bambuddy refused the API key when asked to {what}. "
