@@ -1,5 +1,13 @@
 import { HttpResponse, http } from 'msw'
-import type { DiscoveredPrinter, PrinterRow, PrinterSyncEntry, PrinterSyncResult } from '../../api/types'
+import type {
+  DiscoveredPrinter,
+  PrinterRow,
+  PrinterSyncEntry,
+  PrinterSyncResult,
+  VirtualPrinter,
+  VirtualPrinterCreate,
+  VirtualPrinterDiagnostic,
+} from '../../api/types'
 import { emitRealtime } from '../realtime'
 
 /**
@@ -86,12 +94,81 @@ export function initialDiscovered(): DiscoveredPrinter[] {
   ]
 }
 
-const state = { printers: initialPrinters(), discovered: initialDiscovered(), seq: 0 }
+/**
+ * #4747 item 4 — Bambuddy's virtual printers (`/printers/virtual`): 1 is prod's queue-mode
+ * H2C forwarding to printer 1's row. `auth_enabled` is off, as prod runs; set it on with
+ * `setVirtualAuth(true)` and every write answers Bambuddy's admin-only scope problem.
+ */
+export function initialVirtualPrinters(): VirtualPrinter[] {
+  return [
+    {
+      id: 1,
+      name: 'H2C Virtual',
+      enabled: true,
+      mode: 'queue',
+      model: 'O1C',
+      model_name: 'H2C',
+      access_code_set: true,
+      serial: '09400A391800001',
+      target_printer_id: 1,
+      target: '00000000-0000-4000-8000-000000000001',
+      printer_id: null,
+      auto_dispatch: true,
+      queue_force_color_match: false,
+      save_ams_mapping: false,
+      gcode_injection: false,
+      tailscale_disabled: true,
+      bind_ip: '192.168.10.9',
+      remote_interface_ip: null,
+      status: { running: true, pending_files: 0 },
+    },
+  ]
+}
+
+export const VP_MODELS: Record<string, string> = { O1C: 'H2C', C12: 'P1S' }
+
+const state = {
+  printers: initialPrinters(),
+  discovered: initialDiscovered(),
+  seq: 0,
+  virtual: initialVirtualPrinters(),
+  virtualAuth: false,
+  /** Every VP write's body as sent, for a test that checks what left the page. */
+  virtualWrites: [] as unknown[],
+}
 
 export function reset(): void {
   state.printers = initialPrinters()
   state.discovered = initialDiscovered()
   state.seq = 0
+  state.virtual = initialVirtualPrinters()
+  state.virtualAuth = false
+  state.virtualWrites = []
+}
+
+export function setVirtualAuth(on: boolean): void {
+  state.virtualAuth = on
+}
+
+export function virtualWrites(): unknown[] {
+  return state.virtualWrites
+}
+
+const ADMIN_ONLY = () =>
+  HttpResponse.json(
+    {
+      type: 'https://scadbuddy.dev/problems/bambuddy/scope',
+      title: 'Bambuddy API key scope',
+      status: 409,
+      detail:
+        "Bambuddy refused the API key when asked to change the virtual printer. No Bambuddy API key can change its settings while Bambuddy's auth is on: turn its auth off, or make the change in Bambuddy",
+      required_scope: 'Settings (admin only)',
+    },
+    { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+
+function bambuddyTarget(target: string | null | undefined): number | null {
+  return target ? (state.printers.find((row) => row.id === target)?.bambuddy_printer_id ?? null) : null
 }
 
 /** The rows as they are now, for a test that looks behind the page. */
@@ -214,6 +291,69 @@ export const handlers = [
   http.post('/api/v1/printers/sync-bambuddy', ({ request }) =>
     HttpResponse.json(sync(new URL(request.url).searchParams.get('dry_run') === 'true')),
   ),
+  http.get('/api/v1/printers/virtual', () =>
+    HttpResponse.json({ printers: state.virtual, models: VP_MODELS, auth_enabled: state.virtualAuth }),
+  ),
+  http.get('/api/v1/printers/virtual/:vp/diagnostic', ({ params }) => {
+    const vp = state.virtual.find((entry) => entry.id === Number(params.vp))
+    if (!vp) return HttpResponse.json({ detail: 'no such virtual printer' }, { status: 404 })
+    const result: VirtualPrinterDiagnostic = {
+      vp_id: vp.id,
+      vp_name: vp.name,
+      mode: vp.mode,
+      overall: 'warnings',
+      checks: [
+        { id: 'enabled', status: vp.enabled ? 'pass' : 'fail', params: {} },
+        { id: 'port_mqtt', status: 'pass', params: { port: 8883 } },
+        { id: 'certificate', status: 'warn', params: {} },
+      ],
+    }
+    return HttpResponse.json(result)
+  }),
+  http.post('/api/v1/printers/virtual', async ({ request }) => {
+    if (state.virtualAuth) return ADMIN_ONLY()
+    const body = (await request.json()) as VirtualPrinterCreate
+    state.virtualWrites.push(body)
+    const { access_code, target, ...rest } = body
+    const created = {
+      ...initialVirtualPrinters()[0],
+      ...rest,
+      id: Math.max(0, ...state.virtual.map((vp) => vp.id)) + 1,
+      model_name: body.model ? (VP_MODELS[body.model] ?? null) : null,
+      target: target ?? null,
+      target_printer_id: bambuddyTarget(target),
+      access_code_set: Boolean(access_code) || Boolean(target),
+      serial: null,
+      status: { running: Boolean(body.enabled), pending_files: 0 },
+    } as VirtualPrinter
+    state.virtual = [...state.virtual, created]
+    return HttpResponse.json(created)
+  }),
+  http.put('/api/v1/printers/virtual/:vp', async ({ params, request }) => {
+    if (state.virtualAuth) return ADMIN_ONLY()
+    const body = (await request.json()) as Partial<VirtualPrinterCreate>
+    state.virtualWrites.push(body)
+    const id = Number(params.vp)
+    const { access_code, ...rest } = body
+    let next: VirtualPrinter | undefined
+    state.virtual = state.virtual.map((vp) => {
+      if (vp.id !== id) return vp
+      next = {
+        ...vp,
+        ...rest,
+        ...('target' in body ? { target: body.target ?? null, target_printer_id: bambuddyTarget(body.target) } : {}),
+        access_code_set: vp.access_code_set || Boolean(access_code),
+      } as VirtualPrinter
+      return next
+    })
+    return next ? HttpResponse.json(next) : HttpResponse.json({ detail: 'no such virtual printer' }, { status: 404 })
+  }),
+  http.delete('/api/v1/printers/virtual/:vp', ({ params }) => {
+    if (state.virtualAuth) return ADMIN_ONLY()
+    const id = Number(params.vp)
+    state.virtual = state.virtual.filter((vp) => vp.id !== id)
+    return HttpResponse.json({ deleted: id })
+  }),
   http.post('/api/v1/printers', async ({ request }) => {
     const body = (await request.json()) as { serial: string; name: string; model?: string | null }
     const holder = state.printers.find((printer) => printer.serial === body.serial)
