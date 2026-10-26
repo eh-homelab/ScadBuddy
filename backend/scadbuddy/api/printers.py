@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.address import UnsafeAddressError
+from scadbuddy.printers.bambuddy_sync import PrinterSyncResult, sync_printers
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.lan_link import LanProbeFailedError, probe_and_link
 from scadbuddy.printers.models import (
@@ -147,6 +148,28 @@ async def discover_printers(
         )
         for printer in found
     ]
+
+
+@router.post(
+    "/sync-bambuddy",
+    response_model=PrinterSyncResult,
+    summary="Import and link Bambuddy's printers and virtual printers",
+    description=(
+        "One idempotent pass (#4439, #4747): a row, linked, for every active Bambuddy "
+        "printer that reports a serial; an empty LAN link filled from Bambuddy's address "
+        "and access code through the same probe as `PUT /printers/{id}/lan` (Bambuddy "
+        "gives an API key the code only while its auth is off); a `bambuddy_virtual` row "
+        "for every Bambuddy virtual printer. Never unlinks, deletes or overwrites: "
+        "skips and conflicts are reported. `dry_run` plans and writes nothing. The "
+        "access code is never returned. 409 when no Bambuddy is configured."
+    ),
+)
+async def sync_bambuddy(
+    printers: PrintersDep, store: SettingsStoreDep, dry_run: bool = False
+) -> PrinterSyncResult:
+    settings = await asyncio.to_thread(store.load)
+    async with client_for(settings) as client:
+        return await sync_printers(printers, client, dry_run=dry_run)
 
 
 @router.get("/{printer_id}", response_model=PrinterRow, summary="One printer")

@@ -400,3 +400,84 @@ async def test_a_watch_call_never_hangs_a_route(
     async with asyncio.timeout(5):
         await watches.restart("p")
         await watches.stop("p")
+
+
+# ── the Bambuddy sync (#4439, #4747) ────────────────────────────────────────────────
+
+
+VP_SERIAL = "09400A391800001"
+
+
+def virtual_printers(*rows: dict[str, Any]) -> respx.Route:
+    return respx.get(f"{API}/virtual-printers").mock(
+        return_value=httpx.Response(200, json={"printers": list(rows), "models": {"O1C": "H2C"}})
+    )
+
+
+def virtual_printer(vp_id: int, target: int | None) -> dict[str, Any]:
+    return {
+        **recording("virtual-printers.json")["printers"][0],
+        "id": vp_id,
+        "serial": VP_SERIAL,
+        "target_printer_id": target,
+    }
+
+
+def test_sync_without_bambuddy_is_409(client: TestClient) -> None:
+    response = client.post("/api/v1/printers/sync-bambuddy")
+    assert response.status_code == 409
+
+
+@respx.mock
+def test_sync_imports_links_and_fills_the_lan_link(
+    client: TestClient, watches: RecordedWatches
+) -> None:
+    configure(client)
+    printers = registry(client)
+    printers.store.kek = KEK
+    calls: list[tuple[str, str, str]] = []
+    printers.probe = _probe_ok(calls)
+    bambuddy_printers(bambuddy_printer(1, SERIAL, ip_address="10.0.0.9"))
+    virtual_printers(virtual_printer(3, 1))
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(
+            200, json=bambuddy_printer(1, SERIAL, ip_address="10.0.0.9", access_code=CODE)
+        )
+    )
+
+    dry = client.post("/api/v1/printers/sync-bambuddy", params={"dry_run": True})
+    assert dry.status_code == 200, dry.text
+    assert dry.json()["created"] == 2 and client.get("/api/v1/printers").json() == []
+
+    response = client.post("/api/v1/printers/sync-bambuddy")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["created"], body["lan_linked"], body["dry_run"]) == (2, 1, False)
+    assert CODE not in response.text
+    listed = client.get("/api/v1/printers")
+    assert CODE not in listed.text
+    rows = listed.json()
+    physical = next(row for row in rows if row["kind"] == "physical")
+    virtual = next(row for row in rows if row["kind"] == "bambuddy_virtual")
+    assert physical["lan_host"] == "10.0.0.9" and physical["has_access_code"] is True
+    assert physical["bambuddy_view"]["nozzle_count"] == 2
+    assert virtual["forwards_to"] == physical["id"] and virtual["bambuddy_vp_id"] == 3
+    assert calls == [("10.0.0.9", SERIAL, CODE)]
+    again = client.post("/api/v1/printers/sync-bambuddy").json()
+    assert again["already_linked"] == 2 and again["created"] == 0
+
+
+def test_a_virtual_printer_row_takes_no_bambuddy_link(client: TestClient) -> None:
+    printers = registry(client)
+    pid = create(client, serial=VP_SERIAL)["id"]
+    with printers.store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE printers SET kind = 'bambuddy_virtual', bambuddy_vp_id = 1 WHERE id = %s",
+            (pid,),
+        )
+    with respx.mock:
+        configure(client)
+        bambuddy_printers(bambuddy_printer(4, None))
+        response = client.put(f"/api/v1/printers/{pid}/bambuddy", json={"bambuddy_printer_id": 4})
+    assert response.status_code == 409, response.text

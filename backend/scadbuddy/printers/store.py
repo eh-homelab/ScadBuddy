@@ -204,7 +204,21 @@ def printer_uuid(printer_id: str) -> uuid.UUID | None:
 
 
 #: What `PrinterStore.upsert_virtual` did.
-VirtualOutcome = Literal["already_linked", "linked", "created"]
+VirtualOutcome = Literal["already_linked", "linked", "created", "conflict"]
+
+
+def adopts_for_virtual(holder: PrinterRow, *, may_adopt: bool) -> bool:
+    """Whether a virtual printer takes over ``holder``, the row holding its serial
+    (#4747, security review of the sync): only a physical row with no Bambuddy link
+    now or before (a LAN-only or hand-made row), and only when the caller allows it
+    (``may_adopt``: the VP is not in ``proxy`` mode, whose serial is its target's, and
+    no Bambuddy printer reports that serial). Anything else keeps its identity."""
+    return (
+        may_adopt
+        and holder.kind == "physical"
+        and holder.bambuddy_printer_id is None
+        and holder.bambuddy_unlinked_id is None
+    )
 
 
 def _same_view(old: BambuddyView | None, new: BambuddyView) -> bool:
@@ -680,14 +694,16 @@ class PrinterStore:
         mode: str,
         forwards_to: str | None,
         view: BambuddyView,
+        may_adopt: bool = True,
     ) -> tuple[PrinterRow, VirtualOutcome, bool]:
         """The row for Bambuddy virtual printer ``vp_id``, what happened to it, and
         whether anything was written:
         ``already_linked`` (the row with that VP id, its mode, target and view brought
         up to date, its name only if the user has not renamed it), ``linked`` (a
         physical row holding the VP's serial, with no Bambuddy link of either kind,
-        adopted; its LAN link stays) or ``created`` (a new row, under
-        `synthetic_vp_serial` when the serial is taken, as a proxy VP's target's is)."""
+        adopted when `adopts_for_virtual` allows; its LAN link stays), ``created`` (a
+        new row) or ``conflict`` (another row holds the serial and keeps it: a new row
+        under `synthetic_vp_serial`, never an overwrite)."""
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
             fields = "vp_mode = %s, forwards_to = %s, bambuddy_view = %s"
@@ -720,11 +736,7 @@ class PrinterStore:
                     True,
                 )
             holder = None if serial is None else self._one(conn, "serial", serial)
-            if (
-                holder is not None
-                and holder.kind == "physical"
-                and holder.bambuddy_printer_id is None
-            ):
+            if holder is not None and adopts_for_virtual(holder, may_adopt=may_adopt):
                 return (
                     self._update(
                         conn,
@@ -748,7 +760,7 @@ class PrinterStore:
                 (str(uuid.uuid4()), serial, name, model, vp_id, *args),
             ).fetchone()
             assert data is not None
-            return _row(data), "created", True
+            return _row(data), "created" if holder is None else "conflict", True
 
     def delete(self, printer_id: str) -> None:
         key = printer_uuid(printer_id)

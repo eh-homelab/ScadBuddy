@@ -52,6 +52,7 @@ from scadbuddy.printers.store import (
     SerialTakenError,
     SerialUnknownError,
     VirtualPrinterRowError,
+    adopts_for_virtual,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,10 @@ SERIAL_LINKED_ELSEWHERE = (
 )
 SERIAL_IS_VIRTUAL = "the row with this serial is a Bambuddy virtual printer; nothing was changed"
 RACE = "another change to this printer landed meanwhile; the next sync tries again"
+SERIAL_KEPT = (
+    "another printer holds this virtual printer's serial and keeps it; the virtual"
+    " printer has a row of its own, bambuddy-vp-{vp_id}"
+)
 NOT_LISTED = "Bambuddy no longer lists this virtual printer; the row is kept"
 
 LAN_WITHHELD = (
@@ -179,17 +184,27 @@ def plan_printer(
     return "linked", holder, None
 
 
+def may_adopt(vp: VirtualPrinter, physical_serials: set[str]) -> bool:
+    """Whether the VP may take over a row by its serial at all: never in ``proxy`` mode
+    (its serial is its target's, `VirtualPrinter`), nor when a Bambuddy printer reports
+    that serial (security review of the sync)."""
+    return vp.mode != "proxy" and vp.serial not in physical_serials
+
+
 def plan_virtual(
-    vp: VirtualPrinter, rows: list[PrinterRow]
-) -> tuple[SyncAction, PrinterRow | None]:
-    """What the sync does for one virtual printer (Ruling 4), from the rows alone."""
+    vp: VirtualPrinter, rows: list[PrinterRow], physical_serials: set[str]
+) -> tuple[SyncAction, PrinterRow | None, str | None]:
+    """What the sync does for one virtual printer (Ruling 4), from the rows alone: the
+    same rules as `PrinterStore.upsert_virtual`."""
     own = next((r for r in rows if r.bambuddy_vp_id == vp.id), None)
     if own is not None:
-        return "already_linked", own
+        return "already_linked", own, None
     holder = None if vp.serial is None else next((r for r in rows if r.serial == vp.serial), None)
-    if holder is not None and holder.kind == "physical" and holder.bambuddy_printer_id is None:
-        return "linked", holder
-    return "created", None
+    if holder is None:
+        return "created", None, None
+    if adopts_for_virtual(holder, may_adopt=may_adopt(vp, physical_serials)):
+        return "linked", holder, None
+    return "conflict", holder, SERIAL_KEPT.format(vp_id=vp.id)
 
 
 def printer_view(printer: Printer, now: datetime) -> BambuddyView:
@@ -243,8 +258,11 @@ async def sync_printers(
     for printer in active:
         entries.append(await _sync_printer(printers, client, printer, rows, now, dry_run=dry_run))
     rows = await asyncio.to_thread(store.list)
+    physical_serials = {p.serial_number for p in active if p.serial_number is not None}
     for vp in vps:
-        entries.append(await _sync_virtual(printers, vp, rows, now, dry_run=dry_run))
+        entries.append(
+            await _sync_virtual(printers, vp, rows, physical_serials, now, dry_run=dry_run)
+        )
     if vp_error is None:
         listed = {vp.id for vp in vps}
         entries.extend(
@@ -437,11 +455,12 @@ async def _sync_virtual(
     printers: Printers,
     vp: VirtualPrinter,
     rows: list[PrinterRow],
+    physical_serials: set[str],
     now: datetime,
     *,
     dry_run: bool,
 ) -> SyncEntry:
-    action, row = plan_virtual(vp, rows)
+    action, row, reason = plan_virtual(vp, rows, physical_serials)
     target = (
         None
         if vp.target_printer_id is None
@@ -451,8 +470,9 @@ async def _sync_virtual(
         kind="bambuddy_virtual",
         name=vp.name,
         bambuddy_vp_id=vp.id,
-        printer_id=None if row is None else row.id,
+        printer_id=None if row is None or action == "conflict" else row.id,
         action=action,
+        reason=reason,
         forwards_to=None if target is None else target.id,
         target_model=(vp.model_name or vp.model) if vp.target_printer_id is None else None,
     )
@@ -468,11 +488,14 @@ async def _sync_virtual(
             mode=vp.mode,
             forwards_to=entry.forwards_to,
             view=virtual_view(vp, now),
+            may_adopt=may_adopt(vp, physical_serials),
         )
     except SerialTakenError:
         entry.action, entry.reason = "conflict", RACE
         return entry
     entry.printer_id, entry.action = synced.id, done
+    if done == "conflict":
+        entry.reason = SERIAL_KEPT.format(vp_id=vp.id)
     if changed:
         printers.changed(synced.id)
     return entry

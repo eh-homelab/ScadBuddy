@@ -15,6 +15,7 @@ from scadbuddy.printers.bambuddy_sync import (
     LAN_PROBE_FAILED,
     LAN_WITHHELD,
     PrinterSyncResult,
+    may_adopt,
     plan_printer,
     sync_printers,
 )
@@ -93,7 +94,9 @@ class FakePrinters:
         self.changed_ids.append(printer_id)
 
 
-def bambuddy(printer_id: int, serial: str | None, ip: str | None = "192.168.1.10", **more: Any):
+def bambuddy(
+    printer_id: int, serial: str | None, ip: str | None = "192.168.1.10", **more: Any
+) -> dict[str, Any]:
     return {
         "id": printer_id,
         "name": f"P{printer_id}",
@@ -106,7 +109,9 @@ def bambuddy(printer_id: int, serial: str | None, ip: str | None = "192.168.1.10
     }
 
 
-def vp(vp_id: int, serial: str, target: int | None, mode: str = "queue", **more: Any):
+def vp(
+    vp_id: int, serial: str, target: int | None, mode: str = "queue", **more: Any
+) -> dict[str, Any]:
     return {
         "id": vp_id,
         "name": f"VP{vp_id}",
@@ -325,11 +330,70 @@ async def test_a_proxy_vp_reporting_its_targets_serial_gets_a_row_of_its_own(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
     client = FakeClient([bambuddy(1, SERIAL)], [vp(9, SERIAL, 1, mode="proxy")], codes={1: CODE})
-    await run(printers, client)
+    result = await run(printers, client)
     physical = store.by_serial(SERIAL)
     assert physical is not None and physical.kind == "physical"
     virtual = next(row for row in store.list() if row.bambuddy_vp_id == 9)
     assert virtual.serial == "bambuddy-vp-9" and virtual.forwards_to == physical.id
+    assert [e.action for e in result.entries if e.bambuddy_vp_id == 9] == ["conflict"]
+
+
+async def test_a_proxy_vp_never_adopts_a_lan_only_printer_with_its_serial(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """Security review: a proxy VP reports its target's real serial, so a LAN-only row
+    with that serial is the physical printer, never the VP."""
+    lan_only = store.create(PrinterCreate(serial=SERIAL, name="LAN only"))
+    store.link_lan(
+        lan_only.id, LanLink(host="192.168.1.50", access_code="mine1234"), cert_sha256=CERT
+    )
+    result = await run(printers, FakeClient([], [vp(9, SERIAL, None, mode="proxy")]))
+    (entry,) = result.entries
+    assert entry.action == "conflict" and entry.reason is not None
+    row = store.require(lan_only.id)
+    assert row.kind == "physical" and row.bambuddy_vp_id is None and row.lan_host == "192.168.1.50"
+    virtual = next(r for r in store.list() if r.bambuddy_vp_id == 9)
+    assert virtual.serial == "bambuddy-vp-9" and entry.printer_id == virtual.id
+
+
+async def test_a_vp_never_adopts_a_row_the_user_unlinked_from_bambuddy(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    unlinked = store.create(PrinterCreate(serial=VP_SERIAL, name="Unlinked"))
+    store.link_bambuddy(unlinked.id, 4)
+    store.unlink_bambuddy(unlinked.id)
+    result = await run(printers, FakeClient([], [vp(1, VP_SERIAL, None)]))
+    assert [e.action for e in result.entries] == ["conflict"]
+    row = store.require(unlinked.id)
+    assert row.kind == "physical" and row.bambuddy_unlinked_id == 4
+
+
+async def test_a_vp_never_adopts_a_serial_a_bambuddy_printer_reports(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """A Bambuddy printer reporting the serial is that printer: the VP keeps out, in the
+    plan and in the store, even if the physical pass left the row unlinked."""
+    queue_vp = VirtualPrinter.model_validate(vp(1, SERIAL, None))
+    assert may_adopt(queue_vp, {SERIAL}) is False
+    assert may_adopt(queue_vp, set()) is True
+    assert (
+        may_adopt(VirtualPrinter.model_validate(vp(1, SERIAL, None, mode="proxy")), set()) is False
+    )
+    held = store.create(PrinterCreate(serial=SERIAL, name="Held"))
+    store.link_bambuddy(held.id, 1)
+    store.unlink_bambuddy(held.id)  # the physical pass then skips it, unlinked
+    result = await run(printers, FakeClient([bambuddy(1, SERIAL)], [vp(2, SERIAL, None)]))
+    assert [e.action for e in result.entries] == ["skipped", "conflict"]
+    assert store.require(held.id).kind == "physical"
+
+
+async def test_dry_run_plans_the_same_vp_conflict(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    store.create(PrinterCreate(serial=SERIAL, name="LAN only"))
+    result = await run(printers, FakeClient([], [vp(9, SERIAL, None, mode="proxy")]), dry_run=True)
+    assert [e.action for e in result.entries] == ["conflict"]
+    assert all(r.kind == "physical" for r in store.list())
 
 
 async def test_a_vp_bambuddy_no_longer_lists_is_reported_and_kept(
