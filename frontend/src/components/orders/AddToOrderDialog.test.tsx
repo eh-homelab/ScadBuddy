@@ -98,6 +98,82 @@ describe('AddToOrderDialog (#4249)', () => {
     expect(within(dialog).queryByLabelText('Customer name')).toBeNull()
   })
 
+  it('keeps the order it made when adding the item fails, so a retry makes no second (#4723)', async () => {
+    const createOrder = vi.spyOn(api, 'createOrder')
+    const add = vi.spyOn(api, 'addOrderItem').mockRejectedValueOnce(new Error('The server is away.'))
+    const { user } = renderPage(
+      <>
+        <AddToOrderDialog open outputId={OUTPUT_REAGAN} onClose={() => {}} />
+        <Location />
+      </>,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
+    expect(createOrder).toHaveBeenCalledTimes(1)
+    const made = (await createOrder.mock.results[0]?.value) as { id: string; number: string }
+    // The order it made is now the one picked, and the retry adds to it.
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(made.number))
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${made.id}`))
+    expect(createOrder).toHaveBeenCalledTimes(1)
+    expect(add).toHaveBeenLastCalledWith(made.id, { output_id: OUTPUT_REAGAN, quantity: 1 })
+    createOrder.mockRestore()
+    add.mockRestore()
+  })
+
+  it('keeps the customer it made when the order fails, so a retry makes no second (#4723)', async () => {
+    const createCustomer = vi.spyOn(api, 'createCustomer')
+    const createOrder = vi.spyOn(api, 'createOrder').mockRejectedValueOnce(new Error('The server is away.'))
+    const { user } = renderPage(
+      <>
+        <AddToOrderDialog open outputId={OUTPUT_REAGAN} onClose={() => {}} />
+        <Location />
+      </>,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
+    expect(createCustomer).toHaveBeenCalledTimes(1)
+    expect(await api.customers({ q: 'grace' })).toHaveLength(1)
+    createCustomer.mockRestore()
+    createOrder.mockRestore()
+  })
+
+  it('stays open while a submit is in flight (#4723)', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const real = api.createOrder.bind(api)
+    const createOrder = vi.spyOn(api, 'createOrder').mockImplementation(async (body) => {
+      await held
+      return real(body)
+    })
+    const { user } = renderPage(
+      <>
+        <Toggled />
+        <Location />
+      </>,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    await waitFor(() => expect(createOrder).toHaveBeenCalled())
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: 'Add to order' })).toBeInTheDocument()
+    release()
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
+    createOrder.mockRestore()
+  })
+
   it('shows a rough estimate once a filament is picked, and records nothing (#4250)', async () => {
     const add = vi.spyOn(api, 'addOrderItem')
     const { user } = renderPage(<AddToOrderDialog open outputId={OUTPUT_REAGAN} outputName="Reagan" onClose={() => {}} />)

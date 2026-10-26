@@ -44,7 +44,12 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })),
     [chosen],
   )
-  const openOrders = useMemo(() => (orders.data?.items ?? []).filter((o) => o.status === 'draft' || o.status === 'quoted'), [orders.data])
+  // An order made here, offered (first, as the newest) until the reload lists it.
+  const [made, setMade] = useState<Order | null>(null)
+  const openOrders = useMemo(() => {
+    const listed = (orders.data?.items ?? []).filter((o) => o.status === 'draft' || o.status === 'quoted')
+    return made && made.customer_id === chosen && !listed.some((o) => o.id === made.id) ? [made, ...listed] : listed
+  }, [orders.data, made, chosen])
   useEffect(() => {
     if (!open) {
       setError(null)
@@ -54,8 +59,8 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     }
   }, [open, resetPicker])
   useEffect(() => {
-    // The newest open order of the customer, else a new one.
-    setOrderId(openOrders[0]?.id ?? NEW)
+    // The newest open order of the customer, else a new one; an order still offered stays picked.
+    setOrderId((was) => (was !== NEW && openOrders.some((o) => o.id === was) ? was : (openOrders[0]?.id ?? NEW)))
   }, [chosen, openOrders])
 
   async function add() {
@@ -67,9 +72,16 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     setBusy(true)
     setError(null)
     try {
-      // A customer made here stays picked when a later step fails, so a retry reuses it.
+      // A customer or an order made here stays picked when a later step fails, so a
+      // retry reuses it rather than making a second.
       const customer = await picker.resolve()
-      const order = orderId === NEW ? (await api.createOrder({ customer_id: customer })).id : orderId
+      let order = orderId
+      if (order === NEW) {
+        const created = await api.createOrder({ customer_id: customer })
+        setMade(created)
+        setOrderId(created.id)
+        order = created.id
+      }
       await api.addOrderItem(order, { output_id: outputId, quantity: count })
       onClose()
       void navigate(`/orders/${order}`)
