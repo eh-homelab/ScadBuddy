@@ -39,6 +39,8 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_SLICES_TIMEOUT,
     PREVIEWS_SWEEP,
     PREVIEWS_TIMEOUT,
+    PRINTER_SYNC_SWEEP,
+    PRINTER_SYNC_TIMEOUT,
     PRINTER_WATCHES_SWEEP,
     PRINTER_WATCHES_TIMEOUT,
     PRUNE_INTERVAL,
@@ -134,6 +136,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         TRANSFER_PUTS_SWEEP: TRANSFER_PUTS_TIMEOUT,
         PRINTER_WATCHES_SWEEP: PRINTER_WATCHES_TIMEOUT,
         QUOTE_HOLDS_SWEEP: QUOTE_HOLDS_TIMEOUT,
+        PRINTER_SYNC_SWEEP: PRINTER_SYNC_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -280,6 +283,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_printer_watches",
         # #4250 Ruling 3: a quote's hold a release lost is dropped within the interval.
         "housekeeping_reap_quote_holds",
+        # #4439, #4747: a printer added in Bambuddy, or a failed probe, within the interval.
+        "housekeeping_sync_bambuddy_printers",
     ]
     # The native slices obey the switch, as the Bambuddy background slices do.
     assert PREVIEWS_SWEEP not in sweeps and NATIVE_SLICES_SWEEP not in sweeps
@@ -409,8 +414,8 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    # 50 minutes since #4250's quote-holds reaper joined the prune Schedule (2 minutes).
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=50)
+    # 55 minutes since the Bambuddy printer sync joined the prune Schedule (5 minutes).
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=55)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 
