@@ -7,7 +7,7 @@ import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
-import type { ConnectionTest, Settings, SettingsUpdate, SidebarLink } from '../api/types'
+import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import type { McpAuthMode } from '../api/mcpTokens'
 import { AiCredentialSection } from '../components/assistant/AiCredentialSection'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
@@ -64,16 +64,23 @@ import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
 import { SectionContents, SettingsCollapseProvider, SubSection } from './settings/collapse'
 import { useReveal } from './settings/collapseState'
+import { RUNTIME_FIELDS, SECTIONS, sectionTitle, type FieldName, type FieldSpec, type SectionId } from './settings/fields'
 import {
-  RUNTIME_FIELDS,
-  SECTIONS,
-  envVar,
-  sectionTitle,
-  serverValue,
-  type FieldName,
-  type FieldSpec,
-  type SectionId,
-} from './settings/fields'
+  ACTIVITY_REPAIR,
+  ACTIVITY_TTL,
+  FOLLOW_NOBODY,
+  RETENTION_MAX_DAYS,
+  baseline,
+  extraSpecs,
+  fieldsOf,
+  isProblem,
+  isSecret,
+  ofLimit,
+  storeChoice,
+  toPatchValue,
+  type Secret,
+  type StoreChoice,
+} from './settings/values'
 import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { SpoolInventoryPanel } from './settings/SpoolInventoryPanel'
@@ -82,177 +89,8 @@ import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type See
 import { sectionId, useSectionNav } from './settings/sectionNav'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 
-/** #296 — `used` of `limit`, where a limit of 0 means none. */
-function ofLimit(used: string, limit: number, format: (n: number) => string): string {
-  return limit > 0 ? `${used} of ${format(limit)}` : `${used} (no limit)`
-}
-
-const SECRETS = [
-  'bambuddy_api_key',
-  'bambuddy_render_api_key',
-  'google_fonts_api_key',
-  'store_s3_secret_access_key',
-] as const
-type Secret = (typeof SECRETS)[number]
-
-function isSecret(name: FieldName): name is Secret {
-  return (SECRETS as readonly string[]).includes(name)
-}
-
-const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
-
-/** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
-const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
-  connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
-  printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
-  // #426 — the blob store beside the inbox folder it needs.
-  projects: [
-    'library_folder_id',
-    'last_project_id',
-    'destination_sort',
-    'store_backend',
-    'library_backend',
-    // Plan 2026-10-16 Task 14: who slices, beside where print files are kept.
-    'slicer_backend',
-    // The S3 store's, under the Blob store choice.
-    'store_s3_endpoint',
-    'store_s3_region',
-    'store_s3_bucket',
-    'store_s3_prefix',
-    'store_s3_access_key_id',
-    'store_s3_secret_access_key',
-    'store_s3_path_style',
-  ],
-  preview: ['display_unit', 'default_plate'],
-  administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
-}
-
-const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
-
-/**
- * An env-seeded field this page has no control for yet is still shown and editable, in
- * Diagnostics, so no setting the server takes is out of reach (#322).
- */
-function extraSpecs(settings: Settings | undefined): FieldSpec[] {
-  const known = new Set<string>([...Object.values(HAND_LAID).flat(), ...Object.keys(SPECS)])
-  return Object.keys(settings?.sources ?? {})
-    .filter((name) => !known.has(name))
-    .map((name) => {
-      const current = (settings as Record<string, unknown>)[name]
-      return {
-        name: name as FieldName,
-        section: 'diagnostics' as const,
-        label: envVar(name),
-        kind:
-          typeof current === 'boolean'
-            ? ('bool' as const)
-            : typeof current === 'number'
-              ? ('count' as const)
-              : ('text' as const),
-      }
-    })
-}
-
-function fieldsOf(section: SectionId, settings: Settings | undefined): FieldName[] {
-  return [
-    ...(HAND_LAID[section] ?? []),
-    ...[...RUNTIME_FIELDS, ...extraSpecs(settings)]
-      .filter((spec) => spec.section === section)
-      .map((spec) => spec.name),
-  ]
-}
-
-/** A day, in the seconds the retentions are stored in (#1052, #1053). */
-const DAY_SECONDS = 86400
-/** The settings shown in days and stored in seconds; empty keeps every row. */
-const RETENTIONS: FieldName[] = ['print_run_retention_seconds', 'operation_retention_seconds']
-
-/**
- * The stored activity settings (not env-seeded, so no badge or reset): empty is `null`,
- * the default, shown as the placeholder. The bounds are the backend's
- * (`settings_store.py`), checked here so a bad value is not a 422.
- */
-/** The longest retention the API takes, ten years (`settings_store.RETENTION_MAX_SECONDS`). */
-const RETENTION_MAX_DAYS = 3650
-const ACTIVITY_TTL = { min: 86400, max: RETENTION_MAX_DAYS * 86400, default: 2_592_000 }
-const ACTIVITY_REPAIR = { min: 600, max: 7 * 86400, default: 86400 }
-/** `activity_follow` empty is the default (`["browser"]`); this word follows nobody (`[]`). */
-const FOLLOW_NOBODY = 'none'
-
-function baseline(settings: Settings, name: FieldName): string {
-  if (name === 'display_unit') return settings.display_unit ?? 'mm'
-  if (name === 'destination_sort') return settings.destination_sort ?? 'touched'
-  if (name === 'activity_follow') {
-    const follow = settings.activity_follow
-    return follow == null ? '' : follow.length === 0 ? FOLLOW_NOBODY : follow.join(', ')
-  }
-  if (RETENTIONS.includes(name)) {
-    const seconds = settings[name as 'print_run_retention_seconds' | 'operation_retention_seconds']
-    return seconds == null ? '' : String(seconds / DAY_SECONDS)
-  }
-  return serverValue(settings, name)
-}
-
 /** Each section's id, in page order: what the section nav marks as in view. */
 const SECTION_IDS: readonly string[] = SECTIONS.map((section) => section.id)
-
-type Problem = { problem: string }
-
-/** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
-function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
-  if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
-  if (
-    name === 'display_unit' ||
-    name === 'destination_sort' ||
-    name === 'library_backend' ||
-    name === 'slicer_backend'
-  )
-    return raw
-  if (name === 'store_s3_path_style') return raw === 'true'
-  if (RETENTIONS.includes(name)) {
-    // Empty keeps every row; a number of days prunes the older ones.
-    if (raw.trim() === '') return null
-    const days = Number(raw)
-    if (!Number.isFinite(days) || days < 1 || days > RETENTION_MAX_DAYS) {
-      return { problem: `Enter 1 to ${RETENTION_MAX_DAYS} days, or leave it empty to keep every one.` } satisfies Problem
-    }
-    return days * DAY_SECONDS
-  }
-  if (name === 'activity_follow') {
-    const items = raw.split(',').map((one) => one.trim()).filter((one) => one !== '')
-    if (items.length === 0) return null
-    if (items.length === 1 && items[0] === FOLLOW_NOBODY) return []
-    return items
-  }
-  if (name === 'activity_ttl_seconds' || name === 'activity_repair_window_seconds') {
-    if (raw.trim() === '') return null
-    const seconds = Number(raw)
-    const { min, max } = name === 'activity_ttl_seconds' ? ACTIVITY_TTL : ACTIVITY_REPAIR
-    if (!Number.isFinite(seconds)) return { problem: 'Enter a number of seconds, or leave it empty for the default.' } satisfies Problem
-    if (seconds < min || seconds > max) {
-      return { problem: `Enter ${min} to ${max} seconds.` } satisfies Problem
-    }
-    return seconds
-  }
-  const kind = SPECS[name]?.kind ?? extraSpecs(settings).find((spec) => spec.name === name)?.kind
-  if (kind === 'bool') return raw === 'true'
-  if (kind === 'seconds' || kind === 'count' || kind === 'bytes') {
-    if (raw.trim() === '') return { problem: 'Enter a value, or reset it to the deployment value.' } satisfies Problem
-    const number = Number(raw)
-    if (!Number.isFinite(number)) return { problem: 'Enter a number.' } satisfies Problem
-    // #2348 — none of them takes a negative, and a count is whole; the API checks each
-    // field's own bounds too and names the field it refuses.
-    if (number < 0) return { problem: 'Enter 0 or more.' } satisfies Problem
-    if (kind === 'count' && !Number.isInteger(number)) return { problem: 'Enter a whole number.' } satisfies Problem
-    return number
-  }
-  // Text: empty clears it, which beats the deployment's value until it is reset.
-  return raw === '' ? null : raw
-}
-
-function isProblem(value: unknown): value is Problem {
-  return typeof value === 'object' && value !== null && 'problem' in value
-}
 
 export function SettingsPage() {
   return (
@@ -373,26 +211,13 @@ function SettingsSections() {
     if (isSecret(name) && next !== '') setClearing((current) => current.filter((secret) => secret !== name))
   }
 
-  // #426 — the Bambuddy store needs a SAVED Bambuddy URL and an inbox folder in the form:
-  // until then the Blob store choice shows, sends and compares the local store. The URL is
-  // the saved one, never Connection's unsaved draft: a Projects & files save cannot commit
-  // it, so what the choice shows and what that save sends always agree.
-  const savedBambuddyUrl = settings ? baseline(settings, 'bambuddy_url') !== '' : false
-  const bambuddyStoreReady = savedBambuddyUrl && value('library_folder_id') !== ''
-  // The S3 store needs its SAVED endpoint, bucket and both keys, as the server does.
-  const savedS3 = (name: FieldName) => (settings ? baseline(settings, name) !== '' : false)
-  const s3Ready =
-    savedS3('store_s3_endpoint') &&
-    savedS3('store_s3_bucket') &&
-    savedS3('store_s3_access_key_id') &&
-    Boolean(settings?.has_store_s3_secret_access_key)
-  const chosen = value('store_backend')
-  const chosenBackend =
-    chosen === 's3' ? (s3Ready ? 's3' : 'local') : bambuddyStoreReady && chosen === 'bambuddy' ? 'bambuddy' : 'local'
+  const store: StoreChoice = settings
+    ? storeChoice(settings, value)
+    : { backend: 'local', savedBambuddyUrl: false, bambuddyReady: false, s3Ready: false }
 
   const changed = (name: FieldName): boolean => {
     if (!settings) return false
-    if (name === 'store_backend') return chosenBackend !== baseline(settings, name)
+    if (name === 'store_backend') return store.backend !== baseline(settings, name)
     if (isSecret(name)) return value(name) !== '' || clearing.includes(name)
     return value(name) !== baseline(settings, name)
   }
@@ -439,7 +264,7 @@ function SettingsSections() {
     for (const name of fieldsOf(id, settings)) {
       if (!changed(name)) continue
       if (name === 'store_backend') {
-        body[name] = chosenBackend
+        body[name] = store.backend
         continue
       }
       if (isSecret(name)) {
@@ -1264,30 +1089,30 @@ function SettingsSections() {
               >
                 <ChoiceSelect
                   id="store-backend"
-                  value={chosenBackend}
+                  value={store.backend}
                   onValueChange={(next) => setField('store_backend', next)}
                   choices={[
                     { value: 'local', label: 'This server’s volume (one render worker)' },
                     {
                       value: 'bambuddy',
                       label: 'Bambuddy library (any number of render workers)',
-                      disabled: !bambuddyStoreReady,
+                      disabled: !store.bambuddyReady,
                     },
                     {
                       value: 's3',
                       label: 'S3-compatible object store (any number of render workers)',
-                      disabled: !s3Ready,
+                      disabled: !store.s3Ready,
                     },
                   ]}
                 />
-                {!bambuddyStoreReady && (
+                {!store.bambuddyReady && (
                   <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-backend-hint">
-                    {!savedBambuddyUrl && value('bambuddy_url') !== ''
+                    {!store.savedBambuddyUrl && value('bambuddy_url') !== ''
                       ? 'The Bambuddy URL is not saved yet: save Connection to choose the Bambuddy library.'
                       : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
                   </p>
                 )}
-                {!s3Ready && (
+                {!store.s3Ready && (
                   <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-s3-hint">
                     The S3 store needs its endpoint, bucket and keys saved first.
                   </p>
@@ -1307,10 +1132,10 @@ function SettingsSections() {
                   onValueChange={(next) => setField('library_backend', next)}
                   choices={[
                     { value: 'bambuddy', label: 'Bambuddy’s' },
-                    { value: 'native', label: 'ScadBuddy’s own', disabled: chosenBackend === 'local' },
+                    { value: 'native', label: 'ScadBuddy’s own', disabled: store.backend === 'local' },
                   ]}
                 />
-                {chosenBackend === 'local' && (
+                {store.backend === 'local' && (
                   <p className="mt-1.5 text-xs text-muted-foreground" data-testid="library-backend-hint">
                     ScadBuddy’s own library keeps its files in the blob store: choose the S3 or Bambuddy store first.
                   </p>
