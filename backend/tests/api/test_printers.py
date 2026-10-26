@@ -116,6 +116,47 @@ def test_link_bambuddy_and_unlink(client: TestClient) -> None:
 
 
 @respx.mock
+def test_a_manual_link_fills_the_lan_link_from_bambuddy(
+    client: TestClient, watches: RecordedWatches
+) -> None:
+    """#4747 item 2: linking a row to Bambuddy also makes its LAN link, with no typing."""
+    configure(client)
+    printers = registry(client)
+    printers.store.kek = KEK
+    calls: list[tuple[str, str, str]] = []
+    printers.probe = _probe_ok(calls)
+    bambuddy_printers(bambuddy_printer(1, SERIAL, ip_address="10.0.0.9"))
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(
+            200, json=bambuddy_printer(1, SERIAL, ip_address="10.0.0.9", access_code=CODE)
+        )
+    )
+    row = create(client)
+    linked = client.put(f"/api/v1/printers/{row['id']}/bambuddy", json={"bambuddy_printer_id": 1})
+    assert linked.status_code == 200, linked.text
+    body = linked.json()
+    assert body["lan_host"] == "10.0.0.9" and body["has_access_code"] is True
+    assert CODE not in linked.text
+    assert calls == [("10.0.0.9", SERIAL, CODE)]
+
+
+@respx.mock
+def test_a_manual_link_with_the_code_withheld_says_so(client: TestClient) -> None:
+    configure(client)
+    printers = registry(client)
+    printers.store.kek = KEK
+    bambuddy_printers(bambuddy_printer(1, SERIAL, ip_address="10.0.0.9"))
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=bambuddy_printer(1, SERIAL, access_code=None))
+    )
+    row = create(client)
+    linked = client.put(f"/api/v1/printers/{row['id']}/bambuddy", json={"bambuddy_printer_id": 1})
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["lan_host"] is None
+    assert "withholds the access code" in linked.json()["lan_sync_error"]
+
+
+@respx.mock
 def test_link_bambuddy_refuses_second_printer_with_same_serial(client: TestClient) -> None:
     """Review Focus 2: a re-added printer reports the serial a linked one has."""
     configure(client)

@@ -357,6 +357,21 @@ async def _sync_printer(
     return entry
 
 
+async def fill_lan_after_link(
+    printers: Printers, client: BambuddyClient, row: PrinterRow, printer: Printer
+) -> PrinterRow:
+    """#4747 item 2 for a manual link (``PUT /printers/{id}/bambuddy``): record what
+    Bambuddy reports and, when the row has no LAN link, fill it from Bambuddy as the sync
+    would. Best effort: a failure is the row's `lan_sync_error`, never the link's."""
+    store = printers.store
+    previous_ip = None if row.bambuddy_view is None else row.bambuddy_view.ip_address
+    row = await asyncio.to_thread(
+        store.record_bambuddy_view, row.id, printer_view(printer, datetime.now(UTC)), model=None
+    )
+    await _sync_lan(printers, client, row, printer, previous_ip)
+    return await asyncio.to_thread(store.require, row.id)
+
+
 async def _sync_lan(
     printers: Printers,
     client: BambuddyClient,
