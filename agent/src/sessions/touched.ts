@@ -256,6 +256,12 @@ function registryPrinter(id: unknown): string | null {
   return printer ? `printer:${printer}` : null
 }
 
+/** A Bambuddy virtual printer, by its Bambuddy id (#4747). */
+function virtualPrinter(id: unknown): string | null {
+  const vp = bambuddyId(id)
+  return vp ? `bambuddy_virtual_printer:${vp}` : null
+}
+
 /** A stored setting, by what it is for. */
 function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
   return id ? [{ type: 'setting', id, action: 'modified', ...extra }] : []
@@ -480,6 +486,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
         : [],
     )
   },
+  // #4747: a Bambuddy virtual printer, by its Bambuddy id (the registry row follows it).
+  create_virtual_printer: (_input, result) =>
+    setting(virtualPrinter(field(result, 'id')), { action: 'created' }),
+  update_virtual_printer: (input) => setting(virtualPrinter(input.vp_id)),
+  delete_virtual_printer: (input) => setting(virtualPrinter(input.vp_id), { action: 'deleted' }),
   remember_printer_bed_type: (input) => {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)
