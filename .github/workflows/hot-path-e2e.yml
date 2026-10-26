@@ -45,6 +45,11 @@ on:
       - backend/scadbuddy/bambuddy/**
       - backend/scadbuddy/analyzers/**
       - backend/scadbuddy/api/analyzers.py
+      - backend/scadbuddy/api/printing.py
+      - backend/scadbuddy/api/printers.py
+      - backend/scadbuddy/api/prints.py
+      - backend/scadbuddy/api/library_print.py
+      - backend/scadbuddy/workflows/client.py
       - backend/scadbuddy/workflows/print*.py
       - backend/scadbuddy/workflows/slicing*.py
       - backend/tests/support/fake_lan.py
@@ -148,7 +153,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
           "$RUNNER_TEMP/temporal" --version
 
-      # Each file skips when what it needs is missing; here nothing may.
+      # Each file skips when what it needs is missing; here nothing may. Counted from the
+      # JUnit report, which does not depend on how pytest words its summary line.
       - name: The native tests
         working-directory: backend
         env:
@@ -156,10 +162,11 @@ jobs:
           SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: |
           set -euo pipefail
-          uv run --frozen pytest -p no:cacheprovider -rs -n 4 \
-            tests/test_print_native_workflow.py tests/api/test_hot_path_native.py | tee "$RUNNER_TEMP/native.txt"
-          if grep -qiE '[0-9]+ skipped' "$RUNNER_TEMP/native.txt"; then
-            echo "::error::a native test skipped: each one must run here"
+          uv run --frozen pytest -p no:cacheprovider -rs -n 4 --junitxml="$RUNNER_TEMP/native.xml" \
+            tests/test_print_native_workflow.py tests/api/test_hot_path_native.py
+          skipped=$(grep -c '<skipped' "$RUNNER_TEMP/native.xml" || true)
+          if [ "$skipped" != 0 ]; then
+            echo "::error::$skipped native test(s) skipped: each one must run here"
             exit 1
           fi
 

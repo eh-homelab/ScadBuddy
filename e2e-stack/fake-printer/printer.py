@@ -461,6 +461,7 @@ class FakePrinter:
             for thread in threads:
                 if thread.ident is not None:
                     thread.join(timeout=5)
+            # The FTP server's own thread closes it once started; unstarted, close it here.
             if ftp is not None and not any(thread.ident is not None for thread in threads):
                 ftp.close_all()
             if broker.returncode is None:

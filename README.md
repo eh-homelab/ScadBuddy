@@ -1545,8 +1545,8 @@ backend's native-run tests against the fake printer, `tests/test_print_native_wo
 and `tests/api/test_hot_path_native.py`, with mosquitto, Postgres and Temporal; it fails
 if one skips). Both run on a PR that touches `e2e-stack/**`, the native path's code
 (`printers/`, `slicing/`, `spools/`, `print_library/`, `bambuddy/`, `analyzers/`, the
-print and slicing workflows), those tests or the workflow; the workflow's `paths` list
-is the exact set.
+print and slicing workflows, the print routes), those tests or the workflow; the
+workflow's `paths` list names each one.
 
 ### Switching continuous deploy off
 

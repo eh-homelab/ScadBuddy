@@ -1119,7 +1119,9 @@ export const printTools: Tool[] = [
     // and a project its run would refuse is refused before anyone approves it. Only for the
     // line: the run reads the choices again, so an input-only call skips the read. A
     // failed read fails the approval, as a failed printer read does: a line worded for
-    // Bambuddy's path could approve a print that then goes over the LAN.
+    // Bambuddy's path could approve a print that then goes over the LAN. The run's own read
+    // decides: if the settings change between the two reads, a project the line approved
+    // can still be refused when the run starts.
     prepareApproval: async (args, ctx, needs) => {
       const { printerId, name, lan } = await printerOf(args, ctx.backend, ctx.signal, needs)
       const native =
