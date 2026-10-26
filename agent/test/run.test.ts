@@ -354,6 +354,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
       expect(item.document_id).toBe(`conversation:${sessionId}`)
       expect(item.content).toContain('{"role":"user","content":"Say hello"')
       expect(item.content).toContain('{"role":"assistant","content":"Hello from the fake."')
+      expect(item.content.split('"content":"Hello from the fake."')).toHaveLength(2)
       expect(item.content).not.toContain('PETG')
       expect(item.content).not.toContain(GATEWAY_TOKEN)
     } finally {
