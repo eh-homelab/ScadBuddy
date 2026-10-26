@@ -14,6 +14,15 @@ from scadbuddy.printers.address import valid_host
 #: when the printer is reachable there, else Bambuddy).
 PrintPath = Literal["bambuddy", "native", "auto"]
 
+#: What a registry row is (#4747): a printer, or one of Bambuddy's virtual printers,
+#: which is never counted as hardware (not in the strip, the dialog or the hot path).
+PrinterKind = Literal["physical", "bambuddy_virtual"]
+
+#: A virtual printer's mode, Bambuddy's canonical values (``VP_MODE_VALUES`` in
+#: ``backend/app/models/virtual_printer.py`` at maziggy/bambuddy v1.3.0b1-daily.20261025;
+#: ``immediate`` is its alias for ``archive``).
+VirtualPrinterMode = Literal["archive", "review", "queue", "proxy"]
+
 #: The serial a Bambuddy printer gets when Bambuddy withholds its own: one row per
 #: Bambuddy printer all the same. Such a row cannot take a LAN link (the MQTT topics are
 #: named by the real serial).
@@ -29,8 +38,39 @@ def synthetic_serial(bambuddy_printer_id: int) -> str:
     return f"{SYNTHETIC_SERIAL_PREFIX}{bambuddy_printer_id}"
 
 
+def synthetic_vp_serial(vp_id: int) -> str:
+    """A virtual printer's row serial when its own is taken (a proxy VP reports its
+    target's) or is not a serial's shape: synthetic, so it never takes a LAN link."""
+    return f"{SYNTHETIC_SERIAL_PREFIX}vp-{vp_id}"
+
+
 def is_synthetic_serial(serial: str) -> bool:
     return serial.startswith(SYNTHETIC_SERIAL_PREFIX)
+
+
+class BambuddyView(BaseModel):
+    """What Bambuddy reported for a row at the last sync (#4747 item 1), shown beside
+    the row's own values. Never an access code: only whether a virtual printer has one."""
+
+    #: When the sync first saw these values (a sync that finds nothing changed writes
+    #: nothing, so this is when Bambuddy last reported a change).
+    seen_at: datetime
+    name: str
+    model: str | None = None
+    #: A printer's address as Bambuddy has it; a virtual printer has none Bambuddy knows.
+    ip_address: str | None = None
+    is_active: bool | None = None
+    nozzle_count: int | None = None
+    # A virtual printer's settings, as Bambuddy reports them.
+    enabled: bool | None = None
+    mode: str | None = None
+    model_code: str | None = None
+    target_printer_id: int | None = None
+    bind_ip: str | None = None
+    remote_interface_ip: str | None = None
+    access_code_set: bool | None = None
+    running: bool | None = None
+    pending_files: int | None = None
 
 
 class PrinterRow(BaseModel):
@@ -50,6 +90,16 @@ class PrinterRow(BaseModel):
     #: Whether Bambuddy listed its printer as active when it last answered: what the
     #: strip shows while Bambuddy is down.
     bambuddy_active: bool = True
+    kind: PrinterKind = "physical"
+    #: The Bambuddy virtual printer this row is (``kind`` ``bambuddy_virtual``).
+    bambuddy_vp_id: int | None = None
+    #: The registry printer a virtual printer forwards to; ``None`` for one Bambuddy
+    #: dispatches to any free printer of its model.
+    forwards_to: str | None = None
+    vp_mode: str | None = None
+    bambuddy_view: BambuddyView | None = None
+    #: Why the Bambuddy sync last could not fill or move the LAN link; never the code.
+    lan_sync_error: str | None = None
     created_at: datetime
     updated_at: datetime
 

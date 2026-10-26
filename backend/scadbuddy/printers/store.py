@@ -37,21 +37,24 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
 from scadbuddy.printers.models import (
+    BambuddyView,
     LanLink,
     PrinterCreate,
     PrinterPatch,
     PrinterRow,
     is_synthetic_serial,
     synthetic_serial,
+    synthetic_vp_serial,
 )
 
 Pool = ConnectionPool[Connection[DictRow]]
@@ -59,6 +62,7 @@ Pool = ConnectionPool[Connection[DictRow]]
 _COLUMNS = (
     "id, serial, name, model, bambuddy_printer_id, bambuddy_unlinked_id, lan_host, lan_cert_sha256,"
     " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, bambuddy_active,"
+    " kind, bambuddy_vp_id, forwards_to, vp_mode, bambuddy_view, lan_sync_error,"
     " created_at, updated_at"
 )
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))"
@@ -87,6 +91,28 @@ class BambuddyLinkTakenError(Exception):
         )
         self.existing_id = existing_id
         self.bambuddy_printer_id = bambuddy_printer_id
+
+
+class VirtualPrinterRowError(Exception):
+    """A Bambuddy virtual printer's row takes no Bambuddy printer link (#4747)."""
+
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(f"printer {printer_id} is a Bambuddy virtual printer")
+        self.printer_id = printer_id
+
+
+class LanLinkChangedError(Exception):
+    """The row's LAN link changed while the Bambuddy sync probed: the user's own
+    link wins (#4747 item 2, "never overwrites a LAN link that already exists")."""
+
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(f"printer {printer_id}'s LAN link changed meanwhile")
+        self.printer_id = printer_id
+
+
+#: `link_lan`'s ``expect_host`` when any current link may be replaced (the user's own
+#: link through ``PUT /printers/{id}/lan``).
+ANY_HOST = object()
 
 
 class KekMissingError(Exception):
@@ -158,6 +184,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),
     # #3823 Task 8: the printer a run printed on, and its activity row's facet.
     PrinterReference("print_runs", "printer"),
+    # #4747: the printer a Bambuddy virtual printer forwards to.
+    PrinterReference("printers", "forwards_to"),
     _repoint_run_activity,
 )
 
@@ -175,9 +203,27 @@ def printer_uuid(printer_id: str) -> uuid.UUID | None:
         return None
 
 
+#: What `PrinterStore.upsert_virtual` did.
+VirtualOutcome = Literal["already_linked", "linked", "created"]
+
+
+def _same_view(old: BambuddyView | None, new: BambuddyView) -> bool:
+    """Whether Bambuddy reports what it did at the last sync (``seen_at`` aside)."""
+    if old is None:
+        return False
+    return old.model_dump(exclude={"seen_at"}) == new.model_dump(exclude={"seen_at"})
+
+
 def _row(data: dict[str, Any]) -> PrinterRow:
     fields = {key: value for key, value in data.items() if key != "declined"}
-    return PrinterRow.model_validate({**fields, "id": str(data["id"])})
+    forwards_to = data.get("forwards_to")
+    return PrinterRow.model_validate(
+        {
+            **fields,
+            "id": str(data["id"]),
+            "forwards_to": None if forwards_to is None else str(forwards_to),
+        }
+    )
 
 
 class PrinterStore:
@@ -329,6 +375,8 @@ class PrinterStore:
                 raise PrinterNotFoundError(printer_id)
             if row.bambuddy_printer_id == bambuddy_printer_id:
                 return row
+            if row.kind != "physical":
+                raise VirtualPrinterRowError(row.id)
             if row.bambuddy_printer_id is not None:
                 raise BambuddyLinkTakenError(row.id, row.bambuddy_printer_id)
             holder = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
@@ -373,13 +421,28 @@ class PrinterStore:
                 (),
             )
 
-    def link_lan(self, printer_id: str, body: LanLink, *, cert_sha256: str) -> PrinterRow:
+    def link_lan(
+        self,
+        printer_id: str,
+        body: LanLink,
+        *,
+        cert_sha256: str,
+        expect_host: object = ANY_HOST,
+    ) -> PrinterRow:
+        """Store the LAN link. ``expect_host`` (the Bambuddy sync's): the ``lan_host``
+        the row must still have, ``None`` for none, read under the row's lock; another
+        is `LanLinkChangedError` and nothing is written."""
         if self.kek is None:
             raise KekMissingError()
         with self.pool.connection() as conn, conn.transaction():
+            key = printer_uuid(printer_id)
+            if key is not None:
+                conn.execute("SELECT 1 FROM printers WHERE id = %s FOR UPDATE", (key,))
             row = self._one(conn, "id", printer_id)
             if row is None:
                 raise PrinterNotFoundError(printer_id)
+            if expect_host is not ANY_HOST and row.lan_host != expect_host:
+                raise LanLinkChangedError(printer_id)
             if is_synthetic_serial(row.serial):
                 raise SerialUnknownError(printer_id)
             sealed = seal_secret(self.kek, body.access_code, access_code_aad(row.id, row.serial))
@@ -387,7 +450,7 @@ class PrinterStore:
                 conn,
                 printer_id,
                 "lan_host = %s, lan_cert_sha256 = %s, access_code_sealed = %s,"
-                " access_code_dek_sealed = %s, access_code_kek_id = %s",
+                " access_code_dek_sealed = %s, access_code_kek_id = %s, lan_sync_error = NULL",
                 (
                     body.host,
                     cert_sha256,
@@ -514,7 +577,11 @@ class PrinterStore:
             holder = self._one(conn, "serial", serial)
             if holder is None and linked is not None:  # the synthetic row learns its serial
                 return self._update(conn, linked.id, "serial = %s", (serial,)), None
-            if holder is not None and not live(holder.bambuddy_printer_id):
+            if (
+                holder is not None
+                and holder.kind == "physical"
+                and not live(holder.bambuddy_printer_id)
+            ):
                 merged = None
                 if linked is not None:  # the synthetic row made meanwhile is this printer
                     self._merge(conn, linked.id, holder.id)
@@ -549,6 +616,139 @@ class PrinterStore:
             preferred_path="bambuddy",
             bambuddy_printer_id=bambuddy_printer_id,
         ), None
+
+    # ── the Bambuddy sync (#4439, #4747) ──────────────────────────────────────────
+
+    def create_linked(
+        self, *, serial: str, name: str, model: str | None, bambuddy_printer_id: int
+    ) -> PrinterRow:
+        """A new row for a Bambuddy printer by its serial, linked, ``preferred_path``
+        ``auto`` (#4439). Refuses (`SerialTakenError`, `BambuddyLinkTakenError`) when
+        the strip's `ensure_bambuddy` or another sync made one meanwhile."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(_LOCK)
+            holder = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
+            if holder is not None:
+                raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
+            return self._insert(
+                conn,
+                serial=serial,
+                name=name,
+                model=model,
+                preferred_path="auto",
+                bambuddy_printer_id=bambuddy_printer_id,
+            )
+
+    def record_bambuddy_view(
+        self, printer_id: str, view: BambuddyView, *, model: str | None = None
+    ) -> PrinterRow:
+        """Store what Bambuddy reports for the row. Its name follows Bambuddy's only
+        while it is still the name Bambuddy last gave (the user has not renamed it); its
+        model is filled only when it has none (#4439 "Refresh model/name only if the
+        user hasn't renamed it")."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = self._one(conn, "id", printer_id)
+            if row is None:
+                raise PrinterNotFoundError(printer_id)
+            name = row.name
+            if row.bambuddy_view is not None and row.name == row.bambuddy_view.name:
+                name = view.name
+            if (
+                _same_view(row.bambuddy_view, view)
+                and name == row.name
+                and (row.model is not None or model is None)
+            ):
+                return row  # a sync that changes nothing writes nothing
+            return self._update(
+                conn,
+                printer_id,
+                "bambuddy_view = %s, name = %s, model = COALESCE(model, %s)",
+                (Jsonb(view.model_dump(mode="json")), name, model),
+            )
+
+    def set_lan_sync_error(self, printer_id: str, error: str | None) -> PrinterRow:
+        with self.pool.connection() as conn:
+            return self._update(conn, printer_id, "lan_sync_error = %s", (error,))
+
+    def upsert_virtual(
+        self,
+        vp_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        mode: str,
+        forwards_to: str | None,
+        view: BambuddyView,
+    ) -> tuple[PrinterRow, VirtualOutcome, bool]:
+        """The row for Bambuddy virtual printer ``vp_id``, what happened to it, and
+        whether anything was written:
+        ``already_linked`` (the row with that VP id, its mode, target and view brought
+        up to date, its name only if the user has not renamed it), ``linked`` (a
+        physical row holding the VP's serial, with no Bambuddy link of either kind,
+        adopted; its LAN link stays) or ``created`` (a new row, under
+        `synthetic_vp_serial` when the serial is taken, as a proxy VP's target's is)."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute(_LOCK)
+            fields = "vp_mode = %s, forwards_to = %s, bambuddy_view = %s"
+            args: tuple[Any, ...] = (
+                mode,
+                None if forwards_to is None else uuid.UUID(forwards_to),
+                Jsonb(view.model_dump(mode="json")),
+            )
+            row = self._one(conn, "bambuddy_vp_id", vp_id)
+            if row is not None:
+                renamed = row.bambuddy_view is None or row.name != row.bambuddy_view.name
+                new_name = row.name if renamed else name
+                new_model = model or row.model
+                if (
+                    _same_view(row.bambuddy_view, view)
+                    and row.vp_mode == mode
+                    and row.forwards_to == forwards_to
+                    and row.name == new_name
+                    and row.model == new_model
+                ):
+                    return row, "already_linked", False
+                return (
+                    self._update(
+                        conn,
+                        row.id,
+                        f"{fields}, name = %s, model = %s",
+                        (*args, new_name, new_model),
+                    ),
+                    "already_linked",
+                    True,
+                )
+            holder = None if serial is None else self._one(conn, "serial", serial)
+            if (
+                holder is not None
+                and holder.kind == "physical"
+                and holder.bambuddy_printer_id is None
+            ):
+                return (
+                    self._update(
+                        conn,
+                        holder.id,
+                        f"{fields}, kind = 'bambuddy_virtual', bambuddy_vp_id = %s,"
+                        " model = COALESCE(model, %s)",
+                        (*args, vp_id, model),
+                    ),
+                    "linked",
+                    True,
+                )
+            if serial is None or holder is not None:
+                serial = synthetic_vp_serial(vp_id)
+                if self._one(conn, "serial", serial) is not None:
+                    raise SerialTakenError(serial)
+            data = conn.execute(
+                "INSERT INTO printers (id, serial, name, model, preferred_path, kind,"
+                " bambuddy_vp_id, vp_mode, forwards_to, bambuddy_view)"
+                " VALUES (%s, %s, %s, %s, 'bambuddy', 'bambuddy_virtual', %s, %s, %s, %s)"
+                f" RETURNING {_COLUMNS}",
+                (str(uuid.uuid4()), serial, name, model, vp_id, *args),
+            ).fetchone()
+            assert data is not None
+            return _row(data), "created", True
 
     def delete(self, printer_id: str) -> None:
         key = printer_uuid(printer_id)
