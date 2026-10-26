@@ -320,7 +320,7 @@ export const route: RouteModule = {
       kek: deps.kek,
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
-      builtIns: new BuiltInTools(deps.settings),
+      builtIns: new BuiltInTools(deps.access),
       switches: deps.settings ? new BuiltInPackages(deps.settings) : undefined,
       testPlugin:
         deps.testPlugin ??

@@ -6,7 +6,6 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
-import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
@@ -113,13 +112,13 @@ export type ToolServices = {
   switchedOff?: SwitchedOff | undefined
   /**
    * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
-   * a raised tier or a disabled tool, read at each call. Every tool runs at its
+   * a raised or lowered tier or a disabled tool, from `ai_access` (#2171), read at each call. Every tool runs at its
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
 }
 
-/** One tool's override: a tier at or above its own, and whether it is disabled. */
+/** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
 export type ToolOverride = { tier?: Risk; disabled: boolean }
 
 export type ToolOverrides = {
@@ -128,18 +127,19 @@ export type ToolOverrides = {
   disabled(): Promise<ReadonlySet<string>>
 }
 
-/** What a tool runs at now: its tier raised by any override, whether that gates it, and whether it is disabled. */
+/** What a tool runs at now: its override's tier or its own, whether that gates it, and whether it is disabled. */
 export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
 
 /**
- * A tool's tier and gate with Settings' override applied (#1953). An override
- * only raises, so a tool raised to `outward` is gated like any outward tool
- * (`approval: 'none'` tools are outward already, so this never gates them).
+ * A tool's tier and gate with Settings' override applied (#1953, #2171). An
+ * override moves the tier either way: a tool raised to `outward` is gated like
+ * any outward tool (`approval: 'none'` tools are outward already, so this never
+ * gates them), and an outward tool lowered below it is not gated at all.
  */
 export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
   const override = await services.toolOverrides?.of(tool.name)
-  const risk = raiseTier(tool.risk, override?.tier)
-  return { risk, gated: tool.gated || (risk === 'outward' && tool.risk !== 'outward'), disabled: override?.disabled === true }
+  const risk = override?.tier ?? tool.risk
+  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled: override?.disabled === true }
 }
 
 /** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */

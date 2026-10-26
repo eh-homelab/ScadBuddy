@@ -214,8 +214,8 @@ const oidcRepo = settings
 const oidcProvider = new OidcProvider()
 const access = database ? new AccessStore(database.sql, audit) : undefined
 const plugins = database ? new PluginStore(database.sql) : undefined
-// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
-const builtInTools = new BuiltInTools(settings)
+// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
+const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start({
@@ -258,7 +258,7 @@ const toolServices: ToolServices = {
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
   // The tools Settings can turn off (#1911): read from ai_settings at each call.
   switchedOff: toolSwitches(settings),
-  // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
+  // Settings → Plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over

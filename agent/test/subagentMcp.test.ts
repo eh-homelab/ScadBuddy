@@ -6,7 +6,8 @@ import { z } from 'zod'
 import { createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SETTING_DURABLE_SUBAGENTS } from '../src/routes/durableSubagents.js'
-import { BuiltInTools, builtInToolsSetting } from '../src/plugins/builtInTools.js'
+import { BUILTIN_SOURCES, type ToolAccess } from '../src/access/model.js'
+import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { ASK_THE_MAIN_AGENT, SUBAGENT_MCP_PATH, type SubagentMcpDeps, subagentServer, TURN_OVER } from '../src/routes/subagentMcp.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -14,6 +15,7 @@ import type { Owner } from '../src/sessions/protocol.js'
 import { mintSubagentToken, subagentKey, verifySubagentToken } from '../src/temporal/subagentToken.js'
 import { defineTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
+import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
 // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): every
@@ -27,18 +29,13 @@ const KEK = kekFromBase64(randomBytes(32).toString('base64'))
 const KEY = subagentKey(KEK)
 const ALICE: Owner = { kind: 'bearer', id: 'token:7', label: 'Alice token' }
 const BOB: Owner = { kind: 'bearer', id: 'token:8', label: 'Bob token' }
-const SET = builtInToolsSetting('scadbuddy')
 
 const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
   defineTool({ name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
 const TOOLS = [tool('look', 'read'), tool('change', 'write'), tool('send', 'outward')]
 
 function rig() {
-  const values = new Map<string, unknown>([[SET, { tool_tiers: {}, disabled_tools: [] }]])
-  const settings: SettingsRepo = {
-    get: <T>(key: string) => Promise.resolve(values.get(key) as T),
-    set: (key, value) => Promise.resolve(void values.set(key, value)),
-  }
+  const { access } = memoryAccess()
   const sets = [
     {
       name: 'scadbuddy',
@@ -69,11 +66,15 @@ function rig() {
     currentTiers: async () => state.now as never,
     keys: () => [KEY],
     tools: TOOLS,
-    services: services({ toolOverrides: new BuiltInTools(settings, sets).registryOverrides() }),
+    services: services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() }),
     audit: { record: vi.fn(async () => {}), hash: () => 'h', summarise: () => 's' } as never,
   }
   const token = mintSubagentToken(KEY, { session: SESSION, turn: TURN, owner: ALICE }, Date.now() / 1000 + 600)
-  const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) => values.set(SET, { tool_tiers, disabled_tools })
+  const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) =>
+    access.replaceTools(
+      BUILTIN_SOURCES.scadbuddy,
+      Object.fromEntries(rowsFromOverrides(BUILTIN_SOURCES.scadbuddy, tool_tiers, disabled_tools).map((r) => [r.item, r.access as ToolAccess])),
+    )
   return { deps, state, token, set }
 }
 
@@ -132,9 +133,9 @@ describe("a durable segment's subagents' tools", () => {
     const { deps, token, set } = rig()
     const cl = await client(deps, token)
     expect((await call(cl, 'look')).error).toBe(false)
-    set({}, ['look'])
+    await set({}, ['look'])
     expect((await call(cl, 'look')).text).toMatch(/disabled in Settings/)
-    set({ change: 'outward' }, [])
+    await set({ change: 'outward' }, [])
     expect(await call(cl, 'change')).toEqual({ error: true, text: ASK_THE_MAIN_AGENT })
   })
 

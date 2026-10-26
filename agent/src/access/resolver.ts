@@ -11,8 +11,8 @@ import type { AccessReader } from './store.js'
  */
 export class AccessResolver {
   private readonly reader: AccessReader | undefined
-  private readonly tools: readonly Tool[]
-  constructor(reader: AccessReader | undefined, tools: readonly Tool[] = ALL_TOOLS) {
+  private readonly tools: readonly Pick<Tool, 'name' | 'risk'>[]
+  constructor(reader: AccessReader | undefined, tools: readonly Pick<Tool, 'name' | 'risk'>[] = ALL_TOOLS) {
     this.reader = reader
     this.tools = tools
   }
