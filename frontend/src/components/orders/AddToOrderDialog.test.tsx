@@ -146,8 +146,8 @@ describe('AddToOrderDialog (#4249)', () => {
     // Waits for the reload that carries the cancel, not a cached list (#4749 review): the
     // list is shown, and the cancelled order is not in it (#4751 review).
     await waitFor(() => {
-      expect(screen.getByRole('option', { name: /ORD-2026-3/ })).toBeInTheDocument()
-      expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
+      expect(screen.getByRole('option', { name: /\bORD-2026-3\b/ })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: new RegExp(`${made.number}\\b`) })).toBeNull()
     })
   })
 
@@ -172,8 +172,8 @@ describe('AddToOrderDialog (#4249)', () => {
     // Waits for the reload that carries the cancel, not a cached list (#4749 review): the
     // list is shown, and the cancelled order is not in it (#4751 review).
     await waitFor(() => {
-      expect(screen.getByRole('option', { name: /ORD-2026-3/ })).toBeInTheDocument()
-      expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
+      expect(screen.getByRole('option', { name: /\bORD-2026-3\b/ })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: new RegExp(`${made.number}\\b`) })).toBeNull()
     })
   })
 
