@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { MAZE_SLUG } from '../../mocks/fixtures'
 import { resetMockState } from '../../mocks/handlers'
@@ -12,6 +12,8 @@ const NOVA = 'c'.repeat(32)
 
 describe('AddItemDialog (#4251)', () => {
   beforeEach(() => resetMockState())
+  // Here, not at the end of a test: a failed assertion must not leak a spy into the next.
+  afterEach(() => vi.restoreAllMocks())
 
   it("adds a template's current version with its default settings, pinned to its full commit", async () => {
     const add = vi.spyOn(api, 'addOrderItem')
@@ -116,7 +118,6 @@ describe('AddItemDialog (#4251)', () => {
     await user.type(within(dialog).getByLabelText('Template'), 'maze')
     await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
     expect(await within(dialog).findByRole('radio', { name: 'Current version, default settings' })).toBeDisabled()
-    vi.restoreAllMocks()
   })
 
   it('starts another template from its own default, not the last pick (#4727)', async () => {

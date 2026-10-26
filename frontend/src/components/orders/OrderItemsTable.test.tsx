@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { Quote } from '../../api/types'
 import { resetMockState } from '../../mocks/handlers'
@@ -46,6 +46,7 @@ const quotesOfDraft = () => state.quotes.filter((q) => q.order_item_id === ITEM_
 // place while the order is draft or quoted, and shown only once it is accepted.
 describe('OrderItemsTable · unit price', () => {
   beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
 
   it("shows an accepted order's unit price and line total, with no editor", async () => {
     render(ORDER_ACCEPTED)
@@ -221,7 +222,6 @@ describe('OrderItemsTable · unit price', () => {
     expect(reload).not.toHaveBeenCalled()
     expect(input).toHaveValue('12.50')
     expect(quotesOfDraft()).toHaveLength(0)
-    vi.restoreAllMocks()
   })
 
   it('offers Accept again when the accepted price is for an old quantity (#4726)', async () => {

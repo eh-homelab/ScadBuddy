@@ -146,6 +146,18 @@ describe('useSliceQuotes (#4693)', () => {
     expect(onQuoted).toHaveBeenCalledTimes(1)
   })
 
+  it('looks again on each reload of the items, so a quote started in another tab shows (#4736 review)', async () => {
+    const running = vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [], next_cursor: null })
+    vi.spyOn(api, 'followQuote').mockReturnValue(new Promise<Quote>(() => undefined))
+    const first = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, vi.fn()), { initialProps: { items: first } })
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(1))
+    running.mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-tab', subject: 'order_item:item-1' }], next_cursor: null })
+    rerender({ items: [...first] })
+    await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ error: null }))
+    expect(running).toHaveBeenCalledTimes(2)
+  })
+
   it('shows a picked-up quote that failed as failed (#4736)', async () => {
     vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-1', subject: 'order_item:item-1' }], next_cursor: null })
     vi.spyOn(api, 'followQuote').mockRejectedValue(new ApiError(422, 'No printer takes this plate.'))

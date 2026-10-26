@@ -846,7 +846,12 @@ async function followOperation<T>(
   operations = '/operations',
 ): Promise<T> {
   if (first.status !== 202) return first.body as T
-  let op: Operation = first.body as OperationAccepted
+  return followRunning<T>(first.body as OperationAccepted, signal, operations)
+}
+
+/** An operation from as it stands to its result, or to the problem it ended with. */
+async function followRunning<T>(start: Operation, signal?: AbortSignal, operations = '/operations'): Promise<T> {
+  let op = start
   const began = performance.now()
   while (op.status === 'running') {
     if (performance.now() - began >= printRunPoll.operationFollowMs) {
@@ -2132,10 +2137,10 @@ export const api = {
    * few (each is minutes of slicing), so one page holds them.
    */
   runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
-  /** #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows its own. */
+  /** #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows its own (`followRunning`). */
   followQuote: async (operationId: string, signal?: AbortSignal) => {
     const op = await reattach(() => request<Operation>(`/operations/${seg(operationId)}`, { signal }), signal)
-    return followOperation<Quote>({ status: 202, body: op as OperationAccepted }, signal)
+    return followRunning<Quote>(op, signal)
   },
   // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------
   priceBook: () => request<PriceBook>('/orders/price-book'),

@@ -120,9 +120,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
 
   const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
 
-  // Once this order's items are read: the quotes of them still running, which this page
-  // did not start, followed as `start` follows its own. Best effort: without the activity
-  // index the item shows idle until its quote lands, as before.
+  // Each time this order's items are read (the page's first read, and every reload, so a
+  // quote started in another tab shows too): the quotes of them still running, which this
+  // page does not follow yet, followed as `start` follows its own. Best effort: without the
+  // activity index the item shows idle until its quote lands, as before.
   const itemsOf = items !== undefined && items.length > 0 && items.every((i) => i.order_id === orderId) ? orderId : null
   useEffect(() => {
     if (itemsOf === null) return
@@ -152,9 +153,9 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
             .finally(() => recovering.current.delete(operationId))
         }
       },
-      () => {},
+      (cause: unknown) => console.debug('could not read the running slice quotes; their items show idle', cause),
     )
-  }, [itemsOf, update])
+  }, [itemsOf, items, update])
 
   // A detached run ends when its quote shows on the item: a slice quote it did not have
   // (one typed by hand meanwhile is not it).
