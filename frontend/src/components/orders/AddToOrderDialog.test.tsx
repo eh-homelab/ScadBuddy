@@ -10,7 +10,8 @@ import { renderPage } from '../../test/utils'
 import { AddToOrderDialog } from './AddToOrderDialog'
 
 /** An order number as a whole word, so ORD-2026-3 never matches ORD-2026-30 (#4753, #4764 reviews). */
-const orderNumber = (number: string) => new RegExp(`\\b${number}\\b`)
+const orderNumber = (number: string) =>
+  new RegExp(`\\b${number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
 
 function Location() {
   const location = useLocation()
