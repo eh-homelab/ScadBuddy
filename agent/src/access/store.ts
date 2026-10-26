@@ -108,8 +108,9 @@ export class AccessStore implements AccessReader, AccessWriter {
     let failure: unknown
     try {
       await this.sql.begin(async (tx) => {
-        await fn(tx, updatedBy(context))
+        // Told first: the notification is queued in this transaction, so a failing write drops it.
         await notifyWarmEvict(tx, '*')
+        await fn(tx, updatedBy(context))
       })
     } catch (err) {
       failure = err

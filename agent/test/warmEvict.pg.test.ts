@@ -100,8 +100,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`warm eviction notifications${TEST_DATABASE_
     await expect.poll(() => received).toContain('*')
     received.length = 0
     await expect(access.setItem('builtin:scadbuddy', '*', 'read')).rejects.toThrow()
-    await new Promise((r) => setTimeout(r, 200))
-    expect(received).toEqual([])
+    // A write that passes the checks but fails in the database (NUL is not valid text) rolls back
+    // with its notification; the next write's is the first any cache hears.
+    await expect(access.setItem('builtin:scadbuddy', 'bad\u0000name', 'read')).rejects.toThrow()
+    await access.setItem('builtin:scadbuddy', 'get_model', 'write')
+    await expect.poll(() => received).toEqual(['*'])
+    expect(await db.sql`SELECT access FROM ai_access WHERE item = 'get_model'`).toEqual([{ access: 'write' }])
   })
 
   it('marking a session done evicts its process here and names it to every replica', async () => {
