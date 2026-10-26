@@ -394,7 +394,7 @@ THUMBNAILED = frozenset({"image/png", "image/jpeg", "image/webp"})
 
 def _listed(types: frozenset[str]) -> list[JsonValue]:
     """A type set as the spec carries it, sorted so the export is stable."""
-    return [each for each in sorted(types)]
+    return list[JsonValue](sorted(types))
 
 
 class Attachment(BaseModel):

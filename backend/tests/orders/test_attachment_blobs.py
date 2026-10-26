@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 
 import psycopg
@@ -45,7 +45,7 @@ def claim(root: Path) -> tuple[ClaimStore, str]:
 
 
 async def test_bytes_stored_already_are_kept_without_downloading_them(
-    tmp_path: Path, content: ContentStore, pool: PgPool
+    tmp_path: Path, content: ContentStore, pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a, b = replica(tmp_path / "a", content), replica(tmp_path / "b", content)
     claims, sha = claim(tmp_path)
@@ -59,12 +59,12 @@ async def test_bytes_stored_already_are_kept_without_downloading_them(
     downloads = content.backend.download
     calls = 0
 
-    def counting(backend_id: str):  # type: ignore[no-untyped-def]
+    def counting(backend_id: str) -> AsyncGenerator[bytes]:
         nonlocal calls
         calls += 1
         return downloads(backend_id)
 
-    content.backend.download = counting  # type: ignore[method-assign]
+    monkeypatch.setattr(content.backend, "download", counting)
     # Another replica, whose cache never held it: the same bytes are its blob as it is,
     # and not one of them is downloaded to learn that (a video runs to a gigabyte).
     assert await keep(b, claims, sha, sha) == key
@@ -91,6 +91,10 @@ async def test_a_local_blob_left_half_written_is_written_again(tmp_path: Path) -
     assert (blobs.dir_for(key) / BLOB_FILE).read_bytes() == VIDEO
     assert await blobs.claim(key)
     assert not await blobs.claim(blob_key("0" * 64))
+    # A file where a blob's directory would be is no blob either, as for `exists`.
+    stray = blob_key("1" * 64)
+    (blobs.root / stray).write_bytes(b"x")
+    assert not await blobs.claim(stray)
 
 
 def attached(rows: OrderStore) -> tuple[str, str]:

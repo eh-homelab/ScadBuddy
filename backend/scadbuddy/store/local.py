@@ -68,13 +68,17 @@ class LocalBlobStore:
         return self.exists(key)
 
     async def claim(self, key: str) -> bool:
+        return await asyncio.to_thread(self._claim, key)
+
+    def _claim(self, key: str) -> bool:
         # One volume: the directory is the blob. One with nothing visible in it was
-        # made by `dir_for` for a write that never finished, and holds no blob.
+        # made by `dir_for` for a write that never finished, and holds no blob; a
+        # file at the key's path is none either, as for `exists`.
         path = self._path(key)
         try:
             os.utime(path, None)
             return any(not entry.name.startswith(".") for entry in path.iterdir())
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return False
 
     async def checkout(self, key: str) -> str | None:

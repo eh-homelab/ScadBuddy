@@ -32,5 +32,8 @@ ALTER TABLE order_attachments
 
 -- The old name, for the replicas of the previous build while the API rolls out
 -- (`RollingUpdate`): a plain view of one table is automatically updatable, so their
--- reads and writes keep working. A later migration drops it (#4754).
+-- reads and writes keep working. A later migration drops it (#4754). `SELECT *` is
+-- expanded when the view is made, so its columns are frozen: no migration may add a
+-- column to `order_attachments` before #4754 drops the view, or an old replica's
+-- insert through it would leave that column at its default. Nothing new reads it.
 CREATE VIEW attachments AS SELECT * FROM order_attachments;
