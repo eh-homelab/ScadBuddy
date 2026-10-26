@@ -29,7 +29,7 @@ from scadbuddy.bambuddy.virtual_printers import (
     VirtualPrintersView,
     VirtualPrinterUpdate,
     VirtualPrinterView,
-    seal_access_code,
+    access_code_request,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationsDep
@@ -268,14 +268,17 @@ async def diagnose_virtual_printer(store: SettingsStoreDep, vp_id: int) -> Virtu
         return await client.virtual_printer_diagnostic(vp_id)
 
 
-def _sealed(printers: Printers, code: str | None, subject: str) -> str | None:
-    """The access code sealed for the operation's request (`seal_access_code`): it is
-    never recorded, or sent to Temporal, in the clear."""
-    if code is None:
-        return None
+def _sealed(
+    printers: Printers, code: str | None, *, vp_id: int | None, idempotency_key: str | None
+) -> dict[str, str]:
+    """The request fields carrying the access code (`access_code_request`): it is never
+    recorded, or sent to Temporal, in the clear. A keyless request is refused (428) by
+    `run_operation` before anything is sealed for it."""
+    if code is None or not idempotency_key:
+        return {}
     if printers.kek is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING)
-    return seal_access_code(printers.kek, code, subject)
+    return access_code_request(printers.kek, code, vp_id=vp_id, idempotency_key=idempotency_key)
 
 
 VP_WRITES = (
@@ -312,7 +315,10 @@ async def create_virtual_printer(
         response,
         kind=ops.kinds["bambuddy_vp_create"],
         subject="bambuddy_vp:new",
-        request={"fields": fields, "access_code": _sealed(printers, body.access_code, "new")},
+        request={
+            "fields": fields,
+            **_sealed(printers, body.access_code, vp_id=None, idempotency_key=idempotency_key),
+        },
         idempotency_key=idempotency_key,
     )
     if not isinstance(result, OperationAccepted):
@@ -345,7 +351,7 @@ async def update_virtual_printer(
         request={
             "vp_id": vp_id,
             "fields": fields,
-            "access_code": _sealed(printers, body.access_code, str(vp_id)),
+            **_sealed(printers, body.access_code, vp_id=vp_id, idempotency_key=idempotency_key),
         },
         idempotency_key=idempotency_key,
     )

@@ -13,10 +13,14 @@ reason.
 
 The writes are operation kinds on the ``bambuddy`` queue. The access code an untargeted
 VP may be given is sealed by the route before the request is recorded
-(`seal_access_code`), so it is never in an operation's row or a Temporal payload in the
-clear, and opened by the run; the seal is deterministic per VP and code, so a re-sent
-request keeps its operation key. A targeted VP inherits its target's code (Bambuddy
-overwrites any other, lines 236-240), so a code with a target is refused."""
+(`seal_access_code`, a random IV, bound to the VP's id or, for a create, to the request's
+Idempotency-Key), so it is never in an operation's row or a Temporal payload in the
+clear, and opened by the run. The sealed value is left out of the operation key
+(`OperationKind.unkeyed`); in its place the key covers `access_code_mac`, a MAC of the
+code under its own KEK-derived key and bound to the Idempotency-Key, so a re-send with
+the same key and code finds its record while equal codes in different requests never
+look equal. A targeted VP inherits its target's code (Bambuddy overwrites any other,
+lines 236-240), so a code with a target is refused."""
 
 from __future__ import annotations
 
@@ -42,8 +46,13 @@ from scadbuddy.printers.store import PrinterStore
 
 #: Bambuddy's bound: "Access code must be exactly 8 characters" (lines 189-190).
 ACCESS_CODE_LENGTH = 8
-#: The HKDF label of `access_code_key`.
+#: The HKDF labels of `access_code_key` and of `access_code_mac`'s key.
 ACCESS_CODE_KEY_INFO = b"scadbuddy:bambuddy:vp-access-code:v1"
+ACCESS_CODE_MAC_INFO = b"scadbuddy:bambuddy:vp-access-code-mac:v1"
+#: The request fields `access_code_request` writes; the sealed one is unkeyed.
+SEALED_FIELD = "access_code"
+MAC_FIELD = "access_code_mac"
+CONTEXT_FIELD = "seal_context"
 
 CODE_WITH_TARGET = (
     "a virtual printer with a target uses its target's access code; send no access code"
@@ -131,30 +140,56 @@ class VirtualPrinterUpdate(BaseModel):
 # ── the access code's seal ───────────────────────────────────────────────────────
 
 
+def _derived(kek: Kek, info: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(kek.key)
+
+
 def access_code_key(kek: Kek) -> bytes:
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=ACCESS_CODE_KEY_INFO).derive(
-        kek.key
+    return _derived(kek, ACCESS_CODE_KEY_INFO)
+
+
+def seal_context(*, vp_id: int | None, idempotency_key: str) -> str:
+    """What a seal is bound to: the VP's id, or for a create (no id yet) the request's
+    own Idempotency-Key, which no other request carries."""
+    return (
+        f"vp-access-code:vp:{vp_id}"
+        if vp_id is not None
+        else (f"vp-access-code:new:{idempotency_key}")
     )
 
 
-def _context(subject: str) -> str:
-    return f"vp-access-code:{subject}"
-
-
-def seal_access_code(kek: Kek, code: str, subject: str) -> str:
+def seal_access_code(kek: Kek, code: str, context: str) -> str:
     """The code sealed for the operation's request: AES-GCM under a key derived from
-    the KEK, its IV the HMAC of the subject and code (a synthetic IV, so the same code
-    for the same VP seals the same, and a re-sent request keeps its operation key)."""
-    key = access_code_key(kek)
-    iv = hmac.new(key, f"{subject}\0{code}".encode(), hashlib.sha256).digest()[:12]
-    return base64.b64encode(seal_bytes(key, code.encode(), _context(subject), iv=iv)).decode()
+    the KEK, a random IV, ``context`` as the AAD."""
+    return base64.b64encode(seal_bytes(access_code_key(kek), code.encode(), context)).decode()
 
 
-def open_access_code(kek: Kek, sealed: str, subject: str) -> str:
-    return open_bytes(access_code_key(kek), base64.b64decode(sealed), _context(subject)).decode()
+def open_access_code(kek: Kek, sealed: str, context: str) -> str:
+    return open_bytes(access_code_key(kek), base64.b64decode(sealed), context).decode()
+
+
+def access_code_mac(kek: Kek, code: str, context: str, idempotency_key: str) -> str:
+    """The code's stand-in in the operation key: an HMAC under its own KEK-derived key,
+    over the request's Idempotency-Key, so only a re-send of the same request matches."""
+    message = f"{context}\0{idempotency_key}\0{code}".encode()
+    return hmac.new(_derived(kek, ACCESS_CODE_MAC_INFO), message, hashlib.sha256).hexdigest()
+
+
+def access_code_request(
+    kek: Kek, code: str, *, vp_id: int | None, idempotency_key: str
+) -> dict[str, str]:
+    """The request fields that carry ``code``: sealed, its MAC and the seal's context."""
+    context = seal_context(vp_id=vp_id, idempotency_key=idempotency_key)
+    return {
+        SEALED_FIELD: seal_access_code(kek, code, context),
+        MAC_FIELD: access_code_mac(kek, code, context, idempotency_key),
+        CONTEXT_FIELD: context,
+    }
 
 
 # ── the operation kinds ──────────────────────────────────────────────────────────
+
+UNKEYED = frozenset({SEALED_FIELD})
 
 
 def virtual_printer_kinds(
@@ -193,15 +228,25 @@ def virtual_printer_kinds(
             )
         return checked
 
-    def body_of(request: dict[str, Any], checked: dict[str, Any], subject: str) -> dict[str, Any]:
+    def body_of(
+        request: dict[str, Any], checked: dict[str, Any], vp_id: int | None
+    ) -> dict[str, Any]:
         fields = {k: v for k, v in request.get("fields", {}).items() if k != "target"}
         if "target_printer_id" in checked:
             fields["target_printer_id"] = checked["target_printer_id"]
-        sealed = request.get("access_code")
+        sealed = request.get(SEALED_FIELD)
         if sealed:
             assert printers is not None and printers.kek is not None
+            context = str(request.get(CONTEXT_FIELD, ""))
+            # A create's seal names its request; an update's must name this VP.
+            expected = "vp-access-code:new:" if vp_id is None else f"vp-access-code:vp:{vp_id}"
+            if not (context.startswith(expected) if vp_id is None else context == expected):
+                raise ApiError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "the access code was sealed for another virtual printer",
+                )
             try:
-                fields["access_code"] = open_access_code(printers.kek, sealed, subject)
+                fields["access_code"] = open_access_code(printers.kek, sealed, context)
             except SealError:
                 raise ApiError(
                     status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -210,14 +255,14 @@ def virtual_printer_kinds(
         return fields
 
     async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        body = body_of(request, checked, "new")
+        body = body_of(request, checked, None)
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             created = await client.create_virtual_printer(body)
         return created.model_dump(mode="json")
 
     async def update_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         vp_id = int(request["vp_id"])
-        body = body_of(request, checked, str(vp_id))
+        body = body_of(request, checked, vp_id)
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             updated = await client.update_virtual_printer(vp_id, body)
         return updated.model_dump(mode="json")
@@ -236,7 +281,7 @@ def virtual_printer_kinds(
 
     where = "Bambuddy's Settings > Virtual Printer"
     return [
-        OperationKind("bambuddy_vp_create", write_check, create_run, where=where),
-        OperationKind("bambuddy_vp_update", write_check, update_run, where=where),
+        OperationKind("bambuddy_vp_create", write_check, create_run, where=where, unkeyed=UNKEYED),
+        OperationKind("bambuddy_vp_update", write_check, update_run, where=where, unkeyed=UNKEYED),
         OperationKind("bambuddy_vp_delete", delete_check, delete_run, where=where),
     ]

@@ -14,7 +14,13 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.bambuddy.virtual_printers import open_access_code, seal_access_code
+from scadbuddy.bambuddy.virtual_printers import (
+    access_code_mac,
+    open_access_code,
+    seal_access_code,
+    seal_context,
+)
+from scadbuddy.core.secrets import SealError
 from scadbuddy.printers.component import PRINTERS, Printers
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
@@ -78,13 +84,24 @@ def stored_requests(client: TestClient) -> str:
     return " ".join(row["r"] for row in rows)
 
 
-def test_the_seal_opens_only_for_its_vp() -> None:
-    sealed = seal_access_code(KEK, CODE, "new")
-    assert CODE not in sealed
-    assert sealed == seal_access_code(KEK, CODE, "new")  # a re-send keeps its operation key
-    assert open_access_code(KEK, sealed, "new") == CODE
-    with pytest.raises(Exception):  # noqa: B017 - SealError, of the wrong subject
-        open_access_code(KEK, sealed, "3")
+def test_two_seals_of_one_code_differ_and_open_only_in_their_context() -> None:
+    context = seal_context(vp_id=3, idempotency_key="k1")
+    first = seal_access_code(KEK, CODE, context)
+    second = seal_access_code(KEK, CODE, context)
+    assert CODE not in first and first != second  # a random IV: no equality oracle
+    assert open_access_code(KEK, first, context) == CODE
+    assert open_access_code(KEK, second, context) == CODE
+    with pytest.raises(SealError):
+        open_access_code(KEK, first, seal_context(vp_id=4, idempotency_key="k1"))
+
+
+def test_the_mac_matches_only_a_resend_of_the_same_request() -> None:
+    context = seal_context(vp_id=None, idempotency_key="k1")
+    assert context.endswith(":new:k1")
+    mac = access_code_mac(KEK, CODE, context, "k1")
+    assert CODE not in mac and mac == access_code_mac(KEK, CODE, context, "k1")
+    other = seal_context(vp_id=None, idempotency_key="k2")
+    assert mac != access_code_mac(KEK, CODE, other, "k2")  # equal codes, other requests
 
 
 @respx.mock
@@ -239,3 +256,27 @@ def test_delete_keeps_the_registry_row(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     assert response.json() == {"deleted": 1} and gone.called
     assert any(row.bambuddy_vp_id == 1 for row in registry(client).store.list())
+
+
+@respx.mock
+def test_a_resend_with_the_same_key_and_code_creates_once(client: TestClient) -> None:
+    configure(client)
+    registry(client).store.kek = KEK
+    bambuddy([])
+    created = respx.post(f"{API}/virtual-printers").mock(
+        return_value=httpx.Response(200, json=vp(4, None, name="Any H2C"))
+    )
+    key = press()
+    body = {"name": "Any H2C", "mode": "queue", "access_code": CODE}
+
+    first = client.post("/api/v1/printers/virtual", json=body, headers=key)
+    again = client.post("/api/v1/printers/virtual", json=body, headers=key)
+
+    assert first.status_code == again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert created.call_count == 1
+    with registry(client).store.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM operations WHERE kind = 'bambuddy_vp_create'"
+        ).fetchall()
+    assert len(rows) == 1
