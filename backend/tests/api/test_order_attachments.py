@@ -297,6 +297,11 @@ def test_deleting_a_draft_item_removes_its_files_and_their_holds(client: TestCli
     on_order = attach(client, order["id"], PDF, "brief.pdf").json()
     photo = attach(client, order["id"], png((32, 32)), "mock.png", item_id=item["id"]).json()
     sketch = attach(client, order["id"], PDF + b"x", "sketch.pdf", item_id=item["id"]).json()
+    commit = client.get(f"/api/v1/models/{SLUG}").json()["version"]
+    other = add_item(
+        client, order["id"], slug=SLUG, commit=commit, inputs={"params": {"width": 9}}, quantity=1
+    )
+    kept = attach(client, order["id"], PDF + b"y", "other.pdf", item_id=other["id"]).json()
     marked = client.put(
         f"/api/v1/orders/{order['id']}/items/{item['id']}/delivered",
         json={"attachment_id": photo["id"]},
@@ -306,9 +311,12 @@ def test_deleting_a_draft_item_removes_its_files_and_their_holds(client: TestCli
     assert client.delete(f"/api/v1/orders/{order['id']}/items/{item['id']}").status_code == 204
     detail = client.get(f"/api/v1/orders/{order['id']}").json()
     # `Lifecycle.delete_item` takes the item's files by subject (`subject_attachments`,
-    # #4724): the order's own file stays, with its hold.
-    assert [a["id"] for a in detail["attachments"]] == [on_order["id"]]
-    assert holders(client) == {on_order["id"]: f"attachment-{on_order['sha256']}"}
+    # #4724): the order's own file and the other item's stay, with their holds.
+    assert [a["id"] for a in detail["attachments"]] == [on_order["id"], kept["id"]]
+    assert holders(client) == {
+        on_order["id"]: f"attachment-{on_order['sha256']}",
+        kept["id"]: f"attachment-{kept['sha256']}",
+    }
     removed = [
         e["detail"]
         for e in client.get(f"/api/v1/orders/{order['id']}/events").json()
