@@ -8,13 +8,15 @@
 #
 # No job here is a required check: none is in ci.yml's `CI Summary` needs (plan
 # decision 6). The `stack` job runs weekly and on demand, never on a PR: it builds three
-# images and prints twice. On a PR that touches e2e-stack/, the native path's code, its
-# tests or this file only the `fakes` and `native` jobs run: the two fakes' own tests and ruff over e2e-stack/ (#4187, below), a
-# minute's work, and the backend's tests that drive a native run against the fake
-# printer (#4541, below).
+# images and prints twice. On a PR that touches the `paths` below (e2e-stack/, the
+# native path's code, its tests, this file) only the other two jobs run:
+# - `fakes`: the two fakes' own tests and ruff and mypy over them (#4187, below), a
+#   minute's work.
+# - `native`: the backend's tests that drive a native run against the fake printer
+#   (#4541, below), a few minutes'.
 #
-# #4541: those tests (`tests/test_print_native_workflow.py`, `tests/api/test_hot_path_native.py`,
-# among them the AC1 check that a native run builds no Bambuddy client) need the fake
+# #4541: those tests (`tests/test_print_native_workflow.py` and
+# `tests/api/test_hot_path_native.py`, among them the AC1 check that a native run builds no Bambuddy client) need the fake
 # printer, and so mosquitto and e2e-stack/, as well as Postgres and Temporal: every
 # backend-pytest shard skips them, for #4187's reason. The `native` job runs them here,
 # on a runner with all four, and fails if any skips.
