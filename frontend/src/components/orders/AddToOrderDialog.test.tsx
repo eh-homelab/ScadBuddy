@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { useLocation } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { ORDER_DRAFT, OUTPUT_REAGAN } from '../../mocks/features/orders/state'
@@ -29,6 +29,8 @@ function Toggled() {
 
 describe('AddToOrderDialog (#4249)', () => {
   beforeEach(() => resetMockState())
+  // Here, not at the end of a test: a failed assertion must not leak a spy into the next.
+  afterEach(() => vi.restoreAllMocks())
 
   it("adds the output to the customer's open order and moves to it", async () => {
     const add = vi.spyOn(api, 'addOrderItem')
@@ -48,7 +50,6 @@ describe('AddToOrderDialog (#4249)', () => {
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${ORDER_DRAFT}`))
     expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { output_id: OUTPUT_REAGAN, quantity: 3 })
     expect(onClose).toHaveBeenCalled()
-    add.mockRestore()
   })
 
   it('makes a new customer and a new order when asked', async () => {
@@ -83,7 +84,6 @@ describe('AddToOrderDialog (#4249)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Name the new customer.')
     expect(createCustomer).not.toHaveBeenCalled()
-    createCustomer.mockRestore()
   })
 
   it('opens empty again after a half-typed new customer is closed away', async () => {
@@ -121,13 +121,34 @@ describe('AddToOrderDialog (#4249)', () => {
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${made.id}`))
     expect(createOrder).toHaveBeenCalledTimes(1)
     expect(add).toHaveBeenLastCalledWith(made.id, { output_id: OUTPUT_REAGAN, quantity: 1 })
-    createOrder.mockRestore()
-    add.mockRestore()
+  })
+
+  it('opened again, never offers an order it made that is no longer open (#4743)', async () => {
+    const createOrder = vi.spyOn(api, 'createOrder')
+    vi.spyOn(api, 'addOrderItem').mockRejectedValueOnce(new Error('The server is away.'))
+    const { user } = renderPage(<Toggled />)
+    let dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
+    const made = (await createOrder.mock.results[0]?.value) as { id: string; number: string }
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add to order' })).not.toBeInTheDocument())
+    // Cancelled elsewhere while the dialog was closed.
+    await api.cancelOrder(made.id)
+    await user.click(screen.getByRole('button', { name: 'Toggle' }))
+    dialog = await screen.findByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await user.click(within(dialog).getByRole('combobox', { name: 'Order' }))
+    expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
   })
 
   it('keeps the customer it made when the order fails, so a retry makes no second (#4723)', async () => {
     const createCustomer = vi.spyOn(api, 'createCustomer')
-    const createOrder = vi.spyOn(api, 'createOrder').mockRejectedValueOnce(new Error('The server is away.'))
+    vi.spyOn(api, 'createOrder').mockRejectedValueOnce(new Error('The server is away.'))
     const { user } = renderPage(
       <>
         <AddToOrderDialog open outputId={OUTPUT_REAGAN} onClose={() => {}} />
@@ -143,8 +164,6 @@ describe('AddToOrderDialog (#4249)', () => {
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
     expect(createCustomer).toHaveBeenCalledTimes(1)
     expect(await api.customers({ q: 'grace' })).toHaveLength(1)
-    createCustomer.mockRestore()
-    createOrder.mockRestore()
   })
 
   it('stays open while a submit is in flight (#4723)', async () => {
@@ -171,7 +190,6 @@ describe('AddToOrderDialog (#4249)', () => {
     expect(screen.getByRole('dialog', { name: 'Add to order' })).toBeInTheDocument()
     release()
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
-    createOrder.mockRestore()
   })
 
   it('shows a rough estimate once a filament is picked, and records nothing (#4250)', async () => {
@@ -183,6 +201,5 @@ describe('AddToOrderDialog (#4249)', () => {
     expect(estimate).toHaveTextContent(/An estimate: about [\d.]+ g/)
     expect(estimate).toHaveTextContent('$')
     expect(add).not.toHaveBeenCalled()
-    add.mockRestore()
   })
 })

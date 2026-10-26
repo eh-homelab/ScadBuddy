@@ -44,22 +44,27 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
     () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })),
     [chosen],
   )
-  // An order made here, offered (first, as the newest) until the reload lists it.
+  // An order made here, offered (first, as the newest) until the reload lists it. Once
+  // listed, in whatever status, the list decides: one accepted or cancelled since is gone.
   const [made, setMade] = useState<Order | null>(null)
   const openOrders = useMemo(() => {
-    const listed = (orders.data?.items ?? []).filter((o) => o.status === 'draft' || o.status === 'quoted')
-    return made && made.customer_id === chosen && !listed.some((o) => o.id === made.id) ? [made, ...listed] : listed
+    const all = orders.data?.items ?? []
+    const listed = all.filter((o) => o.status === 'draft' || o.status === 'quoted')
+    return made && made.customer_id === chosen && !all.some((o) => o.id === made.id) ? [made, ...listed] : listed
   }, [orders.data, made, chosen])
   useEffect(() => {
     if (!open) {
       setError(null)
       setBusy(false)
-      // Opened again, it starts empty, as New order does.
+      // Opened again, it starts empty, as New order does, and offers no order made before.
+      setMade(null)
       resetPicker()
     }
   }, [open, resetPicker])
   useEffect(() => {
     // The newest open order of the customer, else a new one; an order still offered stays picked.
+    // New order is deliberately not kept: the list only recomputes when the customer changes,
+    // their orders load, or an order is made here, and each of those should land on the newest.
     setOrderId((was) => (was !== NEW && openOrders.some((o) => o.id === was) ? was : (openOrders[0]?.id ?? NEW)))
   }, [chosen, openOrders])
 
