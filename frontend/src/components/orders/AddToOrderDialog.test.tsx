@@ -143,8 +143,12 @@ describe('AddToOrderDialog (#4249)', () => {
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
     await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
     await user.click(within(dialog).getByRole('combobox', { name: 'Order' }))
-    // Waits for the reload that carries the cancel, not a cached list (#4749 review).
-    await waitFor(() => expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull())
+    // Waits for the reload that carries the cancel, not a cached list (#4749 review): the
+    // list is shown, and the cancelled order is not in it (#4751 review).
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /ORD-2026-3/ })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
+    })
   })
 
   it('kept open, drops an order it made once a reload lists it as no longer open (#4746)', async () => {
@@ -165,8 +169,12 @@ describe('AddToOrderDialog (#4249)', () => {
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
     await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
     await user.click(within(dialog).getByRole('combobox', { name: 'Order' }))
-    // Waits for the reload that carries the cancel, not a cached list (#4749 review).
-    await waitFor(() => expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull())
+    // Waits for the reload that carries the cancel, not a cached list (#4749 review): the
+    // list is shown, and the cancelled order is not in it (#4751 review).
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /ORD-2026-3/ })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
+    })
   })
 
   it('keeps the customer it made when the order fails, so a retry makes no second (#4723)', async () => {
