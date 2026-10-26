@@ -73,6 +73,23 @@ describe("a flow's tool tiers (#2704)", () => {
     ])
   })
 
+  it('flow_tool_tier answers the camera off as disabled', async () => {
+    const { access } = memoryAccess([{ source: BUILTIN_SOURCES.scadbuddy, item: 'get_printer_camera', access: 'off', updated_by: 'browser:browser' }])
+    const camera = [tool('get_printer_camera', 'read')]
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+    const tier = toolActivities(camera, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true })
+  })
+
+  it('/internal/flows/tools lists the camera off as disabled', async () => {
+    const { access } = memoryAccess([{ source: BUILTIN_SOURCES.scadbuddy, item: 'get_printer_camera', access: 'off', updated_by: 'browser:browser' }])
+    const camera = [tool('get_printer_camera', 'read')]
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+    expect(await flowToolTiers(camera, svc)).toEqual([{ name: 'get_printer_camera', tier: 'read', disabled: true }])
+  })
+
   it('/internal/flows/tools answers a lowered tier', async () => {
     const { svc, set } = rig()
     await set({ send: 'write' }, [])

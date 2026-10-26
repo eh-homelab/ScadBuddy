@@ -103,7 +103,6 @@ import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
-import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -256,8 +255,6 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The render limits in Settings, read live (tools/renderLimits.ts).
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
-  // The tools Settings can turn off (#1911): read from ai_settings at each call.
-  switchedOff: toolSwitches(settings),
   // Settings → Plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
 }

@@ -14,7 +14,6 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
-import type { SwitchedOff } from './switches.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -108,8 +107,6 @@ export type ToolServices = {
   waitForTab?: WaitForTab | undefined
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
-  /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
-  switchedOff?: SwitchedOff | undefined
   /**
    * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
    * a raised or lowered tier or a disabled tool, from `ai_access` (#2171), read at each call. Every tool runs at its
@@ -626,8 +623,6 @@ async function runJudgedByResult(
       `${tool.name} needs the "${effective.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
-  const off = await ctx.switchedOff?.(tool.name)
-  if (off) return refused(off)
   if (ctx.gate === 'harness' && effective.risk === 'outward' && ctx.seamTier !== undefined && ctx.seamTier !== 'outward') {
     return refused(
       `${tool.name} was raised to "outward" during this turn, so it needs a human approval this turn did not ask for; ` +
