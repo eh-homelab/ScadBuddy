@@ -29,6 +29,11 @@ export function acceptOperation(
   return HttpResponse.json({ ...op, repeated: false }, { status: 202 })
 }
 
+/** An operation as it stands, such as one still running, for a test that finds it later. */
+export function seedOperation(op: Operation): void {
+  operations.set(op.id, op)
+}
+
 export const handlers = [
   http.get(`${base}/operations/:id`, ({ params }) => {
     const op = operations.get(String(params['id']))

@@ -633,8 +633,14 @@ class Lifecycle:
                     ids = items if isinstance(items, list) else []
                     status: OrderStatus = before
                     return status, [each for each in ids if isinstance(each, str)]
+                reason = "its cancel's audit row names no status it was cancelled from"
                 break
-        return ("accepted" if order.accepted_at is not None else "draft"), []
+        else:
+            reason = "it has no cancel audit row"
+        fallback: OrderStatus = "accepted" if order.accepted_at is not None else "draft"
+        # #4725: so an order that reopened with none of its items back can be explained.
+        logger.warning("order %s reopens as %s with no items: %s", order.number, fallback, reason)
+        return fallback, []
 
     def reopen_order(self, order_id: str, by: Actor) -> Order:
         """Undo a close or a cancel.

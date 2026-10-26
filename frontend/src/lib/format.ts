@@ -26,6 +26,24 @@ const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ['minute', 60],
 ]
 
+/**
+ * An order's due date (#4728). It is a day, stored as that day's UTC midnight, so it is
+ * read in UTC everywhere: a plain `toLocaleDateString()` shows the day before west of UTC.
+ * `dueDay` is the `YYYY-MM-DD` a date input takes, `dueAt` the stored instant of one, and
+ * `formatDueDate` the day as the locale writes it.
+ */
+export function dueDay(dueAt: string): string {
+  return new Date(dueAt).toISOString().slice(0, 10)
+}
+
+export function dueAt(day: string): string {
+  return `${day}T00:00:00Z`
+}
+
+export function formatDueDate(dueAt: string): string {
+  return new Date(dueAt).toLocaleDateString(undefined, { timeZone: 'UTC' })
+}
+
 export function timeAgo(iso: string, now = Date.now()): string {
   const seconds = (new Date(iso).getTime() - now) / 1000
   const magnitude = Math.abs(seconds)

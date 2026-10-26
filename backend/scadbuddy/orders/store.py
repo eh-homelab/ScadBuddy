@@ -779,15 +779,23 @@ class OrderStore:
         ``sliced_blob_key``) under ``(holder_kind, <quote id>)``, in the caller's
         transaction: a rollback leaves no hold, and a commit leaves every one. A row a
         failed release left behind is taken over with a fresh ``created_at`` (and locked
-        until commit), so the reaper's grace counts from this hold, never the old one."""
+        until commit), so the reaper's grace counts from this hold, never the old one.
+        One statement for every quote (#4725), so a large order's reopen is one round
+        trip; each ``(key, quote)`` pair once, since ``ON CONFLICT DO UPDATE`` refuses to
+        touch a row twice in one statement."""
+        pairs: set[tuple[str, str]] = set()
         for quote in quotes:
             keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}
-            for key in sorted(k for k in keys if isinstance(k, str) and k):
-                conn.execute(
-                    "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
-                    " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
-                    (key, holder_kind, quote.id),
-                )
+            pairs |= {(key, quote.id) for key in keys if isinstance(key, str) and key}
+        if not pairs:
+            return
+        ordered = sorted(pairs)
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id)"
+            " SELECT key, %s, holder_id FROM unnest(%s::text[], %s::text[]) AS t(key, holder_id)"
+            " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
+            (holder_kind, [key for key, _ in ordered], [quote_id for _, quote_id in ordered]),
+        )
 
     def reopen_order_row(self, conn: Conn, order_id: str, status: OrderStatus) -> Order:
         """A closed or cancelled order back to ``status``, its ``closed_at`` and

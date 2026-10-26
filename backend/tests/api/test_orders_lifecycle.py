@@ -244,6 +244,20 @@ def test_a_bad_reference_is_422_naming_the_field(client: TestClient) -> None:
         ).status_code
         == 422
     )
+    # #4763: past the `integer` column a quantity is a 422, on an add and on an edit.
+    too_many = 2**31
+    assert (
+        client.post(
+            f"/api/v1/orders/{order['id']}/items", json={"output_id": "x", "quantity": too_many}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.patch(
+            f"/api/v1/orders/{order['id']}/items/x", json={"quantity": too_many}
+        ).status_code
+        == 422
+    )
 
 
 def test_a_commit_or_inputs_beside_an_output_must_be_its_own(client: TestClient) -> None:

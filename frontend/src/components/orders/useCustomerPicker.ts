@@ -13,7 +13,7 @@ export interface NewCustomerDraft {
 
 const EMPTY_DRAFT: NewCustomerDraft = { name: '', email: '', phone: '' }
 
-/** A choice the dialog cannot submit yet (no customer, or a new one with no name). */
+/** A choice the dialog cannot submit yet (no customer, or a new one with no name or a bad email). */
 export class CustomerChoiceError extends Error {}
 
 export interface CustomerPickerState {
@@ -35,6 +35,21 @@ export interface CustomerPickerState {
   /** Back to nothing picked and an empty draft, for a dialog opened afresh; a customer
    *  this picker made stays offered. */
   reset: () => void
+}
+
+/**
+ * A valid email address as the HTML standard defines it for `<input type="email">`
+ * (https://html.spec.whatwg.org/multipage/input.html#valid-e-mail-address), so the field
+ * checks what its type says it does (#4691). The server takes any contact text.
+ */
+const EMAIL = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/
+
+export const EMAIL_HINT = 'Enter the email as name@example.com, or leave it empty.'
+
+/** The draft's email is empty or an address. */
+export function emailOk(email: string): boolean {
+  const trimmed = email.trim()
+  return !trimmed || EMAIL.test(trimmed)
 }
 
 /** The body a new customer is made with (§3.1): a name, and an email and a phone as primary contacts. */
@@ -64,6 +79,7 @@ export function useCustomerPicker(customers: Customer[] | undefined): CustomerPi
     if (!value) throw new CustomerChoiceError('Pick a customer, or make a new one.')
     if (value !== NEW_CUSTOMER) return value
     if (!draft.name.trim()) throw new CustomerChoiceError('Name the new customer.')
+    if (!emailOk(draft.email)) throw new CustomerChoiceError(EMAIL_HINT)
     const customer = await api.createCustomer(newCustomerBody(draft))
     setMade((was) => [...was, customer])
     setValue(customer.id)

@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
 import {
+  dueAt,
+  dueDay,
   formatBbox,
   formatBytes,
+  formatDueDate,
   formatDuration,
   formatElapsed,
   formatValue,
@@ -94,5 +97,16 @@ describe('a waiting render (#1638)', () => {
     expect(formatElapsed(7.9)).toBe('0:07')
     expect(formatElapsed(252)).toBe('4:12')
     expect(formatElapsed(-3)).toBe('0:00')
+  })
+})
+
+describe('due dates (#4728)', () => {
+  it('reads the stored UTC midnight as that day in every time zone', () => {
+    const stored = dueAt('2026-10-20')
+    expect(stored).toBe('2026-10-20T00:00:00Z')
+    expect(dueDay(stored)).toBe('2026-10-20')
+    expect(dueDay('2026-10-20T00:00:00+00:00')).toBe('2026-10-20')
+    // The local calendar day, written as the locale writes it.
+    expect(formatDueDate(stored)).toBe(new Date(2026, 9, 20).toLocaleDateString())
   })
 })

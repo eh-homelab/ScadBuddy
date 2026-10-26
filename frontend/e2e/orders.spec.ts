@@ -46,6 +46,23 @@ test.describe('orders', () => {
     await expect(page.getByText('Closed', { exact: true })).toBeVisible()
   })
 
+  test('reopens a closed order, and unarchives a customer (#4725)', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-1' }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-1' })).toBeVisible()
+    await expect(page.getByText('Closed', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Reopen order' }).click()
+    await expect(page.getByRole('button', { name: 'Reopen order' })).toBeHidden()
+    await expect(page.getByText('Closed', { exact: true })).toBeHidden()
+
+    await page.getByRole('link', { name: 'Bob Builder' }).click()
+    await expect(page.getByRole('heading', { name: 'Bob Builder' })).toBeVisible()
+    await page.getByRole('button', { name: 'Archive', exact: true }).click()
+    await page.getByRole('button', { name: 'Unarchive' }).click()
+    await expect(page.getByRole('button', { name: 'Archive', exact: true })).toBeVisible()
+    await expect(page.getByText(/^Archived /)).toBeHidden()
+  })
+
   test('prices an item in the items table', async ({ page }) => {
     await page.goto('/orders')
     await page.getByRole('link', { name: 'ORD-2026-3' }).click()

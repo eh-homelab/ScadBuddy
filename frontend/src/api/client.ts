@@ -2126,6 +2126,17 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /**
+   * #4736 — the slice quotes still running, as the activity index lists them: each row's
+   * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are
+   * few (each is minutes of slicing), so one page holds them.
+   */
+  runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
+  /** #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows its own. */
+  followQuote: async (operationId: string, signal?: AbortSignal) => {
+    const op = await reattach(() => request<Operation>(`/operations/${seg(operationId)}`, { signal }), signal)
+    return followOperation<Quote>({ status: 202, body: op as OperationAccepted }, signal)
+  },
   // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------
   priceBook: () => request<PriceBook>('/orders/price-book'),
   setPriceBook: (body: PolicyUpdate) => request<PriceBook>('/orders/price-book', { method: 'PUT', body: JSON.stringify(body) }),

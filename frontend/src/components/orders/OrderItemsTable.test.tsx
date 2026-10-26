@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { Quote } from '../../api/types'
 import { resetMockState } from '../../mocks/handlers'
+import { seedActivity } from '../../mocks/features/activity'
+import { seedOperation } from '../../mocks/features/operations'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
@@ -203,6 +205,63 @@ describe('OrderItemsTable · unit price', () => {
     expect(accepted?.id).not.toBe('q-old')
     expect(accepted?.unit_price_minor).toBe(900)
     expect(within(row(ITEM_DRAFT)).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('keeps the typed text and the refusal, and reloads nothing, when the quote itself is refused (#4726)', async () => {
+    const quoted = vi.spyOn(api, 'quoteOrderItem').mockRejectedValueOnce(new Error('The server is away.'))
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const reload = vi.spyOn(api, 'order')
+    const input = screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })
+    await user.type(input, '12.50{Enter}')
+    expect(await within(row(ITEM_DRAFT)).findByRole('alert')).toHaveTextContent('The server is away.')
+    expect(quoted).toHaveBeenCalledTimes(1)
+    expect(accepted).not.toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+    expect(input).toHaveValue('12.50')
+    expect(quotesOfDraft()).toHaveLength(0)
+    vi.restoreAllMocks()
+  })
+
+  it('offers Accept again when the accepted price is for an old quantity (#4726)', async () => {
+    // Accepted for two; the item is now three, so the accepted quote no longer prices it.
+    state.quotes.push({ ...manual('q-done', 1250, '2026-10-24T23:00:00Z'), accepted: true })
+    const draft = state.items.find((i) => i.id === ITEM_DRAFT)
+    if (draft) draft.quantity = 3
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })).toHaveValue('12.50')
+    expect(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' })).toBeEnabled()
+  })
+
+  it('shows a slice quote still running after a reload, and offers no second (#4736)', async () => {
+    const at = new Date().toISOString()
+    const subject = `order_item:${ITEM_DRAFT}`
+    seedOperation({ id: 'op-running', kind: 'order_item_quote', subject, status: 'running', created_at: at })
+    seedActivity([
+      {
+        id: 'operation:op-running',
+        kind: 'operation.order_item_quote',
+        principal: 'browser',
+        session: null,
+        via_tool: null,
+        subject,
+        status: 'running',
+        title: `Order item quote ${subject}`,
+        parent_id: null,
+        detail: {},
+        created_at: at,
+        updated_at: at,
+        finished_at: null,
+      },
+    ])
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByText('Quoting…')).toBeInTheDocument()
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Name Keychain' }))
+    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
   })
 
   it('shows a cancelled item’s price without an editor', async () => {

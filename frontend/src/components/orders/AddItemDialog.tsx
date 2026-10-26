@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { QUANTITY_HINT, parseQuantity } from './quantity'
 import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
 
@@ -30,12 +31,25 @@ function matches(model: ModelSummary, query: string): boolean {
  * at that commit. An output is named by its id alone: the backend takes its commit,
  * inputs, libraries and colours (`orders/reference.py` `resolve_reference`).
  */
-function itemBody(model: ModelSummary, choice: string, quantity: number, title: string): OrderItemCreate {
+function itemBody(current: Pinned | null, choice: string, quantity: number, title: string): OrderItemCreate {
   const named = title.trim() ? { title: title.trim() } : {}
-  if (choice === CURRENT) {
-    return { slug: model.slug, commit: model.version ?? '', inputs: { params: {}, v: model.inputs_version ?? 0 }, quantity, ...named }
+  if (choice === CURRENT && current) {
+    return { slug: current.slug, commit: current.version, inputs: { params: {}, v: current.inputsVersion }, quantity, ...named }
   }
   return { output_id: choice, quantity, ...named }
+}
+
+/** A template's current version as `itemBody` pins it: both its commit and its inputs version known. */
+interface Pinned {
+  slug: string
+  version: string
+  inputsVersion: number
+}
+
+function pinnedOf(model: ModelSummary | null): Pinned | null {
+  return model && typeof model.version === 'string' && model.version && typeof model.inputs_version === 'number'
+    ? { slug: model.slug, version: model.version, inputsVersion: model.inputs_version }
+    : null
 }
 
 /**
@@ -51,7 +65,8 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
   const [slug, setSlug] = useState<string | null>(null)
   const model = (models.data ?? []).find((m) => m.slug === slug) ?? null
   const outputs = useAsync(() => (slug ? api.listOutputs(slug) : Promise.resolve([] as Output[])), [slug])
-  const [choice, setChoice] = useState('')
+  // What the person picked; empty until they pick, for this template.
+  const [picked, setPicked] = useState('')
   const [quantity, setQuantity] = useState('1')
   const [title, setTitle] = useState('')
   const [busy, setBusy] = useState(false)
@@ -59,6 +74,9 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
 
   const found = useMemo(() => (models.data ?? []).filter((m) => matches(m, query)), [models.data, query])
   const saved = useMemo(() => [...(outputs.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)), [outputs.data])
+  const pinned = pinnedOf(model)
+  // Unpicked, the current version when the template has one to pin, else its newest output.
+  const choice = picked || (pinned ? CURRENT : (saved[0]?.id ?? ''))
 
   useEffect(() => {
     if (!open) {
@@ -71,28 +89,28 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
     }
   }, [open])
   useEffect(() => {
-    // The current version when the template has one to pin, else its newest output.
-    setChoice(model?.version ? CURRENT : (saved[0]?.id ?? ''))
-  }, [model?.version, saved])
+    // Another template starts from its own default again.
+    setPicked('')
+  }, [slug])
 
   async function add() {
     if (!model) {
       setError('Pick a template.')
       return
     }
-    if (!choice || (choice === CURRENT && !model.version)) {
+    if (!choice || (choice === CURRENT && !pinned)) {
       setError('Pick what to order.')
       return
     }
-    const count = Number(quantity)
-    if (!Number.isInteger(count) || count < 1) {
-      setError('Enter how many to make, 1 or more.')
+    const count = parseQuantity(quantity)
+    if (count === null) {
+      setError(QUANTITY_HINT)
       return
     }
     setBusy(true)
     setError(null)
     try {
-      await api.addOrderItem(orderId, itemBody(model, choice, count, title))
+      await api.addOrderItem(orderId, itemBody(pinned, choice, count, title))
       onAdded()
       onClose()
     } catch (err) {
@@ -152,13 +170,13 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
               <span className="text-sm font-medium" id="add-item-what">
                 What to order
               </span>
-              <RadioGroup aria-labelledby="add-item-what" value={choice} onValueChange={setChoice} className="max-h-60 gap-1 overflow-y-auto">
+              <RadioGroup aria-labelledby="add-item-what" value={choice} onValueChange={setPicked} className="max-h-60 gap-1 overflow-y-auto">
                 <label className="flex items-start gap-2 rounded-md px-1 py-1 text-sm has-[:disabled]:opacity-60">
-                  <RadioGroupItem value={CURRENT} disabled={!model.version} aria-label="Current version, default settings" className="mt-0.5" />
+                  <RadioGroupItem value={CURRENT} disabled={!pinned} aria-label="Current version, default settings" className="mt-0.5" />
                   <span className="flex flex-col">
                     <span>Current version, default settings</span>
                     <span className="text-xs text-muted-foreground">
-                      {model.version ? `revision ${model.version.slice(0, 7)}; colours are chosen when it is quoted` : 'This template has no history to pin a revision in; order one of its outputs.'}
+                      {pinned ? `revision ${pinned.version.slice(0, 7)}; colours are chosen when it is quoted` : 'This template has no history to pin a revision in; order one of its outputs.'}
                     </span>
                   </span>
                 </label>
