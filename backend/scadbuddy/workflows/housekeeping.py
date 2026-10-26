@@ -194,8 +194,10 @@ SWEEPS = (
 #: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch. And the
 #: printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started again
 #: within the interval, not the sweeps' day. And the quote holds' reaper (#4250), behind
-#: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval. And
-#: the Bambuddy printer sync (#4439, #4747), behind `PRINTER_SYNC_PATCH`.
+#: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval. Not the
+#: Bambuddy printer sync (#4439, #4747): it calls Bambuddy, so it obeys the sweeps'
+#: switch, and the import button, a passing connection test and each virtual printer's
+#: write run it besides.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -206,7 +208,6 @@ PRUNE_SWEEPS = (
     LOST_NATIVE_SLICES_SWEEP,
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
-    PRINTER_SYNC_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
