@@ -61,13 +61,7 @@ function Where() {
   return <p data-testid="where">{pathname}</p>
 }
 
-/** Mounts only the current area's sections, as the page does. */
-function Area() {
-  const { pathname } = useLocation()
-  return pathname === '/settings/library' ? <There /> : <Here />
-}
-
-function renderShell({ byArea = false } = {}) {
+function renderShell() {
   const view = renderPage(
     <SettingsCollapseProvider>
       <SettingsDirtyProvider>
@@ -75,14 +69,8 @@ function renderShell({ byArea = false } = {}) {
           <SettingsAgentProvider sections={fakes}>
             <Where />
             <SettingsLoaded>
-              {byArea ? (
-                <Area />
-              ) : (
-                <>
-                  <Here />
-                  <There />
-                </>
-              )}
+              <Here />
+              <There />
             </SettingsLoaded>
           </SettingsAgentProvider>
         </SettingsCacheProvider>
@@ -118,19 +106,6 @@ describe('the settings agent scope', () => {
     })
   })
 
-  it('sets a field whose section mounts only once its area opens', async () => {
-    renderShell({ byArea: true })
-    await screen.findByLabelText('Bambuddy URL')
-    expect(screen.queryByLabelText('Show dimensions in')).toBeNull()
-    expect(await bridge.call('set_field', { field: 'display_unit', value: 'in' })).toMatchObject({ ok: true })
-    expect(screen.getByTestId('where')).toHaveTextContent('/settings/library')
-    expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
-
-    // The unsaved unit is in this area's section, and still refuses the test.
-    const unsaved = await bridge.call('test_connection', {})
-    expect(!unsaved.ok && unsaved.error.code).toBe('refused')
-  })
-
   it('refuses a value that is not a choice', async () => {
     renderShell()
     await screen.findByLabelText('Show dimensions in')
@@ -163,6 +138,8 @@ describe('the settings agent scope', () => {
         error: null,
       },
     })
+    const unbound = await bridge.call('set_field', { field: 'public_url', value: 'https://x.example' })
+    expect(!unbound.ok && unbound.error).toMatchObject({ code: 'unavailable', message: 'No settings section here holds public_url.' })
   })
 
   it('tests the stored connection when nothing is unsaved', async () => {
@@ -181,6 +158,16 @@ describe('the settings agent scope', () => {
       message: 'The form has unsaved changes, and the test saves the form first. Ask the user to save or test it.',
     })
     expect(testStored).not.toHaveBeenCalled()
+  })
+
+  it('refuses test_connection while a section in another area is unsaved', async () => {
+    renderShell()
+    await screen.findByLabelText('Bambuddy URL')
+    await bridge.call('set_field', { field: 'display_unit', value: 'in' })
+    const unsaved = await bridge.call('test_connection', {})
+    expect(!unsaved.ok && unsaved.error.code).toBe('refused')
+    expect(testStored).not.toHaveBeenCalled()
+    expect(screen.getByTestId('where')).toHaveTextContent('/settings/library')
   })
 
   it('answers a failed test as failed', async () => {

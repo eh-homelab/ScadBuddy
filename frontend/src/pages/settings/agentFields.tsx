@@ -102,13 +102,13 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
   const navigate = useNavigate()
   const location = useLatest(useLocation())
 
-  /** Moves to the area of section `id` when it is not the current one, and waits for it. */
+  /** Moves to the area of section `id` when it is not the current one, and waits for the move. */
   async function goTo(id: string) {
     const area = sections.find((section) => section.id === id)?.area
-    if (!area) throw new AgentToolError('unavailable', `The ${id} settings are not on this page.`)
     const current = () => resolveLocation(location.current.pathname, location.current.hash, sections).area
-    if (current() === area) return
+    if (!area || current() === area) return
     navigate(`/settings/${area}`)
+    // The router commits the move later; the answer should see the page as the user does.
     await committed(() => current() === area, `the ${area} settings to open`)
   }
 
@@ -153,14 +153,10 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
       },
       set_field: async ({ field, value: next }) => {
         const home = AGENT_FIELD_HOME[field]
-        // A mounted section refuses a bad value before the page moves; one in another
-        // area mounts only after the move, and is asked then.
-        const mounted = bindings.fields.get(field)
-        if (mounted) refuseUnlisted(field, next, mounted.current)
-        await goTo(home.section)
-        await committed(() => bindings.fields.has(field), `the ${home.section} settings to open`)
-        const binding = bindings.fields.get(field)!
+        const binding = bindings.fields.get(field)
+        if (!binding) throw new AgentToolError('unavailable', `No settings section here holds ${field}.`)
         refuseUnlisted(field, next, binding.current)
+        await goTo(home.section)
         binding.current.set(next)
         // A folded section's field is hidden: unfold it first, so the edit is seen (#3414).
         reveal(home.domId)
@@ -175,14 +171,13 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
             'The form has unsaved changes, and the test saves the form first. Ask the user to save or test it.',
           )
         }
-        const home = AGENT_FIELD_HOME.bambuddy_url.section
-        await goTo(home)
-        await committed(() => bindings.connection() !== undefined, `the ${home} settings to open`)
+        const connection = bindings.connection()
+        if (!connection) throw new AgentToolError('unavailable', 'No settings section here tests the connection.')
         // With nothing unsaved the stored settings are the form, so this is Test
         // connection minus its save — the one part that would be a settings write.
         touchAfterRender(() => document.querySelector('[data-testid="test-connection"]'))
         try {
-          const result = await bindings.connection()!.testStored()
+          const result = await connection.testStored()
           return { ok: result.ok, detail: result.detail }
         } catch (cause) {
           throw new AgentToolError('failed', cause instanceof ApiError ? cause.detail : 'The connection test could not run.')
