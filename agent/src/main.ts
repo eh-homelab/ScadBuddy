@@ -5,6 +5,7 @@ import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
+import { AccessStore } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
@@ -211,6 +212,7 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
+const access = database ? new AccessStore(database.sql, audit) : undefined
 const plugins = database ? new PluginStore(database.sql) : undefined
 // ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
 const builtInTools = new BuiltInTools(settings)
@@ -891,6 +893,7 @@ const app = createApp({
   backend: () => backendReachable(backend),
   kek,
   credentials,
+  access,
   plugins,
   pluginForwarder,
   pluginPackages,

@@ -5,6 +5,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool, ToolOverride, ToolOverrides } from '../tools/registry.js'
 import { BUILT_INS, builtInEnabled, builtInNamed } from './packages/builtins.js'
 import { OWN_PLUGIN_NAME } from './packages/vet.js'
+import type { StoredOverrides } from '../access/model.js'
 import { PluginError } from './registry.js'
 
 // ScadBuddy's own tool sets as plugins (#1953): listed in /api/v1/ai/plugins
@@ -35,8 +36,7 @@ export type BuiltInToolSet = {
   switchable: boolean
 }
 
-/** What Settings stores for one set: raised tiers and disabled tools, by bare tool name. */
-export type StoredOverrides = { tool_tiers: Record<string, RiskTier>; disabled_tools: string[] }
+export type { StoredOverrides }
 
 const NONE: StoredOverrides = { tool_tiers: {}, disabled_tools: [] }
 
