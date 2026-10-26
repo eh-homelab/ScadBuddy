@@ -62,6 +62,7 @@ import { useAsync } from '../lib/useAsync'
 import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
+import { Advanced } from './settings/formParts'
 import { SectionContents, SettingsCollapseProvider, SubSection } from './settings/collapse'
 import { useReveal } from './settings/collapseState'
 import { RUNTIME_FIELDS, SECTIONS, sectionTitle, type FieldName, type FieldSpec, type SectionId } from './settings/fields'
@@ -1598,26 +1599,6 @@ function SettingsSections() {
  * A fold inside a section: its fields stay mounted while folded, so their edits are kept.
  * A save that refuses a field in it opens it, so the field and its error are on screen.
  */
-function Advanced({ label, invalid, children }: { label: string; invalid: boolean; children: ReactNode }) {
-  const [open, setOpen] = useState(false)
-  const [wasInvalid, setWasInvalid] = useState(invalid)
-  if (invalid !== wasInvalid) {
-    setWasInvalid(invalid)
-    if (invalid) setOpen(true)
-  }
-  return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg ring-1 ring-foreground/10">
-      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground">
-        <ChevronRightIcon aria-hidden="true" className={cn('size-4 shrink-0 transition-transform', open && 'rotate-90')} />
-        {label}
-      </CollapsibleTrigger>
-      <CollapsibleContent forceMount hidden={!open} className="space-y-4 border-t p-3">
-        {children}
-      </CollapsibleContent>
-    </Collapsible>
-  )
-}
-
 /** #1542 — what Bambuddy itself answered a failed connection test, as it said it. */
 function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest['upstream']> }) {
   const [open, setOpen] = useState(false)
