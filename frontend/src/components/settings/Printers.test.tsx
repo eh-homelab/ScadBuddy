@@ -195,6 +195,66 @@ describe('PrintersPanel (#3823)', () => {
     expect(await within(h2c).findByRole('alert')).toHaveTextContent('unlink it first')
   })
 
+  it("shows Bambuddy's view of a linked printer, marking a difference (#4747)", async () => {
+    printersState()[0]!.bambuddy_view!.name = 'Renamed in Bambuddy'
+    renderPage(<PrintersPanel />)
+    const h2c = await screen.findByRole('listitem', { name: H2C })
+    const view = within(h2c).getByLabelText("Bambuddy's view of 3DP-31B-598")
+    expect(view).toHaveTextContent('name Renamed in Bambuddy (ScadBuddy: 3DP-31B-598)')
+    expect(view).toHaveTextContent('model H2C')
+    expect(view).toHaveTextContent('IP 10.0.0.10')
+    expect(view).toHaveTextContent('active')
+    expect(view).toHaveTextContent('2 nozzles')
+    expect(view.querySelectorAll('[data-differs]')).toHaveLength(1)
+  })
+
+  it('imports from Bambuddy, shows the summary, and lists a virtual printer as one (#4439, #4747)', async () => {
+    const { user } = renderPage(<PrintersPanel bambuddyConfigured />)
+    await screen.findByRole('listitem', { name: GARAGE })
+    const button = screen.getByRole('button', { name: 'Import from Bambuddy' })
+    expect(isUserOnly(button)).toBe(true)
+
+    await user.click(button)
+
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('1 added, 1 linked, 1 already linked, 1 skipped, 0 conflicts')
+    expect(status).toHaveTextContent('Spare: skipped (Bambuddy did not report a serial')
+    expect(status).toHaveTextContent('withholds the access code')
+    const virtual = await screen.findByRole('listitem', { name: 'Printer H2C Virtual' })
+    expect(virtual).toHaveTextContent('Bambuddy virtual printer → 3DP-31B-598 (queue)')
+    expect(virtual).toHaveTextContent('Not a printer to print on')
+    // Not a print target: no path, no LAN form, nothing to link.
+    expect(within(virtual).queryByRole('combobox')).toBeNull()
+    expect(within(virtual).queryByRole('form')).toBeNull()
+    const garage = screen.getByRole('listitem', { name: GARAGE })
+    await waitFor(() => expect(garage).toHaveTextContent('Bambuddy printer 2'))
+    expect(within(garage).getByLabelText('Bambuddy sync note for Garage')).toHaveTextContent('withholds the access code')
+  })
+
+  it('says why Import from Bambuddy is off without a Bambuddy (#4439)', async () => {
+    renderPage(<PrintersPanel />)
+    await screen.findByRole('listitem', { name: GARAGE })
+    expect(screen.getByRole('button', { name: 'Import from Bambuddy' })).toBeDisabled()
+    expect(screen.getByText(/Set up the Bambuddy connection first/)).toBeInTheDocument()
+  })
+
+  it('names a virtual printer with no target as any printer of its model (#4747)', async () => {
+    printersState().push({
+      ...printersState()[1]!,
+      id: '00000000-0000-4000-8000-0000000000f2',
+      serial: '09400A391800002',
+      name: 'Any H2C',
+      kind: 'bambuddy_virtual',
+      bambuddy_vp_id: 2,
+      vp_mode: 'archive',
+      forwards_to: null,
+      bambuddy_view: { seen_at: '2026-10-26T00:00:00Z', name: 'Any H2C', model: 'H2C', target_printer_id: null },
+    })
+    renderPage(<PrintersPanel />)
+    const row = await screen.findByRole('listitem', { name: 'Printer Any H2C' })
+    expect(row).toHaveTextContent('Bambuddy virtual printer → any H2C (archive)')
+  })
+
   it("leaves the serial out of the agent's page read, as the printer tools do (#4375)", async () => {
     renderPage(<PrintersPanel />)
     const h2c = await screen.findByRole('listitem', { name: H2C })
