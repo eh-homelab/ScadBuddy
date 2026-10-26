@@ -146,6 +146,27 @@ describe('AddToOrderDialog (#4249)', () => {
     expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
   })
 
+  it('kept open, drops an order it made once a reload lists it as no longer open (#4746)', async () => {
+    const createOrder = vi.spyOn(api, 'createOrder')
+    vi.spyOn(api, 'addOrderItem').mockRejectedValueOnce(new Error('The server is away.'))
+    const { user } = renderPage(<AddToOrderDialog open outputId={OUTPUT_REAGAN} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add to order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
+    await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
+    const made = (await createOrder.mock.results[0]?.value) as { id: string; number: string }
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(made.number))
+    // Cancelled elsewhere while the dialog stays open; re-picking the customer reloads their orders.
+    await api.cancelOrder(made.id)
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Bob Builder')
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await user.click(within(dialog).getByRole('combobox', { name: 'Order' }))
+    expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull()
+  })
+
   it('keeps the customer it made when the order fails, so a retry makes no second (#4723)', async () => {
     const createCustomer = vi.spyOn(api, 'createCustomer')
     vi.spyOn(api, 'createOrder').mockRejectedValueOnce(new Error('The server is away.'))
