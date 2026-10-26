@@ -1,5 +1,5 @@
 import { trace } from '@opentelemetry/api'
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { useState, type ComponentProps } from 'react'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
@@ -553,40 +553,65 @@ describe('ActionBar destinations on the hot path', () => {
     await waitFor(() => expect(asked).toEqual(['/api/v1/print/projects']))
   })
 
+  type PageSettings = ComponentProps<typeof ActionBar>['settings']
+  /** A page that shows what Generate saved, as CustomizePage does, with these Settings. */
+  function GeneratingPage({ settings }: { settings: PageSettings }) {
+    const [saved, setSaved] = useState<Output | undefined>()
+    return (
+      <ActionBar
+        slug="name-keychain"
+        job={job}
+        rendering={false}
+        output={saved}
+        capture={async () => null}
+        captureImage={async () => null}
+        viewSize={() => ({ width: 800, height: 500 })}
+        extra={NO_EXTRA}
+        fit={undefined}
+        onPrinterModel={() => undefined}
+        onGenerated={setSaved}
+        onSent={() => undefined}
+        onRan={() => undefined}
+        settings={settings}
+      />
+    )
+  }
+  /** Generate's save stubbed; the spy on its filing. */
+  function stubGenerate() {
+    vi.spyOn(api, 'createOutput').mockResolvedValue(outputs[0]!)
+    return vi.spyOn(api, 'fileIntoProject').mockResolvedValue({ file_id: 1, folder_id: 2, name: 'x.3mf' } as never)
+  }
+
   it("files the agent's generate in a project on a page whose picker was never opened (#4601)", async () => {
     const asked = projectReads()
-    vi.spyOn(api, 'createOutput').mockResolvedValue(outputs[0]!)
-    const filed = vi
-      .spyOn(api, 'fileIntoProject')
-      .mockResolvedValue({ file_id: 1, folder_id: 2, name: 'x.3mf' } as never)
-    // The page shows what Generate saved, as CustomizePage does.
-    function Page() {
-      const [saved, setSaved] = useState<Output | undefined>()
-      return (
-        <ActionBar
-          slug="name-keychain"
-          job={job}
-          rendering={false}
-          output={saved}
-          capture={async () => null}
-          captureImage={async () => null}
-          viewSize={() => ({ width: 800, height: 500 })}
-          extra={NO_EXTRA}
-          fit={undefined}
-          onPrinterModel={() => undefined}
-          onGenerated={setSaved}
-          onSent={() => undefined}
-          onRan={() => undefined}
-          {...hybrid()}
-        />
-      )
-    }
-    renderPage(<Page />)
+    const filed = stubGenerate()
+    renderPage(<GeneratingPage {...hybrid()} />)
     await screen.findByTestId('customize-project-select')
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(asked).toEqual([])
     const result = await bridge.call('generate', { timeout_ms: 5000, project_id: 1 })
     expect(result).toMatchObject({ ok: true, result: { output: { id: outputs[0]!.id } } })
+    expect(asked).toEqual(['/api/v1/print/projects'])
+    expect(filed).toHaveBeenCalledWith(outputs[0]!.id, 1)
+  })
+
+  it("files the agent's generate in a project when it calls before Settings answer (#4685)", async () => {
+    const asked = projectReads()
+    const filed = stubGenerate()
+    let answer: (() => void) | undefined
+    // Settings unread when the agent calls; the hot path's, so the list then turns lazy.
+    function Late() {
+      const [settings, setSettings] = useState<PageSettings>({ data: undefined, error: undefined })
+      answer = () => setSettings(hybrid().settings)
+      return <GeneratingPage settings={settings} />
+    }
+    renderPage(<Late />)
+    await screen.findByTestId('generate')
+    const call = bridge.call('generate', { timeout_ms: 5000, project_id: 1 })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(asked).toEqual([])
+    act(() => answer?.())
+    expect(await call).toMatchObject({ ok: true, result: { output: { id: outputs[0]!.id } } })
     expect(asked).toEqual(['/api/v1/print/projects'])
     expect(filed).toHaveBeenCalledWith(outputs[0]!.id, 1)
   })

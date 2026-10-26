@@ -456,8 +456,13 @@ class FakePrinter:
             if control is not None:
                 control.shutdown()
                 control.server_close()
+            # A bind that failed (the control port taken) leaves them unstarted: joining
+            # one would raise and hide the bind's OSError, which a caller retries on.
             for thread in threads:
-                thread.join(timeout=5)
+                if thread.ident is not None:
+                    thread.join(timeout=5)
+            if ftp is not None and not any(thread.ident is not None for thread in threads):
+                ftp.close_all()
             if broker.returncode is None:
                 broker.terminate()
                 try:

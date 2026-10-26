@@ -8,8 +8,16 @@
 #
 # Weekly and on demand, never a PR check: it builds three images and prints twice, and
 # it is not in ci.yml's `CI Summary` needs (plan decision 6). On a PR that touches
-# e2e-stack/ (or this file, or the fakes' tests) only the `fakes` job runs: the two
-# fakes' own tests and ruff over e2e-stack/ (#4187, below), a minute's work.
+# e2e-stack/, the native path's code, its tests or this file only the `fakes` and
+# `native` jobs run: the two fakes' own tests and ruff over e2e-stack/ (#4187, below), a
+# minute's work, and the backend's tests that drive a native run against the fake
+# printer (#4541, below).
+#
+# #4541: those tests (`tests/test_print_native_workflow.py`, `tests/api/test_hot_path_native.py`,
+# among them the AC1 check that a native run builds no Bambuddy client) need the fake
+# printer, and so mosquitto and e2e-stack/, as well as Postgres and Temporal: every
+# backend-pytest shard skips them, for #4187's reason. The `native` job runs them here,
+# on a runner with all four, and fails if any skips.
 #
 # #4187, settled here rather than in backend-pytest: the fake printer's test needs
 # mosquitto, which the test image does not carry, and mounting e2e-stack/ into the four
@@ -29,6 +37,19 @@ on:
       - backend/tests/printers/test_fake_printer.py
       - backend/tests/test_bambuddy_recorder.py
       - .github/workflows/hot-path-e2e.yml
+      # What a native run reads and the tests that drive one (`native`, #4541).
+      - backend/scadbuddy/printers/**
+      - backend/scadbuddy/slicing/**
+      - backend/scadbuddy/spools/**
+      - backend/scadbuddy/print_library/**
+      - backend/scadbuddy/bambuddy/**
+      - backend/scadbuddy/analyzers/**
+      - backend/scadbuddy/api/analyzers.py
+      - backend/scadbuddy/workflows/print*.py
+      - backend/scadbuddy/workflows/slicing*.py
+      - backend/tests/support/fake_lan.py
+      - backend/tests/test_print_native_workflow.py
+      - backend/tests/api/test_hot_path_native.py
 
 permissions:
   contents: read
@@ -78,6 +99,67 @@ jobs:
             tests/printers/test_fake_printer.py tests/test_bambuddy_recorder.py | tee "$RUNNER_TEMP/fakes.txt"
           if grep -qiE '[0-9]+ skipped' "$RUNNER_TEMP/fakes.txt"; then
             echo "::error::a fake's test skipped: each one must run here"
+            exit 1
+          fi
+
+  native:
+    name: Native runs against the fake printer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install mosquitto
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mosquitto
+
+      # The same CLI as ci.yml's `agent` job and the Dockerfile's `test` stage
+      # (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump together. The tests start
+      # their own dev servers from it.
+      - name: Install the Temporal CLI
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
+      # Each file skips when what it needs is missing; here nothing may.
+      - name: The native tests
+        working-directory: backend
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+        run: |
+          set -euo pipefail
+          uv run --frozen pytest -p no:cacheprovider -rs -n 4 \
+            tests/test_print_native_workflow.py tests/api/test_hot_path_native.py | tee "$RUNNER_TEMP/native.txt"
+          if grep -qiE '[0-9]+ skipped' "$RUNNER_TEMP/native.txt"; then
+            echo "::error::a native test skipped: each one must run here"
             exit 1
           fi
 

@@ -453,6 +453,7 @@ export function ActionBar({
     subject,
     projectPath,
     listed,
+    settled,
     projectsError: projects.error,
     requestProjects: projects.request,
   })
@@ -484,6 +485,12 @@ export function ActionBar({
       }
       // A lazy list nobody opened yet (#4601): read it now, so the id below can be checked.
       if (project_id !== undefined && project_id !== null && !live.current.listed) {
+        // Settings first: until they answer the list is not lazy yet, so a request is a
+        // no-op and the read it should start never comes (#4685).
+        await waitFor(() => (live.current.settled ? true : undefined), {
+          timeout: timeout_ms,
+          what: 'the settings',
+        })
         live.current.requestProjects()
         await waitFor(() => (live.current.listed || live.current.projectsError ? true : undefined), {
           timeout: timeout_ms,

@@ -107,8 +107,8 @@ in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 that each shard ran what it selected, as `backend-pytest-split` does.
 `e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
 e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
-images; weekly and on dispatch in `hot-path-e2e.yml`, never on PRs); `e2e/real-hot-path.spec.ts`
-skips without what it sets.
+images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs);
+`e2e/real-hot-path.spec.ts` skips without what it sets.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -453,7 +453,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
   `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
-  Run by `.github/workflows/hot-path-e2e.yml` weekly and on dispatch, not on PRs.
+  `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
+  dispatch, never on a PR; its `fakes` job (those two tests, ruff and mypy over the fakes)
+  also runs on a PR that touches `e2e-stack/**`, those tests or the workflow.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

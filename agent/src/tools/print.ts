@@ -139,6 +139,15 @@ function getChoices(ctx: ToolContext, source: Source, query: PrinterQuery) {
       )
 }
 
+/**
+ * #4660 — whether a linked registry row prints over the LAN, as the backend decides it
+ * (`lan_printers` in the choices, the server's `hot_path_native`), never the tool's guess.
+ */
+async function linkedNative(ctx: ToolContext, source: Source, printer: string, printerId: number | undefined): Promise<boolean> {
+  const view = await getChoices(ctx, source, { printer_id: printerId, printer })
+  return view.lan_printers?.includes(printer) ?? false
+}
+
 /** The source's plates: for an output its 3MF's, for a library file what Bambuddy reads from it. */
 export function getPlates(ctx: Pick<ToolContext, 'backend'>, source: Source) {
   return source.kind === 'library'
@@ -199,6 +208,12 @@ async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
   }
   return run
 }
+
+/** #4660 — what a `follow` handle's names are, said where a tool returns one. */
+const FOLLOW_NAMES =
+  "A `follow` handle's `subtask_names` are the names the printer started the plates under, as its screen " +
+  'shows them, for telling the plates apart: they are not an input of get_print_progress, which takes only ' +
+  'the `output_id` or `library_file_id`, and filter nothing.'
 
 /**
  * #4646 — a run that printed over the LAN (`result.path` `native`) queued nothing on
@@ -613,7 +628,8 @@ export const printTools: Tool[] = [
       'A print run print_output started: `running` while it slices and queues, then `succeeded` with its ' +
       '`result` (warnings, queue item ids, the Bambuddy URL) or `failed` with the `error` that stopped it. ' +
       'A run that printed over the LAN (`path: "native"`) has no queue item ids: its `follow` names the ' +
-      'get_print_progress call that follows it.',
+      'get_print_progress call that follows it. ' +
+      FOLLOW_NAMES,
     input: z.object({ run_id: runId }),
     risk: 'read',
     routes: ['GET /api/v1/print/runs/{run_id}'],
@@ -1082,7 +1098,8 @@ export const printTools: Tool[] = [
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids; over the LAN, `path: "native"` and a `follow` handle instead), or ' +
       'hands back the still-running run to poll with get_print_run. Then follow the print with ' +
-      'get_print_progress.',
+      'get_print_progress. ' +
+      FOLLOW_NAMES,
     input: PRINT_OUTPUT_INPUT,
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -1098,10 +1115,17 @@ export const printTools: Tool[] = [
     // registry `printer` is sent with the `printer_id` it links, so confirm_action runs
     // exactly what the person saw.
     // A row only the LAN reaches (#4646) is approved as sent: it links no printer_id to add.
+    // A linked row the backend prints natively (#4660) is approved as a print over the LAN,
+    // and a project its run would refuse is refused before anyone approves it. Only for the
+    // line: the run reads the choices again, so an input-only call skips the read.
     prepareApproval: async (args, ctx, needs) => {
       const { printerId, name, lan } = await printerOf(args, ctx.backend, ctx.signal, needs)
+      const native =
+        lan === true ||
+        (needs.summary && args.printer !== undefined && (await linkedNative(ctx, sourceOf(args), args.printer, printerId)))
+      if (native && !lan) refuseProject(name ?? `printer ${args.printer}`, args)
       const input = args.printer === undefined || lan ? args : { ...args, printer_id: printerId }
-      return { input, summary: printSummary(input, name, lan) }
+      return { input, summary: printSummary(input, name, native) }
     },
     // Its own wait for the print run, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
@@ -1131,8 +1155,11 @@ export const printTools: Tool[] = [
       // Fill what was left out the way the dialog does (frontend PrintPicker
       // `seedDialog`, spool-first spec §7), from the one read the dialog opens
       // on: GET /print/{outputs|library}/{id}/choices. /run takes no defaults of its own
-      // for nozzles, spools or plate, so an omitted choice must be made here.
+      // for nozzles, spools or plate, so an omitted choice must be made here. A linked row
+      // reads them even with every choice supplied: only they say whether it prints over
+      // the LAN (#4660), and so whether a project is refused here rather than by /run.
       if (
+        (args.printer !== undefined && !lanOnly) ||
         (printerId === undefined && !lanOnly) ||
         chosenNozzles === undefined ||
         bedType === undefined ||

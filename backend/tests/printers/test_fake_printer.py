@@ -441,3 +441,29 @@ async def test_the_certificate_survives_a_restart(tmp_path: Path) -> None:
     first = (state / "cert.pem").read_bytes()
     printer._broker_files()
     assert (state / "cert.pem").read_bytes() == first
+
+
+async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path: Path) -> None:
+    """The bind's own error, which the fixtures retry on new ports: the cleanup must not
+    replace it by joining the threads that never started (#4541's CI job hit it)."""
+    module = _load()
+    assert MOSQUITTO is not None
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        printer = module.FakePrinter(
+            module.Config(
+                serial=SERIAL,
+                access_code=ACCESS_CODE,
+                host="127.0.0.1",
+                mqtt_port=_free_port(),
+                ftps_port=_free_port(),
+                control_port=taken.getsockname()[1],
+                sdcard=tmp_path / "sdcard",
+                state=tmp_path / "state",
+                mosquitto=MOSQUITTO,
+            )
+        )
+        with pytest.raises(OSError) as raised:
+            await asyncio.wait_for(printer.run(), 60)
+    assert raised.value.errno == errno.EADDRINUSE
