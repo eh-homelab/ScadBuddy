@@ -454,8 +454,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
   `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
-  dispatch, never on a PR; its `fakes` job (those two tests, ruff and mypy over the fakes)
-  also runs on a PR that touches `e2e-stack/**`, those tests or the workflow.
+  dispatch, never on a PR. Its `fakes` job (those two tests, ruff and mypy over the fakes)
+  and `native` job (`tests/test_print_native_workflow.py` and `tests/api/test_hot_path_native.py`,
+  which every backend-pytest shard skips for want of mosquitto, #4541; it fails on a skip)
+  run on a PR that touches the workflow's `paths`: `e2e-stack/**`, the native path's
+  backend code and those tests. Neither is in `CI Summary`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

@@ -6,10 +6,10 @@
 # names the calls it saw: that is AC1's check working, not a flake (#4629 removed the
 # last ones, from the dialog's analyzers and the Prints page).
 #
-# Weekly and on demand, never a PR check: it builds three images and prints twice, and
-# it is not in ci.yml's `CI Summary` needs (plan decision 6). On a PR that touches
-# e2e-stack/, the native path's code, its tests or this file only the `fakes` and
-# `native` jobs run: the two fakes' own tests and ruff over e2e-stack/ (#4187, below), a
+# No job here is a required check: none is in ci.yml's `CI Summary` needs (plan
+# decision 6). The `stack` job runs weekly and on demand, never on a PR: it builds three
+# images and prints twice. On a PR that touches e2e-stack/, the native path's code, its
+# tests or this file only the `fakes` and `native` jobs run: the two fakes' own tests and ruff over e2e-stack/ (#4187, below), a
 # minute's work, and the backend's tests that drive a native run against the fake
 # printer (#4541, below).
 #
