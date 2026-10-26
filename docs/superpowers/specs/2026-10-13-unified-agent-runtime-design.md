@@ -1,5 +1,10 @@
 # One agent runtime: every session is a workflow, every turn is the classic turn
 
+> **Amended 2026-10-26 (§14).** The turn still runs as one TypeScript implementation, but
+> in a worker Deployment of its own, not in the API pod's `agent` sidecar. `agent-durable/`
+> stays as the Python worker; only its turn code (`session/`) retires. Where §3 goal 5,
+> §4, §6.10, §10.2 step 4 and §11 disagree with §14, §14 wins.
+
 Design written 2026-10-13. It answers this request from the user:
 
 > Unify the tool layer, permissions etc. it should be 100% the same. The only difference
@@ -172,7 +177,11 @@ permission layer. Durability is about *where* and *when* that turn runs:
 ### 2.4 Deployment (`eh-homelab/clusters` `applications/scadbuddy/scadbuddy.yaml`, 2026-10-12)
 
 - The pod runs 3 replicas (`:107`), with the `agent` and `agent-durable` sidecars
-  (`:479`, `:644`).
+  (`:479`, `:644`). **Superseded:** on 2026-10-26 `agent-durable` is a Deployment of its
+  own, `scadbuddy-agent-durable`, with 3 replicas, and the `scadbuddy` pod (3 replicas)
+  holds the containers `scadbuddy` and `agent` only. Measured read-only with `kubectl
+  --context primary -n bambuddy get deploy -o
+  custom-columns='NAME:.metadata.name,REPLICAS:.spec.replicas,CONTAINERS:.spec.template.spec.containers[*].name'`.
 - The `agent` container requests 512Mi of memory, with a 2Gi limit (`:620-624`).
 - The rollout strategy was **`Recreate`** (`:131`) when this was written: every deploy
   stopped all three pods together. It is **`RollingUpdate`** now. Measured on 2026-10-23,
@@ -198,9 +207,9 @@ permission layer. Durability is about *where* and *when* that turn runs:
    before remote MCP servers reconnect.
 4. **Nothing pins forever.** No session holds a process, a slot or a queue while it waits
    on a person beyond a bounded hold.
-5. **Retire `agent-durable/` and the `temporalio-claude-agent-sdk` pin.** This includes the
-   Python ports, their vector files where only Python reads them, and the
-   `agent-durable-pin` workflow.
+5. **Retire the Python turn and the `temporalio-claude-agent-sdk` pin.** This includes
+   `agent-durable/`'s `session/` package and the plugin pin. *Amended 2026-10-26 (§14):*
+   `agent-durable/` itself stays as the Python worker, with its reusable parts.
 6. **Flows keep working unchanged.** `ProjectWorkflow` and its `agent()` / `ask_session()`
    calls behave as they do today.
 7. **A CI check fails if a second turn path appears.**
@@ -954,6 +963,9 @@ done. Their conversation exists only in workflow state.
 
 ## 11. What retires
 
+*Amended 2026-10-26 (§14.4): `agent-durable/` is not removed. Only its turn code and the
+plugin pin retire; the list below is otherwise kept as written for the record.*
+
 - **`agent-durable/`, entirely,** with:
   - the Dockerfile stage `agent-durable`;
   - the `agent-durable` CI job;
@@ -1037,3 +1049,72 @@ in Settings → Assistant beside Session limits. Each value is validated:
 - `warm_max_per_replica` from 0 to 32 (0 means no warm processes, so every turn is cold);
 - `warm_idle_seconds` from 60 to 86400;
 - `turn_max_seconds` from 300 to 86400.
+
+## 14. Amendment 2026-10-26: the turn runs in a worker Deployment of its own
+
+### 14.1 Why
+
+The goal of durable sessions is to scale agent turns on their own. §4 and §6.10 as written
+put every turn in the API pod's `agent` container and delete `agent-durable`, so turns
+would scale only with API replicas, each replica holding up to `warm_max_per_replica`
+Claude Code processes beside the HTTP server. That is the opposite of the goal. The user,
+2026-10-26: "We wanted to scale." "Why can't we just take the classic and move to temporal
+in another process?"
+
+### 14.2 State of production on 2026-10-26
+
+Measured read-only (`kubectl --context primary -n bambuddy`, and `psql -d scadbuddy` on
+the `scadbuddy-db` primary):
+
+- Deployments: `scadbuddy` (3 replicas; containers `scadbuddy`, `agent`) and
+  `scadbuddy-agent-durable` (3 replicas; container `agent-durable`).
+- `ai_settings`: `session_mode` is `"durable"`; `unified_sessions` is not set, so no
+  session runs as `AgentSession`.
+- `ai_sessions`: 147 classic sessions (`runtime` NULL, the last created 2026-10-15) and
+  66 durable ones (`runtime = 'durable'`, the last created 2026-10-25). None is `unified`.
+- `ai_session_entries`: 34,630 rows, all of classic sessions; the 66 durable sessions have
+  none. Their conversation exists only in their `DurableSession` workflow state (and the
+  payload files it references). `ai_session_events` holds 5,116 display events for them,
+  which the panel shows but from which Claude Code cannot resume.
+
+### 14.3 The design change
+
+- **Kept from §4–§6:** one turn implementation, `TurnRunner`, run as the `session_turn`
+  activity under `AgentSession`; the warm process cache; parks through the workflow; the
+  transcript in `ai_session_entries`, sealed (§6.2).
+- **Changed:** the agent's Temporal workers run in a worker-only process, a Deployment of
+  its own (working name `scadbuddy-agent-worker`), not in the API pod. It serves
+  `agent-sessions`, its own `agent-sessions.<hostname>` home queue (§5.2, unchanged: the
+  hostname is the worker pod's) and `agent-tools`. Its replica count and memory are sized
+  for warm processes (E6: about 206 MiB each) and scale apart from the API.
+- **The API pod's `agent` container** keeps HTTP only: the chat and bridge WebSockets,
+  `/mcp`, the `/api/v1/ai/*` routes. It starts and updates workflows and reads
+  `ai_session_events`, as `DurableTurns` does today; it runs no turn.
+- **Same image, two entrypoints.** `agent/src/main.ts` gets a worker-only mode; the
+  Dockerfile's `agent` target serves both.
+
+### 14.4 `agent-durable/` stays
+
+A Python worker will be needed for other code, so `agent-durable/` stays as that worker.
+Reusable as they are: the worker bootstrap (`worker.py`, `__main__.py`), `health.py`,
+`codec.py`, `secrets.py`, `credentials.py`, `payload_store.py`, `gate/` and
+`background.py`. Retired once Phase 7 has migrated every open `DurableSession`: `session/`
+(the `DurableSession` workflow and the segment runner), the `temporalio-claude-agent-sdk`
+and Python `claude-agent-sdk` pins, `check_cli_version.py`, and `agent-durable-pin.sh`
+with its workflow. The vector files stay while a Python reader of them remains.
+
+### 14.5 Unverified, checked first
+
+1. **The browser bridge.** `browser_*` tools need the tab's WebSocket, which lives in the
+   HTTP process. Whether `bridge/relay.ts` (#1916) reaches a turn running in a worker pod
+   is unverified.
+2. **Session-tab waits.** `sessions/manager.ts` `onSessionTab` is wired to the hub in
+   `main.ts`; a worker pod has no hub.
+3. **Anything else the turn reaches in-process** in the HTTP process (an audit of
+   `TurnHost`'s dependencies against what a worker-only `main.ts` builds).
+
+### 14.6 Effect on the plan
+
+Phases 1–5 stand. Phases 6–8 are on hold until they are rewritten around §14.3–§14.4:
+Phase 6 adds the worker Deployment before every session moves to `AgentSession`; Phase 7
+is unchanged; Phase 8 retires only the Python turn, not `agent-durable/`.
