@@ -104,7 +104,9 @@ class StandInTools:
     an outward call runs only with its approval row (Ruling 10), an answer tool returns
     its recorded response, and describe_call answers a fixed summary and hash.
     The registry tools apply ai_access as toolActivities.ts does (#2088, #2171): off, a
-    tool is refused naming Settings; at outward, it runs only with its approval."""
+    tool is refused naming Settings; at outward, it runs only with its approval.
+    ``tiers`` and ``disabled`` lay a change over ai_access's rows, as Settings changes it
+    mid-turn; ``tool_tier`` (agent temporal/toolTier.ts) answers from the same."""
 
     def __init__(self, connect: Connect) -> None:
         self._connect = connect
@@ -125,6 +127,12 @@ class StandInTools:
         self.memory: list[tuple[str, str]] = []
         self.memory_fails = False
         self.tier_refuses = False
+        # tool_tier (#2171): the access laid over ai_access, each tool it was asked, and
+        # tool_tier_refuses makes it fail.
+        self.tiers: dict[str, str] = {}
+        self.disabled: set[str] = set()
+        self.tiers_asked: list[str] = []
+        self.tool_tier_refuses = False
         self.turn_tools_fails = False
         # #2581: the replica queue turn_tools pins every offered tool to (the agent's
         # hostQueue, set when its plugin clients are kept), and the queues turn_tools and
@@ -146,22 +154,26 @@ class StandInTools:
             row = await cur.fetchone()
         return None if row is None else (str(row[0]), row[1])
 
-    async def _overrides(self) -> tuple[dict[str, str], list[str]]:
+    async def _access(self, name: str) -> tuple[str, bool]:
+        """A registry tool's effective tier and whether it is off, as effectiveTool has it."""
         async with self._connect() as conn:
             rows = await access.read_rows(conn, access.REGISTRY_SOURCES)
-        return tools.sanitise_overrides(tools.manifest(), rows)
+        tiers, disabled = tools.sanitise_overrides(tools.manifest(), rows)
+        own = next((e.tier for e in tools.manifest() if e.name == name), "outward")
+        tier = self.tiers.get(name, tiers.get(name, own))
+        return tier, name in disabled or name in self.disabled
 
-    async def _gated(self, name: str, own: str) -> None:
+    async def _gated(self, name: str) -> None:
         """What toolActivities.ts checks before a registry tool runs: refused when off, and
         run only with its approval when its effective tier is outward."""
-        tiers, disabled = await self._overrides()
-        if name in disabled:
+        tier, off = await self._access(name)
+        if off:
             raise ApplicationError(
                 f"{name} is disabled in Settings → Plugins; the user can turn it back on there",
                 type="ToolError",
                 non_retryable=True,
             )
-        if tiers.get(name, own) == "outward":
+        if tier == "outward":
             recorded = await self._response(name)
             if recorded is None or recorded[0] != "approved":
                 raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
@@ -169,19 +181,19 @@ class StandInTools:
     def activities(self) -> list[Callable[..., Any]]:
         @activity.defn(name="render_preview")
         async def render_preview(args: dict[str, Any]) -> str:
-            await self._gated("render_preview", "read")
+            await self._gated("render_preview")
             self.ran.append(("render_preview", args))
             return "rendered"
 
         @activity.defn(name="print_output")
         async def print_output(args: dict[str, Any]) -> str:
-            await self._gated("print_output", "outward")
+            await self._gated("print_output")
             self.ran.append(("print_output", args))
             return "printed"
 
         @activity.defn(name="get_printer_camera")
         async def get_printer_camera(args: dict[str, Any]) -> str:
-            await self._gated("get_printer_camera", "read")
+            await self._gated("get_printer_camera")
             self.ran.append(("get_printer_camera", args))
             return "a frame"
 
@@ -240,6 +252,14 @@ class StandInTools:
                 )
             return {"tier": tier(args["input"])}
 
+        @activity.defn(name="tool_tier")
+        async def tool_tier(args: dict[str, Any]) -> dict[str, Any]:
+            self.tiers_asked.append(args["tool"])
+            if self.tool_tier_refuses:
+                raise ApplicationError("the agent is away", type="ToolError", non_retryable=True)
+            tier, off = await self._access(args["tool"])
+            return {"tier": tier, "disabled": off}
+
         @activity.defn(name="memory_recall")
         async def memory_recall(args: dict[str, Any]) -> dict[str, str | None]:
             self.memory.append(("memory_recall", args["turn_id"]))
@@ -276,6 +296,7 @@ class StandInTools:
             turn_tools,
             turn_tools_close,
             turn_tool_tier,
+            tool_tier,
             turn_tool,
             memory_recall,
             memory_retain,

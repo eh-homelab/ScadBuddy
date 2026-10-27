@@ -120,10 +120,20 @@ def durable_tools(entries: Sequence[ManifestEntry]) -> list[DurableTool]:
             task_queue=TOOLS_QUEUE,
             start_to_close_timeout=timedelta(minutes=10),
             heartbeat_timeout=timedelta(seconds=60),
-            retry_policy=_ONCE if e.hitl == "approval" else _RETRY,
+            retry_policy=_policy(e, e.tier),
         )
         for e in entries
     ]
+
+
+def _policy(entry: ManifestEntry, tier: str) -> RetryPolicy:
+    return _ONCE if entry.hitl == "approval" or tier == "outward" else _RETRY
+
+
+def gate_call(tool: DurableTool, entry: ManifestEntry, tier: str) -> None:
+    """One call's retry policy from its tier as the gate read it then (#2171): at most once
+    when outward or when the manifest asks for approval, else retried on a lost worker."""
+    tool.retry_policy = _policy(entry, tier)
 
 
 def sanitise_overrides(
@@ -170,7 +180,7 @@ def apply_overrides(
         effective = tool_tiers.get(e.name, e.tier)
         outward = effective == "outward" and (e.hitl == "approval" or e.tier != "outward")
         tool.needs_approval = e.name not in disabled and (e.hitl == "answer" or per_call or outward)
-        tool.retry_policy = _ONCE if e.hitl == "approval" or effective == "outward" else _RETRY
+        gate_call(tool, e, effective)
 
 
 # agent/src/temporal/turnTools.ts: the activity a turn tool's call runs as.

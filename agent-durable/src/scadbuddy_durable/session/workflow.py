@@ -8,6 +8,8 @@
 A tool parks by its effective tier (#2088): ``gate_settings`` reads Settings → Plugins
 as each turn starts, a tool raised to ``outward`` parks like any outward tool, and a
 disabled one is left out of what the segment runner declares (``segment_context``).
+Under ``tool-access-2171`` every registry call stops at the gate, which asks the tool's
+access as it is then (``tool_tier``) and lets it through unless it is outward (#2171).
 
 The gate (§6.6, 5b): when the plugin's ``pending_approvals()`` gains a call, the call
 is described (an approval's summary and hash come from the agent, ``gate.describe_call``;
@@ -105,6 +107,8 @@ DESCRIBE_CALL = "gate.describe_call"
 # agent/src/temporal/turnTools.ts (#2320).
 TURN_TOOLS = "turn_tools"
 TURN_TOOL_TIER = "turn_tool_tier"
+# agent/src/temporal/toolTier.ts (#2171): a registry tool's access as it is now.
+TOOL_TIER = "tool_tier"
 TURN_TOOLS_PATCH = "turn-tools-2320"
 # The built-ins a package may name that run as their own activities, so a call can park.
 ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
@@ -155,6 +159,8 @@ SESSION_FLOW_GRANT = "session-flow-grant"
 SESSION_FLOW_ESCALATION = "session-flow-escalation"
 #: A parent hop capped so the person's hop keeps the run's timeout (#2862).
 PERSON_KEEPS_TIMEOUT = "escalation-person-keeps-timeout"
+#: Each registry tool call decided by its access as it is now (#2171, spec §4.4).
+TOOL_ACCESS_PATCH = "tool-access-2171"
 # An entry's timer at most (ai_pending_input's CHECK).
 ENTRY_MAX_S = 86_400
 # A session id, as ai_pending_input.parent_session holds it.
@@ -281,6 +287,9 @@ class DurableSession:
         entries = manifest.manifest()
         self._entries = entries
         self._kinds = {e.name: e.hitl for e in entries}
+        self._by_name = {e.name: e for e in entries}
+        # Set by each turn (tool-access-2171): every registry call asks its access then.
+        self._per_call = False
         # The plugin keeps these objects and reads needs_approval as each call comes:
         # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
         self._tools = {t.name: t for t in manifest.durable_tools(entries)}
@@ -374,11 +383,13 @@ class DurableSession:
         )
         # From the activity's result, so a replay sets the same gates: a turn an older
         # worker started read no overrides, and parks by the manifest as it did then.
+        self._per_call = workflow.patched(TOOL_ACCESS_PATCH)
         manifest.apply_overrides(
             self._tools,
             self._entries,
             self._settings.tool_tiers,
             set(self._settings.disabled_tools),
+            per_call=self._per_call,
         )
         if workflow.patched(TURN_TOOLS_PATCH):
             # What a classic turn would hand Claude Code beside ScadBuddy's own tools,
@@ -599,6 +610,16 @@ class DurableSession:
             # through, as the permission seam lets it; its activity checks the tier again.
             self._agent.decide(str(call["id"]), True, approver="scadbuddy")
             return
+        if self._per_call and kind == "approval" and name in self._kinds:
+            # A registry tool, decided by its access as it is now (#2171 §4.4). Not outward
+            # (or off, which its activity refuses by name), it goes straight through like
+            # any other unparked call; one whose access cannot be read parks.
+            access = await self._tier_now(name)
+            tier = "outward" if access is None else str(access.get("tier"))
+            manifest.gate_call(self._tools[name], self._by_name[name], tier)
+            if access is not None and (access.get("disabled") is True or tier != "outward"):
+                self._agent.decide(str(call["id"]), True, approver="scadbuddy")
+                return
         summary, input_hash = "", None
         if kind == "approval":
             described = await workflow.execute_activity(
@@ -821,6 +842,24 @@ class DurableSession:
         except FailureError:
             return None
         return verdict
+
+    async def _tier_now(self, name: str) -> dict[str, Any] | None:
+        """A registry tool's ``{tier, disabled}`` as Settings has it now (tool_tier), or
+        ``None`` when the agent cannot say: the call then parks."""
+        try:
+            now: dict[str, Any] = await workflow.execute_activity(
+                TOOL_TIER,
+                {"tool": name},
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession", "ToolError"]
+                ),
+                result_type=dict,
+            )
+        except FailureError:
+            return None
+        return now
 
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
         """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a
