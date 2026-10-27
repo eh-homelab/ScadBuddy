@@ -59,6 +59,7 @@ const TOOLS = {
   unlink_printer_bambuddy: ['write', 'DELETE /api/v1/printers/{printer_id}/bambuddy'],
   unlink_printer_lan: ['outward', 'DELETE /api/v1/printers/{printer_id}/lan'],
   delete_printer: ['outward', 'DELETE /api/v1/printers/{printer_id}'],
+  sync_printers_from_bambuddy: ['outward', 'POST /api/v1/printers/sync-bambuddy'],
 } as const
 
 describe('printer registry tools (#3823)', () => {
@@ -191,5 +192,34 @@ describe('printer registry tools (#3823)', () => {
       status: 409,
       untrusted: expect.stringContaining('unlink it first'),
     })
+  })
+
+  it('syncs from Bambuddy, a dry run first, and passes the summary through (#4439, #4747)', async () => {
+    const queries: (string | null)[] = []
+    const summary = {
+      dry_run: true,
+      entries: [{ kind: 'physical', name: 'Garage', bambuddy_printer_id: 1, action: 'created', lan: 'would_try' }],
+      virtual_printers_error: null,
+      created: 1,
+      linked: 0,
+      already_linked: 0,
+      skipped: 0,
+      conflicts: 0,
+      lan_linked: 0,
+      lan_failed: 0,
+    }
+    server.use(
+      http.post(`${BACKEND}/api/v1/printers/sync-bambuddy`, ({ request }) => {
+        queries.push(new URL(request.url).searchParams.get('dry_run'))
+        return HttpResponse.json(summary)
+      }),
+    )
+    const t = tool('sync_printers_from_bambuddy')
+    expect(t.summarize({ dry_run: true })).toMatch(/nothing written/)
+    expect(t.summarize({ dry_run: false })).toMatch(/LAN links/)
+    const planned = await t.execute({ dry_run: true }, ctx())
+    expect(firstText(planned)).toMatchObject({ created: 1, dry_run: true })
+    await t.execute({ dry_run: false }, ctx())
+    expect(queries).toEqual(['true', 'false'])
   })
 })

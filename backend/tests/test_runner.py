@@ -28,6 +28,7 @@ from scadbuddy.render.runner import (
     render_3mf,
     run_openscad,
     template_note,
+    with_defaults,
 )
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter, ParamValue, build_schema
 from tests.conftest import FIXTURES, load_fixture_param, load_fixture_source
@@ -75,6 +76,36 @@ def test_format_scad_value_select_follows_option_type() -> None:
 def test_format_scad_value_rejects_wrong_type(parameter: Parameter, value: object) -> None:
     with pytest.raises(ValueError, match=r"parameter 'a'|expected a number"):
         format_scad_value(parameter, value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("parameter", "sent", "filled"),
+    [
+        # An omitted parameter takes its default; a sent one keeps its value.
+        (Parameter(name="w", type="number", initial=10), {}, {"w": 10}),
+        (Parameter(name="w", type="number", initial=10), {"w": 3}, {"w": 3}),
+        # No default to fill: it stays omitted.
+        (Parameter(name="w", type="number"), {}, {}),
+        # A default the schema's own checks refuse stays omitted, so the render uses
+        # it as before and no request that rendered is refused.
+        (Parameter(name="w", type="slider", initial=500, min=1, max=100), {}, {}),
+        (
+            Parameter(
+                name="s",
+                type="select",
+                initial="gone",
+                options=[Option(name="Round", value="round")],
+            ),
+            {},
+            {},
+        ),
+    ],
+)
+def test_with_defaults_fills_only_a_default_the_schema_takes(
+    parameter: Parameter, sent: dict[str, ParamValue], filled: dict[str, ParamValue]
+) -> None:
+    """#4774: the fill that makes a sparse request the same render as a whole one."""
+    assert with_defaults(_schema(parameter), sent) == filled
 
 
 def test_build_defines_rejects_unknown_parameters() -> None:

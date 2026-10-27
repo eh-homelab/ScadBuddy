@@ -255,6 +255,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(
         main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
     )
+    monkeypatch.setattr(main, "sync_printers", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -393,6 +394,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return 0
 
     monkeypatch.setattr(main, "reap_orphan_quote_holds", slow_quote_holds)
+
+    # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
+    async def slow_sync(*args: object) -> SimpleNamespace:
+        await asyncio.sleep(0.1)
+        return SimpleNamespace(created=0, linked=0, lan_linked=0, conflicts=0)
+
+    monkeypatch.setattr(main, "sync_printers", slow_sync)
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
