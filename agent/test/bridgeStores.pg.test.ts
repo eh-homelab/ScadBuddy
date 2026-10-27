@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
 import type { Database } from '../src/db.js'
+import { sweepBridgeKeys } from '../src/temporal/payloadCodec.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // The bridge's shared rows: which tab a chat session pairs with (#2086,
@@ -73,6 +75,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? ''
     expect(await owners.ownerOf('tab-a')).toBeUndefined()
     expect(await owners.ownerOf('tab-b')).toBeUndefined()
     expect(await owners.ownerOf('tab-c')).toBe('agent-tools.c')
+  })
+
+  it("sweeps only the keys of browser calls older than an hour (#4780)", async () => {
+    const old = `bridge-${randomUUID()}`
+    const fresh = `bridge-${randomUUID()}`
+    const session = `session-${randomUUID()}`
+    await db.sql`
+      INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id, created_at) VALUES
+        (${old}, '\\x00', 'k', now() - interval '2 hours'),
+        (${fresh}, '\\x00', 'k', now()),
+        (${session}, '\\x00', 'k', now() - interval '2 hours')`
+    expect(await sweepBridgeKeys(db.sql)).toBe(1)
+    const left = await db.sql<{ subject: string }[]>`SELECT subject FROM ai_payload_keys WHERE subject IN (${old}, ${fresh}, ${session})`
+    expect(left.map((r) => r.subject).sort()).toEqual([fresh, session].sort())
   })
 
   it('stops a read with the call it is for', async () => {

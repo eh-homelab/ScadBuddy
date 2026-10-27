@@ -43,6 +43,7 @@ import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
+import { PgTabRelay } from './bridge/pgRelay.js'
 import { TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
@@ -84,7 +85,14 @@ import { type ListedTools, turnToolActivities, turnToolActivity } from './tempor
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
-import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, subjectDataConverter } from './temporal/payloadCodec.js'
+import {
+  dropPayloadKey,
+  FilePayloadStore,
+  PgPayloadKeys,
+  rewrapPayloadKeys,
+  subjectDataConverter,
+  sweepBridgeKeys,
+} from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
@@ -234,12 +242,18 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 // replicas make for a tab connected here (#4780).
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
-// activity on the owner's HOST_QUEUE, through Temporal. Its client is set once made
-// (temporalClient below); without Temporal only the tabs here can be reached.
-const tabRelay =
-  database && config.temporalAddress
-    ? new TemporalTabRelay({ owners: new PostgresTabOwnerStore(database.sql), hostQueue: HOST_QUEUE, ready: database.ready })
-    : undefined
+// activity on the owner's HOST_QUEUE, through Temporal, sealed. Its client is set once made
+// (temporalClient below), only with the KEK. For one release (#4868) the Postgres relay
+// (#1916, bridge/pgRelay.ts) runs beside it, for replicas still on the old build: on the
+// listener's connection, made before start(), so its first LISTEN covers it.
+const tabRelay = database
+  ? new TemporalTabRelay({
+      owners: new PostgresTabOwnerStore(database.sql),
+      hostQueue: HOST_QUEUE,
+      ready: database.ready,
+      fallback: events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined,
+    })
+  : undefined
 // The rows a process before this one left under the same identity (a container restart).
 void tabRelay?.releaseAll()
 // /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), on
@@ -541,12 +555,12 @@ if (database) {
   setInterval(sweep, 3600_000).unref()
 }
 // The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
-// start. Every hour, once the database is ready.
+// start; and of browser calls a cancel or a lost caller left (#4780). Every hour, once the database is ready.
 if (database) {
   const sweep = () =>
     void database
       .ready()
-      .then((ok) => (ok ? sweepOrphanedSessionKeys(database.sql) : 0))
+      .then(async (ok) => (ok ? (await sweepOrphanedSessionKeys(database.sql)) + (await sweepBridgeKeys(database.sql)) : 0))
       .catch((err: unknown) => console.error('orphaned payload key sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()
@@ -826,8 +840,12 @@ const hostWorkers =
     : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
-// The browser relay's calls carry the codec: a session's are sealed under its key (#4780).
-if (tabRelay && temporalClient) tabRelay.useClient(temporalClient)
+// The browser relay's calls go through Temporal only sealed, each under a key of its own
+// that is deleted once the caller has the answer (#4780): so only with the codec.
+if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
+  const keys = payloadKeys
+  tabRelay.useClient({ client: temporalClient, dropKey: (subject) => dropPayloadKey(database.sql, keys, subject) })
+}
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.
 if (sessions && temporalClient && payloadKeys && database) {

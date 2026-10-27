@@ -1,4 +1,5 @@
 import { Client } from '@temporalio/client'
+import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
@@ -15,7 +16,7 @@ import { ACK_TIMEOUT_MS, TemporalTabRelay } from '../src/bridge/relay.js'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
 import type { Database } from '../src/db.js'
-import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { dropPayloadKey, FilePayloadStore, type PgPayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
@@ -62,18 +63,28 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
     let workflowWorker: Worker
     let workflowRunning: Promise<void>
     let replicas: Replica[] = []
-    // Every client and worker seals a session's payloads, as main.ts's do with the KEK.
+    // Every client and worker seals bridge payloads, as main.ts's do with the KEK.
     let payloadDir: string
+    let keys: PgPayloadKeys
     let dataConverter: ReturnType<typeof subjectDataConverter>
     let client: Client
+    /** The BridgeCall workflows started, by ID. */
+    let started: string[] = []
 
-    async function replica(name: string, options: { ackTimeoutMs?: number } = {}): Promise<Replica> {
+    async function replica(name: string, options: { ackTimeoutMs?: number; sealed?: boolean } = {}): Promise<Replica> {
       const queue = `agent-tools.${name}-${randomUUID().slice(0, 8)}`
       const relay = new TemporalTabRelay({
         owners: new PostgresTabOwnerStore(db.sql),
         hostQueue: queue,
         workflowQueue,
-        client,
+        ...(options.sealed === false
+          ? {}
+          : {
+              client: {
+                client: recording(client),
+                dropKey: (subject: string) => dropPayloadKey(db.sql, keys, subject),
+              },
+            }),
         ...(options.ackTimeoutMs !== undefined ? { ackTimeoutMs: options.ackTimeoutMs } : {}),
         log: () => {},
       })
@@ -95,6 +106,18 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       return r
     }
 
+    /** `client`, recording each BridgeCall it starts in `started`. */
+    function recording(base: Client): Client {
+      const start = base.workflow.start.bind(base.workflow)
+      const workflow = Object.create(base.workflow) as Client['workflow']
+      workflow.start = (async (...args: Parameters<typeof start>) => {
+        const handle = await start(...args)
+        started.push(handle.workflowId)
+        return handle
+      }) as typeof start
+      return Object.assign(Object.create(base) as Client, { workflow })
+    }
+
     /** The replica's pod is gone: its worker stops polling, and nothing told the database. */
     async function kill(r: Replica): Promise<void> {
       r.worker.shutdown()
@@ -113,7 +136,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       ;[env, { db, drop }] = await Promise.all([localTemporal(), throwawayDatabase()])
       expect(await db.ready()).toBe(true)
       payloadDir = await mkdtemp(join(tmpdir(), 'bridge-payloads-'))
-      dataConverter = subjectDataConverter(testPayloadKeys(db.sql), new FilePayloadStore(payloadDir))
+      keys = testPayloadKeys(db.sql)
+      dataConverter = subjectDataConverter(keys, new FilePayloadStore(payloadDir))
       client = new Client({ connection: env.connection, namespace: env.namespace ?? 'default', dataConverter })
       workflowQueue = `agent-tools-bridge-${randomUUID()}`
       workflowWorker = await Worker.create({
@@ -126,6 +150,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
     }, 120_000)
     beforeEach(async () => {
       await db.sql`TRUNCATE ai_browser_pairings, ai_session_tabs, ai_tab_owners`
+      started = []
     })
     afterEach(async () => {
       for (const r of replicas) {
@@ -197,7 +222,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       expect(onC.calls).toHaveLength(1)
     })
 
-    it("brings a result of MAX_RESULT_BYTES back whole, sealed under the session and stored by reference", async () => {
+    it('brings a result of MAX_RESULT_BYTES back whole, inline: nothing in the payload store', async () => {
       const a = await replica('a')
       const b = await replica('b')
       // A JSON result of exactly MAX_RESULT_BYTES, as link.ts measures it.
@@ -210,8 +235,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       a.hub.pairSession(session, TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: session }, 'get_editor_text', {}, { signal: signal() })
       expect(outcome).toEqual({ ok: true, result })
-      // Over OFFLOAD_BYTES: the session's payload store holds it, not the history (payloadCodec.ts).
-      expect((await readdir(join(payloadDir, `session-${session}`))).length).toBeGreaterThan(0)
+      // Over OFFLOAD_BYTES, yet sealed inline: a bridge call leaves no file on the share (#4780 review).
+      expect(await readdir(payloadDir)).toEqual([])
     })
 
     it('reaches the tab an MCP client paired by code, and reports its state', async () => {
@@ -280,7 +305,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const b = await replica('b')
       await tab(b.hub, () => ({ ok: true, result: 'never' }))
       await owned(TAB, b.queue)
-      b.relay.serve({ run: async () => ({ op: 'gone' }) })
+      b.relay.serve({ holds: () => true, run: async () => ({ op: 'gone' }) })
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
@@ -293,7 +318,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await owned(TAB, b.queue)
       // Answers only once the caller gave up, so B's worker can stop after the test.
       let release = () => {}
-      b.relay.serve({ run: () => new Promise((resolve) => (release = () => resolve({ op: 'gone' }))) })
+      b.relay.serve({ holds: () => true, run: () => new Promise((resolve) => (release = () => resolve({ op: 'gone' }))) })
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal(), timeoutMs: 300 })
       release()
@@ -301,6 +326,46 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         ok: false,
         error: { code: 'no_answer', message: expect.stringMatching(/replica holding the tab did not answer/) },
       })
+    })
+
+    it("leaves no plaintext in any bridge workflow's history, and deletes each call's key", async () => {
+      const a = await replica('a')
+      const b = await replica('b')
+      const SECRET = `form-contents-${randomUUID()}`
+      await tab(b.hub, (frame) => ({ ok: true, result: { echoed: frame.args, page: `${SECRET} on the page` } }))
+      await owned(TAB, b.queue)
+      // One call for a session, one for an /mcp caller with no session.
+      const session = randomUUID()
+      a.hub.pairSession(session, TAB)
+      expect(await a.hub.call({ principal: browser, sessionId: session }, 'fill', { value: SECRET }, { signal: signal() })).toMatchObject({ ok: true })
+      const store = new PostgresPairingStore(db.sql)
+      const request = await store.request(anonymous)
+      expect((await store.accept(request.id, request.code, TAB)).ok).toBe(true)
+      expect(await a.hub.call({ principal: anonymous }, 'fill', { value: SECRET }, { signal: signal() })).toMatchObject({ ok: true })
+      expect(started).toHaveLength(2)
+      for (const id of started) {
+        expect(id).toMatch(/^bridge-[0-9a-f-]{36}$/)
+        // The raw history, read without the codec.
+        const history = historyToJSON(await env.client.workflow.getHandle(id).fetchHistory())
+        expect(history).not.toContain(SECRET)
+        const datas = [...history.matchAll(/"data":\s*"([A-Za-z0-9+/=]+)"/g)].map((m) => Buffer.from(m[1]!, 'base64').toString('latin1'))
+        expect(datas.length).toBeGreaterThan(0)
+        for (const data of datas) expect(data).not.toContain(SECRET)
+      }
+      // Each call's key went with its answer: the history cannot be opened again.
+      await vi.waitFor(async () => expect(await db.sql`SELECT subject FROM ai_payload_keys WHERE subject = ANY(${started})`).toEqual([]))
+    })
+
+    it('refuses to send a call through Temporal unsealed', async () => {
+      const a = await replica('a', { sealed: false })
+      const b = await replica('b')
+      const onB = await tab(b.hub, () => ({ ok: true, result: 'never' }))
+      await owned(TAB, b.queue)
+      a.hub.pairSession('s1', TAB)
+      const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
+      expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/SCADBUDDY_SECRET_KEY_FILE/) } })
+      expect(onB.calls).toHaveLength(0)
+      expect(started).toHaveLength(0)
     })
 
     // #2086: a durable session's tool call is an activity on `agent-tools`, which any

@@ -341,6 +341,7 @@ sequenceDiagram
   B->>B: run the call on the tab, as a local call
   B-->>T: the answer, as the activity's result
   T-->>A: the workflow's result
+  A->>PG: delete the call's payload key
 ```
 
 - **The owner is a row** in `ai_tab_owners`, the queue of the replica whose socket the
@@ -350,24 +351,38 @@ sequenceDiagram
   old socket keeps the newer owner. A replica drops its own rows at start (a container
   restart keeps its identity).
 - **One replica runs a call:** the activity is scheduled on the owner's queue only, with
-  one attempt, so the other replicas do no work for it. The arguments and the tab's
-  result are the workflow's payloads, not rows: a session's are sealed under its key
-  (the workflow is `bridge-<session>-<call>`, `payloadCodec.ts` `subjectOf`), and one of
-  128 KiB or more goes to the payload store by reference, as a durable session's do
-  ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)). A call with
-  no session (an `/mcp` caller's paired tab) is not sealed, as a command's payloads are
-  not.
+  one attempt, so the other replicas do no work for it.
+- **Every call is sealed:** the arguments and the tab's result (page snapshots, form
+  contents, the editor's text) are the workflow's payloads, and each `BridgeCall`
+  workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the
+  KEK ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)
+  `subjectOf`), whether or not the call is for a session. The caller deletes the key
+  once it has the answer, so the history cannot be read again; a key a cancelled call
+  left is deleted by the hourly sweep (`sweepBridgeKeys`, older than an hour). Without
+  the KEK no call goes through Temporal: it is refused, or (for one release) takes the
+  Postgres relay below.
+- **Inline, capped:** a bridge payload is never kept in the payload store (only a
+  session's are), so nothing is left on the data share. The request and the answer are
+  each capped at 1 000 000 bytes of JSON (`MAX_BRIDGE_BYTES`), well past a tab's own
+  200 000; past it the call answers `too_large`.
 - **No replica holds the tab:** there is no row, or no worker takes the activity within
-  2 s (`ACK_TIMEOUT_MS`, its schedule-to-start timeout: the owner's pod is gone), and the
+  3 s (`ACK_TIMEOUT_MS`, its schedule-to-start timeout: the owner's pod is gone), and the
   call answers the usual "the paired ScadBuddy tab is not connected". A row whose queue
   nobody polls is then deleted.
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
-  plus 2 s (the activity's start-to-close). `browser_status` asks the same way for the
+  plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
   tab's route and live tools.
+- **During the rollout of #4780 (one release, #4868):** the Postgres relay of #1916
+  ([`bridge/pgRelay.ts`](../../agent/src/bridge/pgRelay.ts): rows in
+  `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`, every replica hears every call) still
+  runs beside it. A replica on the new build answers its requests for the tabs it holds,
+  and tries it for a call the Temporal path cannot place: no row (the tab is on a replica
+  still on the old build), an owner that is gone or no longer holds the tab, or no KEK.
+  #4868 removes it and drops the table.
 - **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
-  tab, as with a local call. Without Temporal and a database there is no relay, and only
-  tabs on the same process can be reached.
+  tab, as with a local call. Without a database there is no relay, and only tabs on the
+  same process can be reached.
 
 Pairing requests reach every tab whatever the replica: each replica re-reads them from
 Postgres every 3 s (`PAIRINGS_POLL_MS`).

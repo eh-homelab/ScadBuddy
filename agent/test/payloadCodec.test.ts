@@ -282,11 +282,9 @@ it("seals a session's background tasks under the session's key", () => {
   expect(subjectOf(`bgtask-${id}-ab12cd34x`)).toBeUndefined()
 })
 
-it("seals a session's browser calls between replicas under the session's key (#4780)", () => {
-  const id = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+it('seals every browser call between replicas under a key of its own (#4780)', () => {
   const call = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
-  expect(subjectOf(`bridge-${id}-${call}`)).toBe(`session-${id}`)
-  // A call with no session (an /mcp caller's paired tab) carries no subject.
-  expect(subjectOf(`bridge-${call}`)).toBeUndefined()
-  expect(subjectOf(`bridge-${id}-${call}x`)).toBeUndefined()
+  expect(subjectOf(`bridge-${call}`)).toBe(`bridge-${call}`)
+  expect(subjectOf(`bridge-${call}x`)).toBeUndefined()
+  expect(subjectOf('bridge-')).toBeUndefined()
 })

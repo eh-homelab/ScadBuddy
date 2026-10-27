@@ -228,7 +228,7 @@ export class TabHub implements BrowserTabs {
     this.#pairings = options.pairings
     this.#relay = options.relay
     this.#sessionTabStore = options.sessionTabs
-    this.#relay?.serve({ run: (tabId, request) => this.#runHere(tabId, request) })
+    this.#relay?.serve({ holds: (tabId) => this.#tabs.has(tabId), run: (tabId, request) => this.#runHere(tabId, request) })
     this.#callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS
     this.#pollMs = options.pollMs ?? PAIRINGS_POLL_MS
     this.#log = options.log ?? ((m) => console.error(m))
@@ -481,11 +481,7 @@ export class TabHub implements BrowserTabs {
     if ('problem' in resolved) return failure('no_browser', resolved.problem)
     const { tab } = resolved
     if (tab) return this.#callTab(tab, tool, args, signal, timeoutMs)
-    const answer = await this.#relay!.forward(resolved.tabId, { op: 'call', tool, args, timeoutMs }, {
-      signal,
-      timeoutMs,
-      sessionId: target.sessionId,
-    })
+    const answer = await this.#relay!.forward(resolved.tabId, { op: 'call', tool, args, timeoutMs }, { signal, timeoutMs })
     return answer?.op === 'call' ? answer.outcome : failure('no_browser', NOT_CONNECTED)
   }
 
@@ -536,7 +532,6 @@ export class TabHub implements BrowserTabs {
       const answer = await this.#relay!.forward(resolved.tabId, { op: 'status' }, {
         signal: signal ?? new AbortController().signal,
         timeoutMs: this.#callTimeoutMs,
-        sessionId: target.sessionId,
       })
       if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
       state = answer
