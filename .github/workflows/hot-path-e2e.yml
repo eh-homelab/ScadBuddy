@@ -140,10 +140,10 @@ jobs:
       - name: Install mosquitto
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mosquitto
 
-      # The same CLI as ci.yml's `agent` job and the Dockerfile's `test` stage
-      # (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump together (CLAUDE.md lists
-      # every copy). The tests start
-      # their own dev servers from it.
+      # The same CLI as ci.yml's three "Install the Temporal CLI" steps and the
+      # Dockerfile's `test` stage (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump
+      # them together (CLAUDE.md lists every copy). The tests start their own dev servers
+      # from it.
       - name: Install the Temporal CLI
         env:
           TEMPORAL_CLI_VERSION: 1.9.1
@@ -168,7 +168,7 @@ jobs:
           uv run --frozen pytest -p no:cacheprovider -rs -n 4 --junitxml="$RUNNER_TEMP/native.xml" \
             tests/test_print_native_workflow.py tests/api/test_hot_path_native.py
           # Matches, not lines: pytest writes the report on one line.
-          skipped=$(grep -o '<skipped' "$RUNNER_TEMP/native.xml" | wc -l)
+          skipped=$( { grep -o '<skipped' "$RUNNER_TEMP/native.xml" || true; } | wc -l)
           if [ "$skipped" != 0 ]; then
             echo "::error::$skipped native test(s) skipped: each one must run here"
             exit 1
