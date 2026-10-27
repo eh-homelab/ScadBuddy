@@ -859,7 +859,19 @@ class DurableSession:
                 ),
                 result_type=dict,
             )
-        except FailureError:
+        except FailureError as err:
+            # Replay-safe (workflow.logger is quiet during replay), once per failed read.
+            cause = err.cause if err.cause is not None else err
+            kind = type(cause).__name__
+            if isinstance(cause, ApplicationError) and cause.type:
+                kind = f"{kind} {cause.type}"
+            workflow.logger.warning(
+                "%s for %s failed (%s): no tool_tier on agent-tools: is the agent rolled out?"
+                " The call parks for approval.",
+                TOOL_TIER,
+                name,
+                kind,
+            )
             return None
         return now
 

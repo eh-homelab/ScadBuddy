@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -1196,9 +1197,11 @@ async def test_a_tool_disabled_mid_turn_is_refused_naming_settings(
 
 
 async def test_a_call_whose_access_cannot_be_read_parks(
-    harness: Harness, agent_db: Conn, connect: Connect
+    harness: Harness, agent_db: Conn, connect: Connect, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Fail toward asking: a read tool whose tool_tier fails is asked about."""
+    """Fail toward asking: a read tool whose tool_tier fails is asked about, and the
+    workflow says once why (review of #4838: an agent not yet rolled out)."""
+    caplog.set_level(logging.WARNING)
     harness.stand_in.tool_tier_refuses = True
     sid, handle = await harness.session(agent_db)
     await send(handle, "render it")
@@ -1206,6 +1209,12 @@ async def test_a_call_whose_access_cannot_be_read_parks(
     assert await settled(connect, sid) == "idle"
     assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
     assert harness.stand_in.tiers_asked == ["render_preview"]
+    said = [
+        r.getMessage() for r in caplog.records if "no tool_tier on agent-tools" in r.getMessage()
+    ]
+    assert len(said) == 1, said
+    assert "is the agent rolled out?" in said[0]
+    assert "ApplicationError" in said[0]
     await _replays(harness, handle)
 
 
