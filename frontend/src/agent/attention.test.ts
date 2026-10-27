@@ -26,9 +26,44 @@ afterEach(() => {
 describe('fetchPendingInput', () => {
   it('counts what the agent lists as parked on the user, by kind', async () => {
     setPendingApprovals(2)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false })
+    // The mock's approvals are sessionless, as an MCP client's prepare is (#4813).
+    const unattached = [expect.objectContaining({ tool: 'send_to_bambuddy' }), expect.objectContaining({ tool: 'send_to_bambuddy' })]
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false, unattached })
     setPendingAnswers(1, 3)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false, unattached })
+  })
+
+  it('lists the approvals in no session and no flow run, which no feed shows, with what their card says (#4813)', async () => {
+    const approval = {
+      kind: 'approval',
+      id: 'approval:a1',
+      session_id: null,
+      tool: 'print_output',
+      summary: '{"output_id":"o1"}',
+      requested_by: { kind: 'bearer', id: 'token:t1', label: 'Claude Code' },
+      expires_at: '2026-10-27T10:10:00.000Z',
+    }
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({
+          entries: [
+            approval,
+            // A session's, which its feed shows; a flow run's, which its page shows; one past its timer.
+            { ...approval, id: 'approval:a2', session_id: 'sess-1' },
+            { ...approval, id: 'approval:a3', run: { id: 'r1', hop: 'person', starter_session: null } },
+            { ...approval, id: 'approval:a4', expiring: true },
+            // An owner kind this tab does not know is shown by its label, never a failed read.
+            { ...approval, id: 'approval:a5', requested_by: { kind: 'new-kind', label: 'Robot' }, expires_at: null },
+          ],
+        }),
+      ),
+    )
+    const counts = await fetchPendingInput()
+    expect(counts?.approvals).toBe(4)
+    expect(counts?.unattached).toEqual([
+      { id: 'approval:a1', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Claude Code', expiresAt: '2026-10-27T10:10:00.000Z' },
+      { id: 'approval:a5', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Robot' },
+    ])
   })
 
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {

@@ -29,6 +29,8 @@ import {
   useAttentionTitle,
   WORKING_LABEL,
   RunsWaitingContext,
+  ApprovalsWaitingContext,
+  type PendingApproval,
 } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
@@ -46,6 +48,7 @@ import { retryFailedPages } from '../lib/lazyRetry'
 import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
+import { useApprovalToasts } from '../agent/pendingApprovals'
 import { Toasts } from './ui/Toasts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -94,6 +97,8 @@ const NAV = [
 const AgentLink = lazy(async () => ({ default: (await import('./AgentLink')).AgentLink }))
 
 const PANEL_ID = 'assistant-panel'
+/** One empty list, so the approvals' context and toasts do not change while none waits. */
+const NO_APPROVALS: readonly PendingApproval[] = []
 
 interface Props {
   embedded?: boolean
@@ -159,6 +164,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // socket) still says so.
   const attention = useAttention(shown)
   const refreshAttention = attention.refresh
+  // #4813 — the approvals no session's feed shows: listed in the panel and on Activity, and toasted.
+  const unattached = attention.counts?.unattached ?? NO_APPROVALS
+  const approvalsWaiting = useMemo(() => ({ approvals: unattached, refresh: refreshAttention }), [unattached, refreshAttention])
+  useApprovalToasts(unattached, refreshAttention)
   const waitingLabel = attentionLabel(attention.waiting)
   const waitingDetail = attentionDetail(attention.counts)
   // A done summary waits for nothing, so it is shown beside the count, not in it.
@@ -279,6 +288,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   return (
     <AssistantOpenerContext.Provider value={opener}>
       <RunsWaitingContext.Provider value={attention.counts?.runs ?? null}>
+      <ApprovalsWaitingContext.Provider value={approvalsWaiting}>
       <ModalCompanionContext.Provider value={shown && mounted && open ? panelElement : null}>
       <TooltipProvider>
         {/* #3653 — shadcn's sidebar: beside the page from `md` up, collapsing to its icons;
@@ -452,6 +462,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         </SidebarProvider>
       </TooltipProvider>
       </ModalCompanionContext.Provider>
+      </ApprovalsWaitingContext.Provider>
       </RunsWaitingContext.Provider>
     </AssistantOpenerContext.Provider>
   )

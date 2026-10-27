@@ -368,6 +368,29 @@ describe('assistant panel', () => {
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
   })
 
+  it('toasts an approval no session shows, decides it from the toast, and lists it in the panel (#4813)', async () => {
+    setPendingApprovals(2)
+    const { user } = renderShell()
+    const toasts = within(screen.getByTestId('toasts'))
+    // One toast each, with the chat feed's two buttons, which only a person may press.
+    await waitFor(() => expect(toasts.getAllByRole('button', { name: 'Approve' })).toHaveLength(2))
+    expect(toasts.getAllByText('send_to_bambuddy, asked by You: {}')).toHaveLength(2)
+    for (const button of toasts.getAllByRole('button', { name: /^(Approve|Deny)$/ })) {
+      expect(button).toHaveAttribute('data-agent-user-only')
+    }
+    await user.click(toasts.getAllByRole('button', { name: 'Deny' })[0]!)
+    await waitFor(() => expect(respondRequests()).toHaveLength(1))
+    expect(respondRequests()[0]!.body).toEqual({ kind: 'approval', decision: 'deny' })
+    // Decided, it leaves the badge's read; the other one waits in the panel the badge opens.
+    await user.click(await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' }))
+    const listed = await screen.findByRole('region', { name: 'Approvals waiting for you' })
+    expect(within(listed).getAllByTestId('pending-approval')).toHaveLength(1)
+    // Its toast goes too once it is decided in the panel.
+    await user.click(within(listed).getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(toasts.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
+    expect(respondRequests()[1]!.body).toEqual({ kind: 'approval', decision: 'approve' })
+  })
+
   it('shows a running session on the header button with the panel closed, apart from what waits (#1125)', async () => {
     setRunningSessions(1)
     const { user } = renderShell()

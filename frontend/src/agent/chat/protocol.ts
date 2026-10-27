@@ -171,6 +171,17 @@ export const PendingInputSchema = z.object({
   entries: z.array(
     z.object({
       kind: z.enum(['approval', 'answer']),
+      /**
+       * #4813 — what a sessionless approval's card shows (agent `gate/classic.ts` `approvalEntry`):
+       * its request id, tool, scrubbed summary, who prepared it and when it expires. Optional, so
+       * a read missing them, or with one this tab cannot parse, still counts (`.catch`).
+       */
+      id: z.string().optional().catch(undefined),
+      session_id: z.string().nullable().optional().catch(undefined),
+      tool: z.string().optional().catch(undefined),
+      summary: z.string().optional().catch(undefined),
+      requested_by: z.object({ label: z.string() }).nullable().optional().catch(undefined),
+      expires_at: z.string().nullable().optional().catch(undefined),
       /** A durable entry past its timer whose worker has not resolved it yet: not waiting on anyone. */
       expiring: z.boolean().optional(),
       /** #2482 — a flow run's entry: at hop `parent` it waits for the starting session, not yet for the user. */

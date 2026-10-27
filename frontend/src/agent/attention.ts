@@ -38,6 +38,8 @@ export interface PendingCounts {
   summariesTruncated?: boolean
   /** #2482 — the browser-started runs whose own calls wait for you (`RunsWaitingContext`). */
   runs?: RunWaiting[]
+  /** #4813 — the approvals in no session and no flow run, which no feed shows (`ApprovalsWaitingContext`). */
+  unattached?: PendingApproval[]
 }
 
 /** What waits on the user: everything but the done summaries. */
@@ -121,6 +123,40 @@ function runsWaiting(entries: readonly PendingEntry[]): RunWaiting[] {
 
 type PendingEntry = z.infer<typeof PendingInputSchema>['entries'][number]
 
+/**
+ * #4813 — an approval prepared outside any session (an external MCP client's `pending_approval`,
+ * AI spec §8.2): an `ai_approvals` row with no session, so no chat feed has a card for it. The
+ * badge counts it; `ApprovalsWaiting` and the shell's toast are where it is decided.
+ */
+export interface PendingApproval {
+  /** The pending-input request id, `approval:<id>`, that `respond` takes. */
+  id: string
+  tool: string
+  summary: string
+  /** Who prepared it (an MCP token's label), when the agent says. */
+  by?: string
+  expiresAt?: string
+}
+
+/** The badge's own read, and a way to read it again once one is decided; null outside the shell. */
+export const ApprovalsWaitingContext = createContext<{ approvals: readonly PendingApproval[]; refresh: () => void } | null>(null)
+
+/** The approvals in no session and no flow run, as `read` counts them. */
+function unattached(entries: readonly PendingEntry[]): PendingApproval[] {
+  const approvals: PendingApproval[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'approval' || entry.expiring || entry.run || entry.session_id !== null || !entry.id) continue
+    approvals.push({
+      id: entry.id,
+      tool: entry.tool ?? '',
+      summary: entry.summary ?? '',
+      ...(entry.requested_by ? { by: entry.requested_by.label } : {}),
+      ...(entry.expires_at ? { expiresAt: entry.expires_at } : {}),
+    })
+  }
+  return approvals
+}
+
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
@@ -142,6 +178,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
     if (parsed.data.summaries_truncated !== undefined) counts.summariesTruncated = parsed.data.summaries_truncated
     const runs = runsWaiting(parsed.data.entries)
     if (runs.length > 0) counts.runs = runs
+    const loose = unattached(parsed.data.entries)
+    if (loose.length > 0) counts.unattached = loose
     return counts
   } catch {
     return null

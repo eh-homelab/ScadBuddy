@@ -1,6 +1,9 @@
 export const TOAST_MS = 6_000
 
-export type Toast = { id: number; title: string; href?: string }
+/** A button on a toast (#4813: an approval's Approve and Deny); clicking it dismisses the toast. */
+export type ToastAction = { label: string; onClick: () => void; destructive?: boolean; userOnly?: boolean }
+
+export type Toast = { id: number; title: string; href?: string; detail?: string; actions?: readonly ToastAction[]; ms: number }
 
 let toasts: readonly Toast[] = []
 
@@ -27,9 +30,10 @@ export function releaseToast(id: number, by: 'hover' | 'focus'): void {
   const held = holds.get(id)
   held?.delete(by)
   if (held && held.size > 0) return
-  if (!toasts.some((one) => one.id === id)) return
+  const shown = toasts.find((one) => one.id === id)
+  if (!shown) return
   clearTimeout(timers.get(id))
-  timers.set(id, setTimeout(() => dismissToast(id), TOAST_MS))
+  timers.set(id, setTimeout(() => dismissToast(id), shown.ms))
 }
 
 export function dismissToast(id: number): void {
@@ -39,11 +43,27 @@ export function dismissToast(id: number): void {
   publish(toasts.filter((one) => one.id !== id))
 }
 
-/** Shows a toast bottom-right for {@link TOAST_MS}; a `<Toasts />` host must be mounted. */
-export function toast({ title, href }: { title: string; href?: string }): void {
+/**
+ * Shows a toast bottom-right for `ms` ({@link TOAST_MS} by default); a `<Toasts />` host must be
+ * mounted. Returns its id, for {@link dismissToast}.
+ */
+export function toast({
+  title,
+  href,
+  detail,
+  actions,
+  ms = TOAST_MS,
+}: {
+  title: string
+  href?: string
+  detail?: string
+  actions?: readonly ToastAction[]
+  ms?: number
+}): number {
   const id = nextId++
-  publish([...toasts, { id, title, href }])
-  timers.set(id, setTimeout(() => dismissToast(id), TOAST_MS))
+  publish([...toasts, { id, title, href, detail, actions, ms }])
+  timers.set(id, setTimeout(() => dismissToast(id), ms))
+  return id
 }
 
 export function subscribeToasts(listener: () => void): () => void {
