@@ -212,7 +212,8 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
-const access = database ? new AccessStore(database.sql, audit) : undefined
+// The registry's tools let it keep the old ai_settings keys for older replicas (access/legacy.ts, #4828).
+const access = database ? new AccessStore(database.sql, audit, ALL_TOOLS) : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
 const accessResolver = new AccessResolver(access)
 const plugins = database ? new PluginStore(database.sql) : undefined

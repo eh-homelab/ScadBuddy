@@ -1,6 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
+import { LEGACY_SOURCES, legacySettings, type RegistryTool } from './legacy.js'
 import { type AccessRow, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
 
 export type AccessReader = { rows(sources: readonly string[]): Promise<AccessRow[]> }
@@ -106,9 +107,12 @@ const toolsDetail = (edits: readonly Edit[]): string =>
 export class AccessStore implements AccessReader, AccessWriter {
   private readonly sql: Sql
   private readonly audit: AuditSink | undefined
-  constructor(sql: Sql, audit?: AuditSink) {
+  private readonly registryTools: readonly RegistryTool[] | undefined
+  /** `registryTools` (the registry's tools and tiers) lets a write keep `builtin_tools.scadbuddy` and the camera key (access/legacy.ts). */
+  constructor(sql: Sql, audit?: AuditSink, registryTools?: readonly RegistryTool[]) {
     this.sql = sql
     this.audit = audit
+    this.registryTools = registryTools
   }
 
   async rows(sources: readonly string[]): Promise<AccessRow[]> {
@@ -156,6 +160,36 @@ export class AccessStore implements AccessReader, AccessWriter {
   }
 
   /**
+   * The old ai_settings keys of the sources `edits` touch, as they will stand, written before
+   * the ai_access rows: the mirror trigger an older replica's writes need
+   * (20261027T0514Z_access_settings_mirror.sql) then fires first, and the rows written after
+   * it win. Drop next release (#4828).
+   */
+  private async writeLegacy(tx: TransactionSql, edits: readonly Edit[], by: string): Promise<void> {
+    const touched = new Set(edits.map((e) => e.source).filter((s) => LEGACY_SOURCES.includes(s)))
+    if (touched.size === 0) return
+    // One such write at a time, so each derives the keys from the rows the last one left.
+    await tx`SELECT pg_advisory_xact_lock(hashtext('ai_access legacy keys'))`
+    let rows = await tx<AccessRow[]>`
+      SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${tx(LEGACY_SOURCES)}`
+    for (const edit of edits) rows = applyEdit(rows, edit, by)
+    const settings = legacySettings(rows, touched, this.registryTools)
+    if (settings.length === 0) return
+    const stored = new Map(
+      (await tx<{ key: string; value: unknown }[]>`SELECT key, value FROM ai_settings WHERE key IN ${tx(settings.map((s) => s.key))}`).map(
+        (r) => [r.key, JSON.stringify(r.value)],
+      ),
+    )
+    for (const { key, value, absent } of settings) {
+      const now = JSON.stringify(value)
+      if ((stored.get(key) ?? JSON.stringify(absent)) === now) continue
+      await tx`
+        INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+    }
+  }
+
+  /**
    * One transaction with the eviction (a warm process holds its tools), then the audit row.
    * With `skipUnchanged`, an edit that would leave its source's rows as they are is dropped,
    * and a write left with none sends nothing and records nothing.
@@ -181,6 +215,7 @@ export class AccessStore implements AccessReader, AccessWriter {
         }
         // Told first: the notification is queued in this transaction, so a failing write drops it.
         await notifyWarmEvict(tx, '*')
+        await this.writeLegacy(tx, applied, by)
         for (const edit of applied) await runEdit(tx, edit, by)
       })
     } catch (err) {

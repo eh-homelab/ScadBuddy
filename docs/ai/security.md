@@ -764,7 +764,9 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
   `http_request_enabled` and `printer_camera_enabled`, and the `ai_plugins` columns
   `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migrations
   `agent/src/db/migrations/20261026T2201Z_access_copy.sql` (the copy, and the `ai_plugins`
-  mirror trigger for older replicas during a rolling deploy) carry their values into `ai_access`. `20261026T2200Z_access.sql` made the table.
+  mirror trigger for older replicas during a rolling deploy) and
+  `20261027T0514Z_access_settings_mirror.sql` (the same for the four `ai_settings` keys, which the
+  new code also writes, old key first, until #4828) carry their values into `ai_access`. `20261026T2200Z_access.sql` made the table.
 
 ## A browser plugin (Playwright MCP)
 
