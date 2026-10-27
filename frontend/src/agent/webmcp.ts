@@ -66,9 +66,11 @@ export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference 
     if (!preference.enabled()) return
     controller = new AbortController()
     const { signal } = controller
-    const tools = await bridge.listTools()
+    const listed = await bridge.listTools()
     if (mine !== generation) return
-    for (const tool of tools) {
+    // A stale tab (#4884) is reloading; the next page load registers the tools.
+    if (!listed.ok) return
+    for (const tool of listed.tools) {
       await context!
         .registerTool(
           {

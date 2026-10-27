@@ -118,7 +118,9 @@ describe('AgentBridge', () => {
     const bridge = new AgentBridge()
     mount(bridge, { label: 'customize', impls: { set_param: () => null, render: () => null } })
 
-    const live = await bridge.listTools()
+    const listedLive = await bridge.listTools()
+    if (!listedLive.ok) throw new Error(listedLive.error.message)
+    const live = listedLive.tools
     expect(live.map((tool) => tool.name).sort()).toEqual(['render', 'set_param'])
     const setParam = live.find((tool) => tool.name === 'set_param')
     expect(setParam).toMatchObject({ risk: 'write', scope: 'customize', live: true })
@@ -131,11 +133,50 @@ describe('AgentBridge', () => {
     const renderTool = live.find((tool) => tool.name === 'render')
     expect(renderTool?.inputSchema.required ?? []).not.toContain('timeout_ms')
 
-    const all = await bridge.listTools({ all: true })
+    const listedAll = await bridge.listTools({ all: true })
+    if (!listedAll.ok) throw new Error(listedAll.error.message)
+    const all = listedAll.tools
     expect(all.map((tool) => tool.name)).toEqual(Object.keys(TOOLS))
     expect(all.find((tool) => tool.name === 'open_print_dialog')).toMatchObject({
       risk: 'outward',
       live: false,
+    })
+  })
+
+  // #4884 — on a tab from an older build the catalogue chunk is gone. The stale-chunk
+  // reload preventDefault()s Vite's preload error, so the import resolves `undefined`;
+  // without the reload it rejects. Either way the agent gets a typed error, not a throw.
+  describe('when the catalogue chunk cannot load (a stale tab)', () => {
+    it('answers stale_tab, saying the tab is reloading, when the import resolves undefined', async () => {
+      const bridge = new AgentBridge(async () => undefined)
+      mount(bridge, { label: 'customize', impls: { set_params: () => null } })
+
+      const called = await bridge.call('set_params', { values: {} })
+      expect(called.ok).toBe(false)
+      expect(!called.ok && called.error.code).toBe('stale_tab')
+      expect(!called.ok && called.error.message).toMatch(/older ScadBuddy build and is reloading/)
+      expect(!called.ok && called.error.message).toMatch(/pair again with browser_pair/)
+
+      const listed = await bridge.listTools()
+      expect(listed.ok).toBe(false)
+      expect(!listed.ok && listed.error.code).toBe('stale_tab')
+    })
+
+    it('answers stale_tab, naming the failure, when the import rejects', async () => {
+      const bridge = new AgentBridge(() =>
+        Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/catalog-old.js')),
+      )
+
+      const called = await bridge.call('get_params', {})
+      expect(called.ok).toBe(false)
+      expect(!called.ok && called.error.code).toBe('stale_tab')
+      expect(!called.ok && called.error.message).toMatch(/catalog-old\.js/)
+      expect(!called.ok && called.error.message).toMatch(/reload the tab/)
+      expect(!called.ok && called.error.message).toMatch(/browser_pair/)
+
+      const listed = await bridge.listTools({ all: true })
+      expect(listed.ok).toBe(false)
+      expect(!listed.ok && listed.error.code).toBe('stale_tab')
     })
   })
 

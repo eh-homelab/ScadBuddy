@@ -71,7 +71,16 @@ Notes, each from the tool's own entry:
 **Stable tool list** (spec §5.2): the catalogue is the same on every route. A tool whose
 page is not mounted answers `unavailable` instead of disappearing (`call()` in
 `bridge.ts`). The error codes are `unknown_tool`, `unavailable`, `invalid_args`,
-`refused`, `timeout` and `failed` (`ErrorCode`, `types.ts`).
+`refused`, `timeout`, `failed` and `stale_tab` (`ErrorCode`, `types.ts`).
+
+`stale_tab` (#4884) answers a call on a tab from an older build whose lazy tool
+catalogue the server no longer has. `installStaleChunkReload`
+([`staleChunks.ts`](../../frontend/src/lib/staleChunks.ts)) `preventDefault()`s Vite's
+`vite:preloadError` and reloads, which makes the import resolve `undefined`; without
+that reload the import rejects. Both are answered as `stale_tab`, and `listTools()`
+answers `{ ok: false, error }` the same way. The message tells the agent the tab is
+reloading (or must be reloaded) and that, since a reload is a new tab, an agent that
+paired by code must pair again with `browser_pair`.
 
 ## `data-agent-user-only`
 
@@ -222,9 +231,9 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
   fails at once with "The user was not asked for the tab: …". Every wait opened counts,
   including ones withdrawn because their calls stopped.
-  The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
-  as `the tab answered <tool> with <code>: …`, with the tab's message in the
-  untrusted-data envelope (#258), because it can quote the page.
+  The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`,
+  `stale_tab`) come back as `the tab answered <tool> with <code>: …`, with the tab's
+  message in the untrusted-data envelope (#258), because it can quote the page.
 - **Results** are what `bridge.call()` returned, as JSON, in the untrusted-data
   envelope with the source "the user's open ScadBuddy tab". A result over 200 000
   bytes of UTF-8 (measured with `TextEncoder`, not string length) is answered by the tab

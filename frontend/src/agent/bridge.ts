@@ -1,7 +1,9 @@
+import type * as CatalogModule from './catalog'
 import { takeSnapshot, type Snapshot } from './snapshot'
 import {
   AgentToolError,
   type CallResult,
+  type ToolError,
   type Scope,
   type ToolImpls,
   type ToolInfo,
@@ -24,8 +26,51 @@ export interface RegisterOptions {
   describe?: () => unknown
 }
 
+type Catalog = typeof CatalogModule
+
 /** zod and the schemas load on first use, so the entry chunk carries neither. */
-const loadCatalog = () => import('./catalog')
+export type CatalogLoader = () => Promise<Catalog | undefined>
+
+const importCatalog: CatalogLoader = () => import('./catalog')
+
+/** What `listTools()` answers: the tools, or the typed error `call()` would give. */
+export type ListToolsResult = { ok: true; tools: ToolInfo[] } | { ok: false; error: ToolError }
+
+/**
+ * The catalogue, or the `stale_tab` error (#4884). On a tab from an older build the
+ * catalogue chunk is gone from the server: `installStaleChunkReload` `preventDefault()`s
+ * Vite's `vite:preloadError` and reloads, and Vite's preload helper then resolves the
+ * import with `undefined` rather than rejecting. Without the reload (the same build
+ * failed already, or there is no sessionStorage) the import rejects instead. Either way
+ * the agent is told the tab is stale, never handed a TypeError. The reload starts a new
+ * tab id (`tabId.ts`), so an agent that paired by code has to pair again.
+ */
+async function catalogOrStale(load: CatalogLoader): Promise<{ catalog: Catalog } | { error: ToolError }> {
+  let catalog: Catalog | undefined
+  try {
+    catalog = await load()
+  } catch (cause) {
+    return {
+      error: {
+        code: 'stale_tab',
+        message:
+          `The tab could not load its tool catalogue (${cause instanceof Error ? cause.message : String(cause)}); ` +
+          'it is probably running an older ScadBuddy build. Ask the user to reload the tab; an agent ' +
+          'that paired by code must then pair again with browser_pair.',
+      },
+    }
+  }
+  if (catalog) return { catalog }
+  return {
+    error: {
+      code: 'stale_tab',
+      message:
+        'The tab was running an older ScadBuddy build and is reloading to the current one; nothing ' +
+        'was run. Wait for it to come back, then call again. The reload ends this tab, so an agent ' +
+        'that paired by code must pair again with browser_pair.',
+    },
+  }
+}
 
 /**
  * The tab's side of the browser tools (#254). Pages and components register the
@@ -39,6 +84,13 @@ export class AgentBridge {
   private readonly listeners = new Set<() => void>()
   private nextId = 1
   private route: string | null = null
+
+  private readonly loadCatalog: CatalogLoader
+
+  /** `loadCatalog` is for tests, which stand in for a stale tab's failed import. */
+  constructor(loadCatalog: CatalogLoader = importCatalog) {
+    this.loadCatalog = loadCatalog
+  }
 
   /** The router's location; the shell reports it so a MemoryRouter or basename is honoured. */
   setRoute(route: string) {
@@ -88,11 +140,12 @@ export class AgentBridge {
    * The live tools for the current route, or with `all` every tool the app has — each
    * marked `live` or not, which is the stable list a session's tool set is built from.
    */
-  async listTools({ all = false }: { all?: boolean } = {}): Promise<ToolInfo[]> {
-    const { TOOLS } = await loadCatalog()
-    const { toJSONSchema } = await import('zod')
+  async listTools({ all = false }: { all?: boolean } = {}): Promise<ListToolsResult> {
+    const loaded = await catalogOrStale(this.loadCatalog)
+    if ('error' in loaded) return { ok: false, error: loaded.error }
+    const { TOOLS, toJSONSchema } = loaded.catalog
     const live = new Set(this.liveNames())
-    return (Object.keys(TOOLS) as ToolName[])
+    const tools = (Object.keys(TOOLS) as ToolName[])
       .filter((name) => all || live.has(name))
       .map((name) => {
         const spec = TOOLS[name]
@@ -106,10 +159,13 @@ export class AgentBridge {
           live: live.has(name),
         }
       })
+    return { ok: true, tools }
   }
 
   async call(name: string, args: unknown = {}): Promise<CallResult> {
-    const { TOOLS, SCOPE_ROUTES } = await loadCatalog()
+    const loaded = await catalogOrStale(this.loadCatalog)
+    if ('error' in loaded) return { ok: false, error: loaded.error }
+    const { TOOLS, SCOPE_ROUTES } = loaded.catalog
     if (!Object.hasOwn(TOOLS, name)) {
       return { ok: false, error: { code: 'unknown_tool', message: `There is no tool called "${name}".` } }
     }

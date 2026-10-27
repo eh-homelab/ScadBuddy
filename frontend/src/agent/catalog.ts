@@ -264,3 +264,6 @@ export const SCOPE_ROUTES: Record<Scope, string> = {
   source: 'the source editor ("/m/<slug>/source" or "/new")',
   settings: 'settings ("/settings/…")',
 }
+
+/** Re-exported so `listTools()` gets it with the catalogue, behind one stale-tab guard (#4884). */
+export const toJSONSchema = z.toJSONSchema
