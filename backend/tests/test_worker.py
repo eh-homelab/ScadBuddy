@@ -22,12 +22,15 @@ from typing import Any, NoReturn, cast, get_args
 import httpx
 import psycopg
 import pytest
+from google.protobuf.timestamp_pb2 import Timestamp
 from temporalio import workflow
+from temporalio.api.deployment.v1 import WorkerDeploymentOptions
 from temporalio.api.enums.v1 import TaskQueueType
-from temporalio.api.taskqueue.v1 import TaskQueue
-from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.api.taskqueue.v1 import PollerInfo, TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest, DescribeTaskQueueResponse
 from temporalio.client import Client
 from temporalio.common import VersioningBehavior
+from temporalio.runtime import Runtime, TelemetryConfig
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     UnsandboxedWorkflowRunner,
@@ -62,6 +65,7 @@ from scadbuddy.worker import (
     _health_server,
     _on_signal,
     _poll,
+    _serve_versioned,
     deployment_writes,
     make_current_until_polled,
     run_inprocess_worker,
@@ -70,11 +74,13 @@ from scadbuddy.worker import (
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
+    POLLER_SEEN_WITHIN,
     connect_lazily,
     current_routing,
     drained,
     is_current,
     make_current,
+    polled_elsewhere,
 )
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
@@ -469,6 +475,164 @@ async def test_is_current_names_the_deployments_current_build() -> None:
         )
         assert await _is_current_answer(client, build_id)
         assert not await _is_current_answer(client, "other")
+
+
+def _poller(
+    identity: str, build_id: str, age: float, deployment: str = DEPLOYMENT_NAME
+) -> PollerInfo:
+    seen = Timestamp()
+    seen.FromDatetime(datetime.now(UTC) - timedelta(seconds=age))
+    return PollerInfo(
+        identity=identity,
+        last_access_time=seen,
+        deployment_options=WorkerDeploymentOptions(deployment_name=deployment, build_id=build_id),
+    )
+
+
+def _described(*pollers: PollerInfo) -> Client:
+    async def describe(request: DescribeTaskQueueRequest, **_: object) -> DescribeTaskQueueResponse:
+        assert request.task_queue.name == "render"
+        assert request.task_queue_type == TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW
+        return DescribeTaskQueueResponse(pollers=list(pollers))
+
+    return cast(
+        Client,
+        SimpleNamespace(
+            namespace="default", workflow_service=SimpleNamespace(describe_task_queue=describe)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("identity", "build_id", "age", "deployment", "elsewhere"),
+    [
+        ("other@pod-b", "b1", 1, DEPLOYMENT_NAME, True),
+        ("other@pod-b", "b1", POLLER_SEEN_WITHIN - 5, DEPLOYMENT_NAME, True),
+        ("me@pod-a", "b1", 1, DEPLOYMENT_NAME, False),  # this worker's own poll
+        ("other@pod-b", "b2", 1, DEPLOYMENT_NAME, False),  # the rollout's new build
+        ("other@pod-b", "b1", 1, "scadbuddy-print", False),
+        ("other@pod-b", "b1", POLLER_SEEN_WITHIN + 5, DEPLOYMENT_NAME, False),  # gone
+    ],
+)
+async def test_polled_elsewhere_counts_only_a_recent_poller_of_this_build_not_this_worker(
+    identity: str, build_id: str, age: float, deployment: str, elsewhere: bool
+) -> None:
+    """#4869: what lets a stopping worker leave its pinned runs to another. The ages are
+    taken as the test runs, not at collection, which a slow session ran past."""
+    client = _described(
+        _poller("me@pod-a", "b1", age=0), _poller(identity, build_id, age, deployment)
+    )
+    assert (
+        await polled_elsewhere(
+            client,
+            "render",
+            deployment_name=DEPLOYMENT_NAME,
+            build_id="b1",
+            identities={"me@pod-a"},
+        )
+        is elsewhere
+    )
+
+
+async def _always_current(*_: object, **__: object) -> bool:
+    return True
+
+
+async def _never_drained(*_: object, **__: object) -> bool:
+    return False
+
+
+def _pinned_worker(
+    client: Client, queue: str, build_id: str, identity: str | None = None
+) -> Worker:
+    return Worker(
+        client,
+        task_queue=queue,
+        workflows=[_BlocksUntilReleased],
+        workflow_runner=UnsandboxedWorkflowRunner(),
+        identity=identity,
+        deployment_config=WorkerDeploymentConfig(
+            version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
+            use_worker_versioning=True,
+            default_versioning_behavior=VersioningBehavior.PINNED,
+        ),
+    )
+
+
+async def _stop_and_drain(
+    monkeypatch: pytest.MonkeyPatch, client: Client, queue: str, build_id: str, timeout: float
+) -> None:
+    """`_serve_versioned` of one worker, stopped at once, its build current and its runs
+    never drained."""
+
+    async def routing(*_: object, **__: object) -> tuple[str | None, bytes]:
+        return build_id, b""
+
+    async def made_current(*_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr(worker_module, "make_current", made_current)
+    monkeypatch.setattr(worker_module, "current_routing", routing)
+    monkeypatch.setattr(worker_module, "is_current", _always_current)
+    monkeypatch.setattr(worker_module, "drained", _never_drained)
+    monkeypatch.setattr(worker_module, "DRAIN_POLL", 0.05)
+    monkeypatch.setattr(worker_module, "DRAIN_CURRENT_GRACE", 0.0)
+    stop = asyncio.Event()
+    stop.set()
+    await asyncio.wait_for(
+        _serve_versioned(
+            client,
+            [_pinned_worker(client, queue, build_id)],
+            stop,
+            build_id=build_id,
+            deployment_name=DEPLOYMENT_NAME,
+            task_queue=queue,
+            drain_timeout=timeout,
+        ),
+        timeout + 30,
+    )
+
+
+@pytest.mark.requires_temporal
+async def test_a_current_build_with_no_other_worker_keeps_draining(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4869: in a rollout the new pods run the next build, not yet current; an old pod
+    that left on "still current" stranded its pinned runs for their 2 h timeout."""
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    async with temporal_client() as client:
+        with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+            await _stop_and_drain(monkeypatch, client, queue, build_id, timeout=1.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("drain timed out") for m in messages), messages
+    assert not any(m.startswith("stopping without draining") for m in messages)
+
+
+@pytest.mark.requires_temporal
+async def test_a_current_build_another_worker_of_polls_stops_without_draining(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#874: a restart of the same build leaves its runs to the next pod of that build,
+    once that pod polls."""
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    async with temporal_client() as client:
+        # The next pod: a process of its own, as the SDK refuses two workers of one build
+        # and queue in one runtime.
+        next_pod = await Client.connect(
+            client.service_client.config.target_host,
+            namespace=client.namespace,
+            runtime=Runtime(telemetry=TelemetryConfig()),
+        )
+        async with _pinned_worker(next_pod, queue, build_id, identity=f"next-pod-{build_id}"):
+            async with asyncio.timeout(10):
+                while not await _pollers(client, queue):
+                    await asyncio.sleep(0.1)
+            with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+                await _stop_and_drain(monkeypatch, client, queue, build_id, timeout=30.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("stopping without draining") for m in messages), messages
 
 
 async def _write_refusal(
@@ -1730,6 +1894,67 @@ async def test_readyz_waits_for_the_queue_to_route_to_the_build(tmp_path: Path) 
         ready.set()
         answer = await http.get("/readyz")
     assert answer.status_code == 200 and answer.json()["task_queue"] == "projects"
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_the_render_workers_readyz_waits_for_the_render_queue_to_route_to_it(
+    settings: Settings,
+    pg_conninfo: str,
+    tmp_path: Path,
+    health_socket: socket.socket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4869: a new pod ready before its build is current let the rollout stop the old
+    pods while the old build was still current, so each saw "current" and left its
+    pinned runs. Ready now waits for routing, as the print and projects workers do
+    (#4146); /healthz, the liveness probe's, never waits on it."""
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    cfg = settings.model_copy(
+        update={
+            "openscad": fake_3mf_openscad(tmp_path / "bin"),
+            "temporal_task_queue_render": queue,
+            "revision": build_id,
+        }
+    )
+    route = asyncio.Event()
+    asked: list[tuple[str, str, str]] = []
+
+    async def routes_to(_: Client, task_queue: str, *, deployment_name: str, build_id: str) -> bool:
+        asked.append((task_queue, deployment_name, build_id))
+        return route.is_set()
+
+    monkeypatch.setattr(worker_module, "routes_to", routes_to)
+    monkeypatch.setattr(worker_module, "ROUTED_POLL", 0.05)
+    port = health_socket.getsockname()[1]
+    # The API's migrations, which the worker waits for and never applies (#601).
+    migrated = JobProjection(pg_conninfo, pool_size=1)
+    migrated.open()
+    migrated.close()
+    async with temporal_client() as client:
+        stop = asyncio.Event()
+        worker = asyncio.create_task(
+            run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+        )
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+                await _healthy(http, worker)
+                async with asyncio.timeout(MAKE_CURRENT_WITHIN):
+                    while not asked:
+                        assert not worker.done(), worker.result()
+                        await asyncio.sleep(0.05)
+                assert (await http.get("/readyz")).status_code == 503
+                assert (await http.get("/healthz")).status_code == 200
+                route.set()
+                async with asyncio.timeout(10):
+                    while (answer := await http.get("/readyz")).status_code != 200:
+                        await asyncio.sleep(0.05)
+        finally:
+            stop.set()
+            await asyncio.wait_for(worker, timeout=30)
+    assert answer.json()["task_queue"] == queue
+    assert asked[0] == (queue, DEPLOYMENT_NAME, build_id)
 
 
 async def test_wait_until_routed_gives_up_and_says_so(
