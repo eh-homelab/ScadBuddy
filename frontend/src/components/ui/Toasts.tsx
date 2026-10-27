@@ -39,21 +39,30 @@ export function Toasts() {
             {one.detail && <span className="line-clamp-3 text-xs break-words text-muted-foreground">{one.detail}</span>}
             {one.actions && one.actions.length > 0 && (
               <div className="flex gap-2">
-                {one.actions.map((action) => (
-                  <Button
-                    key={action.label}
-                    size="xs"
-                    variant={action.destructive ? 'destructive' : 'default'}
-                    // An action a person must take (an approval), never the browser bridge (#254).
-                    {...(action.userOnly ? { 'data-agent-user-only': '' } : {})}
-                    onClick={() => {
-                      dismissToast(one.id)
-                      action.onClick()
-                    }}
-                  >
-                    {action.label}
-                  </Button>
-                ))}
+                {one.actions.map((action) => {
+                  const act = () => {
+                    dismissToast(one.id)
+                    action.onClick?.()
+                  }
+                  return (
+                    <Button
+                      key={action.label}
+                      size="xs"
+                      variant={action.destructive ? 'destructive' : action.href ? 'outline' : 'default'}
+                      // An action a person must take (an approval), never the browser bridge (#254).
+                      {...(action.userOnly ? { 'data-agent-user-only': '' } : {})}
+                      {...(action.href ? { asChild: true } : { onClick: act })}
+                    >
+                      {action.href ? (
+                        <Link to={action.href} onClick={act}>
+                          {action.label}
+                        </Link>
+                      ) : (
+                        action.label
+                      )}
+                    </Button>
+                  )
+                })}
               </div>
             )}
           </div>

@@ -1,7 +1,10 @@
 export const TOAST_MS = 6_000
 
-/** A button on a toast (#4813: an approval's Approve and Deny); clicking it dismisses the toast. */
-export type ToastAction = { label: string; onClick: () => void; destructive?: boolean; userOnly?: boolean }
+/**
+ * A button on a toast (#4813: an approval's Review and Deny), or a link when it has `href`;
+ * clicking it dismisses the toast.
+ */
+export type ToastAction = { label: string; onClick?: () => void; href?: string; destructive?: boolean; userOnly?: boolean }
 
 export type Toast = { id: number; title: string; href?: string; detail?: string; actions?: readonly ToastAction[]; ms: number }
 
