@@ -88,6 +88,11 @@ async def _row(printers: PrintersDep, printer_id: str) -> PrinterRow:
         row = await asyncio.to_thread(printers.store.get, printer_id)
     if row is None:
         raise _no_printer(printer_id)
+    if row.kind != "physical":
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{row.name} is a Bambuddy virtual printer; it has no trays of its own",
+        )
     return row
 
 

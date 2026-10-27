@@ -75,6 +75,7 @@ from scadbuddy.bambuddy.models import (
     TimelapseInfo,
     TimelapseThumbnails,
     TrashedLibraryFile,
+    VirtualPrinterList,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
@@ -198,6 +199,7 @@ Operation = Literal[
     "spools.filament_presets",
     "spools.list",
     "version",
+    "virtual_printers.list",
 ]
 
 
@@ -347,6 +349,41 @@ class BambuddyClient:
             what=f"read printer {printer_id}",
         )
         return Printer.model_validate(response.json())
+
+    async def printer_access_code(self, printer_id: int) -> str | None:
+        """The printer's LAN access code as Bambuddy holds it, or ``None`` when it is
+        withheld: ``GET /api/v1/printers/{id}`` carries ``access_code`` only for an
+        Admin or Operator session, or when Bambuddy's auth is off; "Viewers and API keys
+        never receive it" (``backend/app/api/routes/printers.py``
+        ``_caller_can_view_printer_secrets`` and ``get_printer``, lines 126-150 and
+        393-410, maziggy/bambuddy v1.3.0b1-daily.20261025). Read only by the Bambuddy
+        sync (`printers/bambuddy_sync.py`), which hands it straight to the LAN probe:
+        never logged, never in a span or a model (`Printer` excludes it)."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}",
+            scope=Scope.READ_STATUS,
+            operation="printers.read",
+            what=f"read printer {printer_id}",
+        )
+        body = response.json()
+        code = body.get("access_code") if isinstance(body, dict) else None
+        if not isinstance(code, str) or not code.strip():
+            return None
+        return code.strip()
+
+    async def virtual_printers(self) -> VirtualPrinterList:
+        """``GET /api/v1/virtual-printers`` (#4747): needs ``settings:read``, which an
+        API key holds through Read Status (``backend/app/core/auth.py``
+        ``_APIKEY_SCOPE_BY_PERMISSION``, line 130, v1.3.0b1-daily.20261025)."""
+        response = await self._send(
+            "GET",
+            "/virtual-printers",
+            scope=Scope.READ_STATUS,
+            operation="virtual_printers.list",
+            what="list the virtual printers",
+        )
+        return VirtualPrinterList.model_validate(response.json())
 
     async def printer_status(self, printer_id: int) -> PrinterStatus:
         """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""

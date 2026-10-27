@@ -44,6 +44,7 @@ from scadbuddy.api.jobs import (
     ViewCamera,
     ViewSize,
     _job_status,
+    draw_view,
     preview_view,
     render_model,
     require_job,
@@ -84,6 +85,7 @@ from scadbuddy.bambuddy.project_file import (
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.config import Config
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
@@ -212,7 +214,9 @@ def detail(
     params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
-        has_thumbnail=store.thumbnail_path(meta.id).is_file(),
+        has_thumbnail=(
+            store.thumbnail_path(meta.id).is_file() or store.drawable_thumbnail(meta.id)
+        ),
         params=params,
         inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
@@ -1077,13 +1081,84 @@ def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> File
     response_class=FileResponse,
     responses={200: {"content": {"image/png": {}}}},
     summary="Output thumbnail",
+    description=(
+        "The viewer's capture, or plate 1's cover for an arranged output. An output with "
+        "neither gets one drawn from its preview mesh on first read while "
+        "`preview_renders` is on; a later upload replaces it."
+    ),
 )
-def get_output_thumbnail(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
-    require_output(outputs, output_id)
-    path = outputs.directory(output_id) / THUMBNAIL_NAME
-    if not path.is_file():
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
+async def get_output_thumbnail(
+    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep
+) -> FileResponse:
+    await asyncio.to_thread(require_output, outputs, output_id)
+    path = await asyncio.to_thread(lambda: outputs.directory(output_id) / THUMBNAIL_NAME)
+    if not await asyncio.to_thread(path.is_file):
+        await _draw_thumbnail(outputs, output_id, path, config)
     return FileResponse(path, media_type="image/png")
+
+
+async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, config: Config) -> None:
+    """#4775: a thumbnail for an output saved with none (the agent's, a flow's, an order
+    quote's), from its preview mesh, as the `iso` view draws it. Lazy, so outputs saved
+    before this get one too, and a browser save that uploads its capture right away
+    never pays for a draw. An upload that lands first stays."""
+    missing = ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
+    if not await asyncio.to_thread(outputs.drawable_thumbnail, output_id):
+        raise missing
+    slots = outputs.thumbnail_draws
+    await slots.acquire()
+    try:
+        # Another read drew it while this one waited.
+        if await asyncio.to_thread(path.is_file):
+            slots.release()
+            return
+    except BaseException:
+        slots.release()
+        raise
+    # The slot goes back when the thread ends, not when this read stops waiting for
+    # it: `wait_for` cannot stop a thread, and a draw past its budget still runs.
+    drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
+    _DRAWING.add(drawing)
+
+    def ended(task: asyncio.Future[bool]) -> None:
+        _DRAWING.discard(task)
+        slots.release()
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "could not draw an output's thumbnail",
+                exc_info=task.exception(),
+                extra={"id": output_id},
+            )
+            outputs.remember_undrawable(output_id)
+
+    drawing.add_done_callback(ended)
+    try:
+        drawn = await asyncio.wait_for(asyncio.shield(drawing), timeout=config.render_timeout)
+    except TimeoutError:
+        outputs.remember_undrawable(output_id)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"drawing the thumbnail took longer than {config.render_timeout:g}s",
+        ) from None
+    except Exception:
+        raise missing from None
+    if not drawn:
+        raise missing
+
+
+#: Draws still running, so none is collected before its thread ends.
+_DRAWING: set[asyncio.Future[bool]] = set()
+
+
+def _draw_and_keep(outputs: OutputStore, output_id: str, path: Path) -> bool:
+    """The `iso` view of the output's preview mesh, kept as its thumbnail unless one
+    landed first; False, and remembered, when the mesh has nothing to draw."""
+    png = draw_view(path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None)
+    if png is None:
+        outputs.remember_undrawable(output_id)
+        return False
+    outputs.write_drawn_thumbnail(output_id, png)
+    return True
 
 
 @router.get(

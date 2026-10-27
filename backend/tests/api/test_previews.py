@@ -558,10 +558,13 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
         _create(client)
         settle(client, booted)
         assert _model(client)["thumbnail_source"] == "preview"
+        # #4775: outputs with no thumbnail get one drawn under the same setting.
+        assert booted.outputs.draw_thumbnails is True
 
     app, off = _boot(settings.model_copy(update={"preview_renders": False}), stub)
     with TestClient(app) as client:
         assert off.previews is None
+        assert off.outputs.draw_thumbnails is False
         assert off.catalogue.previews is not None
         assert off.catalogue.previews.image(SLUG) is not None
         model = _model(client)

@@ -35,7 +35,11 @@ function shown<T extends Row>(row: T): Omit<T, 'serial'> {
 const ROW_FIELDS =
   'Each row has `id` (the registry id the printer tools take), `name`, `model`, `bambuddy_printer_id` (the ' +
   'Bambuddy printer it is, or null), `lan_host` and `has_access_code` (its LAN link, the code itself never ' +
-  'shown), `preferred_path` and `bambuddy_active`.'
+  'shown), `preferred_path` and `bambuddy_active`; `kind` (`physical`, or `bambuddy_virtual` for one of ' +
+  "Bambuddy's virtual printers, never a printer to print on: `bambuddy_vp_id`, `vp_mode`, and `forwards_to`, " +
+  "the registry printer it forwards to, null for Bambuddy's 'any printer of its model'); `bambuddy_view`, " +
+  "Bambuddy's own values at the last sync (name, model, IP, active, nozzle count; a virtual printer's " +
+  'settings); and `lan_sync_error`, why the sync could not fill or move the LAN link.'
 
 /** Where the LAN link is made: by the user, never through a tool. */
 const LAN_IN_SETTINGS =
@@ -85,6 +89,38 @@ export const printerTools: Tool[] = [
     routes: ['GET /api/v1/printers/discover'],
     handler: async (_args, { backend }) =>
       json((await ok(backend.GET('/api/v1/printers/discover'), "list Bambuddy's printers")).map(shown)),
+  }),
+
+  defineTool({
+    name: 'sync_printers_from_bambuddy',
+    description:
+      "Imports and links Bambuddy's printers and virtual printers into the registry in one idempotent pass " +
+      '(#4439, #4747): a linked row for every active Bambuddy printer that reports a serial; an empty LAN link ' +
+      "filled from Bambuddy's address and access code through the same probe as Settings > Printers (Bambuddy " +
+      'gives the code only while its auth is off; otherwise the row says it is withheld); a `bambuddy_virtual` ' +
+      'row for every Bambuddy virtual printer. It never unlinks, deletes or overwrites: each entry says ' +
+      '`created`, `linked`, `already_linked`, `skipped`, `conflict` or `missing`, with a `reason`, and its LAN ' +
+      'outcome. `dry_run` plans the same and writes nothing. The access code is never in the result. Running ' +
+      'it again changes nothing.',
+    input: z.object({
+      dry_run: z.boolean().default(false).describe('Plan and report without writing anything'),
+    }),
+    // Outward: it stores printers' LAN access codes, read from Bambuddy, and dials the printers.
+    risk: 'outward',
+    source: SOURCE,
+    bambuddyScope: ['Read Status'],
+    routes: ['POST /api/v1/printers/sync-bambuddy'],
+    summarize: ({ dry_run }) =>
+      dry_run
+        ? "Plan an import of Bambuddy's printers (nothing written)"
+        : "Import and link Bambuddy's printers and virtual printers, filling empty LAN links from Bambuddy",
+    handler: async ({ dry_run }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/printers/sync-bambuddy', { params: { query: { dry_run } } }),
+          'sync the printers from Bambuddy',
+        ),
+      ),
   }),
 
   defineTool({
