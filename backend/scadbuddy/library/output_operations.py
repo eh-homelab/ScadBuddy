@@ -268,8 +268,10 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 status.HTTP_409_CONFLICT,
                 "this request's upload is no longer held; send it again",
             ) from None
-        await asyncio.to_thread(require_output, state.outputs, output_id)
+        meta = await asyncio.to_thread(require_output, state.outputs, output_id)
         await asyncio.to_thread(state.outputs.write_thumbnail, output_id, png)
+        # #4822: an open History page shows the old image, or "No preview", until told.
+        emit(state.events, OutputEvent(kind="output.updated", output_id=meta.id, slug=meta.slug))
         return {}
 
     async def rename_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
