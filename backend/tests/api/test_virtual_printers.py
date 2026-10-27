@@ -190,6 +190,25 @@ def test_lists_virtual_printers_with_their_registry_rows(client: TestClient) -> 
 
 
 @respx.mock
+def test_a_failed_virtual_printer_read_is_mapped_and_leaves_no_read_behind(
+    client: TestClient,
+) -> None:
+    """#4890: the list read failing is the route's answer, and the auth read is not left
+    running in a client that is closing: it is read after the list, never beside it."""
+    configure(client)
+    respx.get(f"{API}/virtual-printers").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+    auth = respx.get(f"{API}/auth/status").mock(
+        return_value=httpx.Response(200, json={"auth_enabled": False, "requires_setup": False})
+    )
+    response = client.get("/api/v1/printers/virtual")
+    assert response.status_code == 502, response.text
+    assert response.json()["status"] == 502
+    assert not auth.called
+
+
+@respx.mock
 def test_diagnostic_passes_bambuddys_checks_through(client: TestClient) -> None:
     configure(client)
     respx.get(f"{API}/virtual-printers/1/diagnostic").mock(

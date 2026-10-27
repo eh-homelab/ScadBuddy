@@ -226,7 +226,10 @@ async def list_virtual_printers(
     printers: PrintersDep, store: SettingsStoreDep
 ) -> VirtualPrintersView:
     async with client_for(await asyncio.to_thread(store.load)) as client:
-        listed, auth = await asyncio.gather(client.virtual_printers(), client.auth_enabled())
+        # One after the other (#4890): `gather` left the auth read running in a closing
+        # client when the list read failed; the auth read is a small one.
+        listed = await client.virtual_printers()
+        auth = await client.auth_enabled()
     rows = await _call(printers.store.list)
     return VirtualPrintersView(
         printers=_views(listed.printers, rows), models=listed.models, auth_enabled=auth
