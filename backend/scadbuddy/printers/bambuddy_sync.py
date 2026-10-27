@@ -384,9 +384,7 @@ async def _sync_lan(
     clears a reason an earlier sync left when this one has none."""
     action, reason = await _lan_outcome(printers, client, row, printer, previous_ip)
     if reason is None and action in ("kept", "none") and row.lan_sync_error is not None:
-        with contextlib.suppress(PrinterNotFoundError):
-            await asyncio.to_thread(printers.store.set_lan_sync_error, row.id, None)
-        printers.changed(row.id)
+        await _set_lan_state(printers, row, None, move_pending=None)
     return action, reason
 
 
@@ -403,10 +401,14 @@ async def _lan_outcome(
     if row.lan_host is not None:
         # A move is due when the link followed Bambuddy's last address, or when an
         # earlier move failed: that sync already recorded the new address in the view,
-        # so only the recorded failure still says the link was following it.
+        # so only `lan_move_pending` still says the link was following it (#4796). A sync
+        # with no address (above) leaves it, so the move is tried when the address is back.
+        if ip == row.lan_host:
+            if row.lan_move_pending:  # Bambuddy is back at the link's address
+                await _set_lan_state(printers, row, None, move_pending=False)
+            return "kept", None
         followed = previous_ip is not None and row.lan_host == previous_ip
-        retry = row.lan_sync_error == LAN_MOVE_FAILED
-        if not (followed or retry) or ip == row.lan_host:
+        if not (followed or row.lan_move_pending):
             return "kept", None
         return await _move_lan(printers, client, row, printer, ip)
     try:
@@ -436,6 +438,8 @@ async def _move_lan(
         outcome = await _link(printers, row, ip, stored, expect_host=old_host, failed=None)
         if outcome[0] == "linked":
             return "relinked", None
+        if outcome[0] == "kept":  # the user linked it meanwhile: that link wins
+            return "kept", None
     try:
         code = await client.printer_access_code(printer.id)
     except ApiError:
@@ -444,7 +448,9 @@ async def _move_lan(
         outcome = await _link(printers, row, ip, code, expect_host=old_host, failed=None)
         if outcome[0] == "linked":
             return "relinked", None
-    return await _lan_failed(printers, row, "failed", LAN_MOVE_FAILED)
+        if outcome[0] == "kept":
+            return "kept", None
+    return await _lan_failed(printers, row, "failed", LAN_MOVE_FAILED, move_pending=True)
 
 
 async def _link(
@@ -477,13 +483,29 @@ async def _link(
 
 
 async def _lan_failed(
-    printers: Printers, row: PrinterRow, action: LanAction, reason: str | None
+    printers: Printers,
+    row: PrinterRow,
+    action: LanAction,
+    reason: str | None,
+    *,
+    move_pending: bool | None = None,
 ) -> tuple[LanAction, str | None]:
-    if reason is not None and reason != row.lan_sync_error:
-        with contextlib.suppress(PrinterNotFoundError):
-            await asyncio.to_thread(printers.store.set_lan_sync_error, row.id, reason)
-        printers.changed(row.id)
+    if reason is not None and (
+        reason != row.lan_sync_error
+        or (move_pending is not None and move_pending != row.lan_move_pending)
+    ):
+        await _set_lan_state(printers, row, reason, move_pending=move_pending)
     return action, reason
+
+
+async def _set_lan_state(
+    printers: Printers, row: PrinterRow, reason: str | None, *, move_pending: bool | None
+) -> None:
+    with contextlib.suppress(PrinterNotFoundError):
+        await asyncio.to_thread(
+            printers.store.set_lan_sync_error, row.id, reason, move_pending=move_pending
+        )
+    printers.changed(row.id)
 
 
 async def _sync_virtual(

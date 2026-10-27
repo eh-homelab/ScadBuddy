@@ -4,6 +4,7 @@ Rulings 2-4): the registry follows Bambuddy, idempotently, and never overwrites.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -81,9 +82,13 @@ class FakePrinters:
         self.changed_ids: list[str] = []
         self.probes: list[tuple[str, str, str]] = []
         self.answer = True
+        #: Run inside a probe: a change that lands while the sync dials the printer.
+        self.during_probe: Callable[[], None] | None = None
 
         async def probe(host: str, serial: str, code: str) -> tuple[LanReport, str]:
             self.probes.append((host, serial, code))
+            if self.during_probe is not None:
+                self.during_probe()
             if not self.answer:
                 raise ConnectionRefusedError("nope")
             return LanReport(serial=serial, received_at=datetime.now(UTC), print={}), CERT
@@ -297,6 +302,85 @@ async def test_a_failed_move_is_tried_again_on_the_next_sync(
     (row,) = store.list()
     assert row.lan_host == "192.168.1.77" and row.lan_sync_error is None
     assert printers.probes[0] == ("192.168.1.77", SERIAL, CODE)
+
+
+async def test_a_link_the_user_makes_during_a_move_is_kept(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4796 finding 1: the move's probe passes, but the user linked the printer
+    meanwhile. That link wins now, and is not marked as a failed move that the next
+    sync then moves to Bambuddy's address."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    (row,) = store.list()
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+
+    def users_link() -> None:
+        printers.during_probe = None
+        store.link_lan(
+            row.id, LanLink(host="192.168.1.50", access_code="mine1234"), cert_sha256=CERT
+        )
+
+    printers.during_probe = users_link
+    result = await run(printers, moved)
+    assert result.entries[0].lan == "kept"
+    after = store.require(row.id)
+    assert after.lan_host == "192.168.1.50"
+    assert after.lan_sync_error is None and not after.lan_move_pending
+
+    await run(printers, moved)
+    assert store.require(row.id).lan_host == "192.168.1.50"
+    assert store.open_access_code(row.id) == "mine1234"
+
+
+async def test_a_failed_move_is_retried_whatever_its_message_says(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4796 finding 2: the retry is its own state, not the wording of the message a
+    row was stored with."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+    printers.answer = False
+    await run(printers, moved)
+    (row,) = store.list()
+    assert row.lan_move_pending
+    store.set_lan_sync_error(row.id, "an older wording of the failed-move message")
+
+    printers.answer = True
+    again = await run(printers, moved)
+    assert again.entries[0].lan == "relinked"
+    assert store.require(row.id).lan_host == "192.168.1.77"
+
+
+async def test_a_failed_move_survives_a_sync_with_no_address(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4796 finding 3: Bambuddy reporting no address for one sync does not forget the
+    move that is due."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+    printers.answer = False
+    await run(printers, moved)
+    printers.answer = True
+    blank = await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)], codes={1: CODE}))
+    assert blank.entries[0].lan == "kept"
+
+    again = await run(printers, moved)
+    assert again.entries[0].lan == "relinked"
+    row = store.list()[0]
+    assert row.lan_host == "192.168.1.77" and not row.lan_move_pending
+
+
+async def test_a_pending_move_ends_when_bambuddy_returns_to_the_links_address(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    printers.answer = False
+    await run(printers, FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE}))
+    back = await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    assert back.entries[0].lan == "kept"
+    (row,) = store.list()
+    assert row.lan_host == "192.168.1.10"
+    assert row.lan_sync_error is None and not row.lan_move_pending
 
 
 async def test_a_reason_a_later_sync_no_longer_has_is_cleared(

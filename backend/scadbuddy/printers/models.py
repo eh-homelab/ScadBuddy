@@ -100,6 +100,10 @@ class PrinterRow(BaseModel):
     bambuddy_view: BambuddyView | None = None
     #: Why the Bambuddy sync last could not fill or move the LAN link; never the code.
     lan_sync_error: str | None = None
+    #: Whether the LAN link still follows Bambuddy's address after a move to Bambuddy's
+    #: new one failed: the next sync tries the move again (#4796). Any link made or
+    #: removed clears it.
+    lan_move_pending: bool = False
     created_at: datetime
     updated_at: datetime
 

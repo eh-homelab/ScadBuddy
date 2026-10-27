@@ -63,7 +63,7 @@ _COLUMNS = (
     "id, serial, name, model, bambuddy_printer_id, bambuddy_unlinked_id, lan_host, lan_cert_sha256,"
     " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, bambuddy_active,"
     " kind, bambuddy_vp_id, forwards_to, vp_mode, bambuddy_view, lan_sync_error,"
-    " created_at, updated_at"
+    " lan_move_pending, created_at, updated_at"
 )
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))"
 
@@ -464,7 +464,8 @@ class PrinterStore:
                 conn,
                 printer_id,
                 "lan_host = %s, lan_cert_sha256 = %s, access_code_sealed = %s,"
-                " access_code_dek_sealed = %s, access_code_kek_id = %s, lan_sync_error = NULL",
+                " access_code_dek_sealed = %s, access_code_kek_id = %s, lan_sync_error = NULL,"
+                " lan_move_pending = false",
                 (
                     body.host,
                     cert_sha256,
@@ -484,7 +485,8 @@ class PrinterStore:
                 conn,
                 printer_id,
                 "lan_host = NULL, lan_cert_sha256 = NULL, access_code_sealed = NULL,"
-                " access_code_dek_sealed = NULL, access_code_kek_id = NULL",
+                " access_code_dek_sealed = NULL, access_code_kek_id = NULL,"
+                " lan_move_pending = false",
                 (),
             )
 
@@ -685,9 +687,20 @@ class PrinterStore:
                 (Jsonb(view.model_dump(mode="json")), name, model),
             )
 
-    def set_lan_sync_error(self, printer_id: str, error: str | None) -> PrinterRow:
+    def set_lan_sync_error(
+        self, printer_id: str, error: str | None, *, move_pending: bool | None = None
+    ) -> PrinterRow:
+        """Record why the sync could not fill or move the LAN link; ``move_pending``
+        (`PrinterRow.lan_move_pending`) is left as it is when ``None``."""
         with self.pool.connection() as conn:
-            return self._update(conn, printer_id, "lan_sync_error = %s", (error,))
+            if move_pending is None:
+                return self._update(conn, printer_id, "lan_sync_error = %s", (error,))
+            return self._update(
+                conn,
+                printer_id,
+                "lan_sync_error = %s, lan_move_pending = %s",
+                (error, move_pending),
+            )
 
     def upsert_virtual(
         self,
