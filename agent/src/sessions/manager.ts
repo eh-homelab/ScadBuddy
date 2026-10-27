@@ -1,3 +1,4 @@
+import type { AccessResolver } from '../access/resolver.js'
 import type { nestedQueries } from '../builtins/nested.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
@@ -699,6 +700,8 @@ export type SessionManagerDeps = {
   /** Asks the endpoint about a refused or rate-limited credential; fallback.ts's own probe when omitted. */
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
+  /** Tool access (#2171, ai_access): the http_request and own-plugin switches, and http_request's tier. Defaults without it. */
+  access?: Pick<AccessResolver, 'enabled' | 'entry'>
   tierOf?: TierResolver
   /** Each registry call's title for the panel (#782, tools/harness.ts `titleOf`). */
   titleOf?: TitleResolver
@@ -752,8 +755,8 @@ export type SessionManagerDeps = {
   memory?: MemoryOptions | undefined
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
-   * session's turns get it when this is set and the `http_request_enabled`
-   * setting is not `false`; it is on by default.
+   * session's turns get it when this is set and `builtin:http` is not switched
+   * off in `access` (#2171); it is on by default.
    */
   httpRequest?: {
     /** Tests only: a resolver other than the system's. */

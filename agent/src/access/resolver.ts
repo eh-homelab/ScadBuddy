@@ -1,7 +1,7 @@
 import type { RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import type { Tool, ToolOverrides } from '../tools/registry.js'
-import { BUILTIN_SOURCES, type StoredOverrides, type ToolAccess } from './model.js'
+import { BUILTIN_SOURCES, isToolAccess, type StoredOverrides, type ToolAccess } from './model.js'
 import { isRegistrySource, pluginOverrides, registryOverrides, sourceEnabled, toolAccess } from './resolve.js'
 import type { AccessReader } from './store.js'
 
@@ -41,6 +41,17 @@ export class AccessResolver {
 
   async enabled(source: string): Promise<boolean> {
     return sourceEnabled(source, this.reader ? await this.reader.rows([source]) : [])
+  }
+
+  /**
+   * A source's switch and one item's stored access (undefined: none stored, so its default
+   * applies), in one read. For a tool whose default depends on its input (http_request's
+   * method); not for the registry sources, whose migrated rows only raise (`item`).
+   */
+  async entry(source: string, item: string): Promise<{ enabled: boolean; access: ToolAccess | undefined }> {
+    const rows = this.reader ? await this.reader.rows([source]) : []
+    const row = rows.find((r) => r.source === source && r.item === item)
+    return { enabled: sourceEnabled(source, rows), access: row && isToolAccess(row.access) ? row.access : undefined }
   }
 
   /** One item's access: its row, else `declared`. */

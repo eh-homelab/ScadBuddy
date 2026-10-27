@@ -35,7 +35,7 @@ export type BuiltInToolSet = {
   name: string
   tool_prefix: string
   tools: readonly BuiltInTool[]
-  /** Whether the set as a whole has a switch: builtins.ts's setting for it. */
+  /** Whether the set as a whole has a switch: its builtins.ts source's switch in ai_access. */
   switchable: boolean
 }
 
@@ -173,7 +173,7 @@ export class BuiltInTools {
     const builtIn = builtInNamed(set.name)
     const [overrides, enabled] = await Promise.all([
       this.overrides(set),
-      set.switchable && builtIn ? builtInEnabled(undefined, builtIn) : Promise.resolve(true),
+      set.switchable && builtIn ? builtInEnabled(this.#access, builtIn) : Promise.resolve(true),
     ])
     return {
       name: set.name,

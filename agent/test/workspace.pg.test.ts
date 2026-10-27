@@ -587,7 +587,6 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
           httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
-          settings: { get: async <T,>() => true as T },
         }),
       }
       const out = await new MockActivityEnvironment({
@@ -618,7 +617,6 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
           httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
-          settings: { get: async <T,>() => true as T },
         }),
       }
       const out = String(
@@ -654,7 +652,6 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         flows: { startedBy: async (run: string) => (run === flow ? browser : undefined), approved: async () => false },
         servers: turnServers({
           httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
-          settings: { get: async <T,>() => true as T },
         }),
       }
       const out = String(

@@ -12,13 +12,9 @@ import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
-import {
-  HTTP_SERVER,
-  httpRequestEnabled,
-  httpRequestServer,
-  httpTierOf,
-  SETTING_HTTP_REQUEST,
-} from '../harness/httpRequest.js'
+import { BUILTIN_SOURCES } from '../access/model.js'
+import { DEFAULT_ACCESS } from '../access/resolve.js'
+import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
 import type { RiskTier, TierResolver } from '../harness/permissions.js'
 import { isQuestionTool } from '../harness/questions.js'
 import { harnessTierOf, type HarnessRun } from '../harness/run.js'
@@ -26,7 +22,6 @@ import { ensureSessionDir } from '../harness/stateDirs.js'
 import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks, turnRecallMaxQueryChars } from '../memory/hindsight.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
-import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
@@ -52,6 +47,7 @@ export type TurnRunnerDeps = Pick<
   | 'paths'
   | 'credentials'
   | 'settings'
+  | 'access'
   | 'tierOf'
   | 'mcpServers'
   | 'prepareApproval'
@@ -257,8 +253,12 @@ export class TurnRunner {
     const phase = <T,>(name: string, run: () => Promise<T>) =>
       withSpan(`agent.turn.${name}`, parent ? { parent } : {}, run)
     const registryTierOf = this.deps.tierOf ?? (() => undefined)
-    // The http tools' tier depends on the method in their input (#827).
-    const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
+    // Without one, every source and item is at its default.
+    const access = this.deps.access ?? DEFAULT_ACCESS
+    // The http tools' tier depends on the method in their input (#827), unless
+    // http_request's access in ai_access is a tier (#2171), read with its switch below.
+    let httpTier: TierResolver = httpTierOf
+    const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? registryTierOf(name, input)
     // Widened with the plugins' tiers once they are loaded below, so the
     // panel shows a plugin tool at the tier the permission seam applies.
     // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
@@ -301,9 +301,9 @@ export class TurnRunner {
       // Sets the memory hooks up only: the recall and retain they run later are
       // inside the run, not under this span.
       const memory = hindsight ? await phase('memory', () => this.memoryHooks(hindsight, secrets, session)) : undefined
-      // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
+      // Settings → plugin packages may switch it off: its source in ai_access (plugins/packages/builtins.ts).
       const ownPlugin =
-        this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
+        this.deps.ownPlugin !== undefined && (await access.enabled(BUILTIN_SOURCES.ownPlugin))
           ? this.deps.ownPlugin
           : undefined
       const packagePlugins = this.deps.packagePlugins
@@ -406,22 +406,24 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpSetting] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
-          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
+          this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
         ]),
       )
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
       const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
-      // The http_request tool (#827): on unless the setting is `false`. Its
+      // The http_request tool (#827): on unless `builtin:http` is switched off, or its
+      // item is `off`, in ai_access (#2171); an item set to a tier is its tier. Its
       // saved bodies live in Postgres, so any replica serves them (#2374), and it
       // never sees the turn's secrets except to refuse a request that carries one.
+      if (httpAccess) httpTier = httpAccessTierOf(httpAccess.access)
       const http =
-        this.deps.httpRequest && httpRequestEnabled(httpSetting)
+        this.deps.httpRequest && httpAccess?.enabled && httpAccess.access !== 'off'
           ? httpRequestServer(
               slotHttpContext(
                 {

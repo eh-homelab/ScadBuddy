@@ -58,6 +58,17 @@ export function sourceEnabled(source: string, rows: readonly AccessRow[]): boole
   return enabledByDefault(source)
 }
 
+/**
+ * What a caller given no AccessResolver answers: every source and item at its default
+ * (resolver.ts's answers without a reader). Here, not there: resolver.ts imports the
+ * registry, which the turn modules that need this must not import.
+ */
+export const DEFAULT_ACCESS = {
+  enabled: (source: string): Promise<boolean> => Promise.resolve(enabledByDefault(source)),
+  entry: (source: string): Promise<{ enabled: boolean; access: ToolAccess | undefined }> =>
+    Promise.resolve({ enabled: enabledByDefault(source), access: undefined }),
+}
+
 export function isRegistrySource(source: string): boolean {
   return REGISTRY_SOURCES.includes(source)
 }

@@ -70,11 +70,24 @@ describe('AccessResolver', () => {
     expect(await resolver.enabled('remote:other')).toBe(false)
   })
 
+  it('entry() answers the switch and the stored access in one read, undefined where none is stored', async () => {
+    const { access, reads } = memoryAccess([
+      { source: 'builtin:http', item: '*', access: 'off', updated_by: 'browser:browser' },
+      { source: 'builtin:http', item: 'http_request', access: 'outward', updated_by: 'browser:browser' },
+    ])
+    const resolver = new AccessResolver(access)
+    expect(await resolver.entry('builtin:http', 'http_request')).toEqual({ enabled: false, access: 'outward' })
+    expect(reads.n).toBe(1)
+    expect(await resolver.entry('builtin:http', 'other')).toEqual({ enabled: false, access: undefined })
+    expect(await new AccessResolver(undefined).entry('builtin:http', 'http_request')).toEqual({ enabled: true, access: undefined })
+  })
+
   it('a read that fails rejects', async () => {
     const reader: AccessReader = { rows: () => Promise.reject(new Error('db down')) }
     const resolver = new AccessResolver(reader)
     await expect(resolver.registry()).rejects.toThrow('db down')
     await expect(resolver.registryOverrides().of('get_model')).rejects.toThrow('db down')
     await expect(resolver.item('remote:hs', 'search', 'outward')).rejects.toThrow('db down')
+    await expect(resolver.entry('builtin:http', 'http_request')).rejects.toThrow('db down')
   })
 })

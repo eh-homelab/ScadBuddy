@@ -5,6 +5,7 @@ import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
+import { AccessResolver } from './access/resolver.js'
 import { AccessStore } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
@@ -212,6 +213,8 @@ const oidcRepo = settings
   : undefined
 const oidcProvider = new OidcProvider()
 const access = database ? new AccessStore(database.sql, audit) : undefined
+// Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
+const accessResolver = new AccessResolver(access)
 const plugins = database ? new PluginStore(database.sql) : undefined
 // ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
 const builtInTools = new BuiltInTools(access)
@@ -378,6 +381,7 @@ const sessions =
         paths,
         ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
+        access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
         // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
@@ -405,8 +409,8 @@ const sessions =
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
-        // The http_request tool (#827): on for a turn unless the
-        // `http_request_enabled` setting is false (routes/httpRequest.ts).
+        // The http_request tool (#827): on for a turn unless `builtin:http` is
+        // switched off in ai_access (routes/httpRequest.ts, #2171).
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
@@ -599,7 +603,7 @@ const turnToolDeps = temporal
       flows: new PgFlowRuns(temporal.sql),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
-        ...(settings ? { settings } : {}),
+        access: accessResolver,
         // The headless browser's lists (#982), as a classic turn's.
         browserOrigins: new BrowserOrigins(temporal.sql, settings),
         credentialSecrets: durableCredentialSecrets,

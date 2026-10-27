@@ -12,6 +12,9 @@ import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
+import { type AccessRow, BUILTIN_SOURCES } from '../src/access/model.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { memoryAccess } from './support/memoryAccess.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
@@ -333,6 +336,28 @@ describe('turn tools in a durable session', () => {
       env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://example.test/', method: 'POST' }),
     )
     expect(refused.type).toBe('NotApproved')
+  })
+
+  it("takes http_request's switch and tier from ai_access (#2171): off hides it, an item set to outward parks a GET", async () => {
+    const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
+    const run = async (rows: AccessRow[]) => {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({ httpRequest: { saveRoot, sql: noDatabase() as never }, access: new AccessResolver(memoryAccess(rows).access) }),
+        approvals: { approved: async () => false },
+      }
+      const activities = turnToolActivities(deps)
+      const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+      const tier = (input: unknown) =>
+        env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
+      return { names: tools.map((t) => t.name), tools, tier }
+    }
+    const row = (item: string, access: string): AccessRow => ({ source: BUILTIN_SOURCES.http, item, access, updated_by: 'test' })
+    expect((await run([row('*', 'off')])).names.filter((n) => n.startsWith(`${HTTP_SERVER}__`))).toEqual([])
+    expect((await run([row(HTTP_TOOL, 'off')])).names.filter((n) => n.startsWith(`${HTTP_SERVER}__`))).toEqual([])
+    const outward = await run([row(HTTP_TOOL, 'outward')])
+    expect(outward.tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)).toMatchObject({ may_park: true, tier: 'outward' })
+    expect(await outward.tier({ url: 'http://example.test/' })).toEqual({ tier: 'outward' })
   })
 
   it('runs a read call and returns its text, with an audit row', async () => {

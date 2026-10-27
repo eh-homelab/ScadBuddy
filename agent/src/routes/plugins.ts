@@ -321,7 +321,7 @@ export const route: RouteModule = {
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       builtIns: new BuiltInTools(deps.access),
-      switches: deps.settings ? new BuiltInPackages(deps.settings) : undefined,
+      switches: deps.access ? new BuiltInPackages(deps.access) : undefined,
       testPlugin:
         deps.testPlugin ??
         ((plugin, address) =>
