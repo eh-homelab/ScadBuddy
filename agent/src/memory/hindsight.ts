@@ -750,7 +750,9 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       // The SDK hands it over as `last_assistant_message` ("Text content of the
       // last assistant message before stopping. Avoids the need to read and
       // parse the transcript file", sdk.d.ts 0.3.283 and 0.3.287), so it is used for the
-      // last reply; the next turn's retain finds it in the file.
+      // last reply; the next turn's retain finds it in the file. On 2.1.309 the file
+      // sometimes holds it already (the agent CI job of #4741, 2026-10-26), so it is
+      // appended only when the transcript's last turn is not that reply.
       const last = input.last_assistant_message?.trim() ?? ''
       const refId = `conversation:${sessionId}`
       const stopped = new Date()

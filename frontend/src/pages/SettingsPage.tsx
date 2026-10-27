@@ -30,6 +30,7 @@ import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { PrintersPanel } from '../components/settings/Printers'
+import { syncSummary } from '../lib/printerRegistry'
 import { McpTokensSection } from '../components/McpTokensSection'
 import {
   AlertDialog,
@@ -193,6 +194,32 @@ function baseline(settings: Settings, name: FieldName): string {
   return serverValue(settings, name)
 }
 
+/** The flag each secret is reported under. */
+const SECRET_FLAGS: Record<Secret, keyof Settings> = {
+  bambuddy_api_key: 'has_api_key',
+  bambuddy_render_api_key: 'has_render_api_key',
+  google_fonts_api_key: 'has_google_fonts_api_key',
+  store_s3_secret_access_key: 'has_store_s3_secret_access_key',
+}
+
+/**
+ * A copy of `settings` with `names` (their values, secret flags and sources) taken from
+ * `from`. Always a new object, so a seed queued with it is applied even when nothing moved.
+ */
+function patchFields(settings: Settings, from: Settings, names: FieldName[]): Settings {
+  const out: Record<string, unknown> = { ...settings }
+  const sources = { ...settings.sources }
+  for (const name of names) {
+    const key = isSecret(name) ? SECRET_FLAGS[name] : name
+    out[key] = (from as Record<string, unknown>)[key]
+    const source = from.sources?.[name]
+    if (source === undefined) delete sources[name]
+    else sources[name] = source
+  }
+  out.sources = sources
+  return out as Settings
+}
+
 /** Each section's id, in page order: what the section nav marks as in view. */
 const SECTION_IDS: readonly string[] = SECTIONS.map((section) => section.id)
 
@@ -295,6 +322,8 @@ function SettingsSections() {
   const [resetting, setResetting] = useState<FieldName | null>(null)
   const [testing, setTesting] = useState(false)
   const [test, setTest] = useState<ConnectionTest | null>(null)
+  // #4439: what the printer import did after a save whose test passed, or why it could not.
+  const [imported, setImported] = useState<string | null>(null)
   const [registering, setRegistering] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarLink | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -402,13 +431,104 @@ function SettingsSections() {
 
   const guard = useLeaveGuard(dirty)
 
+  // #4776, #4803: every write (a save, a reset) and every reload of the settings is
+  // numbered as sent. Only the newest answer to land is cached whole; an older one landing
+  // after it would take the settings back a step.
+  const writeSent = useRef(0)
+  const writeLanded = useRef(0)
+  /** Whether the answer to `sent` is the newest yet; it is then the newest landed. */
+  const landed = (sent: number): boolean => {
+    if (sent <= writeLanded.current) return false
+    writeLanded.current = sent
+    return true
+  }
+  /** The write each field was last sent in: a late answer is still the truth for these. */
+  const fieldWriter = useRef(new Map<FieldName, number>())
+  /** Each write in flight: the writer each of its fields had before it was sent. */
+  const priorWriter = useRef(new Map<number, Map<FieldName, number | undefined>>())
+  /**
+   * The settings as last cached, read when an answer lands: the render's `settings` can
+   * be a step behind when two answers land together. Any new `settingsState.setData`
+   * caller must update `cached` too, or the next late answer is patched into stale settings.
+   */
+  const cached = useRef<Settings | undefined>(undefined)
+  useEffect(() => {
+    if (settings && cached.current === undefined) cached.current = settings
+  }, [settings])
+
+  /**
+   * Caches a write's answer and returns what is cached. The newest answer is cached whole.
+   * A late one is not: a newer answer has landed. Yet the server may have applied the
+   * writes in another order than they were sent, so that newer answer can lack this
+   * write's fields. The late answer's own fields, the ones no newer write was sent for,
+   * are patched into the cache from it. `patchFields` copies only those fields, their
+   * `has_*` flags and their `sources`, not values the server derives from a write (e.g.
+   * `library_backend` and `store_backend` on a Connection fallback).
+   */
+  const cacheWrite = (sent: number, next: Settings, written: FieldName[], seed: FieldName[], since: Edits): Settings => {
+    requestSeed(seed, since)
+    priorWriter.current.delete(sent)
+    if (landed(sent) || !cached.current) {
+      cached.current = next
+      settingsState.setData(next)
+      return next
+    }
+    const own = written.filter((name) => fieldWriter.current.get(name) === sent)
+    const patched = patchFields(cached.current, next, own)
+    cached.current = patched
+    settingsState.setData(patched)
+    return patched
+  }
+  /** Numbers a write as sent, and marks it the last one sent for each of `written`. */
+  const sendWrite = (written: FieldName[]): number => {
+    const sent = ++writeSent.current
+    priorWriter.current.set(sent, new Map(written.map((name) => [name, fieldWriter.current.get(name)])))
+    for (const name of written) fieldWriter.current.set(name, sent)
+    return sent
+  }
+  /**
+   * A write that failed gives its fields back to the writer each had before, unless a newer
+   * write was sent for it since: a late answer from that older write is still their truth.
+   * A newer write still in flight inherits the same prior, should it fail too.
+   */
+  const failWrite = (sent: number) => {
+    for (const [name, prior] of priorWriter.current.get(sent) ?? []) {
+      for (const priors of priorWriter.current.values()) {
+        if (priors.get(name) === sent) priors.set(name, prior)
+      }
+      if (fieldWriter.current.get(name) !== sent) continue
+      if (prior === undefined) fieldWriter.current.delete(name)
+      else fieldWriter.current.set(name, prior)
+    }
+    priorWriter.current.delete(sent)
+  }
+
+  /**
+   * Numbers a read as sent and refreshes the settings. `onAccept` runs only when no newer
+   * write has landed, and takes the read by returning the edits to seed the form since, or
+   * refuses it with `undefined`. A taken read is the newest landed and is cached whole.
+   */
+  const numberedRead = (onAccept: () => Edits | undefined) => {
+    const sent = ++writeSent.current
+    settingsState.refresh((next) => {
+      // #4803: a save or reset sent after this read has landed already, and is newer.
+      if (sent <= writeLanded.current) return false
+      const since = onAccept()
+      if (since === undefined) return false
+      landed(sent)
+      requestSeed('all', since)
+      cached.current = next
+      return true
+    })
+  }
+
   // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
   // follows them; an edited one (`dirty`) is never overwritten, and says so.
   const [changedElsewhere, setChangedElsewhere] = useState(false)
   const loadLatest = () => {
     setChangedElsewhere(false)
-    requestSeed('all', beginSeed())
-    settingsState.refresh()
+    const since = beginSeed()
+    numberedRead(() => since)
   }
 
   // Read when the answer lands, not when the event came: typing may have started since.
@@ -420,13 +540,10 @@ function SettingsSections() {
       setChangedElsewhere(true)
       return
     }
-    settingsState.refresh(() => {
-      if (!isDirty.current()) {
-        requestSeed('all', beginSeed())
-        return true
-      }
+    numberedRead(() => {
+      if (!isDirty.current()) return beginSeed()
       setChangedElsewhere(true)
-      return false
+      return undefined
     })
   })
 
@@ -479,13 +596,17 @@ function SettingsSections() {
     if (Object.keys(body).length === 0) return true
     setSaving(id)
     setSectionError((current) => ({ ...current, [id]: undefined }))
+    let sent: number | undefined
     try {
       const since = beginSeed()
+      const written = Object.keys(body) as FieldName[]
+      sent = sendWrite(written)
       const next = await api.putSettings(body)
-      requestSeed([...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])], since)
-      settingsState.setData(next)
-      if (id === 'preview') setDisplayUnit(next.display_unit)
-      if (id === 'connection') setBambuddyLinks(next)
+      const names = [...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])]
+      // What is cached, not this answer: a late answer is only patched in (#4803).
+      const shown = cacheWrite(sent, next, written, names, since)
+      if (id === 'preview') setDisplayUnit(shown.display_unit)
+      if (id === 'connection') setBambuddyLinks(shown)
       setSavedAt((current) => ({ ...current, [id]: new Date().toLocaleTimeString() }))
       if (id === 'connection') {
         targetsState.reload()
@@ -493,6 +614,7 @@ function SettingsSections() {
       }
       return true
     } catch (cause) {
+      if (sent !== undefined) failWrite(sent)
       // A 422 names each refused field (`loc: ["body", <field>]`): shown beside it.
       const fieldErrors: Partial<Record<FieldName, string>> = {}
       const reported = cause instanceof ApiError ? (cause.problem as { errors?: unknown }).errors : undefined
@@ -528,6 +650,7 @@ function SettingsSections() {
   async function resetField(name: FieldName) {
     setResetting(name)
     setError(null)
+    let sent: number | undefined
     try {
       // Resetting what the Bambuddy store needs takes the store back to local with it, as a
       // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
@@ -536,15 +659,16 @@ function SettingsSections() {
         settings?.store_backend === 'bambuddy' &&
         settings.library_backend !== 'native'
       const since = beginSeed()
+      const written: FieldName[] = fallBack ? [name, 'store_backend'] : [name]
+      sent = sendWrite(written)
       const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
-      requestSeed(fallBack ? [name, 'store_backend'] : [name], since)
-      settingsState.setData(next)
-      setBambuddyLinks(next)
+      setBambuddyLinks(cacheWrite(sent, next, written, written, since))
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
         targetsState.reload()
         projectsState.reload()
       }
     } catch (cause) {
+      if (sent !== undefined) failWrite(sent)
       setError(cause instanceof ApiError ? cause.detail : 'Could not reset the setting.')
     } finally {
       setResetting(null)
@@ -648,8 +772,23 @@ function SettingsSections() {
     try {
       // The server tests what it has stored, so save first or the test lags the form.
       if (!(await saveSection('connection'))) return
-      setTest(await api.testSettings())
+      const result = await api.testSettings()
+      setTest(result)
       bambuddyState.reload()
+      setImported(null)
+      // #4439: a connection that tests OK imports and links Bambuddy's printers, as the
+      // server's own Schedule would within minutes. The agent's test_connection does not:
+      // it is a read, and the import stores access codes.
+      if (result.ok) {
+        api
+          .syncPrintersFromBambuddy()
+          .then((sync) => setImported(`Printers from Bambuddy: ${syncSummary(sync)}.`))
+          .catch((cause: unknown) =>
+            setImported(
+              `Printers from Bambuddy were not imported: ${cause instanceof ApiError ? cause.detail : 'the import failed'}.`,
+            ),
+          )
+      }
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The connection test could not run.')
     } finally {
@@ -1004,6 +1143,11 @@ function SettingsSections() {
                   )}
                 </div>
                 {test?.upstream && <UpstreamAnswerDetails answer={test.upstream} />}
+                {test?.ok && imported && (
+                  <p role="status" aria-label="Printer import" className="text-xs text-muted-foreground">
+                    {imported}
+                  </p>
+                )}
                 {test && (test.scopes?.length ?? 0) > 0 && (
                   <ul aria-label="Scopes" className="space-y-1 rounded-lg p-3 text-xs ring-1 ring-foreground/10">
                     {test.scopes?.map((check) => (
@@ -1175,7 +1319,7 @@ function SettingsSections() {
             title={sectionTitle('printers')}
             description="One entry per printer, by its serial: the Bambuddy printer it is, and how ScadBuddy reaches it over the LAN. The access code is tested on the printer, stored sealed, and never shown again. Each change applies at once."
           >
-            <PrintersPanel />
+            <PrintersPanel bambuddyConfigured={connected} />
           </Section>
 
           <Section

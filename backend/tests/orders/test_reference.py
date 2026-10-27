@@ -24,6 +24,7 @@ from scadbuddy.orders.reference import (
     resolve_reference,
 )
 from scadbuddy.render.job_models import render_key
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
 
@@ -100,10 +101,13 @@ async def test_a_reference_is_checked_and_normalised(library: Library) -> None:
     )
     reference = resolved.reference  # type: ignore[attr-defined]
     assert (reference.slug, reference.commit) == ("demo", commit)
-    assert reference.inputs == {"params": {"width": 12}, "v": 0}
+    # #4774: the omitted `label` at its default, as the render route fills it, so the
+    # item's render is the one the browser makes of the same item.
+    full: dict[str, ParamValue] = {"width": 12, "label": "hi"}
+    assert reference.inputs == {"params": full, "v": 0}
     assert reference.template_name == "Demo"
     assert reference.libraries == []
-    assert reference.render_key == render_key("demo", {"width": 12}, commit)
+    assert reference.render_key == render_key("demo", full, commit)
     # Nothing to take colours from without an output (Ruling 7): the quote fills them.
     assert resolved.colours == []  # type: ignore[attr-defined]
 
@@ -116,7 +120,11 @@ async def test_reference_from_an_output_copies_commit_libraries_and_colours(
     resolved = await library.resolve(slug=None, commit=None, inputs=None, output_id="out1")
     reference = resolved.reference  # type: ignore[attr-defined]
     assert (reference.slug, reference.commit) == ("demo", commit)
+    # #4774: an item made from an output keeps the inputs it recorded (only `width`, as
+    # outputs saved before renders filled defaults do), and its key hashes those, so
+    # `quote.py` `output_matches` still finds that output.
     assert reference.inputs == {"params": {"width": 12}, "v": 1}
+    assert reference.render_key == render_key("demo", {"width": 12}, commit)
     assert [lib.name for lib in reference.libraries] == ["BOSL2"]
     assert resolved.colours == [  # type: ignore[attr-defined]
         ColourSlot(slot=0, colour="#FF0000"),
@@ -147,6 +155,20 @@ async def test_a_commit_or_inputs_beside_an_output_must_be_the_outputs(
         slug="demo", commit=commit[:7], inputs={"params": {"width": 12}, "v": 1}, output_id="out1"
     )
     assert agreed.reference.commit == commit  # type: ignore[attr-defined]
+    # #4774: the output recorded `width` only. The same render given with its default
+    # `label` agrees, and another `label` does not.
+    full = {"params": {"width": 12, "label": "hi"}, "v": 1}
+    filled = await library.resolve(slug=None, commit=None, inputs=full, output_id="out1")
+    # The output's own, as it recorded them.
+    assert filled.reference.inputs == {"params": {"width": 12}, "v": 1}  # type: ignore[attr-defined]
+    with pytest.raises(ReferenceError) as refused:
+        await library.resolve(
+            slug=None,
+            commit=None,
+            inputs={"params": {"width": 12, "label": "bye"}, "v": 1},
+            output_id="out1",
+        )
+    assert refused.value.field == "inputs"
     with pytest.raises(ReferenceError) as refused:
         await library.resolve(slug=None, commit=later, inputs=None, output_id="out1")
     assert refused.value.field == "commit"

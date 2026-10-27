@@ -22,12 +22,14 @@ from fastapi import status
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.jobs import require_job
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.params import schema_of
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.project_file import ProjectFile, output_stem
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.outputs import MODEL_NAME, hold_parts, release_parts, require_output
 from scadbuddy.operations.claims import ClaimStore
@@ -38,6 +40,7 @@ from scadbuddy.print_library.filing import file_output, put_in_folder, trash_fil
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
+from scadbuddy.render.runner import OpenSCADError, with_defaults
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import template_title
 from scadbuddy.workflows.models import ArrangeInputs
@@ -85,6 +88,31 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             )
         return job, job.outputs[index] if job.outputs else None
 
+    async def _with_job_defaults(job: Job, sent: dict[str, Any], refusal: str) -> dict[str, Any]:
+        """``sent`` with each parameter it omits at its default in the job's revision
+        (#4774), if that makes them the job's own: the render route fills them so, and a
+        caller that saves with the params it sent (an agent's ``save_output``) names the
+        same render. Otherwise, or with no schema to read, ``refusal`` as before."""
+        given = normalize_inputs(sent, None)
+        # The slow path: only a save whose params disagree with the job's gets here, and
+        # the read can run openscad when the revision's schema is not cached yet.
+        try:
+            _, schema = await schema_of(
+                job.slug,
+                job.model_version,
+                paths=state.paths,
+                history=state.history,
+                config=state.config,
+                fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
+            )
+        except (ApiError, OpenSCADError):
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+        filled = {**given.data, "params": with_defaults(schema, given.params)}
+        try:
+            return normalize_inputs(filled, job.params).data
+        except InputsDisagreeError:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+
     async def create_check(request: dict[str, Any]) -> dict[str, Any]:
         require_model_exists(state.catalogue, request["slug"])
         await _done_with(request["slug"], request["job_id"], request["index"])
@@ -101,7 +129,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             try:
                 inputs = normalize_inputs(request["inputs"], job.params).data
             except InputsDisagreeError:
-                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
+                inputs = await _with_job_defaults(job, request["inputs"], rendered)
             except InputsError as error:
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
             # A template's own pipeline read the job's whole inputs (§3.4), so the output
