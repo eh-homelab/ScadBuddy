@@ -692,6 +692,34 @@ describe('HistoryPage', () => {
     expect(within(reagan).getByLabelText('No preview of Reagan')).toBeInTheDocument()
   })
 
+  it('shows a thumbnail that arrives after one failed to load (#4775)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const reagan = outputs.find((o) => o.name === 'Reagan')!
+    const listed = (hasThumbnail: boolean) =>
+      server.use(
+        http.get('/api/v1/models/:slug/outputs', () =>
+          HttpResponse.json(outputs.map((o) => (o.id === reagan.id ? { ...o, has_thumbnail: hasThumbnail } : o))),
+        ),
+      )
+    render()
+    const item = await row('Reagan')
+    fireEvent.error(within(item).getByRole('button', { name: 'Preview Reagan' }).querySelector('img')!)
+    expect(within(item).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+
+    // The list read again says it has none, then that an upload gave it one.
+    listed(false)
+    await realtime.signal('model:name-keychain', 'output.updated')
+    expect(within(await row('Reagan')).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+    listed(true)
+    await realtime.signal('model:name-keychain', 'output.updated')
+    expect(await within(await row('Reagan')).findByRole('button', { name: 'Preview Reagan' })).toBeInTheDocument()
+  })
+
   it('offers Queue, Download 3MF and Rename on every output (#2288)', async () => {
     const { user } = render()
     for (const name of ['Reagan', 'Nova', 'Workshop']) {

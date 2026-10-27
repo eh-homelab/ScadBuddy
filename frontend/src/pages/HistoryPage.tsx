@@ -569,6 +569,12 @@ function OutputRow({
   const label = output.name ?? shortId(output.id)
   /** #4775 — the thumbnail would not load (the server could not draw one): say so. */
   const [thumbnailBroken, setThumbnailBroken] = useState(false)
+  // Until the server says otherwise: a later upload or draw is tried again.
+  const [thumbnailSaid, setThumbnailSaid] = useState(output.has_thumbnail)
+  if (thumbnailSaid !== output.has_thumbnail) {
+    setThumbnailSaid(output.has_thumbnail)
+    setThumbnailBroken(false)
+  }
   /** #2288 — the name being typed, while Rename is open. */
   const [naming, setNaming] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
