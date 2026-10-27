@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any
 
 from fastapi import APIRouter, Response, status
 from fastapi.responses import JSONResponse
@@ -33,8 +32,7 @@ from scadbuddy.bambuddy.virtual_printers import (
     access_code_request,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.component import OperationCommands, OperationsDep
-from scadbuddy.operations.store import OperationAccepted
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.bambuddy_sync import (
     PrinterSyncResult,
@@ -272,28 +270,6 @@ def _sealed(
     return access_code_request(printers.kek, code, vp_id=vp_id, idempotency_key=idempotency_key)
 
 
-async def _vp_write(
-    ops: OperationCommands,
-    response: Response,
-    *,
-    kind: str,
-    subject: str,
-    request: dict[str, Any],
-    idempotency_key: str | None,
-) -> dict[str, Any] | OperationAccepted:
-    """Run a virtual printer's write. Its run syncs the registry's virtual printers once
-    Bambuddy took it (`virtual_printer_kinds`), so a write answered with 202 is followed
-    too, and a repeat answered from its record syncs nothing."""
-    return await run_operation(
-        ops,
-        response,
-        kind=ops.kinds[kind],
-        subject=subject,
-        request=request,
-        idempotency_key=idempotency_key,
-    )
-
-
 VP_WRITES = (
     "A write needs Bambuddy's `settings:update`, which no API key holds while Bambuddy's "
     "auth is on: then it is the scope problem naming `Settings (admin only)`. Bambuddy's "
@@ -318,15 +294,14 @@ async def create_virtual_printer(
     response: Response,
     ops: OperationsDep,
     printers: PrintersDep,
-    store: SettingsStoreDep,
     body: VirtualPrinterCreate,
     idempotency_key: IdempotencyKey = None,
 ) -> VirtualPrinter | JSONResponse:
     fields = body.model_dump(mode="json", exclude={"access_code"})
-    result = await _vp_write(
+    result = await run_operation(
         ops,
         response,
-        kind="bambuddy_vp_create",
+        kind=ops.kinds["bambuddy_vp_create"],
         subject="bambuddy_vp:new",
         request={
             "fields": fields,
@@ -348,16 +323,15 @@ async def update_virtual_printer(
     response: Response,
     ops: OperationsDep,
     printers: PrintersDep,
-    store: SettingsStoreDep,
     vp_id: int,
     body: VirtualPrinterUpdate,
     idempotency_key: IdempotencyKey = None,
 ) -> VirtualPrinter | JSONResponse:
     fields = body.model_dump(mode="json", exclude={"access_code"}, exclude_unset=True)
-    result = await _vp_write(
+    result = await run_operation(
         ops,
         response,
-        kind="bambuddy_vp_update",
+        kind=ops.kinds["bambuddy_vp_update"],
         subject=f"bambuddy_vp:{vp_id}",
         request={
             "vp_id": vp_id,
@@ -382,15 +356,13 @@ async def update_virtual_printer(
 async def delete_virtual_printer(
     response: Response,
     ops: OperationsDep,
-    printers: PrintersDep,
-    store: SettingsStoreDep,
     vp_id: int,
     idempotency_key: IdempotencyKey = None,
 ) -> VirtualPrinterDeleted | JSONResponse:
-    result = await _vp_write(
+    result = await run_operation(
         ops,
         response,
-        kind="bambuddy_vp_delete",
+        kind=ops.kinds["bambuddy_vp_delete"],
         subject=f"bambuddy_vp:{vp_id}",
         request={"vp_id": vp_id},
         idempotency_key=idempotency_key,

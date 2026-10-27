@@ -154,11 +154,9 @@ def access_code_key(kek: Kek) -> bytes:
 def seal_context(*, vp_id: int | None, idempotency_key: str) -> str:
     """What a seal is bound to: the VP's id, or for a create (no id yet) the request's
     own Idempotency-Key, which no other request carries."""
-    return (
-        f"vp-access-code:vp:{vp_id}"
-        if vp_id is not None
-        else (f"vp-access-code:new:{idempotency_key}")
-    )
+    if vp_id is not None:
+        return f"vp-access-code:vp:{vp_id}"
+    return f"vp-access-code:new:{idempotency_key}"
 
 
 def seal_access_code(kek: Kek, code: str, context: str) -> str:
@@ -199,7 +197,10 @@ def virtual_printer_kinds(
     *, settings_store: SettingsStore, printers: PrinterStore | None
 ) -> list[OperationKind]:
     """``bambuddy_vp_create``, ``bambuddy_vp_update`` and ``bambuddy_vp_delete``. Each
-    runs once: Bambuddy dedupes none of them (a second create makes a second VP)."""
+    runs once: Bambuddy dedupes none of them (a second create makes a second VP). Each
+    run syncs the registry's virtual printers once Bambuddy took the write (`follow`),
+    so a write answered with 202 is followed too, and a repeat answered from its record
+    syncs nothing."""
 
     async def target_id(request: dict[str, Any]) -> int | None:
         target = request.get("target")
@@ -223,6 +224,13 @@ def virtual_printer_kinds(
             checked["target_printer_id"] = await target_id(fields)
             if checked["target_printer_id"] is not None and request.get(SEALED_FIELD):
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, CODE_WITH_TARGET)
+        # First: a worker that cannot open the code fails without calling Bambuddy.
+        if request.get(SEALED_FIELD) and (printers is None or printers.kek is None):
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "a virtual printer's access code needs SCADBUDDY_SECRET_KEY_FILE on the"
+                " print worker",
+            )
         if request.get(SEALED_FIELD) and "vp_id" in request and "target" not in fields:
             # An update that keeps the target: Bambuddy would replace a code sent to a
             # targeted VP with its target's (lines 236-240), so it is refused as a create's.
@@ -231,12 +239,6 @@ def virtual_printer_kinds(
                 current = await client.virtual_printer(int(request["vp_id"]))
             if current.target_printer_id is not None:
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, CODE_WITH_TARGET)
-        if request.get(SEALED_FIELD) and (printers is None or printers.kek is None):
-            raise ApiError(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "a virtual printer's access code needs SCADBUDDY_SECRET_KEY_FILE on the"
-                " print worker",
-            )
         return checked
 
     async def follow(client: BambuddyClient) -> None:
@@ -248,7 +250,7 @@ def virtual_printer_kinds(
         try:
             await sync_virtual_printers(StoreRegistry(printers), client)
         except Exception:
-            logger.warning("could not sync the virtual printers after a write")
+            logger.warning("could not sync the virtual printers after a write", exc_info=True)
 
     def body_of(
         request: dict[str, Any], checked: dict[str, Any], vp_id: int | None
