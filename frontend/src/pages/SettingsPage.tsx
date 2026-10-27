@@ -568,6 +568,9 @@ function SettingsSections() {
     const sent = ++writeSent.current
     settingsState.refresh((next) => {
       // It landed, so what is stored is known, whether or not it is taken (#4837 review).
+      // That includes a signal read refused because the form is being edited: if the
+      // "Load the latest" read it offers then fails, the section shows only its error,
+      // with no note, by design (#4839 review).
       unconfirmedWrites.current = []
       // #4803: a save or reset sent after this read has landed already, and is newer.
       if (sent <= writeLanded.current) return false
