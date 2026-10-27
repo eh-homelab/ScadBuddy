@@ -368,8 +368,9 @@ sequenceDiagram
   Postgres relay below.
 - **Inline, capped:** a bridge payload is never kept in the payload store (only a
   session's are), so nothing is left on the data share. The request and the answer are
-  each capped at 1 000 000 bytes of JSON (`MAX_BRIDGE_BYTES`), well past a tab's own
-  200 000; past it the call answers `too_large`.
+  each capped at 256 KiB of JSON (`MAX_BRIDGE_BYTES`), past a tab's own 200 000 bytes and
+  its envelope; sealing adds about a third (base64 inside JSON), so a sealed payload stays
+  under Temporal's 512 KB warning. Past the cap the call answers `too_large`.
 - **No replica holds the tab:** there is no row, or no worker takes the activity within
   3 s (`ACK_TIMEOUT_MS`, its schedule-to-start timeout: the owner's pod is gone), and the
   call answers the usual "the paired ScadBuddy tab is not connected". The row is then

@@ -52,19 +52,24 @@ function oldRelay(): LegacyTabRelay & { forward: ReturnType<typeof vi.fn> } {
 const owner = (tabs: string[]): RelayOwner => ({ holds: () => true, tabs: () => tabs, run: async () => ({ op: 'gone' }) })
 
 describe('TemporalTabRelay', () => {
-  it('claims no tab while its host worker does not serve bridge.tab', async () => {
+  it('claims no tab until its host worker polls, and claims the ones it holds once it does', async () => {
     const owners = memoryOwners()
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
+    relay.serve(owner(['tab-0']))
+    // The activities are built for a worker that has not started, or failed to.
+    relay.hostActivities()
     relay.attached('tab-1')
     await settle()
     expect(owners.rows.size).toBe(0)
-    relay.hostActivities()
+    relay.startHosting()
+    await settle()
+    expect(owners.rows.get('tab-0')).toBe('agent-tools.a') // held before the worker ran
     relay.attached('tab-1')
     await settle()
     expect(owners.rows.get('tab-1')).toBe('agent-tools.a')
     relay.detached('tab-1')
     await settle()
-    expect(owners.rows.size).toBe(0)
+    expect([...owners.rows.keys()]).toEqual(['tab-0'])
     relay.close()
   })
 
@@ -73,8 +78,8 @@ describe('TemporalTabRelay', () => {
     let up = false
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', refreshMs: 20, ready: async () => up, log: () => {} })
     relay.serve(owner(['tab-1']))
-    relay.hostActivities()
-    relay.attached('tab-1') // the database is down: not written
+    relay.startHosting() // the database is down: its first claim is not written
+    relay.attached('tab-1')
     await settle()
     expect(owners.rows.size).toBe(0)
     up = true

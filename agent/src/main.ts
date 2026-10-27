@@ -821,7 +821,7 @@ const hostWorkers =
           // A classic session's Monitor commands, in its directory on this replica.
           ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
           // Other replicas' browser_* calls for a tab connected here (#4780).
-          // Taking them is what makes this replica claim its tabs (TemporalTabRelay.hostActivities).
+          // Its tabs are claimed once this worker polls (startHosting, below).
           ...(tabRelay ? tabRelay.hostActivities() : {}),
         },
         ...(sessionHosting
@@ -839,6 +839,20 @@ const hostWorkers =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
+// This replica claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with
+// bridge.tab: a claim before (or with a worker that never started) would send other replicas'
+// calls to wait out the ack timeout (#4806 review).
+if (tabRelay && hostWorkers) {
+  const relay = tabRelay
+  const pinned = hostWorkers.pinned
+  // Unref'd, so a worker that never connects does not hold the process open at shutdown.
+  const polling = setInterval(() => {
+    if (pinned.state() !== 'ok') return
+    clearInterval(polling)
+    relay.startHosting()
+  }, 200)
+  polling.unref()
+}
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
 // The browser relay's calls go through Temporal only sealed, each under a key of its own

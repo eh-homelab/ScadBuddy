@@ -64,10 +64,13 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 /** How long a forwarded call waits for the owner's replica to take it (the old relay's ack timeout). */
 export const ACK_TIMEOUT_MS = 3_000
 /**
- * The largest request or answer a call carries, as JSON: past the tab's own cap on a result
- * (frontend link.ts MAX_RESULT_BYTES, 200 000), and sealed well under Temporal's 2 MB payload limit.
+ * The largest request or answer a call carries, as JSON: room past the tab's own cap on a
+ * result (frontend link.ts MAX_RESULT_BYTES, 200 000) and its envelope. Sealing grows a payload
+ * by about 4/3 (the codec base64s it inside JSON before it seals it, payloadCodec.ts
+ * `payloadBytes`), so 256 KiB of JSON is about 350 KB sealed, under Temporal's 512 KB
+ * payload-size warning and far under its 2 MB limit.
  */
-export const MAX_BRIDGE_BYTES = 1_000_000
+export const MAX_BRIDGE_BYTES = 256 * 1024
 /**
  * Past the owner's own time: the workflow's whole run, for a workflow task that is slow to start.
  * Room for one failed first workflow task too: during a rolling deploy a replica still on the
@@ -113,7 +116,7 @@ export interface TabRelay {
 
 export type TemporalTabRelayOptions = {
   owners: TabOwnerStore
-  /** This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with `hostActivities()`. */
+  /** This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with `hostActivities()` (then `startHosting`). */
   hostQueue: string
   /** Where BridgeCall runs: `agent-tools`, which every replica's worker polls with the workflow bundle. */
   workflowQueue?: string
@@ -162,7 +165,7 @@ export class TemporalTabRelay implements TabRelay {
   readonly #fallback: LegacyTabRelay | undefined
   #client: SealingClient | undefined
   #owner: RelayOwner | undefined
-  /** Whether this replica's host worker serves `bridge.tab` (`hostActivities`): only then is a tab claimed here. */
+  /** Whether this replica's host worker polls its queue with `bridge.tab` (`startHosting`): only then is a tab claimed here. */
   #hosting = false
   /** One owner-row write at a time, in order: a tab's release never lands before its claim. */
   #writes: Promise<void> = Promise.resolve()
@@ -191,20 +194,23 @@ export class TemporalTabRelay implements TabRelay {
   }
 
   /**
-   * The owner's activity, for this replica's host worker on `hostQueue`. Taking it is what
-   * makes this replica claim its tabs in ai_tab_owners: a claim with nothing serving the
-   * queue would send every call there to wait out the ack timeout.
+   * The host worker polls `hostQueue` with `hostActivities()` (main.ts, once the worker runs):
+   * from now on this replica claims its tabs in ai_tab_owners, and claims the ones it already
+   * holds. Never before: a claim with nothing polling the queue would send every call there to
+   * wait out the ack timeout.
    */
-  hostActivities(): Record<string, (tabId: string, request: RelayRequest) => Promise<RelayAnswer>> {
+  startHosting(): void {
+    if (this.#hosting) return
     this.#hosting = true
-    if (!this.#refresh) {
-      // The tabs are read when the write runs, after any release queued before it.
-      this.#refresh = setInterval(
-        () => void this.#write(() => this.#owners.refresh(this.#owner?.tabs() ?? [], this.hostQueue)),
-        this.#refreshMs,
-      )
-      this.#refresh.unref()
-    }
+    // The tabs are read when the write runs, after any release queued before it.
+    const refresh = () => void this.#write(() => this.#owners.refresh(this.#owner?.tabs() ?? [], this.hostQueue))
+    refresh()
+    this.#refresh = setInterval(refresh, this.#refreshMs)
+    this.#refresh.unref()
+  }
+
+  /** The owner's activity, for this replica's host worker on `hostQueue`; claims start with `startHosting`. */
+  hostActivities(): Record<string, (tabId: string, request: RelayRequest) => Promise<RelayAnswer>> {
     return {
       [BRIDGE_TAB_ACTIVITY]: async (tabId, request) => {
         if (!this.#owner) return { op: 'gone' }

@@ -395,6 +395,12 @@ export class TabHub implements BrowserTabs {
     return true
   }
 
+  /**
+   * Whether `tabId` is connected to any replica. For a tab on another replica, each check starts a
+   * BridgeCall workflow and makes a payload key row (bridge/relay.ts): acceptable for the rare
+   * probes that use it (`sessionTab`, behind `waitForTab` and `isBack`), never for a poll. Callers
+   * must not call it on a timer.
+   */
   async #tabConnected(tabId: string): Promise<boolean> {
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false

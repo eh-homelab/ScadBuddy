@@ -102,6 +102,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         dataConverter,
       })
       const r: Replica = { hub, relay, queue, worker, running: worker.run() }
+      relay.startHosting()
       replicas.push(r)
       return r
     }

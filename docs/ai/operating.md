@@ -88,7 +88,12 @@ covers the same ground more briefly.
   [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)), about one failed task
   and its retry. A call whose workflow still times out is logged and answers
   `no_answer`; it never fails the tool, and it is not sent again by the old relay, since
-  the owner may already have run it. Once no replica
+  the owner may already have run it. With two or more old replicas polling, the retries'
+  backoff can use up those 15 s before a new replica takes the task, so a call that never
+  ran can still answer `no_answer` during the rollout. And a bridge call's deleted key is
+  gone everywhere only once every replica runs this build: an old replica's
+  `PgPayloadKeys` caches any key it opens for 30 s, a `bridge-<uuid>` one included, and
+  this build caches none. Once no replica
   runs a build before #4780, nothing takes those tasks but replicas that have the
   workflow.
 
