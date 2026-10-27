@@ -1724,6 +1724,10 @@ def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> Run
     """How a run reaches ``row`` (#3823, plan Task 8): its ``preferred_path`` as set,
     and for ``auto`` the LAN when it has a LAN link whose last report (``seen_at``) is
     fresh (`is_fresh`), else Bambuddy."""
+    if row.kind != "physical":
+        # A Bambuddy virtual printer is never on the hot path (#4747): `hot_path_native`
+        # ignores it, whatever its LAN link.
+        return "bambuddy"
     if row.preferred_path != "auto":
         return row.preferred_path
     fresh = seen_at is not None and is_fresh(seen_at, now)
@@ -1742,7 +1746,7 @@ async def lan_printers(
     this is on every choices read."""
     if printers is None or not native_backends(settings):
         return []
-    rows = await asyncio.to_thread(printers.list)
+    rows = [row for row in await asyncio.to_thread(printers.list) if row.kind == "physical"]
     seen = {} if reports is None else await asyncio.to_thread(reports.all)
     now = datetime.now(UTC)
     out: list[str] = []
@@ -1762,7 +1766,8 @@ async def all_native(
     Bambuddy's status, and its listing finds a printer the registry has not seen yet."""
     if not native_backends(settings):
         return False
-    rows = await asyncio.to_thread(printers.list)
+    # A virtual printer is not hardware (#4747): the strip never shows one.
+    rows = [row for row in await asyncio.to_thread(printers.list) if row.kind == "physical"]
     return bool(rows) and len(await lan_printers(settings, printers, reports)) == len(rows)
 
 
@@ -2148,6 +2153,13 @@ async def _named_printer(
             )
         return None, printer_id
     named = await asyncio.to_thread(printers.get, printer)
+    if named is not None and named.kind != "physical":
+        # #4747: a Bambuddy virtual printer is not a print target in ScadBuddy; its
+        # queue is Bambuddy's queue, which ScadBuddy drives itself.
+        raise RunRefusalError(
+            f"{named.name} is a Bambuddy virtual printer, not a printer to print on."
+            " Pick the printer it forwards to."
+        )
     if sent is None:
         if named is None:
             raise RunRefusalError(

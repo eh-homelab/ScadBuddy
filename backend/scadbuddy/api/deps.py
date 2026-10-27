@@ -508,6 +508,7 @@ def set_previews(state: AppState, enabled: bool) -> None:
     """Turn the default-render previews on or off before the boot starts them (#322:
     ``preview_renders`` saved in Settings applies at the next start)."""
     state.catalogue.serve_previews = enabled
+    state.outputs.draw_thumbnails = enabled
     if enabled and state.previews is None:
         state.previews = build_previews(state.catalogue, state.outputs, state.render, state.config)
     elif not enabled and state.previews is not None:

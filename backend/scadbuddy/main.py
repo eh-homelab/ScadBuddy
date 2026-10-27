@@ -103,6 +103,7 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library
+from scadbuddy.printers.bambuddy_sync import sync_printers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
@@ -164,6 +165,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_SLICES_SWEEP,
     NATIVE_SLICES_SWEEP,
     PREVIEWS_SWEEP,
+    PRINTER_SYNC_SWEEP,
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
@@ -644,6 +646,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def reap_quote_holds() -> None:
         await _heartbeating(_reap_quote_holds_logged(state))
 
+    @activity.defn(name=PRINTER_SYNC_SWEEP)
+    async def sync_bambuddy_printers() -> None:
+        await _heartbeating(_sync_bambuddy_printers_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -664,6 +670,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         stop_lost_native_slice_rows,
         ensure_printer_watches,
         reap_quote_holds,
+        sync_bambuddy_printers,
     ]
 
 
@@ -718,6 +725,31 @@ async def _ensure_printer_watches_logged(state: AppState) -> None:
         raise
     if started:
         logger.debug("printer watches running", extra={"count": len(started)})
+
+
+async def _sync_bambuddy_printers_logged(state: AppState) -> None:
+    """#4439, #4747: the registry follows Bambuddy's printers and virtual printers, and
+    an empty LAN link is filled from Bambuddy. Nothing to do without a Bambuddy."""
+    registry = state.components.get(PRINTERS)
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            result = await sync_printers(registry, client)
+        except Exception:
+            logger.exception("could not sync the printers from Bambuddy")
+            raise
+        if result.created or result.linked or result.lan_linked or result.conflicts:
+            logger.info(
+                "synced the printers from Bambuddy",
+                extra={
+                    "created": result.created,
+                    "linked": result.linked,
+                    "lan_linked": result.lan_linked,
+                    "conflicts": result.conflicts,
+                },
+            )
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _sweep_print_library_logged(state: AppState) -> None:

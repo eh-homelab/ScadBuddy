@@ -203,6 +203,81 @@ def test_the_viewer_can_upload_and_read_back_a_thumbnail(client: TestClient, mod
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is True
 
 
+def _drawing_thumbnails(client: TestClient) -> None:
+    """``preview_renders`` on, as a boot with it on sets it (#4775)."""
+    getattr(client.app.state, STATE_ATTR).outputs.draw_thumbnails = True  # type: ignore[attr-defined]
+
+
+def test_an_output_saved_without_a_thumbnail_gets_one_drawn(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # Saved while previews were off, as every server-side save was before #4775.
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    assert created["has_thumbnail"] is False
+    _drawing_thumbnails(client)
+
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is True
+    response = client.get(f"/api/v1/outputs/{created['id']}/thumbnail")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    # Drawn once, then served as a file.
+    stored = paths.output_dir(model, created["id"]) / "thumbnail.png"
+    assert stored.read_bytes() == response.content
+
+
+def test_a_new_output_lists_with_a_thumbnail_when_previews_are_on(
+    client: TestClient, model: str
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    assert created["has_thumbnail"] is True
+    listed = client.get(f"/api/v1/models/{model}/outputs").json()
+    assert [o["has_thumbnail"] for o in listed if o["id"] == created["id"]] == [True]
+
+
+@pytest.mark.requires_postgres
+def test_an_upload_replaces_a_drawn_thumbnail(client: TestClient, model: str) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    drawn = client.get(f"/api/v1/outputs/{created['id']}/thumbnail")
+    assert drawn.status_code == 200
+    assert drawn.content != PNG_BYTES
+    put = client.put(
+        f"/api/v1/outputs/{created['id']}/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 204
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").content == PNG_BYTES
+
+
+def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, model: str) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    # The browser's upload landed while the server was drawing.
+    store.write_thumbnail(created["id"], PNG_BYTES)
+    assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is False
+    assert store.thumbnail_path(created["id"]).read_bytes() == PNG_BYTES
+    assert list(store.thumbnail_path(created["id"]).parent.glob(".thumbnail.png.*")) == []
+
+
 def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str) -> None:
     created = client.post(
         f"/api/v1/models/{model}/outputs",
