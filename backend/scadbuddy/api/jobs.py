@@ -71,6 +71,7 @@ from scadbuddy.render.job_models import (
 )
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.objects3mf import UnreadableObjectsError
+from scadbuddy.render.runner import with_defaults
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
@@ -500,6 +501,13 @@ async def render_model(
         await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    if not pipeline:
+        # #4774: every caller (the browser, the agent, a flow) reaches the render through
+        # here, and the key is made from the params: an omitted default takes its value
+        # from this revision's schema, so a sparse request is the same render as a full
+        # one. A pipeline's params need not be `model.scad`'s, so they stay as sent.
+        params = with_defaults(schema, params)
+        inputs = {**inputs, "params": params}
 
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.
