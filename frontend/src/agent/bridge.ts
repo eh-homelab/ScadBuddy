@@ -37,18 +37,18 @@ const importCatalog: CatalogLoader = () => import('./catalog')
 export type ListToolsResult = { ok: true; tools: ToolInfo[] } | { ok: false; error: ToolError }
 
 /**
- * The catalogue, or the `stale_tab` error (#4884). On a tab from an older build the
- * catalogue chunk is gone from the server: `installStaleChunkReload` `preventDefault()`s
+ * The lazy tool catalogue, or the `stale_tab` error (#4884). On a tab from an older
+ * build the chunk is gone from the server: `installStaleChunkReload` `preventDefault()`s
  * Vite's `vite:preloadError` and reloads, and Vite's preload helper then resolves the
  * import with `undefined` rather than rejecting. Without the reload (the same build
  * failed already, or there is no sessionStorage) the import rejects instead. Either way
  * the agent is told the tab is stale, never handed a TypeError. The reload starts a new
  * tab id (`tabId.ts`), so an agent that paired by code has to pair again.
  */
-async function catalogOrStale(load: CatalogLoader): Promise<{ catalog: Catalog } | { error: ToolError }> {
-  let catalog: Catalog | undefined
+async function loadOrStale<T>(load: () => Promise<T | undefined>): Promise<{ module: T } | { error: ToolError }> {
+  let module: T | undefined
   try {
-    catalog = await load()
+    module = await load()
   } catch (cause) {
     return {
       error: {
@@ -60,7 +60,7 @@ async function catalogOrStale(load: CatalogLoader): Promise<{ catalog: Catalog }
       },
     }
   }
-  if (catalog) return { catalog }
+  if (module) return { module }
   return {
     error: {
       code: 'stale_tab',
@@ -141,9 +141,13 @@ export class AgentBridge {
    * marked `live` or not, which is the stable list a session's tool set is built from.
    */
   async listTools({ all = false }: { all?: boolean } = {}): Promise<ListToolsResult> {
-    const loaded = await catalogOrStale(this.loadCatalog)
+    const loaded = await loadOrStale(this.loadCatalog)
     if ('error' in loaded) return { ok: false, error: loaded.error }
-    const { TOOLS, toJSONSchema } = loaded.catalog
+    const { TOOLS } = loaded.module
+    // Unguarded: the catalogue imports zod statically, so once it has loaded so has zod.
+    // Keep the destructure at the import: rolldown tree-shakes a dynamic import by the
+    // members read there, and handing the namespace on keeps all of zod (+290 KB).
+    const { toJSONSchema } = await import('zod')
     const live = new Set(this.liveNames())
     const tools = (Object.keys(TOOLS) as ToolName[])
       .filter((name) => all || live.has(name))
@@ -163,9 +167,9 @@ export class AgentBridge {
   }
 
   async call(name: string, args: unknown = {}): Promise<CallResult> {
-    const loaded = await catalogOrStale(this.loadCatalog)
+    const loaded = await loadOrStale(this.loadCatalog)
     if ('error' in loaded) return { ok: false, error: loaded.error }
-    const { TOOLS, SCOPE_ROUTES } = loaded.catalog
+    const { TOOLS, SCOPE_ROUTES } = loaded.module
     if (!Object.hasOwn(TOOLS, name)) {
       return { ok: false, error: { code: 'unknown_tool', message: `There is no tool called "${name}".` } }
     }
