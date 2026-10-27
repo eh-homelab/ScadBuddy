@@ -1109,15 +1109,67 @@ async def test_a_tier_raised_mid_turn_parks_the_next_call(
         assert [r[0] for r in stand_in.ran] == ["render_preview", "render_preview"]
         texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
         assert texts == ["render_preview: ok: rendered"]
-        scheduled = [
-            e.activity_task_scheduled_event_attributes
-            for e in (await handle.fetch_history()).events
-            if e.HasField("activity_task_scheduled_event_attributes")
-            and e.activity_task_scheduled_event_attributes.activity_type.name == "render_preview"
-        ]
         # The first ran as a read (retried on a lost worker), the raised one at most once.
-        assert [a.retry_policy.maximum_attempts for a in scheduled] == [3, 1]
+        assert _scheduled_attempts(await handle.fetch_history(), "render_preview") == [3, 1]
         await _replays(harness, handle)
+
+
+def _scheduled_attempts(history: WorkflowHistory, tool: str) -> list[int]:
+    return [
+        e.activity_task_scheduled_event_attributes.retry_policy.maximum_attempts
+        for e in history.events
+        if e.HasField("activity_task_scheduled_event_attributes")
+        and e.activity_task_scheduled_event_attributes.activity_type.name == tool
+    ]
+
+
+def _both(prompt: str, history: list[HistoryItem]) -> ToolCall | list[ToolCall] | Final:
+    """Two render_preview calls at once, then the last result."""
+    if not history:
+        return [
+            ToolCall("render_preview", {"model": "a"}),
+            ToolCall("render_preview", {"model": "b"}),
+        ]
+    return Final(f"{len(history)} results")
+
+
+async def test_a_parked_call_runs_once_though_a_parallel_call_was_read_lower(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """The tool object is shared by parallel calls: the one lowered after the first parked
+    must not leave the parked one to be scheduled with retries (a second send)."""
+    stand_in = harness.stand_in
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    stand_in.tier_answers = ["outward", "read"]
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(_both)
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "render both")
+        await _approve_next(handle)
+        assert await settled(connect, sid) == "idle"
+        assert stand_in.tiers_asked == ["render_preview", "render_preview"]
+        assert _types(await events(agent_db, sid)).count("approval.required") == 1
+        assert len(stand_in.ran) == 2
+        assert _scheduled_attempts(await handle.fetch_history(), "render_preview") == [1, 1]
+        await _replays(harness, handle)
+
+
+async def test_a_call_lowered_while_parked_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    [entry] = await _parked(handle)
+    harness.stand_in.tiers["render_preview"] = "read"
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
+    assert _scheduled_attempts(await handle.fetch_history(), "render_preview") == [1]
+    await _replays(harness, handle)
 
 
 async def test_a_tool_disabled_mid_turn_is_refused_naming_settings(

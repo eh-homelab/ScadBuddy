@@ -132,8 +132,12 @@ def _policy(entry: ManifestEntry, tier: str) -> RetryPolicy:
 
 def gate_call(tool: DurableTool, entry: ManifestEntry, tier: str) -> None:
     """One call's retry policy from its tier as the gate read it then (#2171): at most once
-    when outward or when the manifest asks for approval, else retried on a lost worker."""
-    tool.retry_policy = _policy(entry, tier)
+    when outward or when the manifest asks for approval. It only tightens: the tool object
+    is shared by the turn's parallel calls, and the plugin reads it when it schedules each
+    after its decision, so a later call read at a lower tier must not let a parked outward
+    one run twice. Only the turn's start (``apply_overrides``) relaxes it."""
+    if _policy(entry, tier) is _ONCE:
+        tool.retry_policy = _ONCE
 
 
 def sanitise_overrides(
@@ -180,7 +184,7 @@ def apply_overrides(
         effective = tool_tiers.get(e.name, e.tier)
         outward = effective == "outward" and (e.hitl == "approval" or e.tier != "outward")
         tool.needs_approval = e.name not in disabled and (e.hitl == "answer" or per_call or outward)
-        gate_call(tool, e, effective)
+        tool.retry_policy = _policy(e, effective)
 
 
 # agent/src/temporal/turnTools.ts: the activity a turn tool's call runs as.

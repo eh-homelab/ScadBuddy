@@ -133,6 +133,9 @@ class StandInTools:
         self.disabled: set[str] = set()
         self.tiers_asked: list[str] = []
         self.tool_tier_refuses = False
+        #: tool_tier's next answers in turn, each then laid over its tool (Settings
+        #: changing between two parallel calls' reads).
+        self.tier_answers: list[str] = []
         self.turn_tools_fails = False
         # #2581: the replica queue turn_tools pins every offered tool to (the agent's
         # hostQueue, set when its plugin clients are kept), and the queues turn_tools and
@@ -258,6 +261,8 @@ class StandInTools:
             if self.tool_tier_refuses:
                 raise ApplicationError("the agent is away", type="ToolError", non_retryable=True)
             tier, off = await self._access(args["tool"])
+            if self.tier_answers:
+                tier = self.tiers[args["tool"]] = self.tier_answers.pop(0)
             return {"tier": tier, "disabled": off}
 
         @activity.defn(name="memory_recall")

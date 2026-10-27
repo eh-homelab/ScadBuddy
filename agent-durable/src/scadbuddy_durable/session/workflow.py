@@ -615,7 +615,9 @@ class DurableSession:
             # (or off, which its activity refuses by name), it goes straight through like
             # any other unparked call; one whose access cannot be read parks.
             access = await self._tier_now(name)
-            tier = "outward" if access is None else str(access.get("tier"))
+            tier = access.get("tier") if access is not None else None
+            if tier not in manifest.RISK_TIERS:
+                tier = "outward"  # no answer, or one with no known tier: ask
             manifest.gate_call(self._tools[name], self._by_name[name], tier)
             if access is not None and (access.get("disabled") is True or tier != "outward"):
                 self._agent.decide(str(call["id"]), True, approver="scadbuddy")
