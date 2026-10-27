@@ -322,3 +322,36 @@ def test_a_repeat_answered_from_the_record_does_not_sync_again(client: TestClien
     again = client.put("/api/v1/printers/virtual/1", json={"enabled": False}, headers=key)
     assert again.status_code == 200, again.text
     assert listed.call_count == synced
+
+
+@respx.mock
+def test_bambuddys_validation_error_never_echoes_the_code(client: TestClient) -> None:
+    """Review #4784: a FastAPI 422 quotes each field's input; the code must not come
+    back in the answer or the operation's record."""
+    configure(client)
+    registry(client).store.kek = KEK
+    bambuddy([])
+    respx.post(f"{API}/virtual-printers").mock(
+        return_value=httpx.Response(
+            422,
+            json={
+                "detail": [
+                    {
+                        "type": "string_too_long",
+                        "loc": ["body", "access_code"],
+                        "msg": "String should have at most 8 characters",
+                        "input": CODE,
+                    }
+                ]
+            },
+        )
+    )
+    response = client.post(
+        "/api/v1/printers/virtual", json={"name": "X", "access_code": CODE}, headers=press()
+    )
+    assert response.status_code == 422, response.text
+    assert "body.access_code: String should have at most 8 characters" in response.text
+    assert CODE not in response.text
+    with registry(client).store.pool.connection() as conn:
+        rows = conn.execute("SELECT coalesce(error::text, '') AS e FROM operations").fetchall()
+    assert all(CODE not in row["e"] for row in rows)

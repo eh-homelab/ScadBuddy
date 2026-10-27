@@ -83,10 +83,13 @@ const vpFields = {
   bind_ip: z.string().max(253).optional().describe('The pod interface it listens on, as Bambuddy reports them'),
   remote_interface_ip: z.string().max(253).optional(),
 }
-const VP_WRITE =
+const VP_AUTH =
   " Bambuddy accepts it only while its auth is off (list_virtual_printers' `auth_enabled`); otherwise the answer " +
-  "names the 'Settings (admin only)' scope, which no API key holds. The registry's rows follow the write. An " +
-  'untargeted one needs an access code to be enabled: the user sets it in Settings > Printers, never in chat.'
+  "names the 'Settings (admin only)' scope, which no API key holds."
+const VP_WRITE =
+  VP_AUTH +
+  " The registry's rows follow the write. An untargeted one needs an access code to be enabled: the user sets it " +
+  'in Settings > Printers, never in chat.'
 
 function virtualPrinterTools(): Tool[] {
   return [
@@ -209,7 +212,7 @@ function virtualPrinterTools(): Tool[] {
       description:
         'Deletes a Bambuddy virtual printer; slicers can no longer send to it. Its registry row is kept, reported as ' +
         'no longer in Bambuddy.' +
-        VP_WRITE.split(' The registry')[0],
+        VP_AUTH,
       input: z.object({ vp_id: vpId }),
       risk: 'outward',
       source: VP_SOURCE,

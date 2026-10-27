@@ -41,7 +41,7 @@ from scadbuddy.bambuddy.errors import (
     map_response,
     map_transport,
     not_configured,
-    upstream_detail,
+    scrubbed_detail,
 )
 from scadbuddy.bambuddy.models import (
     Archive,
@@ -411,7 +411,9 @@ class BambuddyClient:
     ) -> httpx.Response:
         """A virtual-printer call (#4747): a read under Read Status, a write under
         `Scope.ADMIN_SETTINGS`. Bambuddy's 400 (an invalid mode, a bind IP in use, no
-        target in proxy mode; ``routes/virtual_printers.py``) is a 422 with its reason."""
+        target in proxy mode; ``routes/virtual_printers.py``) is a 422 with its reason, and
+        so is its own 422: both with `scrubbed_detail`, since a validation error echoes the
+        request's values and a write may carry an access code (never its body)."""
         write = method != "GET"
         response = await self._send(
             method,
@@ -420,10 +422,15 @@ class BambuddyClient:
             operation=operation,
             what=what,
             json=json,
-            passthrough=frozenset({status.HTTP_400_BAD_REQUEST}),
+            passthrough=frozenset(
+                {status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_CONTENT}
+            ),
         )
-        if response.status_code == status.HTTP_400_BAD_REQUEST:
-            detail = upstream_detail(response)
+        if response.status_code in (
+            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ):
+            detail = scrubbed_detail(response)
             error = ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Bambuddy refused to {what}" + (f": {detail}" if detail else ""),

@@ -81,6 +81,31 @@ def upstream_detail(response: httpx.Response) -> str | None:
     return None
 
 
+def scrubbed_detail(response: httpx.Response) -> str | None:
+    """Bambuddy's message with no request value in it, for a call whose body carried a
+    secret (#4747: a virtual printer's access code). A FastAPI validation detail is a
+    list of errors, each echoing the field's ``input``; only each error's ``loc`` and
+    ``msg`` are kept."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if not isinstance(item, dict):
+                continue
+            loc = item.get("loc")
+            where = ".".join(str(p) for p in loc) if isinstance(loc, list) else ""
+            msg = item.get("msg") if isinstance(item.get("msg"), str) else "invalid"
+            parts.append(f"{where}: {msg}" if where else str(msg))
+        return "; ".join(parts) or None
+    return None
+
+
 def upstream_body(response: httpx.Response) -> Any:
     try:
         return response.json()

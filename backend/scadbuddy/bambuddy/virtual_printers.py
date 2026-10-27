@@ -47,6 +47,10 @@ from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
 
+#: How long the registry-follow may take inside a write's run: well inside the run's
+#: timeout, so a slow sync never turns a write Bambuddy took into a timed-out one.
+FOLLOW_TIMEOUT_S = 20.0
+
 #: Bambuddy's bound: "Access code must be exactly 8 characters" (lines 189-190).
 ACCESS_CODE_LENGTH = 8
 #: The HKDF labels of `access_code_key` and of `access_code_mac`'s key.
@@ -56,6 +60,8 @@ ACCESS_CODE_MAC_INFO = b"scadbuddy:bambuddy:vp-access-code-mac:v1"
 SEALED_FIELD = "access_code"
 MAC_FIELD = "access_code_mac"
 CONTEXT_FIELD = "seal_context"
+#: The Idempotency-Key a create's seal is bound to (already the operation row's own).
+KEY_FIELD = "seal_key"
 
 CODE_WITH_TARGET = (
     "a virtual printer with a target uses its target's access code; send no access code"
@@ -185,6 +191,7 @@ def access_code_request(
         SEALED_FIELD: seal_access_code(kek, code, context),
         MAC_FIELD: access_code_mac(kek, code, context, idempotency_key),
         CONTEXT_FIELD: context,
+        KEY_FIELD: idempotency_key,
     }
 
 
@@ -248,7 +255,8 @@ def virtual_printer_kinds(
         if printers is None:
             return
         try:
-            await sync_virtual_printers(StoreRegistry(printers), client)
+            async with asyncio.timeout(FOLLOW_TIMEOUT_S):
+                await sync_virtual_printers(StoreRegistry(printers), client)
         except Exception:
             logger.warning("could not sync the virtual printers after a write", exc_info=True)
 
@@ -262,9 +270,9 @@ def virtual_printer_kinds(
         if sealed:
             assert printers is not None and printers.kek is not None
             context = str(request.get(CONTEXT_FIELD, ""))
-            # A create's seal names its request; an update's must name this VP.
-            expected = "vp-access-code:new:" if vp_id is None else f"vp-access-code:vp:{vp_id}"
-            if not (context.startswith(expected) if vp_id is None else context == expected):
+            # Exactly what the route sealed under: this VP, or this create's own key.
+            key = str(request.get(KEY_FIELD, ""))
+            if context != seal_context(vp_id=vp_id, idempotency_key=key):
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
                     "the access code was sealed for another virtual printer",
