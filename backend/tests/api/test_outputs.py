@@ -273,6 +273,41 @@ def test_an_upload_replaces_a_drawn_thumbnail(client: TestClient, model: str) ->
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").content == PNG_BYTES
 
 
+def test_an_uploaded_thumbnail_is_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #4822: an open History page shows the old image, or "No preview", until it is told.
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    put = client.put(
+        f"/api/v1/outputs/{created['id']}/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 204
+    updated = _output_updates(published)
+    assert [(e.output_id, e.slug) for e in updated] == [(created["id"], model)]
+
+
+def test_a_refused_thumbnail_upload_is_not_announced(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    put = client.put(
+        "/api/v1/outputs/" + "0" * 32 + "/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 404
+    assert _output_updates(published) == []
+
+
 def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, model: str) -> None:
     created = client.post(
         f"/api/v1/models/{model}/outputs",
