@@ -228,9 +228,11 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # No `--with-deps`: see ci.yml's frontend-e2e job (#4882).
       - name: Install Playwright browsers
         working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        run: pnpm exec playwright install chromium
 
       - name: run.sh --mode both
         run: e2e-stack/run.sh --mode both --no-build
