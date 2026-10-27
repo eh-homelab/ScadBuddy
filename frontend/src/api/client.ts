@@ -770,7 +770,7 @@ export async function command<T>(
    * #4693 — told once the server accepted the command as an operation (its 202), before
    * it is followed: a refusal from its check comes before this, a slow run's end after.
    */
-  onAccepted?: () => void,
+  onAccepted?: (operation: OperationAccepted) => void,
 ): Promise<T> {
   const signal = init.signal ?? undefined
   const headers: Record<string, string> = {
@@ -787,7 +787,7 @@ export async function command<T>(
     (url) => requestWithStatus<T | OperationAccepted | CommandAccepting>(url, { method: 'POST' }),
     signal,
   )
-  if (first.status === 202) onAccepted?.()
+  if (first.status === 202) onAccepted?.(first.body as OperationAccepted)
   return followOperation<T>(first as { status: number; body: T | OperationAccepted }, signal, operations)
 }
 
@@ -2126,8 +2126,8 @@ export const api = {
     request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the
    * dialog's choices, price with the book; followed to the quote as every command is. */
-  /** `onAccepted` (#4693): the quote is running as its operation, past its check. */
-  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest, onAccepted?: () => void, signal?: AbortSignal) =>
+  /** `onAccepted` (#4693): the quote is running as its operation, past its check, with that operation. */
+  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest, onAccepted?: (operation: OperationAccepted) => void, signal?: AbortSignal) =>
     command<Quote>(
       `/orders/${seg(orderId)}/items/${seg(itemId)}/quote`,
       { method: 'POST', body: JSON.stringify(body), signal },

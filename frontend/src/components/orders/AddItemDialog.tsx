@@ -33,7 +33,9 @@ function matches(model: ModelSummary, query: string): boolean {
  */
 function itemBody(current: Pinned | null, choice: string, quantity: number, title: string): OrderItemCreate {
   const named = title.trim() ? { title: title.trim() } : {}
-  if (choice === CURRENT && current) {
+  if (choice === CURRENT) {
+    // `add()` refuses this first; never sent as an output id.
+    if (!current) throw new Error('This template has no version to pin.')
     return { slug: current.slug, commit: current.version, inputs: { params: {}, v: current.inputsVersion }, quantity, ...named }
   }
   return { output_id: choice, quantity, ...named }

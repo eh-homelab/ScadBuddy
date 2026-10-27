@@ -91,8 +91,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
             orderId,
             itemId,
             body,
-            () => {
+            (operation) => {
               running = true
+              // Its own follow ends it; a stale activity row of it is not followed again.
+              followed.current.add(operation.id)
               accepted()
             },
             follows.current.signal,

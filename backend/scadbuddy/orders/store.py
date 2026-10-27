@@ -792,7 +792,8 @@ class OrderStore:
         ordered = sorted(pairs)
         conn.execute(
             "INSERT INTO blob_refs (key, holder_kind, holder_id)"
-            " SELECT key, %s, holder_id FROM unnest(%s::text[], %s::text[]) AS t(key, holder_id)"
+            " SELECT key, %s::text, holder_id"
+            " FROM unnest(%s::text[], %s::text[]) AS t(key, holder_id)"
             " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
             (holder_kind, [key for key, _ in ordered], [quote_id for _, quote_id in ordered]),
         )

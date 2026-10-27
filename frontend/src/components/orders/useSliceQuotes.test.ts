@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, OPERATION_UNFINISHED } from '../../api/client'
-import type { Activity, OrderItemDetail, Quote, SliceQuoteRequest } from '../../api/types'
+import type { Activity, OperationAccepted, OrderItemDetail, Quote, SliceQuoteRequest } from '../../api/types'
 import { useSliceQuotes } from './useSliceQuotes'
 
 const BODY: SliceQuoteRequest = {
@@ -10,6 +10,9 @@ const BODY: SliceQuoteRequest = {
   choices: { bed_type: 'Textured PEI Plate', nozzles: [], tier: null },
   filaments: {},
 }
+
+/** The 202 a slice quote's start answers. */
+const ACCEPTED: OperationAccepted = { id: 'op-started', kind: 'order_item_quote', subject: 'order_item:item-1', status: 'running', created_at: '2026-10-26T10:00:00Z', repeated: false }
 
 /** An activity row of a running `order_item_quote` operation (`operations/activity.py` `row_of`). */
 const ROW: Activity = {
@@ -58,7 +61,7 @@ describe('useSliceQuotes (#4693)', () => {
   it('settles start once the server accepts the quote, before it ends', async () => {
     const pending = deferred<Quote>()
     vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, onAccepted) => {
-      onAccepted?.()
+      onAccepted?.(ACCEPTED)
       return pending.promise
     })
     const { result } = renderHook(() => useSliceQuotes('order-1', undefined, vi.fn()))
@@ -86,7 +89,7 @@ describe('useSliceQuotes (#4693)', () => {
   it('keeps a run that failed after it was accepted, with its refusal', async () => {
     const pending = deferred<Quote>()
     vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, onAccepted) => {
-      onAccepted?.()
+      onAccepted?.(ACCEPTED)
       return pending.promise
     })
     const onQuoted = vi.fn()
@@ -169,6 +172,29 @@ describe('useSliceQuotes (#4693)', () => {
     rerender({ items: [...first] })
     await waitFor(() => expect(running).toHaveBeenCalledTimes(2))
     expect(followed).toHaveBeenCalledTimes(1)
+    expect(onQuoted).toHaveBeenCalledTimes(1)
+  })
+
+  it('never picks up a quote it started itself, though its activity row still says running (#4736 review)', async () => {
+    const running = vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [], next_cursor: null })
+    const followed = vi.spyOn(api, 'followQuote').mockResolvedValue({} as Quote)
+    const pending = deferred<Quote>()
+    vi.spyOn(api, 'quoteItem').mockImplementation((_order, _item, _body, onAccepted) => {
+      onAccepted?.(ACCEPTED)
+      return pending.promise
+    })
+    const onQuoted = vi.fn()
+    const first = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
+    const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: first } })
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(1))
+    await act(async () => result.current.start('item-1', BODY, []))
+    await act(async () => pending.resolve({} as Quote))
+    await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
+    // The reload its quote brought, with the projection not yet caught up.
+    running.mockResolvedValue({ items: [{ ...ROW, id: `operation:${ACCEPTED.id}`, subject: 'order_item:item-1' }], next_cursor: null })
+    rerender({ items: [...first] })
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(2))
+    expect(followed).not.toHaveBeenCalled()
     expect(onQuoted).toHaveBeenCalledTimes(1)
   })
 
