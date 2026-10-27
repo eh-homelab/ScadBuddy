@@ -129,6 +129,45 @@ describe('useLeaveGuard (#322)', () => {
       await waitFor(() => expect(window.location.pathname).toBe('/settings/general'))
       expect(screen.getByTestId('pending')).toHaveTextContent('none')
     })
+
+    it('with within, Back to another path under it passes while dirty, and Back out of it is still held', async () => {
+      // Dirtied only after the move, so the sentinel sits above the second path, not the first.
+      function Later() {
+        const [dirty, setDirty] = useState(false)
+        const guard = useLeaveGuard(dirty, { within: '/settings' })
+        const location = useLocation()
+        return (
+          <>
+            <Link to="/settings/library">Library</Link>
+            <button onClick={() => setDirty(true)}>Type</button>
+            <p data-testid="where">{location.pathname}</p>
+            <p data-testid="pending">{guard.pending === null ? 'none' : String(guard.pending)}</p>
+          </>
+        )
+      }
+      window.history.replaceState(null, '', '/settings/general')
+      render(
+        <BrowserRouter>
+          <Later />
+        </BrowserRouter>,
+      )
+      await userEvent.setup().click(screen.getByRole('link', { name: 'Library' }))
+      press('Type')
+      expect(onSentinel()).toBe(true)
+
+      window.history.back()
+      await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/settings/general'))
+      expect(window.location.pathname).toBe('/settings/general')
+      expect(screen.getByTestId('pending')).toHaveTextContent('none')
+      // Re-armed where it landed: Back from here would leave Settings, so it is held.
+      await waitFor(() => expect(onSentinel()).toBe(true))
+
+      const out = popped()
+      window.history.back()
+      await act(() => out)
+      await waitFor(() => expect(screen.getByTestId('pending')).toHaveTextContent('Symbol(back)'))
+      expect(screen.getByTestId('where')).toHaveTextContent('/settings/general')
+    })
   })
 
   it('without options, a link to another path is still held', async () => {

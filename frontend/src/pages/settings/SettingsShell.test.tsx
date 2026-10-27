@@ -1,10 +1,12 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { Link, useLocation } from 'react-router'
+import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Section } from './controls'
 import { useReportDirty } from './dirty'
 import type { SettingsSection } from './registry'
+import { SettingsProviders, SettingsShell } from './SettingsShell'
 import { enter, renderSettingsShell } from './testing'
 
 // #2171 — Settings by area: one address per area, every area mounted at once so drafts
@@ -32,6 +34,7 @@ function Alpha() {
       <Where />
       <Link to="/">Leave</Link>
       <Link to="/settings#beta">To Beta</Link>
+      <Link to="/settings#assistant-model">Old link</Link>
     </Section>
   )
 }
@@ -68,6 +71,30 @@ const fakes: readonly SettingsSection[] = [
   { id: 'beta', area: 'library', title: 'Beta', order: 10, Component: Beta },
   { id: 'packages', area: 'tools', title: 'Packages', order: 10, Component: Packages },
   { id: 'ghost', area: 'tools', title: 'Ghost', order: 20, Component: Ghost, hideWhenEmpty: true },
+]
+
+/** A section holding an element whose id is an old anchor's: a stale hash must not reach it. */
+function Decoy() {
+  return (
+    <Section id="decoy" title="Decoy">
+      <label htmlFor="assistant-model">Decoy field</label>
+      <input id="assistant-model" />
+    </Section>
+  )
+}
+
+function Model() {
+  return (
+    <Section id="model" title="Model">
+      <p>The model</p>
+    </Section>
+  )
+}
+
+const withDecoy: readonly SettingsSection[] = [
+  ...fakes,
+  { id: 'decoy', area: 'general', title: 'Decoy', order: 20, Component: Decoy },
+  { id: 'model', area: 'assistant', title: 'Model', order: 10, Component: Model },
 ]
 
 const areas = () => screen.getByRole('navigation', { name: 'Settings areas' })
@@ -173,5 +200,58 @@ describe('SettingsShell (#2171)', () => {
     pane.scrollTo = ((options: ScrollToOptions) => tops.push(options.top ?? -1)) as typeof pane.scrollTo
     await user.click(within(areas()).getByRole('link', { name: 'Library' }))
     expect(tops).toEqual([0])
+  })
+
+  it('Back across areas while dirty asks nothing and keeps the draft', async () => {
+    window.history.replaceState(null, '', '/settings/general')
+    const user = userEvent.setup()
+    render(
+      <BrowserRouter>
+        <Routes>
+          <Route
+            path="/settings/*"
+            element={
+              <SettingsProviders sections={fakes}>
+                <SettingsShell sections={fakes} />
+              </SettingsProviders>
+            }
+          />
+        </Routes>
+      </BrowserRouter>,
+    )
+    await screen.findByLabelText('Alpha')
+    await user.click(within(areas()).getByRole('link', { name: 'Library' }))
+    await enter(user, screen.getByRole('textbox', { name: 'Beta' }), 'draft')
+    window.history.back()
+    await waitFor(() => expect(where()).toBe('/settings/general'))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    // Its area is hidden now, and still mounted.
+    expect(screen.getByRole('textbox', { name: 'Beta', hidden: true })).toHaveValue('draft')
+    expect(within(areas()).getByRole('link', { name: /Library/ })).toContainElement(screen.getByLabelText('unsaved'))
+  })
+
+  it('never scrolls to, or unfolds around, an element named by the hash before its redirect', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['decoy']))
+    const tops: number[] = []
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const top = this.id === 'assistant-model' ? 500 : this.id === 'model' ? 300 : 0
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }
+    })
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: (options: ScrollToOptions) => tops.push(options.top ?? -1),
+    })
+    try {
+      const { user } = renderSettingsShell(withDecoy)
+      await screen.findByLabelText('Alpha')
+      // Followed once the page is loaded: the stale hash is in the address for one render.
+      await user.click(screen.getByRole('link', { name: 'Old link' }))
+      await waitFor(() => expect(where()).toBe('/settings/assistant#model'))
+      await waitFor(() => expect(tops).toContain(292))
+      expect(tops).not.toContain(492)
+      expect(screen.getByRole('button', { name: 'Decoy', hidden: true })).toHaveAttribute('aria-expanded', 'false')
+    } finally {
+      delete (HTMLElement.prototype as { scrollTo?: unknown }).scrollTo
+    }
   })
 })

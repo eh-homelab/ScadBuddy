@@ -90,14 +90,18 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
   const navigate = useNavigate()
   const target = resolveLocation(pathname, hash, sections)
   const address = `/settings/${target.area}${target.hash}`
+  /** The address is the one it resolves to: until then its hash may name an old anchor. */
+  const resolved = `${pathname}${hash}` === address
   // Never an early return: the areas stay mounted through the redirect, so drafts survive.
   useEffect(() => {
-    if (`${pathname}${hash}` !== address) void navigate(address, { replace: true })
-  }, [pathname, hash, address, navigate])
+    if (!resolved) void navigate(address, { replace: true })
+  }, [resolved, address, navigate])
 
   const cache = useSettingsCache()
   const { settings } = cache
   const loaded = Boolean(settings)
+  /** Loaded, at an address already redirected: what the hash names is a section here. */
+  const ready = loaded && resolved
   const ai = useAiAvailability()
   const collapse = useContext(CollapseContext)
   const dirtyIds = useDirtySections()
@@ -119,10 +123,10 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
   // useSectionNav then scrolls the pane to it.
   const reveal = useReveal()
   useEffect(() => {
-    if (!loaded || hash.length < 2) return
+    if (!ready || hash.length < 2) return
     reveal(sectionId(hash))
-  }, [loaded, hash, reveal])
-  const { current: currentSection, go: goToSection } = useSectionNav(pane, sectionNav, shownIds, loaded)
+  }, [ready, hash, reveal])
+  const { current: currentSection, go: goToSection } = useSectionNav(pane, sectionNav, shownIds, ready)
 
   // Another area opens at its top, unless the address names a section in it.
   const shownArea = useRef(target.area)

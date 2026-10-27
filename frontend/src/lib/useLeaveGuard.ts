@@ -1,6 +1,14 @@
-import { useContext, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { useLatest } from './useLatest'
-import { createPath, UNSAFE_NavigationContext, useLocation, useNavigate, type Navigator, type To } from 'react-router'
+import {
+  createPath,
+  UNSAFE_NavigationContext,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+  type Navigator,
+  type To,
+} from 'react-router'
 
 /** Marks the history entry pushed on top of the page while it is dirty. */
 const SENTINEL = 'scadbuddyLeaveGuard'
@@ -10,6 +18,13 @@ const BACK = Symbol('back')
 function onSentinel(): boolean {
   const state: unknown = window.history.state
   return typeof state === 'object' && state !== null && SENTINEL in state
+}
+
+/** The router's key of the current entry (`default` for one it never wrote). */
+function entryKey(): string {
+  const state: unknown = window.history.state
+  const key = typeof state === 'object' && state !== null ? (state as { key?: unknown }).key : undefined
+  return typeof key === 'string' ? key : 'default'
 }
 
 /** A copy of the current entry (the router's own state kept), marked as the sentinel. */
@@ -45,7 +60,8 @@ function intercept(navigator: Navigator, hold: (original: Navigator['push']) => 
  *   `BrowserRouter`, which has no `useBlocker`, so the router's navigator is wrapped;
  * - Back: a sentinel entry is pushed on top of the page, so Back pops it without leaving
  *   the page, and the push drops any Forward entries. Each pop re-pushes it at once, so
- *   Back pressed again before the dialog is answered is held too.
+ *   Back pressed again before the dialog is answered is held too. With `within`, a Back
+ *   to an entry under that prefix passes, and the sentinel is pushed again where it lands.
  */
 export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
   const navigate = useNavigate()
@@ -93,37 +109,86 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
     })
   }, [dirty, navigator, location.pathname, within])
 
+  // With `within`: each entry seen here, and the one it was pushed over, so a Back from
+  // the sentinel knows whether the entry beneath the page's is still under the prefix.
+  const navigationType = useNavigationType()
+  const entries = useRef(new Map<string, { pathname: string; before: string | null }>())
+  const shownKey = useRef<string | null>(null)
+  useEffect(() => {
+    if (within === undefined) return
+    const previous = shownKey.current
+    shownKey.current = location.key
+    if (entries.current.has(location.key)) return
+    // A replaced entry keeps the one it was pushed over; one reached by Back or a reload
+    // before this page mounted has none known.
+    let before: string | null = null
+    if (navigationType === 'PUSH') before = previous
+    else if (navigationType === 'REPLACE' && previous) before = entries.current.get(previous)?.before ?? null
+    entries.current.set(location.key, { pathname: location.pathname, before })
+  }, [within, location.key, location.pathname, navigationType])
+  /** The entries a sentinel was pushed over. */
+  const armed = useRef(new Set<string>())
+  /** Set while a Back of our own steps past the page's entry to the one under `within` before it. */
+  const stepping = useRef(false)
+
   // Saved or discarded: the sentinel comes off with a `history.back()` of our own, whose
   // popstate comes a task later. Typing again in between makes the page dirty before it
   // lands (#3671), so it must not be taken for the user's Back: the listener stays for
   // the page's life and knows that pop by `ownBack`.
   const dirtyNow = useLatest(dirty)
   const ownBack = useRef(false)
+  /** Pushes the sentinel over the current entry, which is then known to lie beneath one. */
+  const arm = useCallback(() => {
+    armed.current.add(entryKey())
+    pushSentinel()
+  }, [])
   useEffect(() => {
+    const under = (pathname: string) =>
+      within !== undefined && (pathname === within || pathname.startsWith(`${within}/`))
     const onPop = () => {
       if (ownBack.current) {
         ownBack.current = false
-        if (dirtyNow.current && !onSentinel()) pushSentinel()
+        armed.current.delete(entryKey())
+        if (dirtyNow.current && !onSentinel()) arm()
         return
       }
+      const step = stepping.current
+      stepping.current = false
       if (!dirtyNow.current) return
       if (leavingBack.current) {
         leavingBack.current = false
         return
       }
       if (onSentinel()) return
+      if (within !== undefined) {
+        const key = entryKey()
+        if (!step && armed.current.has(key)) {
+          // Back from the sentinel onto the page's own entry: the user means the one
+          // before it. Under the prefix, go on to it without asking.
+          const before = entries.current.get(key)?.before
+          const previous = before ? entries.current.get(before) : undefined
+          if (previous && under(previous.pathname)) {
+            stepping.current = true
+            window.history.back()
+            return
+          }
+        } else if (under(window.location.pathname)) {
+          arm()
+          return
+        }
+      }
       // Re-armed at once, not when the dialog is answered: a second Back before then
       // pops this new sentinel instead of leaving the page.
-      pushSentinel()
+      arm()
       setPending(BACK)
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [dirtyNow])
+  }, [dirtyNow, within, arm])
 
   useEffect(() => {
     if (!dirty) return
-    if (!onSentinel()) pushSentinel()
+    if (!onSentinel()) arm()
     return () => {
       // Saved or discarded: take the sentinel off, so one Back leaves again.
       if (onSentinel()) {
@@ -131,7 +196,7 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
         window.history.back()
       }
     }
-  }, [dirty])
+  }, [dirty, arm])
 
   const go = (to: string) => {
     bypass.current = true
