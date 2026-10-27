@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettingsPage } from '../pages/SettingsPage'
 import { renderPage } from '../test/utils'
 import { AgentBridge, bridge as appBridge } from './bridge'
@@ -71,6 +71,23 @@ describe('WebMCP', () => {
     expect(registered.every((entry) => entry.signal?.aborted)).toBe(true)
 
     disconnect()
+  })
+
+  it('registers nothing on a stale tab, and says why (#4884)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const bridge = new AgentBridge(() =>
+      Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/catalog-old.js')),
+    )
+    bridge.register({ search: () => [] }, { label: 'page' })
+    setWebMcpEnabled(true)
+    const disconnect = connectWebMcp(bridge)
+    try {
+      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/not registered \(stale_tab\)/)))
+      expect(registered).toEqual([])
+    } finally {
+      disconnect()
+      warn.mockRestore()
+    }
   })
 
   it('reads as off when storage is unavailable', () => {

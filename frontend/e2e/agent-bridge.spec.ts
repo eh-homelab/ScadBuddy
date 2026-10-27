@@ -15,7 +15,9 @@ type Outcome =
 
 interface Bridge {
   call: (name: string, args?: unknown) => Promise<Outcome>
-  listTools: (options?: { all?: boolean }) => Promise<{ name: string; live: boolean; risk: string }[]>
+  listTools: (
+    options?: { all?: boolean },
+  ) => Promise<{ ok: true; tools: { name: string; live: boolean; risk: string }[] } | { ok: false }>
 }
 
 // `page.evaluate` serialises its callback, so the lookup is spelled out inside each one
@@ -29,11 +31,11 @@ async function call(page: Page, name: string, args: unknown = {}): Promise<Outco
 }
 
 async function liveTools(page: Page): Promise<string[]> {
-  return page.evaluate(async () =>
-    (await (globalThis as unknown as { __scadbuddyBridge: Bridge }).__scadbuddyBridge.listTools()).map(
-      (tool) => tool.name,
-    ),
-  )
+  return page.evaluate(async () => {
+    const listed = await (globalThis as unknown as { __scadbuddyBridge: Bridge }).__scadbuddyBridge.listTools()
+    if (!listed.ok) throw new Error('listTools answered an error')
+    return listed.tools.map((tool) => tool.name)
+  })
 }
 
 async function result<T>(page: Page, name: string, args: unknown = {}): Promise<T> {
