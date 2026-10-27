@@ -12,7 +12,7 @@ test.describe('MCP authentication', () => {
   test('turning authentication off takes a confirmation, then warns in both sections', async ({
     page,
   }) => {
-    await page.goto('/settings')
+    await page.goto('/settings/mcp')
     const auth = page.getByRole('region', { name: 'MCP authentication' })
     const tokens = page.getByRole('region', { name: 'MCP access tokens' })
     await expect(auth.getByRole('radio', { name: /Require an access token/ })).toBeChecked()
