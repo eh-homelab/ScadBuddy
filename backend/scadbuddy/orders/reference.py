@@ -30,7 +30,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, ModelLibrary
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError, OutputStore
 from scadbuddy.orders.models import ColourSlot, Reference
-from scadbuddy.render.inputs import InputsError, inputs_key, normalize_inputs
+from scadbuddy.render.inputs import InputsError, NormalizedInputs, inputs_key, normalize_inputs
 from scadbuddy.render.job_models import render_key
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import (
@@ -38,6 +38,7 @@ from scadbuddy.render.runner import (
     UnknownParameterError,
     build_defines,
     cached_schema,
+    with_defaults,
 )
 
 _COMMIT = re.compile(COMMIT_ID_PATTERN)
@@ -274,6 +275,12 @@ async def resolve_reference(
             build_defines(schema, normalized.params)
         except (UnknownParameterError, ParameterValueError, ValueError) as error:
             raise ReferenceError("inputs", str(error)) from None
+        if facts is None:
+            # #4774: as the render route fills them, so the key below is the one a
+            # render of these inputs takes. An output's inputs stay as it recorded them:
+            # `quote.py` `output_matches` compares the two.
+            filled = with_defaults(schema, normalized.params)
+            normalized = NormalizedInputs(data={**normalized.data, "params": filled}, params=filled)
     libraries = facts.libraries if facts is not None else list(source.libraries)
     reference = Reference(
         slug=slug,

@@ -24,6 +24,7 @@ from scadbuddy.orders.reference import (
     resolve_reference,
 )
 from scadbuddy.render.job_models import render_key
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
 
@@ -100,10 +101,13 @@ async def test_a_reference_is_checked_and_normalised(library: Library) -> None:
     )
     reference = resolved.reference  # type: ignore[attr-defined]
     assert (reference.slug, reference.commit) == ("demo", commit)
-    assert reference.inputs == {"params": {"width": 12}, "v": 0}
+    # #4774: the omitted `label` at its default, as the render route fills it, so the
+    # item's render is the one the browser makes of the same item.
+    full: dict[str, ParamValue] = {"width": 12, "label": "hi"}
+    assert reference.inputs == {"params": full, "v": 0}
     assert reference.template_name == "Demo"
     assert reference.libraries == []
-    assert reference.render_key == render_key("demo", {"width": 12}, commit)
+    assert reference.render_key == render_key("demo", full, commit)
     # Nothing to take colours from without an output (Ruling 7): the quote fills them.
     assert resolved.colours == []  # type: ignore[attr-defined]
 
