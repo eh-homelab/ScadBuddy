@@ -1132,7 +1132,7 @@ async def _draw_thumbnail(
     outputs.draws_running += 1
     drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
     _DRAWING.add(drawing)
-    waiting = True
+    gave_up = False
 
     def ended(task: asyncio.Future[bool]) -> None:
         _DRAWING.discard(task)
@@ -1147,10 +1147,9 @@ async def _draw_thumbnail(
                 extra={"id": output_id},
             )
             outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
-        elif task.result() and not waiting:
+        elif task.result() and gave_up:
             emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=meta.slug))
 
-    # Before the shield's own callback, so a read still waiting is answered, not told.
     drawing.add_done_callback(ended)
     try:
         drawn = await asyncio.wait_for(asyncio.shield(drawing), timeout=config.render_timeout)
@@ -1158,15 +1157,18 @@ async def _draw_thumbnail(
         if _drawn(drawing):
             # It ended as the budget ran out, while this read still waited.
             return
+        gave_up = True
         outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"drawing the thumbnail took longer than {config.render_timeout:g}s",
         ) from None
+    except asyncio.CancelledError:
+        # The request went away; the draw goes on.
+        gave_up = True
+        raise
     except Exception:
         raise missing from None
-    finally:
-        waiting = False
     if not drawn:
         raise missing
 
