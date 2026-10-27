@@ -31,6 +31,11 @@ interface Stage {
 }
 
 /** The stages a source recorded in `detail.stages`; anything not shaped like one is left out. */
+/** A `<server>__<tool>` name is a remote plugin's tool; any other is one of ScadBuddy's own. */
+export function toolSettingsPath(viaTool: string): string {
+  return viaTool.includes('__') ? '/settings/tools#remote' : '/settings/tools#builtin'
+}
+
 function stagesOf(detail: Record<string, unknown>): Stage[] {
   const raw = detail.stages
   if (!Array.isArray(raw)) return []
@@ -208,7 +213,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
                 )}
                 {row.via_tool && (
                   <Row label="Via tool">
-                    <Link to="/settings#plugins" className={LINK}>
+                    <Link to={toolSettingsPath(row.via_tool)} className={LINK}>
                       {row.via_tool}
                     </Link>
                   </Row>

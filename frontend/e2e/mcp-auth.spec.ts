@@ -43,7 +43,7 @@ test.describe('MCP authentication', () => {
     await expect(page.getByTestId('mcp-auth-banner')).toContainText('with read and write access')
     await page.keyboard.press('Control+Backquote')
     await expect(panel.getByTestId('mcp-auth-banner')).toContainText('MCP authentication is off')
-    await expect(panel.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+    await expect(panel.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/mcp#mcp-auth-mode')
     await page.keyboard.press('Escape')
     await expect(panel).toBeHidden()
 

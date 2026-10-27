@@ -34,7 +34,7 @@ const ROUTES: RoutePrompts[] = [
     prompts: ['Write a parametric cable clip', 'Help me turn a sketch into a model'],
   },
   {
-    pattern: '/settings',
+    pattern: '/settings/*',
     prompts: ['Help me connect Bambuddy', 'What does each setting do?'],
   },
   {

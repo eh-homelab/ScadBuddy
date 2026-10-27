@@ -60,8 +60,16 @@ describe('ActivityDrawer', () => {
       'href',
       expect.stringContaining('op-model_import'),
     )
-    expect(screen.getByRole('link', { name: 'import_model' })).toHaveAttribute('href', '/settings#plugins')
+    expect(screen.getByRole('link', { name: 'import_model' })).toHaveAttribute('href', '/settings/tools#builtin')
     expect(screen.getByText(/"url": "https:\/\/x"/)).toBeInTheDocument()
+  })
+
+  it('links a remote plugin tool to Remote MCP plugins', async () => {
+    seedActivity([failedImport({ via_tool: 'hindsight__recall' })])
+    const { user } = renderPage(<ActivityDrawer id="operation:o1" onClose={() => {}} />)
+    await screen.findByText('Failed')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    expect(await screen.findByRole('link', { name: 'hindsight__recall' })).toHaveAttribute('href', '/settings/tools#remote')
   })
 
   it('closes on Escape and returns focus', async () => {
