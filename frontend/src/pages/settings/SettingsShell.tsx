@@ -103,6 +103,8 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
   /** Loaded, at an address already redirected: what the hash names is a section here. */
   const ready = loaded && resolved
   const ai = useAiAvailability()
+  // Not while its first read is out, nor when it answered unset up: Status & credentials says why.
+  const down = ai.state === 'unavailable' || ai.state === 'unreachable'
   const collapse = useContext(CollapseContext)
   const dirtyIds = useDirtySections()
   const anyDirty = dirtyIds.length > 0
@@ -266,7 +268,7 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
           <div className="mt-5">
             {AREAS.map((area) => (
               <div key={area.id} data-area={area.id} hidden={area.id !== target.area} className="space-y-4">
-                {area.servedByAgent && !ai.available && (
+                {area.servedByAgent && down && (
                   <p role="status" className="text-sm text-muted-foreground">
                     The assistant service is not answering: the settings it serves are hidden until it does.
                   </p>

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AiAvailability } from '../../agent/chat/availability'
 import { Section } from './controls'
 import { useReportDirty } from './dirty'
 import type { SettingsSection } from './registry'
@@ -12,7 +13,7 @@ import { enter, renderSettingsShell } from './testing'
 // #2171 — Settings by area: one address per area, every area mounted at once so drafts
 // survive a switch, and the leave guard asking only when the page itself is left.
 
-const availability = vi.hoisted(() => ({ available: true }))
+const availability = vi.hoisted((): AiAvailability => ({ available: true, state: 'configured' }))
 vi.mock('../../agent/chat/availability', () => ({ useAiAvailability: () => availability }))
 
 /** The current address, path and hash, as the router has it. */
@@ -105,7 +106,7 @@ const sectionLinks = () =>
 
 describe('SettingsShell (#2171)', () => {
   afterEach(() => {
-    availability.available = true
+    Object.assign(availability, { available: true, state: 'configured' })
     localStorage.clear()
     vi.restoreAllMocks()
   })
@@ -182,15 +183,28 @@ describe('SettingsShell (#2171)', () => {
     expect(document.getElementById('packages')).toBeVisible()
   })
 
-  it('shows one notice on an agent-served area while the assistant is unavailable', async () => {
-    availability.available = false
-    const notice = 'The assistant service is not answering: the settings it serves are hidden until it does.'
-    const { user } = renderSettingsShell(fakes, { route: '/settings/tools' })
-    await waitFor(() => expect(screen.getAllByRole('status')).toHaveLength(1))
-    expect(screen.getByRole('status')).toHaveTextContent(notice)
-    await user.click(within(areas()).getByRole('link', { name: 'General' }))
-    expect(screen.queryByRole('status')).toBeNull()
-  })
+  it.each(['unavailable', 'unreachable'] as const)(
+    'shows one notice on an agent-served area while the assistant is %s',
+    async (state) => {
+      Object.assign(availability, { available: false, state })
+      const notice = 'The assistant service is not answering: the settings it serves are hidden until it does.'
+      const { user } = renderSettingsShell(fakes, { route: '/settings/tools' })
+      await waitFor(() => expect(screen.getAllByRole('status')).toHaveLength(1))
+      expect(screen.getByRole('status')).toHaveTextContent(notice)
+      await user.click(within(areas()).getByRole('link', { name: 'General' }))
+      expect(screen.queryByRole('status')).toBeNull()
+    },
+  )
+
+  it.each(['checking', 'not_configured'] as const)(
+    'shows no notice on an agent-served area while the assistant is %s (#2171)',
+    async (state) => {
+      Object.assign(availability, { available: false, state })
+      renderSettingsShell(fakes, { route: '/settings/tools' })
+      await waitFor(() => expect(sectionLinks()).toEqual(['Packages']))
+      expect(screen.queryByText(/The assistant service is not answering/)).toBeNull()
+    },
+  )
 
   it('scrolls the pane to the top on an area switch', async () => {
     const { user, container } = renderSettingsShell(fakes)
