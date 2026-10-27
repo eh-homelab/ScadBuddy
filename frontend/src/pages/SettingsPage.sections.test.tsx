@@ -656,7 +656,7 @@ describe('SettingsPage sections (#322)', () => {
     let release: () => void = () => undefined
     const held = new Promise<void>((resolve) => (release = resolve))
     const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
-      if ('reset' in body) throw new ApiError(500, 'The reset failed.')
+      if ('reset' in body) throw new ApiError(409, 'The reset failed.')
       if ('public_url' in body) await held
       return save(body)
     })
@@ -682,6 +682,112 @@ describe('SettingsPage sections (#322)', () => {
     expect(field).toHaveValue('https://older.test')
     expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here')
     expect(timeout).toHaveValue(45)
+    put.mockRestore()
+  })
+
+  it('keeps a newer write’s answer for a field when a write between them is refused (#4816)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const field = screen.getByLabelText('ScadBuddy’s own URL')
+    await user.clear(field)
+    await enter(user, field, 'https://mine.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here'))
+
+    // The server applies each Connection save as it comes (older, then newest) and holds
+    // its answer; the reset sent between them is refused once newest is in flight. The
+    // newest's answer lands first, the older's last: the refusal must not hand the URL
+    // back to the older save, whose late answer would then patch it over the newest.
+    const save = api.putSettings.bind(api)
+    const hold = () => {
+      let release: () => void = () => undefined
+      const held = new Promise<void>((resolve) => (release = resolve))
+      return { held, release: () => release() }
+    }
+    const older = hold()
+    const refusal = hold()
+    const newest = hold()
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      if ('reset' in body) {
+        await refusal.held
+        throw new ApiError(409, 'The reset was refused.')
+      }
+      const saved = await save(body)
+      if (body.public_url === 'https://older.test') await older.held
+      if (body.public_url === 'https://newest.test') await newest.held
+      return saved
+    })
+    await user.clear(field)
+    await enter(user, field, 'https://older.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    await user.click(
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset to deployment value: ScadBuddy’s own URL' }),
+    )
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+
+    // A Rendering save in between: the page shows one save at a time, so Save Connection
+    // is offered again once it has answered.
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+
+    await user.clear(field)
+    await enter(user, field, 'https://newest.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(4))
+
+    await act(async () => refusal.release())
+    expect(await screen.findByText('The reset was refused.')).toBeInTheDocument()
+    await act(async () => newest.release())
+    await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
+    await act(async () => older.release())
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(field).toHaveValue('https://newest.test')
+    expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
+    expect(timeout).toHaveValue(45)
+    put.mockRestore()
+  })
+
+  it('reads the settings again after a write whose answer was lost (#4816)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const field = screen.getByLabelText('ScadBuddy’s own URL')
+    await user.clear(field)
+    await enter(user, field, 'https://mine.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here'))
+
+    // The server applies Connection's save, then the reset; Connection's answer is held,
+    // and the reset's is lost to a proxy 502. The reset may well have been applied, so
+    // Connection's late answer must not put its URL back over what the server holds.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if ('reset' in body) throw new ApiError(502, 'Bad gateway.')
+      if ('public_url' in body) await held
+      return saved
+    })
+    await user.clear(field)
+    await enter(user, field, 'https://older.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    await user.click(
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset to deployment value: ScadBuddy’s own URL' }),
+    )
+    expect(await screen.findByText('Bad gateway.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('From SCADBUDDY_PUBLIC_URL'))
+
+    await act(async () => release())
+    await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
+    expect(field).toHaveValue('https://scadbuddy.internal.nullreference.io')
+    expect(screen.getByTestId('source-public_url')).toHaveTextContent('From SCADBUDDY_PUBLIC_URL')
     put.mockRestore()
   })
 

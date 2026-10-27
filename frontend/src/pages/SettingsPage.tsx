@@ -502,21 +502,37 @@ function SettingsSections() {
     }
     priorWriter.current.delete(sent)
   }
+  /**
+   * #4816 — a write that threw. Only a refusal (a 4xx) was surely not applied, and gives its
+   * fields back. Any other failure (no answer, a 5xx, a timeout) may have been applied with
+   * its answer lost: its fields stay its own, so no older answer patches over them, and the
+   * settings are read again, seeding no field, so the form keeps what was typed.
+   */
+  const writeThrew = (sent: number, cause: unknown) => {
+    if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
+      failWrite(sent)
+      return
+    }
+    priorWriter.current.delete(sent)
+    const since = beginSeed()
+    numberedRead(() => since, [])
+  }
 
   /**
    * Numbers a read as sent and refreshes the settings. `onAccept` runs only when no newer
-   * write has landed, and takes the read by returning the edits to seed the form since, or
-   * refuses it with `undefined`. A taken read is the newest landed and is cached whole.
+   * write has landed, and takes the read by returning the edits to seed `seed` with since,
+   * or refuses it with `undefined`. A taken read is the newest landed and is cached whole.
    */
-  const numberedRead = (onAccept: () => Edits | undefined) => {
+  const numberedRead = (onAccept: () => Edits | undefined, seed: 'all' | FieldName[] = 'all') => {
     const sent = ++writeSent.current
     settingsState.refresh((next) => {
       // #4803: a save or reset sent after this read has landed already, and is newer.
       if (sent <= writeLanded.current) return false
+      // `onAccept` must not land a write between the check above and `landed(sent)`.
       const since = onAccept()
       if (since === undefined) return false
       landed(sent)
-      requestSeed('all', since)
+      requestSeed(seed, since)
       cached.current = next
       return true
     })
@@ -614,7 +630,7 @@ function SettingsSections() {
       }
       return true
     } catch (cause) {
-      if (sent !== undefined) failWrite(sent)
+      if (sent !== undefined) writeThrew(sent, cause)
       // A 422 names each refused field (`loc: ["body", <field>]`): shown beside it.
       const fieldErrors: Partial<Record<FieldName, string>> = {}
       const reported = cause instanceof ApiError ? (cause.problem as { errors?: unknown }).errors : undefined
@@ -668,7 +684,7 @@ function SettingsSections() {
         projectsState.reload()
       }
     } catch (cause) {
-      if (sent !== undefined) failWrite(sent)
+      if (sent !== undefined) writeThrew(sent, cause)
       setError(cause instanceof ApiError ? cause.detail : 'Could not reset the setting.')
     } finally {
       setResetting(null)
