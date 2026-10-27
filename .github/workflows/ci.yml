@@ -525,6 +525,10 @@ jobs:
       # takes 0-3 s, but at times trickles at 24-58 kB/s for 7-12 minutes, and
       # every single-shard timeout here was that, not a test. The step timeout
       # makes a stalled browser download fail this step by name.
+      # This rests on today's ubuntu-latest already having chromium's libraries.
+      # If a newer image lacks one, chromium fails at launch with a shared-library
+      # error: add a separate `pnpm exec playwright install-deps chromium` step
+      # with its own timeout, in all three jobs that point here (#4883 review).
       - name: Install Playwright browsers
         timeout-minutes: 5
         run: pnpm exec playwright install chromium
