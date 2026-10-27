@@ -116,7 +116,9 @@ describe('SettingsPage, live (#269)', () => {
 
     await api.putSettings({ public_url: OTHER })
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
-    expect(await screen.findByText(/Settings were changed elsewhere/)).toBeInTheDocument()
+    expect(await screen.findByText(/Settings were changed elsewhere/)).toHaveTextContent(
+      'Settings were changed elsewhere. Your unsaved changes in Connection are kept; Load the latest discards them.',
+    )
     expect(field).toHaveValue('https://mine.test')
 
     await user.click(screen.getByRole('button', { name: 'Load the latest' }))

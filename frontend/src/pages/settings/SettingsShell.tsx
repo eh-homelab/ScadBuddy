@@ -253,7 +253,10 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
             <Card role="status" size="sm" className="mt-4 bg-primary/8 ring-primary/40">
               <CardContent className="flex flex-wrap items-center gap-3 text-xs">
                 <span className="min-w-0 flex-1 basis-60">
-                  Settings were changed elsewhere. Your unsaved changes here are kept until you load them.
+                  Settings were changed elsewhere.
+                  {/* The drafts may be in hidden areas, and Load the latest drops them all. */}
+                  {dirtyIds.length > 0 &&
+                    ` Your unsaved changes in ${dirtyIds.map(titleOf).join(', ')} are kept; Load the latest discards them.`}
                 </span>
                 <Button size="sm" onClick={cache.loadLatest}>
                   Load the latest

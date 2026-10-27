@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AiAvailability } from '../../agent/chat/availability'
+import { emitRealtime } from '../../mocks/realtime'
 import { Section } from './controls'
 import { useReportDirty } from './dirty'
 import type { SettingsSection } from './registry'
@@ -165,6 +166,20 @@ describe('SettingsShell (#2171)', () => {
     expect(screen.getByLabelText('Alpha')).toHaveValue('draft')
     await user.click(screen.getByRole('link', { name: 'Leave' }))
     expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toHaveTextContent('Alpha')
+  })
+
+  it('names every section with a draft, in any area, in the changed-elsewhere notice', async () => {
+    const { user } = renderSettingsShell(fakes)
+    await enter(user, await screen.findByLabelText('Alpha'), 'draft')
+    await user.click(within(areas()).getByRole('link', { name: 'Library' }))
+    await enter(user, screen.getByRole('textbox', { name: 'Beta' }), 'draft')
+    // The first event may land before the subscription is live.
+    await waitFor(() => {
+      emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+      expect(screen.getByText(/Settings were changed elsewhere/)).toHaveTextContent(
+        'Settings were changed elsewhere. Your unsaved changes in Alpha, Beta are kept; Load the latest discards them.',
+      )
+    })
   })
 
   it('keeps drafts through a redirect', async () => {
