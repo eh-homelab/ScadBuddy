@@ -23,9 +23,12 @@
       waits a little longer each time (0, 0.5, 1 s); a failed stylesheet reloads at once,
       as the entry script may already be rendering and a late reload would flash. Then the
       URL is left failed for this tab, so it cannot loop, and a later deploy (new names)
-      still recovers. Without sessionStorage there is no
-      guard, so no reload. Its sha256 is in PAGE_CSP (backend/scadbuddy/api/static.py,
-      frontend/page-csp.txt); src/entryReload.test.ts fails when they drift.
+      still recovers. The 3 are per URL for the tab's whole session, not 3 failures in a
+      row: a reload that recovers still spends one. That is fine, as a hashed name is one
+      build, which a later deploy replaces with new names and a fresh budget. Without
+      sessionStorage there is no guard, so no reload. Its sha256 is in PAGE_CSP
+      (backend/scadbuddy/api/static.py, frontend/page-csp.txt); src/entryReload.test.ts
+      fails when they drift.
     -->
     <script>
       ;(function () {
