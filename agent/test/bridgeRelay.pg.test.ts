@@ -198,14 +198,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
   })
 
   it('answers not connected when the tab left the owner between being claimed and run', async () => {
-    b.relay.serve({ holds: () => true, run: async () => ({ op: 'gone' }) })
+    b.relay.serve({ holds: () => true, tabs: () => [TAB], run: async () => ({ op: 'gone' }) })
     a.hub.pairSession('s1', TAB)
     const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
     expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
   })
 
   it('gives up on an owner that acked and then never answered', async () => {
-    b.relay.serve({ holds: () => true, run: () => new Promise(() => {}) })
+    b.relay.serve({ holds: () => true, tabs: () => [TAB], run: () => new Promise(() => {}) })
     a.hub.pairSession('s1', TAB)
     const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal(), timeoutMs: 300 })
     expect(outcome).toMatchObject({

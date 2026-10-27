@@ -305,7 +305,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const b = await replica('b')
       await tab(b.hub, () => ({ ok: true, result: 'never' }))
       await owned(TAB, b.queue)
-      b.relay.serve({ holds: () => true, run: async () => ({ op: 'gone' }) })
+      b.relay.serve({ holds: () => true, tabs: () => [TAB], run: async () => ({ op: 'gone' }) })
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
@@ -316,7 +316,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const b = await replica('b')
       await tab(b.hub, () => ({ ok: true, result: 'never' }))
       await owned(TAB, b.queue)
-      b.relay.serve({ holds: () => true, run: async () => Promise.reject(new Error('the hub broke')) })
+      b.relay.serve({ holds: () => true, tabs: () => [TAB], run: async () => Promise.reject(new Error('the hub broke')) })
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_answer', message: expect.stringMatching(/failed while it ran the call/) } })
@@ -331,7 +331,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await owned(TAB, b.queue)
       // Answers only once the caller gave up, so B's worker can stop after the test.
       let release = () => {}
-      b.relay.serve({ holds: () => true, run: () => new Promise((resolve) => (release = () => resolve({ op: 'gone' }))) })
+      b.relay.serve({ holds: () => true, tabs: () => [TAB], run: () => new Promise((resolve) => (release = () => resolve({ op: 'gone' }))) })
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal(), timeoutMs: 300 })
       release()

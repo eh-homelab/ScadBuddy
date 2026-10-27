@@ -228,7 +228,11 @@ export class TabHub implements BrowserTabs {
     this.#pairings = options.pairings
     this.#relay = options.relay
     this.#sessionTabStore = options.sessionTabs
-    this.#relay?.serve({ holds: (tabId) => this.#tabs.has(tabId), run: (tabId, request) => this.#runHere(tabId, request) })
+    this.#relay?.serve({
+      holds: (tabId) => this.#tabs.has(tabId),
+      tabs: () => this.connected(),
+      run: (tabId, request) => this.#runHere(tabId, request),
+    })
     this.#callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS
     this.#pollMs = options.pollMs ?? PAIRINGS_POLL_MS
     this.#log = options.log ?? ((m) => console.error(m))
@@ -618,6 +622,7 @@ export class TabHub implements BrowserTabs {
   /** Closes every connection and stops the poll (shutdown). */
   close(): void {
     for (const tab of [...this.#tabs.values()]) tab.close('the agent service is shutting down')
+    this.#relay?.close?.()
     clearInterval(this.#poll)
     this.#poll = undefined
   }

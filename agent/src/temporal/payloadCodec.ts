@@ -191,6 +191,10 @@ export class PgPayloadKeys implements PayloadKeys {
     const kek = row.kek_id === this.#kek.id ? this.#kek : row.kek_id === this.#previous?.id ? this.#previous : undefined
     if (!kek) throw new SealError(`the payload key of ${subject} was sealed with key ${row.kek_id}, which is not mounted`)
     const key = openBytes(kek.key, row.dek_sealed, payloadKeyContext(subject))
+    // Never cached for a browser call (`bridge-<uuid>`): its caller deletes the key once it has the
+    // answer (dropPayloadKey), and a copy cached on the owner's or the workflow's replica would
+    // outlive that by up to `cacheMs`.
+    if (subject.startsWith('bridge-')) return key
     // Expired keys go now, not when their subject is next asked for.
     const now = Date.now()
     for (const [held, entry] of this.#cache) if (entry.until <= now) this.forget(held)

@@ -76,12 +76,21 @@ export const MAX_BRIDGE_BYTES = 1_000_000
  */
 const WORKFLOW_SLACK_MS = 15_000
 
+/**
+ * How often a replica refreshes its tabs' rows (`TabOwnerStore.refresh`): a claim lost while
+ * the database was down, or a row a call that missed this replica's queue dropped, is back
+ * within this. A row naming another replica is never taken back.
+ */
+export const OWNER_REFRESH_MS = 30_000
+
 /** A call's workflow ID, and the subject its payloads are sealed under. */
 export const bridgeWorkflowId = (): string => `bridge-${randomUUID()}`
 
-/** The hub's side: whether a tab is held here (for the old relay), and running a request on it. */
+/** The hub's side: whether a tab is held here (for the old relay), the tabs held, and running a request on one. */
 export type RelayOwner = {
   holds(tabId: string): boolean
+  /** Every tab held here now, for the owner rows' refresh. */
+  tabs(): string[]
   run(tabId: string, request: RelayRequest): Promise<RelayAnswer>
 }
 
@@ -98,6 +107,8 @@ export interface TabRelay {
    * Rejects with the abort error when `signal` aborts.
    */
   forward(tabId: string, request: RelayRequest, options: { signal: AbortSignal; timeoutMs: number }): Promise<RelayAnswer | undefined>
+  /** Stops anything the relay runs on its own (the hub's close). */
+  close?(): void
 }
 
 export type TemporalTabRelayOptions = {
@@ -109,6 +120,8 @@ export type TemporalTabRelayOptions = {
   /** Set later with `useClient` when it is made after the hub (main.ts). */
   client?: SealingClient | undefined
   ackTimeoutMs?: number
+  /** `OWNER_REFRESH_MS` when omitted. */
+  refreshMs?: number
   /** The database is migrated (db.ts `ready`): each owner-row write waits for it, and is skipped when it is down. */
   ready?: () => Promise<boolean>
   /** The old relay, for one release (#4868): tried when this path cannot place the call. */
@@ -153,6 +166,8 @@ export class TemporalTabRelay implements TabRelay {
   #hosting = false
   /** One owner-row write at a time, in order: a tab's release never lands before its claim. */
   #writes: Promise<void> = Promise.resolve()
+  readonly #refreshMs: number
+  #refresh: NodeJS.Timeout | undefined
 
   constructor(options: TemporalTabRelayOptions) {
     this.#owners = options.owners
@@ -163,6 +178,7 @@ export class TemporalTabRelay implements TabRelay {
     this.#log = options.log ?? ((m) => console.error(m))
     this.#ready = options.ready
     this.#fallback = options.fallback
+    this.#refreshMs = options.refreshMs ?? OWNER_REFRESH_MS
   }
 
   useClient(client: SealingClient): void {
@@ -181,6 +197,14 @@ export class TemporalTabRelay implements TabRelay {
    */
   hostActivities(): Record<string, (tabId: string, request: RelayRequest) => Promise<RelayAnswer>> {
     this.#hosting = true
+    if (!this.#refresh) {
+      // The tabs are read when the write runs, after any release queued before it.
+      this.#refresh = setInterval(
+        () => void this.#write(() => this.#owners.refresh(this.#owner?.tabs() ?? [], this.hostQueue)),
+        this.#refreshMs,
+      )
+      this.#refresh.unref()
+    }
     return {
       [BRIDGE_TAB_ACTIVITY]: async (tabId, request) => {
         if (!this.#owner) return { op: 'gone' }
@@ -188,6 +212,11 @@ export class TemporalTabRelay implements TabRelay {
         return jsonBytes(answer) > MAX_BRIDGE_BYTES ? tooLarge('result') : answer
       },
     }
+  }
+
+  close(): void {
+    clearInterval(this.#refresh)
+    this.#refresh = undefined
   }
 
   /** Drops the rows a previous process on this queue left (a restart keeps the identity). */
@@ -226,11 +255,12 @@ export class TemporalTabRelay implements TabRelay {
     if (sealing) {
       try {
         const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
+        if (answer === 'failed') return request.op === 'call' ? NO_ANSWER : undefined
         if (answer !== undefined) return answer
       } catch (err) {
         if (options.signal.aborted) throw abortError()
-        // Temporal refused the start, or the workflow failed or timed out: never a throw
-        // from the tool. The old relay may still reach the tab; else the call may have run.
+        // The owner's row could not be read, or Temporal refused the start: the call ran
+        // nowhere, so the old relay may still take it. Never a throw from the tool.
         this.#failed(err)
         failed = true
       }
@@ -242,18 +272,23 @@ export class TemporalTabRelay implements TabRelay {
     return undefined
   }
 
-  /** The owner's answer; undefined when this path finds no replica holding the tab. */
+  /**
+   * The owner's answer; undefined when this path finds no replica holding the tab, so the call
+   * ran nowhere; `failed` when the workflow started and then failed, so the call may have run on
+   * the tab and is never sent again. Rejects when the row's read or the start failed.
+   */
   async #viaTemporal(
     { client, dropKey }: SealingClient,
     tabId: string,
     request: RelayRequest,
     signal: AbortSignal,
-  ): Promise<RelayAnswer | undefined> {
-    const queue = await this.#owners.ownerOf(tabId, signal).catch((err: unknown) => {
+  ): Promise<RelayAnswer | 'failed' | undefined> {
+    const owner = await this.#owners.ownerOf(tabId, signal).catch((err: unknown) => {
       throw signal.aborted ? abortError() : err
     })
     // Here, the hub would have found it: a row of this queue's is a socket that closed.
-    if (queue === undefined || queue === this.hostQueue) return undefined
+    if (owner === undefined || owner.queue === this.hostQueue) return undefined
+    const { queue } = owner
     const input: BridgeCallInput = { queue, tabId, request, ackTimeoutMs: this.#ackTimeoutMs }
     const workflowId = bridgeWorkflowId()
     const handle = await client.workflow.start(BRIDGE_CALL_WORKFLOW, {
@@ -262,7 +297,7 @@ export class TemporalTabRelay implements TabRelay {
       args: [input],
       workflowExecutionTimeout: this.#ackTimeoutMs + ownerRunMs(input) + WORKFLOW_SLACK_MS,
     })
-    const answer = await new Promise<BridgeCallAnswer>((resolve, reject) => {
+    const answer = await new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
       const onAbort = () => {
         // The tab is not told, as for a local call; the workflow stops waiting for it. Its
         // key stays for the workflow's last tasks, and the sweep deletes it (sweepBridgeKeys).
@@ -278,15 +313,20 @@ export class TemporalTabRelay implements TabRelay {
         },
         (err: unknown) => {
           signal.removeEventListener('abort', onAbort)
-          reject(err)
+          // The workflow failed or timed out (a rollout's old replica failing its tasks): the
+          // owner may have run the call, so it is not sent again by the old relay.
+          this.#failed(err)
+          resolve('failed')
         },
       )
     })
     // The workflow is closed and its answer read: nobody needs its payloads again.
     dropKey(workflowId).catch((err: unknown) => this.#failed(err))
+    if (answer === 'failed') return answer
     if (answer.op === 'unreachable') {
-      // Nobody polls the owner's queue: its pod is gone, and so is its claim.
-      void this.#write(() => this.#owners.release(tabId, queue))
+      // Nobody polled the owner's queue in time: its pod is gone, and so is its claim. Only the
+      // row as read: a claim or refresh since then is a live owner's (OWNER_REFRESH_MS).
+      void this.#write(() => this.#owners.release(tabId, queue, owner.claimedAt))
       return undefined
     }
     return answer.op === 'gone' ? undefined : answer

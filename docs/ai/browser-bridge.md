@@ -349,7 +349,10 @@ sequenceDiagram
   host worker polls). A tab's hello claims it; its socket's close releases it only while
   the row still names that replica, so a reconnect to another replica that overtakes the
   old socket keeps the newer owner. A replica drops its own rows at start (a container
-  restart keeps its identity).
+  restart keeps its identity). A replica claims tabs only while its host worker serves
+  `bridge.tab`. Every 30 s (`OWNER_REFRESH_MS`) it refreshes the rows of the tabs it holds
+  and makes a missing one again: a claim lost while the database was down, or a row that
+  a missed call dropped. It never takes back a row that names another replica.
 - **One replica runs a call:** the activity is scheduled on the owner's queue only, with
   one attempt, so the other replicas do no work for it.
 - **Every call is sealed:** the arguments and the tab's result (page snapshots, form
@@ -357,8 +360,10 @@ sequenceDiagram
   workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the
   KEK ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)
   `subjectOf`), whether or not the call is for a session. The caller deletes the key
-  once it has the answer, so the history cannot be read again; a key a cancelled call
-  left is deleted by the hourly sweep (`sweepBridgeKeys`, older than an hour). Without
+  once it has the answer, so the history cannot be read again. No replica caches a bridge
+  key (`PgPayloadKeys` reads it from the row each time), so no copy outlives the row in
+  memory. A key that a cancelled call left is deleted by the hourly sweep
+  (`sweepBridgeKeys`, older than an hour). Without
   the KEK no call goes through Temporal: it is refused, or (for one release) takes the
   Postgres relay below.
 - **Inline, capped:** a bridge payload is never kept in the payload store (only a
@@ -367,8 +372,15 @@ sequenceDiagram
   200 000; past it the call answers `too_large`.
 - **No replica holds the tab:** there is no row, or no worker takes the activity within
   3 s (`ACK_TIMEOUT_MS`, its schedule-to-start timeout: the owner's pod is gone), and the
-  call answers the usual "the paired ScadBuddy tab is not connected". A row whose queue
-  nobody polls is then deleted.
+  call answers the usual "the paired ScadBuddy tab is not connected". The row is then
+  deleted only if nobody claimed or refreshed it after the call read it, so a live owner
+  that was only slow keeps its row, or makes it again at its next refresh.
+- **A failed call answers, never throws:** if the owner's row cannot be read or Temporal
+  refuses the start, the call ran nowhere, so it takes the old relay while that exists,
+  or answers `no_answer`. Once the workflow has started, a failure or a timeout answers
+  `no_answer` and is never sent again: the owner may have run it, and a click must not
+  run twice. If the owner's run throws, the workflow completes with a `no_answer`
+  outcome.
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the

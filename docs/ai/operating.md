@@ -86,8 +86,9 @@ covers the same ground more briefly.
   replica that may be another old one. The workflow's execution timeout leaves 15 s
   past the call's own time for that (`WORKFLOW_SLACK_MS`,
   [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)), about one failed task
-  and its retry. A call whose workflow still times out is logged, and it takes the old
-  relay, or without it answers `no_answer`; it never fails the tool. Once no replica
+  and its retry. A call whose workflow still times out is logged and answers
+  `no_answer`; it never fails the tool, and it is not sent again by the old relay, since
+  the owner may already have run it. Once no replica
   runs a build before #4780, nothing takes those tasks but replicas that have the
   workflow.
 

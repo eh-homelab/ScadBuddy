@@ -3,7 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
 import type { Database } from '../src/db.js'
-import { sweepBridgeKeys } from '../src/temporal/payloadCodec.js'
+import { SubjectForgotten, sweepBridgeKeys } from '../src/temporal/payloadCodec.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // The bridge's shared rows: which tab a chat session pairs with (#2086,
@@ -57,11 +58,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? ''
     const owners = new PostgresTabOwnerStore(db.sql)
     expect(await owners.ownerOf('tab-a')).toBeUndefined()
     await owners.claim('tab-a', 'agent-tools.b')
-    expect(await owners.ownerOf('tab-a')).toBe('agent-tools.b')
+    expect((await owners.ownerOf('tab-a'))?.queue).toBe('agent-tools.b')
     // A reconnect to C, then B sees its old socket close.
     await owners.claim('tab-a', 'agent-tools.c')
     await owners.release('tab-a', 'agent-tools.b')
-    expect(await owners.ownerOf('tab-a')).toBe('agent-tools.c')
+    expect((await owners.ownerOf('tab-a'))?.queue).toBe('agent-tools.c')
     await owners.release('tab-a', 'agent-tools.c')
     expect(await owners.ownerOf('tab-a')).toBeUndefined()
   })
@@ -74,7 +75,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? ''
     await owners.releaseAll('agent-tools.b')
     expect(await owners.ownerOf('tab-a')).toBeUndefined()
     expect(await owners.ownerOf('tab-b')).toBeUndefined()
-    expect(await owners.ownerOf('tab-c')).toBe('agent-tools.c')
+    expect((await owners.ownerOf('tab-c'))?.queue).toBe('agent-tools.c')
   })
 
   it("sweeps only the keys of browser calls older than an hour (#4780)", async () => {
@@ -89,6 +90,39 @@ describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? ''
     expect(await sweepBridgeKeys(db.sql)).toBe(1)
     const left = await db.sql<{ subject: string }[]>`SELECT subject FROM ai_payload_keys WHERE subject IN (${old}, ${fresh}, ${session})`
     expect(left.map((r) => r.subject).sort()).toEqual([fresh, session].sort())
+  })
+
+  it("refreshes a replica's own rows and makes a lost one again, never taking another replica's (#4806 review)", async () => {
+    const owners = new PostgresTabOwnerStore(db.sql)
+    await owners.claim('tab-a', 'agent-tools.b')
+    await owners.claim('tab-b', 'agent-tools.c') // reconnected to C; B's old socket not yet closed
+    const before = (await owners.ownerOf('tab-a'))!.claimedAt
+    await owners.refresh(['tab-a', 'tab-b', 'tab-lost'], 'agent-tools.b')
+    expect((await owners.ownerOf('tab-a'))!.claimedAt > before).toBe(true)
+    expect((await owners.ownerOf('tab-b'))?.queue).toBe('agent-tools.c')
+    expect((await owners.ownerOf('tab-lost'))?.queue).toBe('agent-tools.b')
+  })
+
+  it('drops a row a missed call read only while nobody refreshed it since (#4806 review)', async () => {
+    const owners = new PostgresTabOwnerStore(db.sql)
+    await owners.claim('tab-a', 'agent-tools.b')
+    const read = (await owners.ownerOf('tab-a'))!.claimedAt
+    await owners.refresh(['tab-a'], 'agent-tools.b') // the live owner, after the read
+    await owners.release('tab-a', 'agent-tools.b', read)
+    expect((await owners.ownerOf('tab-a'))?.queue).toBe('agent-tools.b')
+    // The row as read, with microseconds: no later write, so it goes.
+    const now = (await owners.ownerOf('tab-a'))!.claimedAt
+    await owners.release('tab-a', 'agent-tools.b', now)
+    expect(await owners.ownerOf('tab-a')).toBeUndefined()
+  })
+
+  it("never caches a browser call's payload key, so deleting the row shreds it everywhere (#4806 review)", async () => {
+    const keys = testPayloadKeys(db.sql)
+    const subject = `bridge-${randomUUID()}`
+    await keys.keyFor(subject, true)
+    await keys.keyFor(subject, false) // read again: a cached copy would now outlive the row
+    await db.sql`DELETE FROM ai_payload_keys WHERE subject = ${subject}` // another replica's dropPayloadKey
+    await expect(keys.keyFor(subject, false)).rejects.toBeInstanceOf(SubjectForgotten)
   })
 
   it('stops a read with the call it is for', async () => {
