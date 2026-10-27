@@ -116,6 +116,7 @@ from scadbuddy.workflows.client import (
     follow_worker,
     is_current,
     make_current,
+    polled_elsewhere,
     projects_deployment,
     render_worker,
     routes_to,
@@ -139,8 +140,8 @@ logger = logging.getLogger(__name__)
 HEALTH_PORT = 9090
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
-#: How long a stopping worker whose build is still current keeps serving its pinned
-#: runs before leaving them to the next pod of the same build.
+#: How long a stopping worker whose build is still current, and polled by another
+#: worker of the build, keeps serving its pinned runs before leaving them to that one.
 DRAIN_CURRENT_GRACE = 30.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
@@ -305,11 +306,11 @@ async def _drain(
     stop_now: asyncio.Event | None = None,
 ) -> DrainOutcome:
     """Poll until no run is pinned to this build (``drained``) or ``timeout`` passes
-    (``timed_out``). A build that is still, or again, current (``current``) ends it
-    too, because another worker of the same build serves its pinned runs (#874); but
-    only after ``grace``, during which this worker keeps serving them itself, in case
-    the pod that replaces it is slow to come, or never comes. ``stop_now`` (a second
-    signal, #605) ends it at once (``stopped``)."""
+    (``timed_out``). A build that is still, or again, current with another worker of it
+    polling (``still_current``, ``current``) ends it too, because that worker serves its
+    pinned runs (#874, #4869); but only after ``grace``, during which this worker keeps
+    serving them itself, in case the pod that replaces it is slow to come, or never
+    comes. ``stop_now`` (a second signal, #605) ends it at once (``stopped``)."""
     loop = asyncio.get_running_loop()
     trust_current_at = loop.time() + grace
 
@@ -501,6 +502,7 @@ async def _poll(
         stop,
         build_id=build_id,
         deployment_name=DEPLOYMENT_NAME,
+        task_queue=settings.temporal_task_queue_render,
         drain_timeout=2 * config.activity_timeout + 120 if drain else None,
         stop_now=stop_now,
     )
@@ -513,12 +515,14 @@ async def _serve_versioned(
     *,
     build_id: str,
     deployment_name: str,
+    task_queue: str,
     drain_timeout: float | None,
     stop_now: asyncio.Event | None = None,
     ready: tuple[str, asyncio.Event] | None = None,
 ) -> None:
     """Run ``workers`` (one deployment version) until ``stop``, making the build current
-    beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs.
+    beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs,
+    which only another worker of the build polling ``task_queue`` ends early (#4869).
     ``stop_now`` cuts the drain short (#605). With ``ready`` (a task queue and an
     event), the event is set once that queue routes to this build (`wait_until_routed`),
     for `/readyz` (#4146)."""
@@ -535,6 +539,9 @@ async def _serve_versioned(
             logger.warning("could not count this build's running workflows", exc_info=True)
             return False
 
+    # This worker's own polls, told apart from another pod's of the same build.
+    identities = {worker.config().get("identity") or client.identity for worker in workers}
+
     async def still_current() -> bool:
         try:
             return await is_current(
@@ -542,9 +549,18 @@ async def _serve_versioned(
                 namespace=client.namespace,
                 build_id=build_id,
                 deployment_name=deployment_name,
+            ) and await polled_elsewhere(
+                client,
+                task_queue,
+                deployment_name=deployment_name,
+                build_id=build_id,
+                identities=identities,
             )
         except RPCError:
-            logger.warning("could not read the deployment's current build", exc_info=True)
+            logger.warning(
+                "could not read the deployment's current build or the queue's pollers",
+                exc_info=True,
+            )
             return False
 
     async with contextlib.AsyncExitStack() as running:
@@ -587,8 +603,10 @@ async def _serve_versioned(
 
         # A workflow is PINNED to the build that started it: one waiting between two
         # activities is served by no other build, so keep polling until none is left,
-        # unless this build is still current: a restart of the same build (a manifest
-        # change, a node drain) leaves its runs to the next pod of that build.
+        # unless this build is still current and another worker of it polls: a restart
+        # of the same build (a manifest change, a node drain) leaves its runs to the next
+        # pod of that build. Current alone is not enough: in a rollout the new pods run
+        # the next build, not yet current, and serve none of these runs (#4869).
         logger.info(
             "stopping: draining this build's workflows",
             extra={"build_id": build_id, "timeout_s": drain_timeout},
@@ -605,9 +623,8 @@ async def _serve_versioned(
             logger.info("drained", extra={"build_id": build_id})
         elif outcome == "current":
             logger.warning(
-                "stopping without draining: this build is still current, so its pinned"
-                " workflows are left to the next worker of this build; until one polls,"
-                " they wait",
+                "stopping without draining: this build is still current and another"
+                " worker of it polls, so its pinned workflows are left to that worker",
                 extra={"build_id": build_id},
             )
         elif outcome == "stopped":
@@ -1181,6 +1198,7 @@ async def run_print_worker(
                     stop,
                     build_id=build_id,
                     deployment_name=PRINT_DEPLOYMENT_NAME,
+                    task_queue=queue,
                     drain_timeout=None,
                     stop_now=stop_now,
                     ready=(queue, routed),
@@ -1279,6 +1297,7 @@ async def run_projects_worker(
                     stop,
                     build_id=build_id,
                     deployment_name=PROJECTS_DEPLOYMENT_NAME,
+                    task_queue=queue,
                     drain_timeout=None,
                     ready=(queue, routed),
                 )
