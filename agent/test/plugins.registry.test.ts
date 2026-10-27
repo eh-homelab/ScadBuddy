@@ -201,6 +201,11 @@ describe('tool names as Claude Code sees them', () => {
     expect(() => validateDisabledTools(['x'.repeat(129)])).toThrow(PluginError)
   })
 
+  it('refuses a disabled tool named "*"', () => {
+    expect(() => validateDisabledTools(['*'])).toThrow(PluginError)
+    expect(() => validateDisabledTools(['a', '*'])).toThrow(/"\*" is not a tool name/)
+  })
+
   it('describes renamed and colliding tools as outward, with their harness names', () => {
     const tools = describeTools(memory, [
       { name: 'recall', annotations: { readOnlyHint: true } },

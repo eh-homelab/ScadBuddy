@@ -128,7 +128,7 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
       return { name: `print ${id}`, to: page(`/prints/${encodeURIComponent(id)}`) }
     case 'library':
       // A model's pin goes to the model; the shared checkout, to Settings' Libraries.
-      return { name: `${id}${on}`, to: page(e.model ? modelPath(e.model) : '/settings#libraries') }
+      return { name: `${id}${on}`, to: page(e.model ? modelPath(e.model) : '/settings/library#libraries') }
     case 'font':
       return { name: id, to: null }
     case 'setting':

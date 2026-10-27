@@ -5,14 +5,15 @@ import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
-import { BuiltInTools, builtInToolsSetting } from '../src/plugins/builtInTools.js'
+import { BUILTIN_SOURCES, type ToolAccess } from '../src/access/model.js'
+import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
-import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTiers } from '../src/temporal/flowTools.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { defineTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
+import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
 // #2704: a flow gets its tools' tiers as the agent's own turns do, live from
@@ -21,17 +22,12 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // activity, and for the API (grants, the editor) through the loopback route.
 
 const RUN = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
-const SET = builtInToolsSetting('scadbuddy')
 const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
   defineTool({ name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
 const TOOLS = [tool('look', 'read'), tool('change', 'write'), tool('send', 'outward'), tool('browser_click', 'write')]
 
 function rig() {
-  const values = new Map<string, unknown>([[SET, { tool_tiers: {}, disabled_tools: [] }]])
-  const settings: SettingsRepo = {
-    get: <T>(key: string) => Promise.resolve(values.get(key) as T),
-    set: (key, value) => Promise.resolve(void values.set(key, value)),
-  }
+  const { access } = memoryAccess()
   const sets = [
     {
       name: 'scadbuddy',
@@ -40,8 +36,12 @@ function rig() {
       tools: TOOLS.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })),
     },
   ]
-  const svc = services({ toolOverrides: new BuiltInTools(settings, sets).registryOverrides() })
-  const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) => values.set(SET, { tool_tiers, disabled_tools })
+  const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+  const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) =>
+    access.replaceTools(
+      BUILTIN_SOURCES.scadbuddy,
+      Object.fromEntries(rowsFromOverrides(BUILTIN_SOURCES.scadbuddy, tool_tiers, disabled_tools).map((r) => [r.item, r.access as ToolAccess])),
+    )
   return { svc, set }
 }
 
@@ -65,7 +65,7 @@ async function failure(p: Promise<unknown>): Promise<ApplicationFailure> {
 describe("a flow's tool tiers (#2704)", () => {
   it('lists every tool a flow may call at its tier as Settings raises it, with what is disabled', async () => {
     const { svc, set } = rig()
-    set({ look: 'outward' }, ['change'])
+    await set({ look: 'outward' }, ['change'])
     expect(await flowToolTiers(TOOLS, svc)).toEqual([
       { name: 'look', tier: 'outward', disabled: false },
       { name: 'change', tier: 'write', disabled: true },
@@ -73,14 +73,44 @@ describe("a flow's tool tiers (#2704)", () => {
     ])
   })
 
+  it('flow_tool_tier answers the camera off as disabled', async () => {
+    const { access } = memoryAccess([{ source: BUILTIN_SOURCES.scadbuddy, item: 'get_printer_camera', access: 'off', updated_by: 'browser:browser' }])
+    const camera = [tool('get_printer_camera', 'read')]
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+    const tier = toolActivities(camera, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true, declared: 'read' })
+  })
+
+  it('/internal/flows/tools lists the camera off as disabled', async () => {
+    const { access } = memoryAccess([{ source: BUILTIN_SOURCES.scadbuddy, item: 'get_printer_camera', access: 'off', updated_by: 'browser:browser' }])
+    const camera = [tool('get_printer_camera', 'read')]
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+    expect(await flowToolTiers(camera, svc)).toEqual([{ name: 'get_printer_camera', tier: 'read', disabled: true }])
+  })
+
+  it('/internal/flows/tools answers a lowered tier', async () => {
+    const { svc, set } = rig()
+    await set({ send: 'write' }, [])
+    expect(await flowToolTiers(TOOLS, svc)).toContainEqual({ name: 'send', tier: 'write', disabled: false })
+  })
+
   it("answers a flow's call with the tool's tier as it is now", async () => {
     const { svc, set } = rig()
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     const flow = env(`flow-${RUN}`)
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false })
-    set({ look: 'outward' }, ['send'])
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false })
-    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false, declared: 'read' })
+    await set({ look: 'outward' }, ['send'])
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false, declared: 'read' })
+    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true, declared: 'outward' })
+  })
+
+  it('answers the code tier as declared beside a lowered tier, so the flow retries by the stricter (review I2)', async () => {
+    const { svc, set } = rig()
+    const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
+    await set({ send: 'read' }, [])
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'read', disabled: false, declared: 'outward' })
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {
@@ -110,7 +140,7 @@ describe("a flow's tool tiers (#2704)", () => {
 
     it('answers the pod-local API with the tools as Settings has them now', async () => {
       const { svc, set } = rig()
-      set({ change: 'outward' }, ['look'])
+      await set({ change: 'outward' }, ['look'])
       const res = await app('127.0.0.1', svc).request(FLOW_TOOLS_PATH)
       expect(res.status).toBe(200)
       expect(await res.json()).toEqual({

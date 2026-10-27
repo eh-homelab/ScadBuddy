@@ -47,7 +47,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
-- **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
+- **Minting, listing and revoking** are Settings → MCP access → "MCP access tokens" (shown only
   where `useAiAvailability()` says AI is available, that is, once a Claude credential is saved)
   ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
   over `/api/v1/ai/mcp-tokens`
@@ -737,6 +737,37 @@ Not done yet:
 - per-part enabling. The review shows each part, but a package is enabled as a whole.
 - tier maps for a package's own MCP tools. They stay `outward`.
 
+## Tool access (`ai_access`, #2171)
+
+The user decides what the assistant may use, and the table `ai_access` holds it. The
+design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-design.md).
+[operating.md](operating.md#tool-access-ai_access-2171) lists the sources and rows.
+
+- **Who writes.** Only the user, in Settings → Tools & plugins. Every write is a
+  user-only settings write (`uiRequestProblem` in `agent/src/routes/guard.ts`), and the
+  store audits it (`agent/src/access/store.ts`). The agent cannot change its own access
+  (spec §4.1).
+- **What a row does.** A tool has `off`, `read`, `write` or `outward`. `off` leaves the tool
+  out of every list the model or `/mcp` sees, and refuses a call (spec §4.4). The
+  declared tier is a default, not a floor: the user may lower or raise it. One exception:
+  on the registry sources (`builtin:scadbuddy`, `builtin:browser`), a row the copy migration
+  wrote (`updated_by` is `migration:2171`) counts only when it is `off` or above the
+  declared tier, so a copied lower tier is ignored (`toolAccess` in
+  `agent/src/access/resolve.ts`).
+- **One answer for every caller.** The main agent, a subagent, a classic or durable turn,
+  a flow run and `/mcp` get the same access for the same item. A principal's tier cap
+  still applies on top (spec §4.1, §4.5).
+- **Read per call.** A change applies from the next call, in either direction (spec §4.4).
+- **Forced tiers stay.** A tool Claude Code renames stays `outward`, and colliding tools
+  are hidden (spec §4.1).
+- **Old keys.** The `ai_settings` keys `builtin_tools.scadbuddy`, `scadbuddy_plugin_enabled`,
+  `http_request_enabled` and `printer_camera_enabled`, and the `ai_plugins` columns
+  `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migrations
+  `agent/src/db/migrations/20261026T2201Z_access_copy.sql` (the copy, and the `ai_plugins` and
+  `ai_settings` mirror triggers for older replicas during a rolling deploy; the new code also
+  writes the four `ai_settings` keys, old key first, until #4828) carries their values into
+  `ai_access`. `20261026T2200Z_access.sql` made the table.
+
 ## A browser plugin (Playwright MCP)
 
 The built-in headless browser of #349 (its vendored plugin, the backend's
@@ -745,8 +776,10 @@ only as a remote plugin, Microsoft's Playwright MCP
 ([headless-browser.md](headless-browser.md)), so it gets exactly what any remote plugin
 gets:
 
-- Its tools are `outward` until an admin tiers them in Settings → Plugins, so every call
-  parks for a human until then; tiers and disabled tools are the plugin's own.
+- Its tools are `outward` until an admin tiers them in Settings → Tools & plugins, so every call
+  parks for a human until then. Those tiers and the tool switches are the plugin's own
+  `ai_access` rows (`remote:<name>`, spec §4.2); `ai_plugins.tool_tiers` and
+  `disabled_tools` no longer decide.
 - ScadBuddy no longer marks or limits what that browser requests. Nothing on the backend
   tells its requests from a person's. Where it may go is decided where it is deployed:
   its `--allowed-origins`/`--blocked-origins` and the network. Do not let it reach
@@ -827,11 +860,11 @@ so a name re-pointed between check and connect reaches nothing new.
   size_bytes, redirect?}` as the summary, never a path, a header or a body. The tool
   call itself is also a `tool_call` row, whose input summary is scrubbed like any
   other (`Authorization` and `Cookie` headers are blanked by name).
-- **On by default, and a user-only switch.** `ai_settings` key `http_request_enabled`;
-  anything but a stored `false` is on. It is set through
+- **On by default, and a user-only switch.** The `ai_access` row (`builtin:http`, `*`)
+  (spec §4.2, `agent/src/routes/httpRequest.ts`); anything but a stored `off` is on. It is set through
   `PUT /api/v1/ai/settings/http-request` ([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)),
   behind `uiRequestProblem` like the other AI settings writes, and the write is audited
-  as a `settings` row. Settings → AI shows it as "Let the assistant make HTTP requests".
+  as a `settings` row. Settings → Tools & plugins shows it.
 
 ## Workflow scripts (#2393)
 

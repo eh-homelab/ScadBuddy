@@ -1,0 +1,57 @@
+import { HTTP_TOOL, HTTP_TOOL_NAME, httpTierOf } from '../harness/httpRequest.js'
+import { toolPrefix } from '../plugins/registry.js'
+import { SERVER_NAME } from '../tools/projections.js'
+import type { Tool } from '../tools/registry.js'
+import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
+import type { AccessResolver } from './resolver.js'
+
+/**
+ * One call's access as it is now (#2171, spec §4.4), by the name Claude Code gives the
+ * tool; undefined where ai_access says nothing of its own for this call, so the turn's
+ * resolver stands. A read that fails rejects: the seam then refuses the call.
+ */
+export type LiveAccess = (harnessName: string, input?: unknown) => Promise<ToolAccess | undefined>
+
+/** What a turn offers, so each call is read from its own source. */
+export type LiveTurn = {
+  tools: readonly Tool[]
+  /** The remote plugins' names. */
+  remote: readonly string[]
+  /** Each package http server: the name its tools carry (packageServerName) and where its access lives. */
+  packageServers: readonly { name: string; pkg: string; server: string }[]
+}
+
+/**
+ * The seam's per-call read (harness/permissions.ts `LiveSeam`): a registry tool's access
+ * (`off` too when `builtin:browser` is switched off, for a browser tool), a remote
+ * plugin's tool's (`off` when the plugin is switched off), a package server's tool's
+ * (outward unless stored), and http_request's (`off` when `builtin:http` is, its item
+ * when one is stored, else its method's tier). Anything else (Skill, Agent, Claude
+ * Code's built-ins) is undefined.
+ */
+export function liveAccess(resolver: Pick<AccessResolver, 'item' | 'entry' | 'switchedItem'>, turn: LiveTurn): LiveAccess {
+  const own = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
+  const sources: { prefix: string; source: string; switched: boolean }[] = [
+    ...turn.remote.map((name) => ({ prefix: toolPrefix(name), source: remoteSource(name), switched: true })),
+    // Not switched yet: a package server's '*' default is defined by #4757 (enabledByDefault is false for it today).
+    ...turn.packageServers.map((s) => ({ prefix: toolPrefix(s.name), source: packageServerSource(s.pkg, s.server), switched: false })),
+  ]
+  return async (harnessName, input) => {
+    const tool = own.get(harnessName)
+    if (tool) {
+      const source = registrySource(tool.name)
+      return source === BUILTIN_SOURCES.browser
+        ? resolver.switchedItem(source, tool.name, tool.risk)
+        : resolver.item(source, tool.name, tool.risk)
+    }
+    if (harnessName === HTTP_TOOL_NAME) {
+      const { enabled, access } = await resolver.entry(BUILTIN_SOURCES.http, HTTP_TOOL)
+      if (!enabled) return 'off'
+      return access ?? httpTierOf(HTTP_TOOL_NAME, input)
+    }
+    const from = sources.find((s) => harnessName.startsWith(s.prefix))
+    if (!from) return undefined
+    const item = harnessName.slice(from.prefix.length)
+    return from.switched ? resolver.switchedItem(from.source, item, 'outward') : resolver.item(from.source, item, 'outward')
+  }
+}

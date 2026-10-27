@@ -148,7 +148,7 @@ export function HotendUsagePanel({ targets }: { targets: BambuddyTargets | null 
     <div className="space-y-3">
       {racks.map((read) => (
         <section key={read.printerId} aria-label={`Hotend usage for ${read.name}`} className="min-w-0">
-          <h3 className="text-sm font-medium">Hotend usage · {read.name}</h3>
+          <h4 className="text-sm font-medium">Hotend usage · {read.name}</h4>
           <ul className="text-sm">
             {read.usage?.hotends.map((hotend) => (
               <HotendRow key={hotend.serial ?? `position-${hotend.position}`} hotend={hotend} />

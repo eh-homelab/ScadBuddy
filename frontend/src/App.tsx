@@ -112,7 +112,7 @@ export function App() {
         <Route path="workflows/flows/:id" element={<FlowPage />} />
         <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
         <Route path="activity" element={<ActivityPage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route path="settings/*" element={<SettingsPage />} />
         {UiGalleryPage && <Route path="ui-gallery" element={<UiGalleryPage />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

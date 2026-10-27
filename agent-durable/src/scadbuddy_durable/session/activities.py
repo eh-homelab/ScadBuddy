@@ -1,7 +1,8 @@
 """DurableSession's own activities on the ``agent`` queue: a turn's settings and its end.
 
-``gate_settings`` reads the gate's timers and the tools' Settings → Plugins overrides
-(#2088), so the workflow parks by a tool's effective tier, not the manifest's.
+``gate_settings`` reads the gate's timers and the registry tools' access in ``ai_access``
+(#2088, #2171), so the workflow parks by a tool's effective tier, raised or lowered, not the
+manifest's.
 
 ``finish_turn`` writes what a classic turn's end writes (agent/src/sessions/manager.ts):
 ``session.result`` with the lineage's spend and budget, the error if the turn did not
@@ -21,7 +22,7 @@ import psycopg
 from temporalio import activity
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
-from scadbuddy_durable.session import tools
+from scadbuddy_durable.session import access, tools
 from scadbuddy_durable.session.models import MESSAGE_MAX, FinishTurn, GateSettings
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
@@ -79,14 +80,13 @@ class SessionActivities:
         async with self._connect() as conn:
             cur = await conn.execute(
                 "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
-                ([APPROVAL_EXPIRY_KEY, QUESTION_EXPIRY_KEY, tools.OVERRIDES_SETTING],),
+                ([APPROVAL_EXPIRY_KEY, QUESTION_EXPIRY_KEY],),
             )
             values = {
                 k: (json.loads(v) if isinstance(v, str) else v) for k, v in await cur.fetchall()
             }
-        tiers, disabled = tools.sanitise_overrides(
-            tools.manifest(), values.get(tools.OVERRIDES_SETTING)
-        )
+            rows = await access.read_rows(conn, access.REGISTRY_SOURCES)
+        tiers, disabled = tools.sanitise_overrides(tools.manifest(), rows)
         return GateSettings(
             approval_expiry_s=_seconds(values.get(APPROVAL_EXPIRY_KEY), DEFAULT_APPROVAL_EXPIRY_S),
             question_expiry_s=_seconds(values.get(QUESTION_EXPIRY_KEY), DEFAULT_QUESTION_EXPIRY_S),

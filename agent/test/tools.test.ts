@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { makeCanUseTool } from '../src/harness/permissions.js'
@@ -661,6 +661,15 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       tier: 'standard' as const,
       bed_type: 'Cool Plate',
     }
+    // A linked row's choices are read even with every choice supplied, to learn whether it
+    // prints over the LAN (#4660): here it does not, unless a test says otherwise.
+    beforeEach(() =>
+      server.use(
+        http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () =>
+          HttpResponse.json({ printer_id: 2, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices: {}, lan_printers: [] }),
+        ),
+      ),
+    )
 
     it('names it beside the Bambuddy printer it links, so the backend can check the two agree', async () => {
       const run: { body?: Record<string, unknown> } = {}
@@ -871,6 +880,70 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(run.body).toMatchObject({ printer: PRINTER, printer_id: 2 })
       expect(run.body).not.toHaveProperty('project_id')
       expect(firstText(result)).toMatchObject({ path: 'native', follow: { tool: 'get_print_progress', output_id: OUT } })
+    })
+
+    // #4660 — every choice supplied leaves nothing to fill, but the choices still say
+    // whether the linked row prints over the LAN.
+    describe('a linked row the backend says prints natively, with every choice supplied (#4660)', () => {
+      /** The row's choices, naming it among `lan_printers`; each read's query recorded. */
+      const linkedNative = (asked: URLSearchParams[] = []) =>
+        http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, ({ request }) => {
+          asked.push(new URL(request.url).searchParams)
+          return HttpResponse.json({ printer_id: 2, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices: {}, lan_printers: [PRINTER] })
+        })
+      const NATIVE = { status: 'succeeded', result: { ...RESULT, queue_item_ids: [], bambuddy_url: null, path: 'native', lan: [] } }
+
+      it('refuses a project before anything is sent', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        const asked: URLSearchParams[] = []
+        server.use(row(2), linkedNative(asked), ...capturedRun(run, NATIVE))
+        const result = await runTool({ ...tool('print_output'), gated: false }, { ...chosen, printer: PRINTER, project_id: 7 }, ctx())
+        expect(result.isError).toBe(true)
+        expect(firstText(result)).toMatch(/Garage prints over the LAN.*no Bambuddy project/)
+        expect(asked.map((q) => [q.get('printer'), q.get('printer_id')])).toEqual([[PRINTER, '2']])
+        expect(run.body).toBeUndefined()
+      })
+
+      it('sends the choices as given, with no project', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        server.use(row(2), linkedNative(), ...capturedRun(run, NATIVE))
+        const result = await tool('print_output').execute({ ...chosen, printer: PRINTER, project_id: null }, ctx())
+        expect(result.isError).toBeFalsy()
+        expect(run.body).toMatchObject({
+          printer: PRINTER,
+          printer_id: 2,
+          filament_plan: { slots: chosen.filament_plan.slots },
+          choices: { tier: 'standard', bed_type: 'Cool Plate' },
+        })
+        expect(run.body).not.toHaveProperty('project_id')
+      })
+
+      it('approves it as a print over the LAN, and never approves a project', async () => {
+        server.use(row(2), linkedNative())
+        const { context, pending } = pendingCtx()
+        const answer = firstText(await runTool(tool('print_output'), { ...chosen, printer: PRINTER }, context)) as { summary: string }
+        expect(answer.summary).toContain('on printer "Garage" over the LAN')
+        expect(pending.inputs).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
+        const project = await runTool(tool('print_output'), { ...chosen, printer: PRINTER, project_id: 7 }, context)
+        expect(project.isError).toBe(true)
+        expect(firstText(project)).toMatch(/Garage prints over the LAN.*no Bambuddy project/)
+        expect(pending.inputs).toHaveLength(1)
+      })
+
+      it('an input-only check reads no choices and passes a project on; the run refuses it', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        const asked: URLSearchParams[] = []
+        server.use(row(2), linkedNative(asked), ...capturedRun(run, NATIVE))
+        const args = { ...chosen, printer: PRINTER, project_id: 7 }
+        const { input } = await tool('print_output').prepareApproval(args, ctx(), { summary: false })
+        expect(input).toMatchObject({ printer: PRINTER, printer_id: 2, project_id: 7 })
+        expect(asked).toEqual([])
+        const result = await runTool({ ...tool('print_output'), gated: false }, input, ctx())
+        expect(result.isError).toBe(true)
+        expect(firstText(result)).toMatch(/Garage prints over the LAN.*no Bambuddy project/)
+        expect(asked).toHaveLength(1)
+        expect(run.body).toBeUndefined()
+      })
     })
 
     it("keeps a Bambuddy run's queue item ids and its Bambuddy URL, with no follow handle", async () => {

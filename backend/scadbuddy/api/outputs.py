@@ -22,6 +22,7 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    EventsDep,
     FetcherDep,
     FontsDep,
     HistoryDep,
@@ -86,6 +87,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, OutputEvent, emit
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
@@ -135,6 +137,10 @@ THREE_MF_MEDIA_TYPE = "model/3mf"
 
 class OutputSummary(OutputMeta):
     has_thumbnail: bool
+    #: Which image `/outputs/{id}/thumbnail` serves (#4841): changes when an upload or a
+    #: draw replaces it, so a page can put it in the URL and fetch the new one. None
+    #: while there is no file, also when ``has_thumbnail`` says one would be drawn.
+    thumbnail_version: str | None = None
     #: Every copy of ``model.3mf`` ScadBuddy has put in Bambuddy's file library (#316),
     #: in upload order, read from `BambuddyUploadStore` (#455). One per (folder,
     #: target): a project's folder keeps the file each of its prints came from.
@@ -212,11 +218,11 @@ def detail(
     failed_before_queueing: bool = False,
 ) -> OutputDetail:
     params = store.params(meta.id)
+    thumbnail_version = _thumbnail_version(store.thumbnail_path(meta.id))
     return OutputDetail(
         **meta.model_dump(),
-        has_thumbnail=(
-            store.thumbnail_path(meta.id).is_file() or store.drawable_thumbnail(meta.id)
-        ),
+        has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
+        thumbnail_version=thumbnail_version,
         params=params,
         inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
@@ -228,6 +234,16 @@ def detail(
         library_files=library_files,
         failed_before_queueing=failed_before_queueing,
     )
+
+
+def _thumbnail_version(path: Path) -> str | None:
+    """The file's identity: every write puts a new file in place (a new inode, by a
+    rename or a link), and its time and size tell apart an inode used again."""
+    try:
+        stat = path.stat()
+    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
+        return None
+    return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
 
 
 async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
@@ -1088,63 +1104,105 @@ def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> File
     ),
 )
 async def get_output_thumbnail(
-    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep
+    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep, events: EventsDep
 ) -> FileResponse:
-    await asyncio.to_thread(require_output, outputs, output_id)
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
     path = await asyncio.to_thread(lambda: outputs.directory(output_id) / THUMBNAIL_NAME)
     if not await asyncio.to_thread(path.is_file):
-        await _draw_thumbnail(outputs, output_id, path, config)
+        await _draw_thumbnail(outputs, meta, path, config, events)
     return FileResponse(path, media_type="image/png")
 
 
-async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, config: Config) -> None:
+async def _draw_thumbnail(
+    outputs: OutputStore, meta: OutputMeta, path: Path, config: Config, events: EventBus
+) -> None:
     """#4775: a thumbnail for an output saved with none (the agent's, a flow's, an order
     quote's), from its preview mesh, as the `iso` view draws it. Lazy, so outputs saved
     before this get one too, and a browser save that uploads its capture right away
-    never pays for a draw. An upload that lands first stays."""
+    never pays for a draw. An upload that lands first stays. A draw that ends after its
+    read stopped waiting is announced as ``output.updated`` (#4811), so a page that got
+    the 503 reads the list again."""
+    output_id = meta.id
     missing = ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
     if not await asyncio.to_thread(outputs.drawable_thumbnail, output_id):
         raise missing
     slots = outputs.thumbnail_draws
+    # No deadline here: a read queued behind a draw past its budget waits for a slot
+    # and then answers with the image. A 503 now would start no draw, and so nothing
+    # would announce the thumbnail to the page that got it.
     await slots.acquire()
     try:
-        # Another read drew it while this one waited.
-        if await asyncio.to_thread(path.is_file):
-            slots.release()
-            return
+        # Another read drew it, or its draw came to nothing, while this one waited.
+        drawn_meanwhile, drawable = await asyncio.to_thread(
+            lambda: (path.is_file(), outputs.drawable_thumbnail(output_id))
+        )
     except BaseException:
         slots.release()
         raise
+    if drawn_meanwhile or not drawable:
+        slots.release()
+        if drawn_meanwhile:
+            return
+        raise missing
     # The slot goes back when the thread ends, not when this read stops waiting for
     # it: `wait_for` cannot stop a thread, and a draw past its budget still runs.
+    outputs.draws_running += 1
     drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
     _DRAWING.add(drawing)
+    gave_up = False
 
     def ended(task: asyncio.Future[bool]) -> None:
         _DRAWING.discard(task)
+        outputs.draws_running -= 1
         slots.release()
-        if not task.cancelled() and task.exception() is not None:
+        if task.cancelled():
+            return
+        if task.exception() is not None:
             logger.error(
                 "could not draw an output's thumbnail",
                 exc_info=task.exception(),
                 extra={"id": output_id},
             )
-            outputs.remember_undrawable(output_id)
+            outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
+        # True also when an upload landed first and stayed: either way it has one now.
+        elif task.result() and gave_up:
+            emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=meta.slug))
 
     drawing.add_done_callback(ended)
     try:
         drawn = await asyncio.wait_for(asyncio.shield(drawing), timeout=config.render_timeout)
     except TimeoutError:
-        outputs.remember_undrawable(output_id)
+        if _drawn(drawing):
+            # It ended as the budget ran out, while this read still waited.
+            return
+        gave_up = True
+        outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"drawing the thumbnail took longer than {config.render_timeout:g}s",
         ) from None
+    except asyncio.CancelledError:
+        # The request went away; the draw goes on.
+        gave_up = True
+        raise
     except Exception:
         raise missing from None
     if not drawn:
         raise missing
 
+
+def _drawn(drawing: asyncio.Future[bool]) -> bool:
+    return (
+        drawing.done()
+        and not drawing.cancelled()
+        and drawing.exception() is None
+        and drawing.result()
+    )
+
+
+#: Seconds before a draw that timed out or failed is tried again: a busy moment, not
+#: the mesh, may be why. An empty mesh is never tried again.
+RETRY_DRAW_AFTER = 600.0
 
 #: Draws still running, so none is collected before its thread ends.
 _DRAWING: set[asyncio.Future[bool]] = set()

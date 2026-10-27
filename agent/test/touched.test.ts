@@ -332,14 +332,35 @@ describe('extractors', () => {
   it('records the rows a Bambuddy sync made or changed, and nothing for a dry run (#4439)', () => {
     const P = '00000000-0000-4000-8000-0000000000aa'
     const Q = '00000000-0000-4000-8000-0000000000bb'
+    const R = '00000000-0000-4000-8000-0000000000cc'
+    const S = '00000000-0000-4000-8000-0000000000dd'
     const entries = [
-      { printer_id: P, action: 'created', lan: 'linked' },
-      { printer_id: Q, action: 'already_linked', lan: 'kept' },
-      { printer_id: null, action: 'skipped' },
+      { printer_id: P, action: 'created', lan: 'linked', changed: true },
+      { printer_id: Q, action: 'already_linked', lan: 'kept', changed: false },
+      { printer_id: null, action: 'skipped', changed: false },
+      // #4798: a LAN link moved to Bambuddy's new address, and a row whose name, view or
+      // virtual-printer target the sync changed.
+      { printer_id: R, action: 'already_linked', lan: 'relinked', changed: true },
+      { printer_id: S, action: 'already_linked', lan: 'kept', changed: true },
     ]
     expect(touches('sync_printers_from_bambuddy', {}, { dry_run: false, entries }, 'outward')).toEqual([
       { type: 'setting', id: `printer:${P}`, action: 'created' },
+      { type: 'setting', id: `printer:${R}`, action: 'modified' },
+      { type: 'setting', id: `printer:${S}`, action: 'modified' },
     ])
+    // #4850 review: a VP whose target is missing keeps its own action, and its row is recorded.
+    expect(
+      touches(
+        'sync_printers_from_bambuddy',
+        {},
+        { dry_run: false, entries: [{ printer_id: S, action: 'created', target_missing: true, changed: true }] },
+        'outward',
+      ),
+    ).toEqual([{ type: 'setting', id: `printer:${S}`, action: 'created' }])
+    // A relink is recorded even from a backend that does not say `changed`.
+    expect(
+      touches('sync_printers_from_bambuddy', {}, { dry_run: false, entries: [{ printer_id: R, action: 'already_linked', lan: 'relinked' }] }, 'outward'),
+    ).toEqual([{ type: 'setting', id: `printer:${R}`, action: 'modified' }])
     expect(touches('sync_printers_from_bambuddy', { dry_run: true }, { dry_run: true, entries }, 'outward')).toEqual([])
   })
 

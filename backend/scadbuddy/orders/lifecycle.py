@@ -31,8 +31,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
-from scadbuddy.orders.attachments import SHOWN_IMAGES
 from scadbuddy.orders.models import (
+    SHOWN_IMAGES,
     Actor,
     AddressSnapshot,
     Attachment,
@@ -633,8 +633,14 @@ class Lifecycle:
                     ids = items if isinstance(items, list) else []
                     status: OrderStatus = before
                     return status, [each for each in ids if isinstance(each, str)]
+                reason = "its cancel's audit row names no status it was cancelled from"
                 break
-        return ("accepted" if order.accepted_at is not None else "draft"), []
+        else:
+            reason = "it has no cancel audit row"
+        fallback: OrderStatus = "accepted" if order.accepted_at is not None else "draft"
+        # #4725: so an order that reopened with none of its items back can be explained.
+        logger.warning("order %s reopens as %s with no items: %s", order.number, fallback, reason)
+        return fallback, []
 
     def reopen_order(self, order_id: str, by: Actor) -> Order:
         """Undo a close or a cancel.
@@ -898,20 +904,19 @@ class Lifecycle:
             # Its files go with it, each on the audit line, and with them their holds
             # on the blobs: nothing could show or remove an item's file once the item
             # is gone. A refusal below rolls this back.
-            for attachment in self.store.attachments(order.id, conn=conn):
-                if attachment.item_id == item.id:
-                    self.store.delete_attachment(conn, attachment.id)
-                    self._event(
-                        conn,
-                        order,
-                        by,
-                        "attachment.removed",
-                        attachment_id=attachment.id,
-                        item_id=item.id,
-                        filename=attachment.filename,
-                        sha256=attachment.sha256,
-                        was_delivered=item.delivered_attachment_id == attachment.id,
-                    )
+            for attachment in self.store.subject_attachments(item_subject(item.id), conn=conn):
+                self.store.delete_attachment(conn, attachment.id)
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "attachment.removed",
+                    attachment_id=attachment.id,
+                    item_id=item.id,
+                    filename=attachment.filename,
+                    sha256=attachment.sha256,
+                    was_delivered=item.delivered_attachment_id == attachment.id,
+                )
             if not self.store.delete_draft_item(conn, item.id):
                 raise LifecycleError(
                     "item_not_draft",
@@ -1417,8 +1422,8 @@ class Lifecycle:
     def edit_attachment(
         self, order_id: str, attachment_id: str, patch: AttachmentPatch, by: Actor
     ) -> Attachment:
-        """The caption and the role; a field left out stays. An image marked delivered
-        keeps its mark whatever its role becomes."""
+        """The caption and the role; a field left out stays. Each change is on the audit
+        line. An image marked delivered keeps its mark whatever its role becomes."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             before = self._attachment_of(conn, order, attachment_id)
@@ -1437,6 +1442,16 @@ class Lifecycle:
                     attachment_id=attachment.id,
                     from_role=before.role,
                     to=attachment.role,
+                )
+            if attachment.caption != before.caption:
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "attachment.caption",
+                    attachment_id=attachment.id,
+                    from_caption=before.caption,
+                    to=attachment.caption,
                 )
             change = _Change(order)
             self._subject_item(change, conn, attachment)

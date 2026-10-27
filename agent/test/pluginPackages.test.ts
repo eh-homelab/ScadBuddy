@@ -20,6 +20,14 @@ import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, to
 import { PluginError } from '../src/plugins/registry.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
+import { packageServerSource } from '../src/access/model.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { harnessTierOf } from '../src/harness/run.js'
+import { PluginForwarder } from '../src/plugins/forwarder.js'
+import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
+import { connectHttp } from '../src/temporal/turnTools.js'
+import { startFakeMcp } from './support/fakeMcp.js'
+import { memoryAccess } from './support/memoryAccess.js'
 
 // Plugin packages (#297, src/plugins/packages/): source validation, the
 // content hash, vetting, and the installer against real local git
@@ -656,5 +664,51 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/nope.git' })).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(PluginError)
     expect((err as PluginError).status).toBe(502)
+  })
+})
+
+describe("a package's MCP servers on ai_access (#2171)", () => {
+  it("a package server's tool set read in ai_access is read in a classic turn, and one set off is refused by the forwarder", async () => {
+    const mcp = await startFakeMcp({ extraTools: ['a', 'b'] })
+    const forwarder = await PluginForwarder.start()
+    try {
+      const dir = tree({
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'notes' }),
+        '.mcp.json': JSON.stringify({ mcpServers: { api: { type: 'http', url: mcp.url } } }),
+      })
+      const pkg = { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+      const source = packageServerSource('notes', 'api')
+      const { access } = memoryAccess([
+        { source, item: 'a', access: 'read', updated_by: 'test' },
+        { source, item: 'b', access: 'off', updated_by: 'test' },
+      ])
+      const servers = await forwardPackageServers([pkg], forwarder, async () => ['127.0.0.1'], { access: new AccessResolver(access) })
+      expect(servers.problems).toEqual([])
+      const [plugin] = servers.plugins
+      expect(plugin).toMatchObject({ name: 'plugin_notes_api', toolTiers: { a: 'read' }, disabledTools: ['b'] })
+      // A classic turn puts the servers among its remote plugins (sessions/turnRunner.ts).
+      const tierOf = harnessTierOf({ remotePlugins: servers.plugins })
+      expect(tierOf('mcp__plugin_notes_api__a', {})).toBe('read')
+      expect(tierOf('mcp__plugin_notes_api__recall', {})).toBe('outward')
+      const client = await connectHttp(plugin!.url)
+      try {
+        const listed = (await client.listTools()).tools.map((t) => t.name)
+        expect(listed).toContain('a')
+        expect(listed).not.toContain('b')
+        await expect(client.callTool({ name: 'b', arguments: { text: 'x' } })).rejects.toThrow(/ScadBuddy: tool "b" is disabled/)
+        await client.callTool({ name: 'a', arguments: { text: 'x' } })
+        expect(mcp.calls).toEqual(['a:x'])
+      } finally {
+        await client.close()
+        servers.release()
+      }
+      // Without the resolver nothing is stored: every tool is outward, none refused.
+      const plain = await forwardPackageServers([pkg], forwarder, async () => ['127.0.0.1'])
+      expect(plain.plugins[0]).toMatchObject({ toolTiers: {}, disabledTools: [] })
+      plain.release()
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
   })
 })

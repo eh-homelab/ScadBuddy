@@ -1,0 +1,586 @@
+{
+  "tool_access": [
+    "off",
+    "read",
+    "write",
+    "outward"
+  ],
+  "migrated_by": "migration:2171",
+  "registry_source": {
+    "get_model": "builtin:scadbuddy",
+    "send_to_bambuddy": "builtin:scadbuddy",
+    "get_printer_camera": "builtin:scadbuddy",
+    "order_accept": "builtin:scadbuddy",
+    "browser_click": "builtin:browser",
+    "browser_navigate": "builtin:browser"
+  },
+  "registry": [
+    {
+      "name": "no rows: every tool at its own tier",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a raise of a read tool",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "get_model",
+          "access": "outward",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "get_model": "outward"
+        },
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a lowering of an outward tool",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "send_to_bambuddy",
+          "access": "write",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "send_to_bambuddy": "write"
+        },
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "off disables",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "send_to_bambuddy",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:browser",
+          "item": "browser_click",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:scadbuddy",
+          "item": "get_model",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": [
+          "browser_click",
+          "get_model",
+          "send_to_bambuddy"
+        ]
+      }
+    },
+    {
+      "name": "a tool's own tier is no override",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "get_model",
+          "access": "read",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:browser",
+          "item": "browser_click",
+          "access": "write",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a row naming no tool is ignored",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "no_such_tool",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:scadbuddy",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "an unknown access value is ignored",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "get_model",
+          "access": "none",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:scadbuddy",
+          "item": "send_to_bambuddy",
+          "access": "on",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a migrated row that lowers is ignored",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "send_to_bambuddy",
+          "access": "write",
+          "updated_by": "migration:2171"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a migrated row that raises counts",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "get_model",
+          "access": "write",
+          "updated_by": "migration:2171"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "get_model": "write"
+        },
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a migrated off counts",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "send_to_bambuddy",
+          "access": "off",
+          "updated_by": "migration:2171"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": [
+          "send_to_bambuddy"
+        ]
+      }
+    },
+    {
+      "name": "browser tools come from builtin:browser",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "browser_click",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:browser",
+          "item": "browser_click",
+          "access": "outward",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:browser",
+          "item": "get_model",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "browser_click": "outward"
+        },
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "a row of another source is ignored",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "remote:hs",
+          "item": "get_model",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:http",
+          "item": "send_to_bambuddy",
+          "access": "read",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "an answer tool is in no source",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        },
+        {
+          "name": "ask_user",
+          "risk": "read",
+          "hitl": "answer"
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "ask_user",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {},
+        "disabled_tools": []
+      }
+    },
+    {
+      "name": "durable_only: a migrated raise of a tool whose tier is no tier counts",
+      "durable_only": true,
+      "tools": [
+        {
+          "name": "t",
+          "risk": "?",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:scadbuddy",
+          "item": "t",
+          "access": "outward",
+          "updated_by": "migration:2171"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "t": "outward"
+        },
+        "disabled_tools": []
+      }
+    }
+  ],
+  "sources": [
+    {
+      "name": "http is on by default",
+      "source": "builtin:http",
+      "rows": [],
+      "expect": true
+    },
+    {
+      "name": "http off",
+      "source": "builtin:http",
+      "rows": [
+        {
+          "source": "builtin:http",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": false
+    },
+    {
+      "name": "the own plugin off",
+      "source": "builtin:own-plugin",
+      "rows": [
+        {
+          "source": "builtin:own-plugin",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": false
+    },
+    {
+      "name": "a remote plugin is off by default",
+      "source": "remote:hs",
+      "rows": [],
+      "expect": false
+    },
+    {
+      "name": "a remote plugin on",
+      "source": "remote:hs",
+      "rows": [
+        {
+          "source": "remote:hs",
+          "item": "*",
+          "access": "on",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": true
+    },
+    {
+      "name": "a '*' row holding a tier is ignored",
+      "source": "remote:hs",
+      "rows": [
+        {
+          "source": "remote:hs",
+          "item": "*",
+          "access": "outward",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": false
+    }
+  ]
+}

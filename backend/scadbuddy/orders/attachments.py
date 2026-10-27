@@ -5,7 +5,7 @@ Any file may be attached. What it *is* comes from its bytes, never its name or t
 browser's content type (`sniff`): a PNG, JPEG, WebP, GIF, AVIF or HEIC photo is an
 ``image``, an MP4, QuickTime or WebM video a ``video``, a PDF a ``document``, and
 anything else ``other``. Only the sniffed types are ever served as themselves
-(``INLINE``); every other file is served as ``application/octet-stream`` with
+(``models.INLINE``); every other file is served as ``application/octet-stream`` with
 ``Content-Disposition: attachment``, so an uploaded HTML or SVG page never runs on
 ScadBuddy's origin.
 
@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders.models import AttachmentKind
 from scadbuddy.store import BlobStore
+from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content_models import BlobScope
 
 #: How many leading bytes `sniff` reads.
@@ -44,24 +45,6 @@ MAX_FILENAME = 255
 #: with MP4: https://www.iana.org/assignments/media-types/image/heic).
 _HEIF_BRANDS = {b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1"}
 _AVIF_BRANDS = {b"avif", b"avis"}
-
-#: The types served as themselves, inline: what a browser shows and never runs.
-INLINE = frozenset(
-    {
-        "image/png",
-        "image/jpeg",
-        "image/webp",
-        "image/gif",
-        "image/avif",
-        "image/heic",
-        "video/mp4",
-        "video/quicktime",
-        "video/webm",
-        "application/pdf",
-    }
-)
-#: The image types a browser draws, so the UI shows them and a thumbnail is made.
-SHOWN_IMAGES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"})
 
 
 def sniff(head: bytes, filename: str) -> tuple[AttachmentKind, str]:
@@ -162,12 +145,23 @@ async def keep(blobs: BlobStore, claims: ClaimStore, claim: str, sha256: str) ->
 
     Bytes the store holds already (the same photo on a second item) are its blob as it
     is: a publish over it from a directory fetched before it existed (a cache that
-    evicted it, another replica) would be refused as stale."""
+    evicted it, another replica) would be refused as stale. Asking costs no download
+    (a video runs to a gigabyte, #4677): `BlobStore.claim` touches the blob, so the
+    sweeps keep it until the row's hold is committed, as `_place`'s `dir_for` does.
+
+    Otherwise the blob is written from nothing, so it is published against no row
+    (`publish_fresh`), never against a marker this cache kept from a stored copy whose
+    object was since lost (#4785). Two runs of the same bytes at once: the one that
+    loses the swap finds the other's blob, which is the same bytes."""
     key = blob_key(sha256)
-    if await blob_path(blobs, key) is not None:
+    if await blobs.claim(key):
         return key
     await asyncio.to_thread(_place, blobs, key, claims, claim)
-    await blobs.publish(key, scope=BlobScope())
+    try:
+        await blobs.publish_fresh(key, scope=BlobScope(), expected=None)
+    except StaleBlobError:
+        if not await blobs.claim(key):
+            raise
     return key
 
 

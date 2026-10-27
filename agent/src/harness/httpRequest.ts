@@ -10,13 +10,14 @@ import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Re
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
 import { type SessionFiles, sha256, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
-import type { RiskTier } from './permissions.js'
+import type { ToolAccess } from '../access/model.js'
+import type { RiskTier, TierResolver } from './permissions.js'
 
 // The assistant's `http_request` tool (#827): "curl" for a harness that runs
 // with `tools: []` (options.ts: no Bash, no WebFetch) and refuses plugins that
 // start a process (plugins.ts). An in-process SDK MCP server, added to a session's
-// turn when the `http_request_enabled` setting is not `false`
-// (routes/httpRequest.ts; on by default).
+// turn unless `builtin:http` is switched off, or its item is `off`, in `ai_access`
+// (#2171, routes/httpRequest.ts; on by default).
 //
 // REACH IS OPEN, decided by the owner on 2026-09-30 (#827): the internet, the
 // LAN, private ranges, `*.internal` names and plain `http:` to any host. There
@@ -81,12 +82,11 @@ export const HTTP_READ_TOOL = 'http_response_read'
 export const HTTP_TOOL_NAME = `mcp__${HTTP_SERVER}__${HTTP_TOOL}`
 export const HTTP_READ_TOOL_NAME = `mcp__${HTTP_SERVER}__${HTTP_READ_TOOL}`
 
-/** `ai_settings` key; anything but a stored `false` is on (#827: on by default). */
+/**
+ * The `ai_settings` key the switch was kept under (#827) until #2171 moved it to
+ * `ai_access` (`builtin:http`'s `*` row, on by default); the access migration copied it.
+ */
 export const SETTING_HTTP_REQUEST = 'http_request_enabled'
-
-export function httpRequestEnabled(stored: unknown): boolean {
-  return stored !== false
-}
 
 export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
 export type HttpMethod = (typeof METHODS)[number]
@@ -114,6 +114,16 @@ export function httpTierOf(toolName: string, input?: unknown): RiskTier | undefi
   const method = typeof input === 'object' && input !== null ? (input as { method?: unknown }).method : undefined
   if (method === undefined) return 'read'
   return typeof method === 'string' && READ_METHODS.has(method) ? 'read' : 'outward'
+}
+
+/**
+ * The http tools' tiers under `http_request`'s access in `ai_access` (#2171): where it is
+ * a tier, http_request takes it whatever the method; else `httpTierOf`. `off` is never a
+ * tier here: an http_request that is off is not offered at all.
+ */
+export function httpAccessTierOf(override: ToolAccess | undefined): TierResolver {
+  return (toolName, input) =>
+    toolName === HTTP_TOOL_NAME && override !== undefined && override !== 'off' ? override : httpTierOf(toolName, input)
 }
 
 /** Header names the model may not set: Node sets them from the request. */

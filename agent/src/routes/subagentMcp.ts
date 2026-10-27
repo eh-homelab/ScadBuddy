@@ -31,7 +31,7 @@ import type { RouteModule } from './module.js'
 // the session must still be durable, running the token's turn, and owned by the token's
 // owner (a handoff, an interrupt or the turn's end refuses the token); the call runs as
 // that owner with the tiers the turn's sender holds while it still owns the session, cut
-// to what its credential holds now (`turnTiers`, PR #2323); and Settings → Plugins applies
+// to what its credential holds now (`turnTiers`, PR #2323); and Settings → Tools & plugins applies
 // as the call runs (`effectiveTool`). A call that is outward (by its tier now, or because
 // it needs an approval) is refused: nothing in a subagent can wait for a human, so the
 // main agent makes it, where it parks for approval.
@@ -124,7 +124,7 @@ export function subagentServer(deps: SubagentMcpDeps, claim: SubagentClaim): Mcp
           })
         }
         if (effective.disabled) {
-          const message = `${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`
+          const message = `${tool.name} is disabled in Settings → Tools & plugins; the user can turn it back on there`
           await record('refused', message)
           return errorResult(message)
         }

@@ -11,8 +11,8 @@ import { refusalText } from './refusal'
 /**
  * The rough estimate of an output's filament (§5.3, #4250, `GET /orders/estimate`): pick a
  * price-book filament and read about how many grams it takes, and what they cost. Never a
- * quote, and nothing is recorded. Shown only when the price book has filaments. The same
- * block as `AddToOrderDialog`'s, for a dialog that orders an output it is not given up front.
+ * quote, and nothing is recorded. Shown only when the price book has filaments. Both
+ * `AddToOrderDialog` and `AddItemDialog` show it, so the two cannot drift (#4727).
  */
 export function RoughEstimate({ outputId, idPrefix = 'order-estimate' }: { outputId: string; idPrefix?: string }) {
   const [filamentId, setFilamentId] = useState('')
@@ -42,7 +42,7 @@ export function RoughEstimate({ outputId, idPrefix = 'order-estimate' }: { outpu
         <p className="text-[13px] text-muted-foreground" data-testid="order-estimate">
           An estimate: about <span className="sb-num text-foreground">{estimate.data.grams} g</span>, filament{' '}
           <span className="sb-num text-foreground">{formatMoney(estimate.data.filament_minor, estimate.data.currency, estimate.data.minor_exponent)}</span>
-          {estimate.data.unknown_parts > 0 ? `, leaving out ${estimate.data.unknown_parts} part(s) with no volume` : ''}. Quote it from a slice once it is on the
+          {estimate.data.unknown_parts > 0 ? `, leaving out ${estimate.data.unknown_parts} part(s) with no volume` : ''}. Quote it from a slice once it is on an
           order.
         </p>
       )}

@@ -37,15 +37,19 @@ const ROW_FIELDS =
   'Bambuddy printer it is, or null), `lan_host` and `has_access_code` (its LAN link, the code itself never ' +
   'shown), `preferred_path` and `bambuddy_active`; `kind` (`physical`, or `bambuddy_virtual` for one of ' +
   "Bambuddy's virtual printers, never a printer to print on: `bambuddy_vp_id`, `vp_mode`, and `forwards_to`, " +
-  "the registry printer it forwards to, null for Bambuddy's 'any printer of its model'); `bambuddy_view`, " +
-  "Bambuddy's own values at the last sync (name, model, IP, active, nozzle count; a virtual printer's " +
-  'settings); and `lan_sync_error`, why the sync could not fill or move the LAN link.'
+  "the registry printer it forwards to: null with `bambuddy_view.target_printer_id` null is Bambuddy's 'any " +
+  "printer of its model', but null with a `target_printer_id` means its target has no row here, never 'any'); " +
+  "`bambuddy_view`, Bambuddy's own values at the last sync (name, model, IP, active, nozzle count; a virtual printer's " +
+  'settings); `lan_sync_error`, why the sync could not fill or move the LAN link; and `lan_move_pending`, ' +
+  "whether the next sync tries again to move the link to Bambuddy's new address."
 
-/** Where the LAN link is made: by the user, never through a tool. */
+/** Where a LAN link is made: by the user in Settings, or by the sync from Bambuddy's code (#4798). */
 const LAN_IN_SETTINGS =
-  ' A printer is linked over the LAN only in Settings > Printers, where the user types its access code: ask ' +
-  'the user to do it there (open the page with browser_navigate to /settings#printers), and never ask for ' +
-  'the code in chat.'
+  ' A user links a printer over the LAN in Settings > Printers, where they type its access code: ask the ' +
+  'user to do it there (open the page with browser_navigate to /settings#printers), and never ask for the ' +
+  'code in chat. The one tool that makes a LAN link is sync_printers_from_bambuddy (outward, approved), which ' +
+  "fills an empty link from Bambuddy's address and access code when Bambuddy gives the code, and moves a " +
+  "link that follows Bambuddy's address when that address changes."
 
 export const printerTools: Tool[] = [
   defineTool({
@@ -99,8 +103,10 @@ export const printerTools: Tool[] = [
       "filled from Bambuddy's address and access code through the same probe as Settings > Printers (Bambuddy " +
       'gives the code only while its auth is off; otherwise the row says it is withheld); a `bambuddy_virtual` ' +
       'row for every Bambuddy virtual printer. It never unlinks, deletes or overwrites: each entry says ' +
-      '`created`, `linked`, `already_linked`, `skipped`, `conflict` or `missing`, with a `reason`, and its LAN ' +
-      'outcome. `dry_run` plans the same and writes nothing. The access code is never in the result. Running ' +
+      '`created`, `linked`, `already_linked`, `skipped`, `conflict` or `missing`, with a `reason`, its LAN ' +
+      'outcome, and whether the sync `changed` the row. A virtual printer whose Bambuddy target has no row ' +
+      'here says `target_missing` (its `forwards_to` is null, which is then not "any printer of its model"), ' +
+      'beside its own action. `dry_run` plans the same and writes nothing. The access code is never in the result. Running ' +
       'it again changes nothing.',
     input: z.object({
       dry_run: z.boolean().default(false).describe('Plan and report without writing anything'),

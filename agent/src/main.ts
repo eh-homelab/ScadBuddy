@@ -5,6 +5,8 @@ import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
+import { AccessResolver } from './access/resolver.js'
+import { AccessStore } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
@@ -104,7 +106,6 @@ import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { BackendWorkspaceBlobs } from './workspace/blobs.js'
 import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './workspace/store.js'
-import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -220,9 +221,13 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
+// The registry's tools let it keep the old ai_settings keys for older replicas (access/legacy.ts, #4828).
+const access = database ? new AccessStore(database.sql, audit, ALL_TOOLS) : undefined
+// Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
+const accessResolver = new AccessResolver(access)
 const plugins = database ? new PluginStore(database.sql) : undefined
-// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
-const builtInTools = new BuiltInTools(settings)
+// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
+const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start({
@@ -263,9 +268,7 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The render limits in Settings, read live (tools/renderLimits.ts).
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
-  // The tools Settings can turn off (#1911): read from ai_settings at each call.
-  switchedOff: toolSwitches(settings),
-  // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
+  // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
@@ -431,9 +434,10 @@ const sessions =
         paths,
         ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
+        access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
-        // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
+        // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
         // subagents, with the Skill and Agent tools they need.
@@ -457,9 +461,9 @@ const sessions =
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
-        // The http_request tool (#827): on for a turn unless the
-        // `http_request_enabled` setting is false (routes/httpRequest.ts).
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true, access: accessResolver }),
+        // The http_request tool (#827): on for a turn unless `builtin:http` is
+        // switched off in ai_access (routes/httpRequest.ts, #2171).
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
@@ -652,7 +656,7 @@ const turnToolDeps = temporal
       flows: new PgFlowRuns(temporal.sql),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
-        ...(settings ? { settings } : {}),
+        access: accessResolver,
         // The headless browser's lists (#982), as a classic turn's.
         browserOrigins: new BrowserOrigins(temporal.sql, settings),
         credentialSecrets: durableCredentialSecrets,
@@ -665,7 +669,7 @@ const turnToolDeps = temporal
                 load: () => loadPackagesForRun(pluginPackages, packageInstaller),
                 root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
                 localRoot: path.join(paths.stateDir, 'plugins-local'),
-                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { access: accessResolver }),
               },
             }
           : {}),
@@ -944,6 +948,7 @@ const app = createApp({
   ...(workspaceBytesStatus ? { workspaceBytes: workspaceBytesStatus } : {}),
   kek,
   credentials,
+  access,
   plugins,
   pluginForwarder,
   pluginPackages,

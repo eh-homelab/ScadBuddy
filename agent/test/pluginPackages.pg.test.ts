@@ -12,8 +12,10 @@ import { validateSource } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
 import { PluginError } from '../src/plugins/registry.js'
-import { ownPluginEnabled, SETTING_OWN_PLUGIN } from '../src/plugins/packages/builtins.js'
-import { SettingsStore } from '../src/credentials.js'
+import { ownPluginEnabled } from '../src/plugins/packages/builtins.js'
+import { BUILTIN_SOURCES } from '../src/access/model.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { AccessStore } from '../src/access/store.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 import { InlineCommands } from './support/commands.js'
@@ -264,8 +266,8 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
     })
 
     it('lists the built-in plugins first; they enable and disable through their settings, and are never removed', async () => {
-      const settings = new SettingsStore(db.sql)
-      const a = createApp({ ...appDeps(), settings })
+      const access = new AccessStore(db.sql)
+      const a = createApp({ ...appDeps(), access })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
         name: string
         built_in?: boolean
@@ -279,10 +281,11 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
 
       const off = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
       expect(((await off.json()) as { enabled: boolean }).enabled).toBe(false)
-      expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(false)
-      expect(await ownPluginEnabled(settings)).toBe(false)
+      const own = () => access.rows([BUILTIN_SOURCES.ownPlugin])
+      expect((await own()).map((r) => [r.item, r.access])).toEqual([['*', 'off']])
+      expect(await ownPluginEnabled(access)).toBe(false)
       await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
-      expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(true)
+      expect((await own()).map((r) => [r.item, r.access])).toEqual([['*', 'on']])
       const one = await a.request('/api/v1/ai/plugin-packages/scadbuddy', { headers: READ })
       expect(await one.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
 
@@ -296,7 +299,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         expect(res.status, `${method} ${url}`).toBe(409)
         expect(await res.json()).toMatchObject({ built_in: true })
       }
-      // Without the settings store a built-in cannot be switched: 503, never a stored row.
+      // Without the access store a built-in cannot be switched: 503, never a stored row.
       const noSettings = await app().request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
       expect(noSettings.status).toBe(503)
     })
@@ -311,7 +314,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(loaded.paths).toEqual([])
       expect(loaded.problems).toEqual([expect.stringMatching(/scadbuddy was not loaded: "scadbuddy" is built in/)])
 
-      const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
+      const a = createApp({ ...appDeps(), access: new AccessStore(db.sql) })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
         name: string
         built_in?: boolean
@@ -376,7 +379,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
     })
 
     it("serves a built-in plugin's files, and has no re-pin of one", async () => {
-      const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
+      const a = createApp({ ...appDeps(), access: new AccessStore(db.sql) })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages/scadbuddy/files', { headers: READ })).json()) as {
         files: { path: string }[]
       }
@@ -520,13 +523,13 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
     })
 
     it('loads ScadBuddy\'s own plugin unless Settings switched it off', async () => {
-      const settings = new SettingsStore(db.sql)
+      const access = new AccessStore(db.sql)
       const runs: HarnessRun[] = []
       const scripted = scriptedRunner(() => ({ reply: 'hi' }))
       const m = manager({
         sql: db.sql,
         paths: await tempPaths(),
-        settings,
+        access: new AccessResolver(access),
         ownPlugin: '/opt/own-plugin',
         run: (run) => {
           runs.push(run)
@@ -536,7 +539,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       await (await m.start(agentA, { origin: 'mcp', prompt: 'hi' })).turn!.done
       expect(runs[0]?.ownPlugin).toBe('/opt/own-plugin')
 
-      await settings.set(SETTING_OWN_PLUGIN, false, { actor: UI_ACTOR, surface: 'http' })
+      await access.setEnabled(BUILTIN_SOURCES.ownPlugin, false, { actor: UI_ACTOR, surface: 'http' })
       await (await m.start(agentA, { origin: 'mcp', prompt: 'hi' })).turn!.done
       expect(runs[1]?.ownPlugin).toBeUndefined()
     })
