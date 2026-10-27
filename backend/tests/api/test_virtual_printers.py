@@ -326,7 +326,9 @@ def test_delete_keeps_the_registry_row(client: TestClient) -> None:
 
     assert response.status_code == 200, response.text
     assert response.json() == {"deleted": 1} and gone.called
-    assert any(row.bambuddy_vp_id == 1 for row in registry(client).store.list())
+    # #4889: the row stays, marked no longer listed by the write's own follow.
+    (row,) = [row for row in registry(client).store.list() if row.bambuddy_vp_id == 1]
+    assert row.bambuddy_active is False
 
 
 @respx.mock

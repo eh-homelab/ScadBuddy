@@ -291,6 +291,8 @@ async def sync_printers(
         )
     if vp_error is None:
         listed = {vp.id for vp in vps}
+        if not dry_run:
+            await _mark_listed(printers, listed)
         entries.extend(
             SyncEntry(
                 kind=row.kind,
@@ -574,6 +576,14 @@ async def sync_virtual_printers(registry: VirtualRegistry, client: BambuddyClien
     physical_serials = {p.serial_number for p in active if p.serial_number is not None}
     for vp in vps:
         await _sync_virtual(registry, vp, rows, physical_serials, set(), now, dry_run=False)
+    # A VP the write deleted is marked here, not only by the next full sync (#4889).
+    await _mark_listed(registry, {vp.id for vp in vps})
+
+
+async def _mark_listed(registry: VirtualRegistry, listed: set[int]) -> None:
+    """Mark each VP row by whether Bambuddy lists its VP now (``bambuddy_active``)."""
+    for printer_id in await asyncio.to_thread(registry.store.mark_virtual_listed, listed):
+        registry.changed(printer_id)
 
 
 async def _sync_virtual(

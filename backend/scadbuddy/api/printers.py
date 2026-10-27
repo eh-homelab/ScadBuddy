@@ -348,8 +348,8 @@ async def update_virtual_printer(
     responses=OPERATION_RESPONSES,
     summary="Delete a Bambuddy virtual printer",
     description=(
-        "Its registry row stays (the sync never deletes one) and is reported as no "
-        "longer listed. " + VP_WRITES
+        "Its registry row stays (the sync never deletes one), marked no longer listed "
+        "(`bambuddy_active` false) by the sync the write runs. " + VP_WRITES
     ),
 )
 async def delete_virtual_printer(

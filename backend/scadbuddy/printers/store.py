@@ -431,6 +431,21 @@ class PrinterStore:
                 (ids, ids),
             )
 
+    def mark_virtual_listed(self, listed: Iterable[int]) -> tuple[str, ...]:
+        """Record which virtual printers Bambuddy lists now on their rows' ``bambuddy_active``
+        (#4889): a VP's row is kept when Bambuddy drops the VP, marked no longer listed.
+        Writes only the rows that change, and returns their ids."""
+        ids = sorted(set(listed))
+        with self.pool.connection() as conn:
+            changed = conn.execute(
+                "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
+                " updated_at = now() WHERE bambuddy_vp_id IS NOT NULL"
+                " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
+                " RETURNING id",
+                (ids, ids),
+            ).fetchall()
+        return tuple(str(row["id"]) for row in changed)
+
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
         """Take the Bambuddy link off, and remember which it was, so the next strip read
         (`ensure_bambuddy`) gives that Bambuddy printer its own synthetic row rather than

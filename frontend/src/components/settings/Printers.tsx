@@ -295,6 +295,8 @@ function VirtualLine({ row, targetName }: { row: PrinterRow; targetName: string 
         <Badge variant="outline">Bambuddy virtual printer</Badge> → {target}
         {mode ? ` (${mode})` : ''}
       </p>
+      {/* #4889: kept when Bambuddy drops the VP, and said so. */}
+      {!row.bambuddy_active && <p className="text-warn">No longer in Bambuddy: the row is kept.</p>}
       {view && (
         <p className="flex flex-wrap gap-x-2 text-muted-foreground">
           <span>{view.enabled ? 'enabled' : 'disabled'}</span>
