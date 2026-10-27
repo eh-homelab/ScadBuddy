@@ -770,7 +770,7 @@ export async function command<T>(
    * #4693 — told once the server accepted the command as an operation (its 202), before
    * it is followed: a refusal from its check comes before this, a slow run's end after.
    */
-  onAccepted?: () => void,
+  onAccepted?: (operation: OperationAccepted) => void,
 ): Promise<T> {
   const signal = init.signal ?? undefined
   const headers: Record<string, string> = {
@@ -787,7 +787,7 @@ export async function command<T>(
     (url) => requestWithStatus<T | OperationAccepted | CommandAccepting>(url, { method: 'POST' }),
     signal,
   )
-  if (first.status === 202) onAccepted?.()
+  if (first.status === 202) onAccepted?.(first.body as OperationAccepted)
   return followOperation<T>(first as { status: number; body: T | OperationAccepted }, signal, operations)
 }
 
@@ -847,7 +847,12 @@ async function followOperation<T>(
   operations = '/operations',
 ): Promise<T> {
   if (first.status !== 202) return first.body as T
-  let op: Operation = first.body as OperationAccepted
+  return followRunning<T>(first.body as OperationAccepted, signal, operations)
+}
+
+/** An operation from as it stands to its result, or to the problem it ended with. */
+async function followRunning<T>(start: Operation, signal?: AbortSignal, operations = '/operations'): Promise<T> {
+  let op = start
   const began = performance.now()
   while (op.status === 'running') {
     if (performance.now() - began >= printRunPoll.operationFollowMs) {
@@ -2121,8 +2126,8 @@ export const api = {
     request<Quote>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4250 — the `order_item_quote` operation: render if needed, slice every plate with the
    * dialog's choices, price with the book; followed to the quote as every command is. */
-  /** `onAccepted` (#4693): the quote is running as its operation, past its check. */
-  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest, onAccepted?: () => void, signal?: AbortSignal) =>
+  /** `onAccepted` (#4693): the quote is running as its operation, past its check, with that operation. */
+  quoteItem: (orderId: string, itemId: string, body: SliceQuoteRequest, onAccepted?: (operation: OperationAccepted) => void, signal?: AbortSignal) =>
     command<Quote>(
       `/orders/${seg(orderId)}/items/${seg(itemId)}/quote`,
       { method: 'POST', body: JSON.stringify(body), signal },
@@ -2130,6 +2135,22 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /**
+   * #4736 — the slice quotes still running, as the activity index lists them: each row's
+   * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are
+   * few (each is minutes of slicing), so one page holds them.
+   */
+  runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
+  /**
+   * #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows
+   * its own (`followRunning`). `onRunning` is told once the first read finds it still
+   * running: an activity row can say running of one that has already ended.
+   */
+  followQuote: async (operationId: string, signal?: AbortSignal, onRunning?: () => void) => {
+    const op = await reattach(() => request<Operation>(`/operations/${seg(operationId)}`, { signal }), signal)
+    if (op.status === 'running') onRunning?.()
+    return followRunning<Quote>(op, signal)
+  },
   // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------
   priceBook: () => request<PriceBook>('/orders/price-book'),
   setPriceBook: (body: PolicyUpdate) => request<PriceBook>('/orders/price-book', { method: 'PUT', body: JSON.stringify(body) }),
