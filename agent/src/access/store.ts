@@ -170,7 +170,7 @@ export class AccessStore implements AccessReader, AccessWriter {
     if (touched.size === 0) return
     // One such write at a time, so each derives the keys from the rows the last one left.
     await tx`SELECT pg_advisory_xact_lock(hashtext('ai_access legacy keys'))`
-    let rows = await tx<AccessRow[]>`
+    let rows: AccessRow[] = await tx<AccessRow[]>`
       SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${tx(LEGACY_SOURCES)}`
     for (const edit of edits) rows = applyEdit(rows, edit, by)
     const settings = legacySettings(rows, touched, this.registryTools)
