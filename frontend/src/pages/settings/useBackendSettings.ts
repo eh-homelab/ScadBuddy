@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import { useLatest } from '../../lib/useLatest'
 import type { Settings, SettingsUpdate } from '../../api/types'
-import { useLoadedSettings, useSettingsCache, type Seeder } from './cache'
+import { UNCONFIRMED, useLoadedSettings, useSettingsCache, type Seeder } from './cache'
 import { useReportDirty } from './dirty'
 import type { FieldName, SectionId } from './fields'
 import { editedSince, pendingFields, seedDraft, type Draft, type Seed } from './seed'
@@ -71,6 +71,10 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
   const [sectionError, setSectionError] = useState<string | undefined>(undefined)
   const [resetting, setResetting] = useState<FieldName | null>(null)
   const [resetError, setResetError] = useState<string | null>(null)
+  // #4826 — a lost save's or reset's note that nothing confirmed what is stored, shown once
+  // after the failure it follows, where that failure is reported, until a read is taken.
+  const [saveUnconfirmed, setSaveUnconfirmed] = useState(false)
+  const [resetUnconfirmed, setResetUnconfirmed] = useState(false)
 
   // What the next settings objects seed the form with: all of it at first and after a
   // reload, the fields a save or reset wrote after it. Queued, since requests overlap.
@@ -83,6 +87,10 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     begin: () => new Map(edits.current),
     seed: (names, since) => {
       seeds.current.push({ names, since })
+    },
+    confirm: () => {
+      setSaveUnconfirmed(false)
+      setResetUnconfirmed(false)
     },
   }))
   const { register } = cache
@@ -154,8 +162,12 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     if (Object.keys(body).length === 0) return true
     setSaving(true)
     setSectionError(undefined)
+    setSaveUnconfirmed(false)
     try {
-      const next = await cache.write((answer) => [...fieldsFor(answer), ...also], () => api.putSettings(body))
+      const next = await cache.write((answer) => [...fieldsFor(answer), ...also], () => api.putSettings(body), {
+        written: namesOf(body),
+        unconfirmed: () => setSaveUnconfirmed(true),
+      })
       setSavedAt(new Date().toLocaleTimeString())
       options.onSaved?.(next)
       return true
@@ -186,14 +198,20 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     setClearing((current) => current.filter((name) => !names.includes(name)))
     setErrors((current) => ({ ...current, ...Object.fromEntries(names.map((name) => [name, undefined])) }))
     setSectionError(undefined)
+    setSaveUnconfirmed(false)
   }
 
   async function reset(name: FieldName) {
     setResetting(name)
     setResetError(null)
+    setResetUnconfirmed(false)
     try {
       const also = options.alsoReset?.(name, settings) ?? {}
-      const next = await cache.write([name, ...namesOf(also)], () => api.putSettings({ ...also, reset: [name] }))
+      const written = [name, ...namesOf(also)]
+      const next = await cache.write(written, () => api.putSettings({ ...also, reset: [name] }), {
+        written,
+        unconfirmed: () => setResetUnconfirmed(true),
+      })
       options.onReset?.(name, next)
     } catch (cause) {
       setResetError(cause instanceof ApiError ? cause.detail : 'Could not reset the setting.')
@@ -214,7 +232,7 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     changed,
     dirty,
     errors,
-    sectionError,
+    sectionError: withNote(sectionError, saveUnconfirmed),
     saving,
     savedAt,
     clearing,
@@ -223,6 +241,12 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     discard,
     reset,
     resetting,
-    resetError,
+    resetError: withNote(resetError, resetUnconfirmed) ?? null,
   }
+}
+
+/** `message`, followed by the {@link UNCONFIRMED} note when `unconfirmed`. */
+function withNote(message: string | null | undefined, unconfirmed: boolean): string | undefined {
+  if (!unconfirmed) return message ?? undefined
+  return message ? `${message} ${UNCONFIRMED}` : UNCONFIRMED
 }

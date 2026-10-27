@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { OrderAttachment, OrderAttachmentPatch, OrderAttachmentRole } from '../../../api/types'
+import { SHOWN_IMAGES, THUMBNAILED } from '../../../components/orders/attachmentMedia'
 import { event, itemOf, lock, refused, transition } from './orders'
 import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './state'
 
@@ -9,8 +10,6 @@ import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './st
  * it, served back as it was sent, and an item's image marked as what was delivered.
  */
 
-/** `orders/attachments.py` `SHOWN_IMAGES`: what may stand as an item's picture. */
-const SHOWN_IMAGES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'])
 const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
 
 /** `orders/attachments.py` `sniff`, over the first bytes. */
@@ -133,7 +132,7 @@ export const handlers = [
   http.get('/api/v1/orders/:id/attachments/:a/thumbnail', ({ request, params }) => {
     try {
       const attachment = found(String(params.id), String(params.a))
-      if (!['image/png', 'image/jpeg', 'image/webp'].includes(attachment.media_type)) {
+      if (!THUMBNAILED.has(attachment.media_type)) {
         return problem(request, 404, 'only a PNG, JPEG or WebP photo has a thumbnail')
       }
       return new HttpResponse(state.files[attachment.id], { headers: { 'Content-Type': attachment.media_type } })
@@ -150,7 +149,10 @@ export const handlers = [
         event(lock(String(params.id)), 'attachment.role', { attachment_id: attachment.id, from_role: attachment.role, to: body.role })
         attachment.role = body.role
       }
-      if (body.caption != null) attachment.caption = body.caption
+      if (body.caption != null && body.caption !== attachment.caption) {
+        event(lock(String(params.id)), 'attachment.caption', { attachment_id: attachment.id, from_caption: attachment.caption, to: body.caption })
+        attachment.caption = body.caption
+      }
       return attachment
     })
   }),

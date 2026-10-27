@@ -46,7 +46,8 @@ function fakeSeeder(name: string, order: string[]) {
   const seed = vi.fn((_names: 'all' | readonly FieldName[], _since: Edits) => {
     order.push(`seed-${name}`)
   })
-  return { seeder: { begin, seed } satisfies Seeder, since, begin, seed }
+  const confirm = vi.fn()
+  return { seeder: { begin, seed, confirm } satisfies Seeder, since, begin, seed, confirm }
 }
 
 function Section({ id, dirty = false, seeder, drafts }: { id: string; dirty?: boolean; seeder?: Seeder; drafts?: Partial<Record<FieldName, string>> }) {
@@ -121,10 +122,14 @@ describe('settings cache', () => {
     await screen.findByTestId('loaded')
     let next: Awaited<ReturnType<typeof api.putSettings>> | undefined
     await act(async () => {
-      next = await cache.write(['store_backend'], async () => {
-        order.push('request')
-        return api.putSettings({ store_backend: 'local' })
-      })
+      next = await cache.write(
+        ['store_backend'],
+        async () => {
+          order.push('request')
+          return api.putSettings({ store_backend: 'local' })
+        },
+        { written: ['store_backend'], unconfirmed: () => {} },
+      )
     })
     expect(order).toEqual(['begin-a', 'begin-bb', 'request', 'seed-a', 'seed-bb'])
     expect(a.seed).toHaveBeenCalledWith(['store_backend'], a.since)
@@ -147,6 +152,7 @@ describe('settings cache', () => {
       await cache.write(
         (next) => (next.store_backend === 'local' ? ['store_backend'] : []),
         () => api.putSettings({ store_backend: 'local' }),
+        { written: ['store_backend'], unconfirmed: () => {} },
       )
     })
     expect(a.seed).toHaveBeenCalledWith(['store_backend'], a.since)
@@ -209,7 +215,7 @@ describe('settings cache', () => {
     // read is in flight, not yet reported dirty, must keep its draft.
     let typed = 0
     const seed = vi.fn((_names: 'all' | readonly FieldName[], _since: Edits) => {})
-    const seeder: Seeder = { begin: () => new Map<FieldName, number>([['public_url', typed]]), seed }
+    const seeder: Seeder = { begin: () => new Map<FieldName, number>([['public_url', typed]]), seed, confirm: () => {} }
     renderPage(
       <Providers>
         <Probe />
@@ -285,9 +291,13 @@ describe('settings cache', () => {
     expect(b.seed).not.toHaveBeenCalledWith('all', expect.anything())
 
     act(() => cache.loadLatest())
-    expect(a.seed).toHaveBeenCalledWith('all', expect.any(Map))
-    expect(b.seed).toHaveBeenCalledWith('all', expect.any(Map))
     expect(cache.changedElsewhere).toBe(false)
+    // Seeded when the read lands and is taken (#4803), with the counts from the click.
+    await waitFor(() => expect(a.seed).toHaveBeenCalledWith('all', a.since))
+    expect(b.seed).toHaveBeenCalledWith('all', b.since)
+    // A taken read confirms what is stored (#4826).
+    expect(a.confirm).toHaveBeenCalled()
+    expect(b.confirm).toHaveBeenCalled()
   })
 
   it('Keep mine clears the notice and seeds nothing', async () => {

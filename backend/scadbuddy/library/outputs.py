@@ -67,6 +67,8 @@ _ID_LIST = TypeAdapter(list[str])
 #: `blob_refs.holder_kind` for a saved output: its Parts live as long as it does.
 OUTPUT_HOLDER = "output"
 FILES_DIR = "files"
+#: How many outputs whose thumbnail draw came to nothing a process remembers (#4775).
+UNDRAWABLE_MAX = 4096
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -256,6 +258,19 @@ class OutputStore:
         #: and a listing's details asked about ten times per output. A hit is checked
         #: with one stat, so a moved or deleted output is looked for again.
         self._dirs: dict[str, Path] = {}
+        #: #4775 — whether an output with no thumbnail gets one drawn from its preview
+        #: mesh on first read; `preview_renders`, set at boot as the model previews are.
+        self.draw_thumbnails = False
+        #: Bounds those draws: a History page of new outputs asks for every one at once.
+        self.thumbnail_draws = asyncio.Semaphore(2)
+        #: How many of those draws' threads are running, a timed-out one's included.
+        self.draws_running = 0
+        #: Outputs whose draw came to nothing, each with the `time.monotonic()` after
+        #: which it may be drawn again, or None for never (an empty mesh). Listed with
+        #: no thumbnail meanwhile. Insertion ordered, so the oldest goes first past
+        #: `UNDRAWABLE_MAX`.
+        self._undrawable: dict[str, float | None] = {}
+        self._undrawable_lock = threading.Lock()
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -800,7 +815,46 @@ class OutputStore:
         return self._find_dir(output_id) / THUMBNAIL_NAME
 
     def write_thumbnail(self, output_id: str, png: bytes) -> None:
-        self.thumbnail_path(output_id).write_bytes(png)
+        """Whole, by a rename: a reader of the old file never gets half of this one."""
+        _replace_bytes(self.thumbnail_path(output_id), png)
+
+    def drawable_thumbnail(self, output_id: str) -> bool:
+        """True when the output has no thumbnail and the server may draw one from its
+        preview mesh (#4775): not one whose draw came to nothing, until it may be tried
+        again."""
+        if not self.draw_thumbnails:
+            return False
+        with self._undrawable_lock:
+            if output_id in self._undrawable:
+                retry_at = self._undrawable[output_id]
+                if retry_at is None or time.monotonic() < retry_at:
+                    return False
+                del self._undrawable[output_id]
+        return (self._find_dir(output_id) / PREVIEW_NAME).is_file()
+
+    def remember_undrawable(self, output_id: str, *, retry_after: float | None = None) -> None:
+        """``output_id``'s draw came to nothing (#4775): it is not tried again for
+        ``retry_after`` seconds, or ever when None (an empty mesh stays empty)."""
+        retry_at = None if retry_after is None else time.monotonic() + retry_after
+        with self._undrawable_lock:
+            self._undrawable.pop(output_id, None)
+            self._undrawable[output_id] = retry_at
+            while len(self._undrawable) > UNDRAWABLE_MAX:
+                del self._undrawable[next(iter(self._undrawable))]
+
+    def write_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
+        """``png`` as the thumbnail only when the output still has none: an upload that
+        landed while the server drew stays (#4775). Written whole or not at all."""
+        path = self.thumbnail_path(output_id)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        temporary.write_bytes(png)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        finally:
+            temporary.unlink()
+        return True
 
     def _write_meta(self, directory: Path, meta: OutputMeta) -> None:
         (directory / META_NAME).write_text(

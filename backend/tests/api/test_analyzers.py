@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -25,14 +25,19 @@ from scadbuddy.analyzers.context import AnalysisContext
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
+from scadbuddy.api.analyzers import _newest_render
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.split import ColourPart
+from tests.api.conftest import wait_for_job
 from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 from tests.test_bambu3mf import add_plate
 
 API = f"{BASE}/api/v1"
@@ -125,6 +130,12 @@ def test_a_configuration_is_judged_on_its_newest_render(client: TestClient, mode
     output_id = make_output(client, model)
     body: dict[str, Any] = {"target": {"slug": model, "params": {"width": 12}}}
     assert _ok(client.post("/api/v1/analyzers/run", json=body))["output_id"] == output_id
+    # #4774: the output records `label` at its default, and both the sparse target above
+    # and the whole one name it; another `label` does not.
+    body = {"target": {"slug": model, "params": {"width": 12, "label": "hi"}}}
+    assert _ok(client.post("/api/v1/analyzers/run", json=body))["output_id"] == output_id
+    body = {"target": {"slug": model, "params": {"width": 12, "label": "bye"}}}
+    assert _ok(client.post("/api/v1/analyzers/run", json=body))["output_id"] is None
 
     body = {"target": {"slug": model, "params": {"width": 13}}, "detail": "advanced"}
     report = _ok(client.post("/api/v1/analyzers/run", json=body))
@@ -132,6 +143,76 @@ def test_a_configuration_is_judged_on_its_newest_render(client: TestClient, mode
     geometry = next(row for row in report["inputs"] if row["name"] == "geometry")
     assert geometry["reason"] == "this configuration has not been rendered yet"
     assert "print" not in [scope["kind"] for scope in report["scopes"]]
+
+
+def test_an_all_defaults_configuration_finds_its_render(client: TestClient, model: str) -> None:
+    """#4774: a render of the defaults records them whole, so a target that leaves its
+    params out (or sends none) names that output too."""
+    job_id = client.post(f"/api/v1/models/{model}/render", json={}).json()["job_id"]
+    wait_for_job(client, job_id)
+    output_id = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    ).json()["id"]
+    for target in ({"slug": model}, {"slug": model, "params": {}}):
+        report = _ok(client.post("/api/v1/analyzers/run", json={"target": target}))
+        assert report["output_id"] == output_id, target
+
+
+class _Outputs:
+    """The two reads `_newest_render` makes of the output store, newest first."""
+
+    def __init__(self, *rows: tuple[str, str, dict[str, ParamValue]]) -> None:
+        self.rows = rows
+
+    def list_for(self, slug: str) -> list[OutputMeta]:
+        return [
+            OutputMeta.model_construct(id=output_id, slug=slug, model_version=version)
+            for output_id, version, _ in self.rows
+        ]
+
+    def params(self, output_id: str) -> dict[str, ParamValue]:
+        return next(params for row_id, _, params in self.rows if row_id == output_id)
+
+
+def _labelled(default: str) -> CustomizerSchema:
+    return CustomizerSchema(
+        parameters=[
+            Parameter(name="width", type="number", initial=10),
+            Parameter(name="label", type="string", initial=default),
+        ]
+    )
+
+
+async def test_an_output_is_filled_at_the_defaults_of_its_own_revision() -> None:
+    """#4774: an output saved before renders filled defaults records only `width`. At
+    its revision `label` defaulted to "old"; it is no render of a target that names
+    today's "hi", while one rendered at a revision whose default is "hi" is."""
+    schemas = {"a" * 40: _labelled("old"), "b" * 40: _labelled("hi")}
+
+    async def schema_at(version: str | None) -> CustomizerSchema | None:
+        return schemas.get(version or "")
+
+    target: dict[str, ParamValue] = {"width": 12, "label": "hi"}
+    old = _Outputs(("old", "a" * 40, {"width": 12}))
+    assert await _newest_render("demo", target, cast(OutputStore, old), schema_at) is None
+    later = _Outputs(("new", "b" * 40, {"width": 12}), ("old", "a" * 40, {"width": 12}))
+    found = await _newest_render("demo", target, cast(OutputStore, later), schema_at)
+    assert found is not None and found.id == "new"
+
+
+async def test_a_target_its_newest_output_records_reads_no_schema() -> None:
+    """#4774: an all-defaults target whose newest output records the same params is
+    found without a schema read, which could run openscad."""
+    reads: list[str | None] = []
+
+    async def schema_at(version: str | None) -> CustomizerSchema | None:
+        reads.append(version)
+        return _labelled("hi")
+
+    outputs = _Outputs(("new", "b" * 40, {}), ("old", "a" * 40, {"width": 12}))
+    found = await _newest_render("demo", {}, cast(OutputStore, outputs), schema_at)
+    assert found is not None and found.id == "new"
+    assert reads == []
 
 
 @pytest.mark.parametrize(

@@ -274,7 +274,7 @@ async def printers_now(
     cards = list(await asyncio.gather(*(card(p, r) for p, r in zip(active, rows, strict=True))))
     shown = {row.id for row in rows}
     for row in await asyncio.to_thread(printers.list):
-        if row.id in shown:
+        if row.id in shown or row.kind != "physical":  # a VP is not hardware (#4747)
             continue
         bambuddy_down = (
             unreachable is not None and row.bambuddy_printer_id is not None and row.bambuddy_active

@@ -67,6 +67,22 @@ class LocalBlobStore:
         # One volume: the directory is the blob.
         return self.exists(key)
 
+    async def claim(self, key: str) -> bool:
+        return await asyncio.to_thread(self._claim, key)
+
+    def _claim(self, key: str) -> bool:
+        # One volume: the directory is the blob. One with nothing visible in it was
+        # made by `dir_for` for a write that never finished, and holds no blob; a
+        # file at the key's path is none either, as for `exists`. The touch comes first
+        # (a sweep must not take a blob between the check and the hold), so a
+        # half-written directory looks fresh too; `keep` writes it again at once.
+        path = self._path(key)
+        try:
+            os.utime(path, None)
+            return any(not entry.name.startswith(".") for entry in path.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+
     async def checkout(self, key: str) -> str | None:
         if not self.exists(key):
             raise PieceStateLostError(key)

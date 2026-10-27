@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { ORDER_DRAFT, OUTPUT_REAGAN } from '../../mocks/features/orders/state'
+import { orderNumberMatcher } from '../../test/orderNumber'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { AddToOrderDialog } from './AddToOrderDialog'
@@ -43,7 +44,7 @@ describe('AddToOrderDialog (#4249)', () => {
     )
     const dialog = screen.getByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await user.clear(within(dialog).getByLabelText('Quantity'))
     await user.type(within(dialog).getByLabelText('Quantity'), '3')
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
@@ -109,14 +110,14 @@ describe('AddToOrderDialog (#4249)', () => {
     )
     const dialog = screen.getByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
     expect(createOrder).toHaveBeenCalledTimes(1)
     const made = (await createOrder.mock.results[0]?.value) as { id: string; number: string }
     // The order it made is now the one picked, and the retry adds to it.
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(made.number))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher(made.number)))
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`/orders/${made.id}`))
     expect(createOrder).toHaveBeenCalledTimes(1)
@@ -129,7 +130,7 @@ describe('AddToOrderDialog (#4249)', () => {
     const { user } = renderPage(<Toggled />)
     let dialog = screen.getByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
@@ -141,10 +142,14 @@ describe('AddToOrderDialog (#4249)', () => {
     await user.click(screen.getByRole('button', { name: 'Toggle' }))
     dialog = await screen.findByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await user.click(within(dialog).getByRole('combobox', { name: 'Order' }))
-    // Waits for the reload that carries the cancel, not a cached list (#4749 review).
-    await waitFor(() => expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull())
+    // Waits for the reload that carries the cancel, not a cached list (#4749 review): the
+    // list is shown, and the cancelled order is not in it (#4751 review).
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: orderNumberMatcher('ORD-2026-3') })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: orderNumberMatcher(made.number) })).toBeNull()
+    })
   })
 
   it('kept open, drops an order it made once a reload lists it as no longer open (#4746)', async () => {
@@ -153,20 +158,24 @@ describe('AddToOrderDialog (#4249)', () => {
     const { user } = renderPage(<AddToOrderDialog open outputId={OUTPUT_REAGAN} onClose={() => {}} />)
     const dialog = screen.getByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
     const made = (await createOrder.mock.results[0]?.value) as { id: string; number: string }
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(made.number))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher(made.number)))
     // Cancelled elsewhere while the dialog stays open; re-picking the customer reloads their orders.
     await api.cancelOrder(made.id)
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Bob Builder')
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await user.click(within(dialog).getByRole('combobox', { name: 'Order' }))
-    // Waits for the reload that carries the cancel, not a cached list (#4749 review).
-    await waitFor(() => expect(screen.queryByRole('option', { name: new RegExp(made.number) })).toBeNull())
+    // Waits for the reload that carries the cancel, not a cached list (#4749 review): the
+    // list is shown, and the cancelled order is not in it (#4751 review).
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: orderNumberMatcher('ORD-2026-3') })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: orderNumberMatcher(made.number) })).toBeNull()
+    })
   })
 
   it('keeps the customer it made when the order fails, so a retry makes no second (#4723)', async () => {
@@ -205,7 +214,7 @@ describe('AddToOrderDialog (#4249)', () => {
     )
     const dialog = screen.getByRole('dialog', { name: 'Add to order' })
     await choose(user, within(dialog).getByRole('combobox', { name: 'Customer' }), 'Ada Lovelace')
-    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent('ORD-2026-3'))
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Order' })).toHaveTextContent(orderNumberMatcher('ORD-2026-3')))
     await choose(user, within(dialog).getByRole('combobox', { name: 'Order' }), 'New order')
     await user.click(within(dialog).getByRole('button', { name: 'Add to order' }))
     await waitFor(() => expect(createOrder).toHaveBeenCalled())

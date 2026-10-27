@@ -47,6 +47,9 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
+(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`), in `ci.yml`'s three "Install the
+Temporal CLI" steps and in `hot-path-e2e.yml`'s `native` job; move all five together.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -107,8 +110,8 @@ in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 that each shard ran what it selected, as `backend-pytest-split` does.
 `e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
 e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
-images; weekly and on dispatch in `hot-path-e2e.yml`, never on PRs); `e2e/real-hot-path.spec.ts`
-skips without what it sets.
+images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs);
+`e2e/real-hot-path.spec.ts` skips without what it sets.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -453,7 +456,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
   `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
-  Run by `.github/workflows/hot-path-e2e.yml` weekly and on dispatch, not on PRs.
+  `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
+  dispatch, never on a PR. Its `fakes` job (those two tests, ruff and mypy over the fakes)
+  and `native` job (`tests/test_print_native_workflow.py` and `tests/api/test_hot_path_native.py`,
+  which every backend-pytest shard skips for want of mosquitto, #4541; it fails on a skip)
+  run on a PR that touches `e2e-stack/**`, `backend/**` or the workflow. Neither is in
+  `CI Summary`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -614,9 +622,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order or a line item,
-  `attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
-  `orders/attachments.py` `sniff`; only `INLINE` types are served as themselves, the rest
-  as downloads), uploaded through the claim store and the `order_attachment_add` kind (the
+  `order_attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
+  `orders/attachments.py` `sniff`; only `orders/models.py` `INLINE` types are served as
+  themselves, the rest as downloads; the spec carries the type sets, which
+  `attachmentMedia.test.ts` checks the browser's copy against), uploaded through the claim store and the `order_attachment_add` kind (the
   blob `attachment-<sha256>`, its `blob_refs` row written in the attachment's own
   transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
   (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
@@ -1047,6 +1056,15 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `needs`, so `go` is required: a skip is a failure, a "no Go changes" run a pass. The
   `freshness` job also regenerates the Go client when the API or the client changed and
   pushes it to a same-repo PR with the `RUNNER_APP` token.
+- Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
+  shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
+  the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
+  (`rust`, `slicer-image`) and `image` (the app image job: any backend change, plus
+  `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
+  does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
+  where the lane was needed is a failure. A push, the schedule, a dispatch, the
+  Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
+  that opens a file outside its tree) needs its path in that lane's pattern.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
   touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,

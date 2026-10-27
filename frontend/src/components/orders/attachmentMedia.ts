@@ -13,13 +13,18 @@ export const ROLE_LABELS: Record<OrderAttachmentRole, string> = {
   other: 'Other',
 }
 export const ROLES = Object.keys(ROLE_LABELS) as OrderAttachmentRole[]
-/** What the server serves inline (`orders/attachments.py` `INLINE`): opened in a tab. */
+/*
+ * The three type sets copy `orders/models.py`'s. The spec publishes the backend's on
+ * `Attachment.media_type` (`x-inline`, `x-shown-images`, `x-thumbnailed`), and
+ * `attachmentMedia.test.ts` fails when these differ from it (#4679).
+ */
+/** What the server serves inline (`INLINE`): opened in a tab. */
 export const OPENS = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif', 'image/heic', 'video/mp4', 'video/quicktime', 'video/webm', 'application/pdf'])
 
-/** The image types a browser draws (`orders/attachments.py` `SHOWN_IMAGES`). */
+/** The image types a browser draws (`SHOWN_IMAGES`). */
 export const SHOWN_IMAGES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'])
-/** The ones the server shrinks to a thumbnail; a GIF or AVIF is shown as it is. */
-const THUMBNAILED = new Set(['image/png', 'image/jpeg', 'image/webp'])
+/** The ones the server shrinks to a thumbnail (`THUMBNAILED`); a GIF or AVIF is shown as it is. */
+export const THUMBNAILED = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 /** An attached photo's smallest URL the browser can draw, or null when it cannot draw it. */
 export function attachmentImageUrl(orderId: string, attachment: OrderAttachment): string | null {

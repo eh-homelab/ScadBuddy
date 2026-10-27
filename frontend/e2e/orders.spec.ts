@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { orderNumberMatcher } from '../src/test/orderNumber'
 import { choose } from './select'
 
 // Orders phase 1 (#4249) over the mocks (src/mocks/features/orders/): a customer, an
@@ -23,8 +24,8 @@ test.describe('orders', () => {
 
     // The draft order with its item: price it, accept it, fulfil, ship and close.
     await page.goto('/orders')
-    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
-    await expect(page.getByRole('heading', { name: 'ORD-2026-3' })).toBeVisible()
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-3', exact: true })).toBeVisible()
     await page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Name Keychain' }).click()
     const item = page.getByRole('dialog', { name: 'Name Keychain' })
     await item.getByLabel(/Price per unit/).fill('12.50')
@@ -46,9 +47,26 @@ test.describe('orders', () => {
     await expect(page.getByText('Closed', { exact: true })).toBeVisible()
   })
 
+  test('reopens a closed order, and unarchives a customer (#4725)', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-1', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-1', exact: true })).toBeVisible()
+    await expect(page.getByText('Closed', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Reopen order' }).click()
+    await expect(page.getByRole('button', { name: 'Reopen order' })).toBeHidden()
+    await expect(page.getByText('Closed', { exact: true })).toBeHidden()
+
+    await page.getByRole('link', { name: 'Bob Builder' }).click()
+    await expect(page.getByRole('heading', { name: 'Bob Builder' })).toBeVisible()
+    await page.getByRole('button', { name: 'Archive', exact: true }).click()
+    await page.getByRole('button', { name: 'Unarchive' }).click()
+    await expect(page.getByRole('button', { name: 'Archive', exact: true })).toBeVisible()
+    await expect(page.getByText(/^Archived /)).toBeHidden()
+  })
+
   test('prices an item in the items table', async ({ page }) => {
     await page.goto('/orders')
-    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
     const items = page.getByRole('table', { name: 'Line items' })
     const unit = items.getByRole('textbox', { name: 'Unit price for Name Keychain' })
     await unit.fill('12.50')
@@ -88,7 +106,7 @@ test.describe('orders', () => {
     const dialog = page.getByRole('dialog', { name: 'Add to order' })
     await dialog.getByRole('combobox', { name: 'Customer' }).click()
     await page.getByRole('option', { name: 'Ada Lovelace' }).click()
-    await expect(dialog.getByRole('combobox', { name: 'Order' })).toContainText('ORD-2026-3')
+    await expect(dialog.getByRole('combobox', { name: 'Order' })).toContainText(orderNumberMatcher('ORD-2026-3'))
     await dialog.getByRole('button', { name: 'Add to order' }).click()
     await expect(page).toHaveURL(/\/orders\/0e5a3c1e-1111-4222-8333-944455556661$/)
     await expect(page.getByRole('table', { name: 'Line items' }).getByRole('row')).toHaveCount(3)
@@ -98,7 +116,7 @@ test.describe('orders', () => {
   // filament per slot, and the quote with its lines on the item.
   test('quotes an item from a slice of its output', async ({ page }) => {
     await page.goto('/orders')
-    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
     await page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Name Keychain' }).click()
     const item = page.getByRole('dialog', { name: 'Name Keychain' })
     await item.getByTestId('quote-from-slice').click()
@@ -148,8 +166,8 @@ test.describe('orders', () => {
   test('adds items from the order page', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/orders')
-    await page.getByRole('link', { name: 'ORD-2026-3' }).click()
-    await expect(page.getByRole('heading', { name: 'ORD-2026-3' })).toBeVisible()
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'ORD-2026-3', exact: true })).toBeVisible()
     const rows = page.getByRole('table', { name: 'Line items' }).getByRole('row')
     await expect(rows).toHaveCount(2)
 

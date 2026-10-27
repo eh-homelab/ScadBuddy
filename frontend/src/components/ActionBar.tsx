@@ -453,6 +453,7 @@ export function ActionBar({
     subject,
     projectPath,
     listed,
+    settled,
     projectsError: projects.error,
     requestProjects: projects.request,
   })
@@ -484,11 +485,23 @@ export function ActionBar({
       }
       // A lazy list nobody opened yet (#4601): read it now, so the id below can be checked.
       if (project_id !== undefined && project_id !== null && !live.current.listed) {
-        live.current.requestProjects()
-        await waitFor(() => (live.current.listed || live.current.projectsError ? true : undefined), {
-          timeout: timeout_ms,
-          what: 'the project list',
-        })
+        // Settings first: until they answer the list is not lazy yet, so a request is a
+        // no-op and the read it should start never comes (#4685). One wait, so the two
+        // share the caller's timeout.
+        let requested = false
+        await waitFor(
+          () => {
+            if (!live.current.settled) return undefined
+            if (!requested) {
+              requested = true
+              // Safe in the poll: this runs in the handler, outside React's render, and
+              // the latest `request` only sets the hook's state.
+              live.current.requestProjects()
+            }
+            return live.current.listed || live.current.projectsError ? true : undefined
+          },
+          { timeout: timeout_ms, what: 'the settings and the project list' },
+        )
       }
       // An id Bambuddy does not list would be saved and then fail to file: refuse it first.
       if (project_id !== undefined && project_id !== null && !live.current.listed?.some((p) => p.id === project_id)) {

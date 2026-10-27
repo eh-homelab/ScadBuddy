@@ -18,6 +18,32 @@ export function isSecret(name: FieldName): name is Secret {
   return (SECRETS as readonly string[]).includes(name)
 }
 
+/** The flag each secret is reported under. */
+const SECRET_FLAGS: Record<Secret, keyof Settings> = {
+  bambuddy_api_key: 'has_api_key',
+  bambuddy_render_api_key: 'has_render_api_key',
+  google_fonts_api_key: 'has_google_fonts_api_key',
+  store_s3_secret_access_key: 'has_store_s3_secret_access_key',
+}
+
+/**
+ * #4803 — a copy of `settings` with `names` (their values, secret flags and sources) taken
+ * from `from`. Always a new object, so a seed queued with it is applied even when nothing moved.
+ */
+export function patchFields(settings: Settings, from: Settings, names: readonly FieldName[]): Settings {
+  const out: Record<string, unknown> = { ...settings }
+  const sources = { ...settings.sources }
+  for (const name of names) {
+    const key = isSecret(name) ? SECRET_FLAGS[name] : name
+    out[key] = (from as Record<string, unknown>)[key]
+    const source = from.sources?.[name]
+    if (source === undefined) delete sources[name]
+    else sources[name] = source
+  }
+  out.sources = sources
+  return out as Settings
+}
+
 const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */

@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { Spinner } from '../../../components/ui/spinner'
+import { syncSummary } from '../../../lib/printerRegistry'
 import { useSettingsConnectionAgent, useSettingsAgentField } from '../agentFields'
 import { useBambuddyResources } from '../bambuddyResources'
 import { useSettingsCache } from '../cache'
@@ -63,6 +64,8 @@ export function Component() {
 
   const [testing, setTesting] = useState(false)
   const [test, setTest] = useState<ConnectionTest | null>(null)
+  // #4439: what the printer import did after a save whose test passed, or why it could not.
+  const [imported, setImported] = useState<string | null>(null)
   const [registering, setRegistering] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarLink | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -107,6 +110,20 @@ export function Component() {
       if (result === null) return
       setTest(result)
       status.reload()
+      setImported(null)
+      // #4439: a connection that tests OK imports and links Bambuddy's printers, as the
+      // server's own Schedule would within minutes. The agent's test_connection does not:
+      // it is a read, and the import stores access codes.
+      if (result.ok) {
+        api
+          .syncPrintersFromBambuddy()
+          .then((sync) => setImported(`Printers from Bambuddy: ${syncSummary(sync)}.`))
+          .catch((cause: unknown) =>
+            setImported(
+              `Printers from Bambuddy were not imported: ${cause instanceof ApiError ? cause.detail : 'the import failed'}.`,
+            ),
+          )
+      }
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The connection test could not run.')
     } finally {
@@ -292,6 +309,11 @@ export function Component() {
           )}
         </div>
         {test?.upstream && <UpstreamAnswerDetails answer={test.upstream} />}
+        {test?.ok && imported && (
+          <p role="status" aria-label="Printer import" className="text-xs text-muted-foreground">
+            {imported}
+          </p>
+        )}
         {test && (test.scopes?.length ?? 0) > 0 && (
           <ul aria-label="Scopes" className="space-y-1 rounded-lg p-3 text-xs ring-1 ring-foreground/10">
             {test.scopes?.map((check) => (
