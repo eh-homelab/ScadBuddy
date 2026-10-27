@@ -1249,6 +1249,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   refuses the same way and moves nothing. The agent logs the cause once at start, and
   `GET /api/v1/ai/status` shows it as `workspace_files` (`{store: "blobs" | "postgres" |
   "refused", ...}`, checked at most once a minute).
+- Rows of both kinds read back only between blob backends (s3 and bambuddy, through
+  `/store/migrate`). After a switch back to `store_backend` local the backend's URL route
+  answers 404, so every file already in the blob store cannot be read (`unavailable`)
+  until the backend is on a blob store again; new writes go to `data`. `workspace_files`
+  then carries `unreadable_files`, the count of such rows (also when writes are refused).
+  Do not switch a deployment that holds workspace blobs back to local.
 - The holder: a trigger on `ai_session_files` (migration
   `20261027T0114Z_session_files_blobs.sql`) writes and removes each row's holder
   `(ai_session_file, <workspace>/<path>)` in the backend's `blob_refs`, in the

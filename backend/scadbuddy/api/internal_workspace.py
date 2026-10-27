@@ -12,8 +12,11 @@ row names it.
 Without a content store (`store_backend` local) every route is a 404, and the agent keeps
 the file's bytes in Postgres as before. With one but without what a `TransferUrl` needs
 (`SCADBUDDY_API_INTERNAL_URL`, the KEK) a route is a 503 saying which: the agent then
-refuses the write, never keeping the bytes in plaintext. Not a client API: hidden from the schema,
-and internal by path only, like `api/internal.py`."""
+refuses the write, never keeping the bytes in plaintext. Not a client API: hidden from
+the schema, and internal by path only, like `api/internal.py`. `POST /uploads` is a write
+path (a token for one internal PUT of up to `MAX_SLICED_BYTES`, with no workflow or row
+behind it): README "Deploying" lists it with the internal routes that the guard coming
+with API auth must cover."""
 
 from __future__ import annotations
 
@@ -84,6 +87,8 @@ def _missing(key: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"blob {key} not found", key=key)
 
 
+#: A write path for whoever reaches the API, internal by path only (README "Deploying"):
+#: covered by the same cluster-internal guard as the other internal routes once the API has auth.
 @router.post("/uploads", response_model=WorkspaceUpload)
 async def mint_upload(slicing: SlicingDep) -> WorkspaceUpload:
     try:
