@@ -316,7 +316,11 @@ const withUnconfirmed = (message: string | null | undefined): string =>
   !message ? UNCONFIRMED : message.endsWith(UNCONFIRMED) ? message : `${message} ${UNCONFIRMED}`
 /** `message` without the note, once a read has confirmed what is stored. */
 const confirmed = (message: string | null | undefined): string | undefined =>
-  message === UNCONFIRMED ? undefined : (message?.replace(` ${UNCONFIRMED}`, '') ?? undefined)
+  message === UNCONFIRMED
+    ? undefined
+    : message?.endsWith(` ${UNCONFIRMED}`)
+      ? message.slice(0, -(UNCONFIRMED.length + 1))
+      : (message ?? undefined)
 
 function SettingsSections() {
   const settingsState = useAsync(() => api.getSettings(), [])
@@ -563,8 +567,11 @@ function SettingsSections() {
       requestSeed(seed, since)
       cached.current = next
       setError((current) => confirmed(current) ?? null)
+      // Keep `current` when no section carries the note: nothing changed, so React bails out.
       setSectionError((current) =>
-        Object.fromEntries(Object.entries(current).map(([id, message]) => [id, confirmed(message)])),
+        Object.values(current).some((message) => message?.endsWith(UNCONFIRMED))
+          ? Object.fromEntries(Object.entries(current).map(([id, message]) => [id, confirmed(message)]))
+          : current,
       )
       return true
     }, failed)
