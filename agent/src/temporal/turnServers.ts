@@ -8,7 +8,17 @@ import type { AuditSink } from '../audit/log.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
 import type { BackgroundTasks } from '../background/service.js'
 import type { NestedQueries } from '../builtins/web.js'
-import { dirBodies, HTTP_READ_TOOL_NAME, HTTP_SERVER, HTTP_TOOL, HTTP_TOOL_NAME, httpAccessTierOf, httpRequestServer, type SavedBodies } from '../harness/httpRequest.js'
+import {
+  dirBodies,
+  HTTP_READ_TOOL_NAME,
+  HTTP_SERVER,
+  HTTP_TOOL,
+  HTTP_TOOL_NAME,
+  httpAccessTierOf,
+  httpRequestServer,
+  httpTierOf,
+  type SavedBodies,
+} from '../harness/httpRequest.js'
 import { PgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
@@ -261,6 +271,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
               }).instance,
           ),
         tierOf: (name, input) => httpTier(name, input) ?? 'outward',
+        // Its method's tier, whatever its access: a POST lowered to read is still a POST.
+        declaredTierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
         // http_request may park whatever its access at the listing: a raise to outward later in
         // the turn is asked about, as in a classic turn. Reading a saved body never parks.
         mayPark: (name) => name !== HTTP_READ_TOOL_NAME,

@@ -87,6 +87,11 @@ export type TurnServer = {
   /** The tier of a call by its harness name (`mcp__<server>__<tool>`) and input, as the permission seam resolves it. */
   tierOf(harnessName: string, input: unknown): RiskTier
   /**
+   * The call's tier in code, whatever its access says (#2171): what says whether a lost
+   * answer may be asked again. Absent: `tierOf`.
+   */
+  declaredTierOf?(harnessName: string, input: unknown): RiskTier
+  /**
    * Judges a call by its input before its tier, as a classic turn's input guard does
    * (harness/permissions.ts; the headless browser's lists, #982): `deny` refuses it,
    * `outward` or `allow` move its tier (`tierAfter`).
@@ -549,7 +554,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const session = sessionOf(Context.current().info.workflowExecution?.workflowId)
       if (session !== undefined) await deps.clients?.closeSession(session)
     },
-    [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; task_queue?: string; refused?: string }> => {
+    // `declared` is the call's tier in code (TurnServer.declaredTierOf): a flow retries a call
+    // only when it and `tier` are both read (#2171).
+    [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; declared: RiskTier; task_queue?: string; refused?: string }> => {
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (typeof tool !== 'string') throw ApplicationFailure.nonRetryable('turn_tool_tier takes {tool: string, input}', TOOL_ERROR)
       const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
@@ -563,8 +570,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         // it with the reason (turnToolActivity). It is answered as not outward; `refused`
         // says why, for diagnostics only (the durable workflow reads `tier`, and the
         // transcript shows the call's own refusal).
-        if (verdict && 'deny' in verdict) return { tier: 'write', refused: verdict.deny, ...queue }
-        return { tier: tierAfter(server.tierOf(harnessName, input), verdict), ...queue }
+        if (verdict && 'deny' in verdict) return { tier: 'write', declared: 'outward', refused: verdict.deny, ...queue }
+        const declared = server.declaredTierOf?.(harnessName, input) ?? server.tierOf(harnessName, input)
+        return { tier: tierAfter(server.tierOf(harnessName, input), verdict), declared, ...queue }
       })
     },
   }

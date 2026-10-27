@@ -158,8 +158,8 @@ describe("a package's MCP server tools in a durable turn (#2171)", () => {
           workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
           taskQueue: 'agent-tools',
         }).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool, input: { text: 'x' } })
-      expect(await tier('plugin_notes_api__a')).toEqual({ tier: 'read' })
-      expect(await tier('plugin_notes_api__recall')).toEqual({ tier: 'outward' })
+      expect(await tier('plugin_notes_api__a')).toEqual({ tier: 'read', declared: 'read' })
+      expect(await tier('plugin_notes_api__recall')).toEqual({ tier: 'outward', declared: 'outward' })
     } finally {
       await forwarder.close()
       await mcp.close()

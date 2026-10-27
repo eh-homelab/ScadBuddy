@@ -275,8 +275,8 @@ describe('turn tools in a durable session', () => {
   it('tiers a call from its input', async () => {
     const h = harness()
     const tier = (input: unknown) => env(TURN_TOOL_TIER_ACTIVITY).run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input })
-    expect(await tier({ method: 'GET', body: '' })).toEqual({ tier: 'read' })
-    expect(await tier({ method: 'POST', body: '' })).toEqual({ tier: 'outward' })
+    expect(await tier({ method: 'GET', body: '' })).toEqual({ tier: 'read', declared: 'read' })
+    expect(await tier({ method: 'POST', body: '' })).toEqual({ tier: 'outward', declared: 'outward' })
   })
 
   it("labels and parks a remote plugin's tools by their Settings tier, an unlisted one outward (#2838)", async () => {
@@ -330,8 +330,8 @@ describe('turn tools in a durable session', () => {
     expect(labels[`${HTTP_SERVER}__${HTTP_READ_TOOL}`]).toBe('read')
     const tier = (input: unknown) =>
       env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
-    expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward' })
-    expect(await tier({ url: 'http://example.test/' })).toEqual({ tier: 'read' })
+    expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward', declared: 'outward' })
+    expect(await tier({ url: 'http://example.test/' })).toEqual({ tier: 'read', declared: 'read' })
     const refused = await failure(
       env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://example.test/', method: 'POST' }),
     )
@@ -358,7 +358,13 @@ describe('turn tools in a durable session', () => {
     expect((await run([row(HTTP_TOOL, 'off')])).names.filter((n) => n.startsWith(`${HTTP_SERVER}__`))).toEqual([])
     const outward = await run([row(HTTP_TOOL, 'outward')])
     expect(outward.tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)).toMatchObject({ may_park: true, tier: 'outward' })
-    expect(await outward.tier({ url: 'http://example.test/' })).toEqual({ tier: 'outward' })
+    expect(await outward.tier({ url: 'http://example.test/' })).toEqual({ tier: 'outward', declared: 'read' })
+    // Lowered, a POST is read by its access and outward by its method: a flow retries by the
+    // stricter (review residual c).
+    expect(await (await run([row(HTTP_TOOL, 'read')])).tier({ url: 'http://example.test/', method: 'POST' })).toEqual({
+      tier: 'read',
+      declared: 'outward',
+    })
     // Lowered to read or write it is still listed as may_park, so a raise to outward later in
     // the turn parks the call, as a classic turn would (review M1).
     for (const lowered of ['read', 'write']) {
@@ -366,7 +372,7 @@ describe('turn tools in a durable session', () => {
       const listed = turn.tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)
       expect(listed, lowered).toMatchObject({ may_park: true, tier: lowered })
       turn.rows.splice(0, turn.rows.length, row(HTTP_TOOL, 'outward'))
-      expect(await turn.tier({ url: 'http://example.test/' }), lowered).toEqual({ tier: 'outward' })
+      expect(await turn.tier({ url: 'http://example.test/' }), lowered).toEqual({ tier: 'outward', declared: 'read' })
     }
     expect((await run([])).tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)?.may_park).toBe(true)
   })
@@ -577,6 +583,7 @@ describe('turn tools in a durable session', () => {
       const tier = h.activities[TURN_TOOL_TIER_ACTIVITY]!
       expect(await flowEnv(TURN_TOOL_TIER_ACTIVITY).run(tier, { tool: 'notes__read_note', input: { id: 'a' } })).toEqual({
         tier: 'read',
+        declared: 'read',
         task_queue: 'agent-tools.host-1',
       })
       expect(await flowEnv('turn:notes__read_note').run(h.call, { id: 'a' })).toBe('note a')
@@ -669,11 +676,16 @@ describe("the headless browser's lists in a durable turn (#982)", () => {
 
   it('tiers a navigation by its page: allowed runs unasked, unlisted parks, denied is not parked', async () => {
     const h = browserHarness()
-    expect(await h.tier('https://makerworld.com/en/models/1')).toEqual({ tier: 'write' })
-    expect(await h.tier('https://example.org/')).toEqual({ tier: 'outward' })
-    expect(await h.tier('https://makerworld.com.evil2.example/')).toEqual({ tier: 'outward' })
+    // A navigation is outward in code (`declared`), whatever page it opens.
+    expect(await h.tier('https://makerworld.com/en/models/1')).toEqual({ tier: 'write', declared: 'outward' })
+    expect(await h.tier('https://example.org/')).toEqual({ tier: 'outward', declared: 'outward' })
+    expect(await h.tier('https://makerworld.com.evil2.example/')).toEqual({ tier: 'outward', declared: 'outward' })
     // No approval could run it, so the user is not asked: its call refuses it.
-    expect(await h.tier('https://evil.example/')).toEqual({ tier: 'write', refused: expect.stringContaining('deny rule "evil.example"') as unknown })
+    expect(await h.tier('https://evil.example/')).toEqual({
+      tier: 'write',
+      declared: 'outward',
+      refused: expect.stringContaining('deny rule "evil.example"') as unknown,
+    })
   })
 
   it('runs an allowed navigation, refuses a denied one even approved, and an unlisted one until approved', async () => {

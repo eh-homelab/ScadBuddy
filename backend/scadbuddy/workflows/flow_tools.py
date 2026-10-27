@@ -877,12 +877,18 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
             queue=queue,
         )
         return result
+    # Only a read is retried. Under `flow-access-2171` its tier in code (`declared`, e.g.
+    # http_request's method) must be read too: a POST set to read is still a POST (#2171).
+    # An agent that does not say `declared` counts as outward.
+    retry_safe = tier == "read"
+    if workflow.patched(FLOW_ACCESS_PATCH):
+        retry_safe = retry_safe and tiered.get("declared") == "read"
     async with step(f"tool:{name}", call_id, outward=False):
         return await _call_tool(
             call_id,
             name,
             args,
-            attempts=3 if tier == "read" else 1,
+            attempts=3 if retry_safe else 1,
             activity=f"{TURN_TOOL_PREFIX}{name}",
             queue=queue,
         )

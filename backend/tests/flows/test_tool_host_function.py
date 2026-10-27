@@ -445,6 +445,12 @@ class TurnTools:
         self.call_delay_s = 0.0
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        #: Set: http_request's access in Settings, its tier whatever the method (#2171).
+        self.access: str | None = None
+        #: Set: every call fails with this retryable message, as one that lost its answer.
+        self.call_fails: str | None = None
+        #: False: the tier answers no `declared`, as an agent from before it answers.
+        self.says_declared = True
 
     def tier(self) -> Any:
         @activity.defn(name="turn_tool_tier")
@@ -463,7 +469,11 @@ class TurnTools:
                     non_retryable=True,
                 )
             method = args["input"].get("method")
-            return {"tier": "read" if method == "GET" else "outward", "task_queue": self.host}
+            declared = "read" if method == "GET" else "outward"
+            answer: dict[str, Any] = {"tier": self.access or declared, "task_queue": self.host}
+            if self.says_declared:
+                answer["declared"] = declared
+            return answer
 
         return turn_tool_tier
 
@@ -474,6 +484,8 @@ class TurnTools:
             fields = activity.payload_converter().from_payload(args[0].payload, dict)
             self.calls.append((info.activity_type, info.activity_id, fields))
             await asyncio.sleep(self.call_delay_s)
+            if self.call_fails is not None:
+                raise ApplicationError(self.call_fails)
             return f"{fields['method']} done"
 
         return turn_call
@@ -488,6 +500,32 @@ async def turn_tools(outward: Outward) -> AsyncIterator[tuple[TurnTools, str]]:
         Worker(outward.client, task_queue=served.host, activities=[served.call()]),
     ):
         yield served, queue
+
+
+@pytest.mark.parametrize("says_declared", [True, False])
+async def test_an_http_post_lowered_to_read_runs_once_when_its_attempt_fails(
+    outward: Outward, turn_tools: tuple[TurnTools, str], says_declared: bool
+) -> None:
+    """#2171, review residual (c): http_request set to read in Settings runs a POST without
+    approval, but a POST is still a POST: it is never sent again. An agent that does not
+    say `declared` counts as outward."""
+    served, queue = turn_tools
+    served.access = "read"
+    served.call_fails = "lost its answer"
+    served.says_declared = says_declared
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('scadbuddy_http__http_request', {'method': 'POST'})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [s.outward for s in run.steps] == [False]
+    assert len(served.calls) == 1
 
 
 async def test_a_turn_tool_runs_on_the_queue_its_tier_names(
