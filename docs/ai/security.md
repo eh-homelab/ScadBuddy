@@ -763,9 +763,8 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
 - **Old keys.** The `ai_settings` keys `builtin_tools.scadbuddy`, `scadbuddy_plugin_enabled`,
   `http_request_enabled` and `printer_camera_enabled`, and the `ai_plugins` columns
   `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migrations
-  `agent/src/db/migrations/20261026T2201Z_access_copy.sql` (copy) and
-  `20261026T2358Z_access_plugins_mirror.sql` (older replicas during a rolling deploy)
-  carry their values into `ai_access`. `20261026T2200Z_access.sql` made the table.
+  `agent/src/db/migrations/20261026T2201Z_access_copy.sql` (the copy, and the `ai_plugins`
+  mirror trigger for older replicas during a rolling deploy) carry their values into `ai_access`. `20261026T2200Z_access.sql` made the table.
 
 ## A browser plugin (Playwright MCP)
 

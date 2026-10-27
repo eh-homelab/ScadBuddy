@@ -1178,8 +1178,8 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
   `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
   `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
-  `migration:2171`). `20261026T2358Z_access_plugins_mirror.sql` mirrors a write of an older
-  replica into `ai_access` during a rolling deploy. A later migration drops the old
+  `migration:2171`); its trigger, created before the copy, mirrors an `ai_plugins` write of an
+  older replica into `ai_access` during a rolling deploy. A later migration drops the old
   columns (spec §4.3).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
   replaces the old switch (spec §4.2; `agent/src/routes/printerCamera.ts`, #1911). The

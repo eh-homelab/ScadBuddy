@@ -128,6 +128,21 @@ describe.skipIf(skip !== '')(`the tool-access migrations${skip}`, () => {
     expect(p).toEqual({ tool_tiers: { recall: 'read' }, disabled_tools: [], enabled: true })
   })
 
+  it('the copy file creates the ai_plugins mirror before it copies, so no old-replica write falls between them', async () => {
+    await migrate(
+      db.sql,
+      MIGRATIONS.filter((m) => m.id <= COPY),
+    )
+    const triggers = await db.sql`SELECT tgname FROM pg_trigger WHERE tgrelid = 'ai_plugins'::regclass AND NOT tgisinternal`
+    expect(triggers.map((t) => t.tgname)).toEqual(['ai_plugins_mirror_access'])
+    expect(MIGRATIONS.some((m) => m.id === '20261026T2358Z_access_plugins_mirror')).toBe(false)
+    await plugin('hs', false, {}, ['recall'])
+    expect(await rows('remote:%')).toEqual([
+      { source: 'remote:hs', item: '*', access: 'off', updated_by: BY },
+      { source: 'remote:hs', item: 'recall', access: 'off', updated_by: BY },
+    ])
+  })
+
   it('refuses a source item whose access does not fit it', async () => {
     await migrate(db.sql, MIGRATIONS)
     await expect(
