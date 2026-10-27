@@ -380,13 +380,33 @@ async def _sync_lan(
     previous_ip: str | None,
 ) -> tuple[LanAction, str | None]:
     """Fill an empty LAN link from Bambuddy, or move one that followed Bambuddy's
-    address (Ruling 3). Records the outcome's reason on the row (`lan_sync_error`)."""
+    address (Ruling 3). Records the outcome's reason on the row (`lan_sync_error`), and
+    clears a reason an earlier sync left when this one has none."""
+    action, reason = await _lan_outcome(printers, client, row, printer, previous_ip)
+    if reason is None and action in ("kept", "none") and row.lan_sync_error is not None:
+        with contextlib.suppress(PrinterNotFoundError):
+            await asyncio.to_thread(printers.store.set_lan_sync_error, row.id, None)
+        printers.changed(row.id)
+    return action, reason
+
+
+async def _lan_outcome(
+    printers: Printers,
+    client: BambuddyClient,
+    row: PrinterRow,
+    printer: Printer,
+    previous_ip: str | None,
+) -> tuple[LanAction, str | None]:
     ip = printer.ip_address
     if is_synthetic_serial(row.serial) or ip is None:
         return ("kept", None) if row.lan_host is not None else ("none", None)
     if row.lan_host is not None:
-        moved = previous_ip is not None and row.lan_host == previous_ip and ip != row.lan_host
-        if not moved:
+        # A move is due when the link followed Bambuddy's last address, or when an
+        # earlier move failed: that sync already recorded the new address in the view,
+        # so only the recorded failure still says the link was following it.
+        followed = previous_ip is not None and row.lan_host == previous_ip
+        retry = row.lan_sync_error == LAN_MOVE_FAILED
+        if not (followed or retry) or ip == row.lan_host:
             return "kept", None
         return await _move_lan(printers, client, row, printer, ip)
     try:
