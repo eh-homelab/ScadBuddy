@@ -426,7 +426,7 @@ match `SCADBUDDY_PUBLIC_URL`.
 ### 4.1 MCP access tokens
 
 An outside MCP client authenticates to `/mcp` with a bearer token (`bearer` auth mode,
-spec §8.3). Tokens are managed in Settings → **MCP access tokens**, which calls the
+spec §8.3). Tokens are managed in Settings → MCP access → **MCP access tokens**, which calls the
 routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
 stored in `ai_mcp_tokens` (§7). The Settings section renders only where
@@ -603,7 +603,7 @@ keep working. The design and the specifications followed are in spec §8.3 (`oid
   MCP client with its redirect URI (Claude Code uses a loopback redirect), and give the
   client ID to the MCP client's configuration.
 
-**In ScadBuddy.** Settings → "MCP sign-in (OIDC)" (the section appears where the agent
+**In ScadBuddy.** Settings → MCP access → "MCP sign-in (OIDC)" (the section appears where the agent
 service is available), or the API it uses:
 
 ```bash
@@ -663,7 +663,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `browser_origins`, the headless browser's allow and deny
-  lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
+  lists (`{ allow, deny }`, the defaults when unset), which Settings → Tools & plugins → AI headless browser writes
   through `PUT /api/v1/ai/settings/browser-origins`
   ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
   `image_long_edge`, the long edge in pixels the
@@ -672,8 +672,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
   `memory_recall_max_query_chars`, the longest automatic Hindsight recall query in
-  characters (default 800, 0 for no cut, at most 100000), which Settings → Hindsight
-  memory writes through `PUT /api/v1/ai/settings/memory`
+  characters (default 800, 0 for no cut, at most 100000), which Settings → Assistant →
+  Hindsight memory writes through `PUT /api/v1/ai/settings/memory`
   ([§11](#11-automatic-hindsight-memory));
   `session_mode`, the mode a new session gets when whoever starts it names none
   (`durable` unless it says `classic`), which Settings → Assistant session mode writes
@@ -1050,7 +1050,7 @@ A value outside those lists fails closed: `bearer`, or a `read` cap. While the m
 `disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
 this once, and again after any change to either key.
 
-Change them in Settings → **MCP authentication** (shown where AI is available, beside
+Change them in Settings → MCP access → **MCP authentication** (shown where AI is available, beside
 the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
 ([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
 choice is "Require an access token" (`bearer`) or "Allow calls without a token"
@@ -1100,7 +1100,7 @@ with the forwarder).
   `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
   800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
   setting of the same name (env `HINDSIGHT_RECALL_MAX_QUERY_CHARS`, `query[:max]`).
-  Settings → Assistant plugins → Hindsight memory writes it to `ai_settings`
+  Settings → Assistant → Hindsight memory writes it to `ai_settings`
   `memory_recall_max_query_chars` through `PUT /api/v1/ai/settings/memory`
   ([`agent/src/routes/memorySettings.ts`](../../agent/src/routes/memorySettings.ts)), and
   both session modes read it at each turn. The bank's own limit is in tokens,

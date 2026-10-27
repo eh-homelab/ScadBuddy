@@ -36,7 +36,7 @@ exactly as any plugin's (`agent/src/plugins/registry.ts`).
 
 A plugin tool with no tier of its own is **`outward`**: every call parks for a human's
 approval until it is tiered. So once the plugin is added, set its tiers in Settings →
-Plugins. A starting point:
+Tools & plugins. A starting point:
 
 | Tier | Tools |
 |---|---|
@@ -55,7 +55,7 @@ section). `browser_tabs` both lists and opens tabs, so it cannot be `read` as a 
 ## Where it may go: the allow and deny lists (#982)
 
 Every navigation a session's browser is asked to make is judged by two lists the user
-keeps in **Settings → Assistant → AI headless browser** (`ai_settings` key
+keeps in **Settings → Tools & plugins → AI headless browser** (`ai_settings` key
 `browser_origins`, routes `agent/src/routes/browserOrigins.ts`, the rules
 `agent/src/browser/origins.ts`). It applies to any remote plugin's `browser_*` call that
 names a `url` (Playwright MCP's `browser_navigate`), in classic and durable turns alike
