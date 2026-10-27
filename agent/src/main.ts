@@ -43,7 +43,8 @@ import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
-import { PgTabRelay } from './bridge/relay.js'
+import { TemporalTabRelay } from './bridge/relay.js'
+import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
 import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
@@ -228,11 +229,21 @@ const backend = createBackendClient(config.backendUrl)
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
-// browser_* calls for a tab connected to another replica (#1916, bridge/relay.ts),
-// on the listener's connection: made before start(), so its first LISTEN covers it.
-const tabRelay = database && events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
-// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts),
-// on the same connection, for the same reason.
+// This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
+// Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
+// replicas make for a tab connected here (#4780).
+const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+// browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
+// activity on the owner's HOST_QUEUE, through Temporal. Its client is set once made
+// (temporalClient below); without Temporal only the tabs here can be reached.
+const tabRelay =
+  database && config.temporalAddress
+    ? new TemporalTabRelay({ owners: new PostgresTabOwnerStore(database.sql), hostQueue: HOST_QUEUE, ready: database.ready })
+    : undefined
+// The rows a process before this one left under the same identity (a container restart).
+void tabRelay?.releaseAll()
+// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), on
+// the listener's connection: made before start(), so its first LISTEN covers it.
 const mcpRelay = database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
@@ -327,9 +338,6 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
-// This replica's own queue: a pinned turn tool's calls (#2320), and a classic session's
-// Monitor commands, which run where its turns' Bash runs.
-const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
 // payloads are task ids only, so its client has no codec.
@@ -798,6 +806,8 @@ const hostWorkers =
           default: turnToolActivity(turnToolDeps),
           // A classic session's Monitor commands, in its directory on this replica.
           ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
+          // Other replicas' browser_* calls for a tab connected here (#4780).
+          ...(tabRelay ? tabRelay.activities() : {}),
         },
         ...(sessionHosting
           ? {
@@ -816,6 +826,8 @@ const hostWorkers =
     : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// The browser relay's calls carry the codec: a session's are sealed under its key (#4780).
+if (tabRelay && temporalClient) tabRelay.useClient(temporalClient)
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.
 if (sessions && temporalClient && payloadKeys && database) {

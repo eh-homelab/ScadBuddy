@@ -1,0 +1,84 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
+import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
+import type { Database } from '../src/db.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+
+// The bridge's shared rows: which tab a chat session pairs with (#2086,
+// bridge/sessionTabs.ts) and which replica's queue holds each tab (#4780,
+// bridge/tabOwners.ts). The calls across replicas are bridgeRelay.temporal.test.ts.
+
+describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  let db: Database
+  let drop: () => Promise<void>
+
+  beforeAll(async () => {
+    ;({ db, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+  })
+  beforeEach(async () => {
+    await db.sql`TRUNCATE ai_session_tabs, ai_tab_owners`
+  })
+  afterAll(async () => {
+    await drop()
+  })
+
+  async function chatSession(): Promise<string> {
+    const [row] = await db.sql<{ id: string }[]>`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (gen_random_uuid(), 'chat', 'browser', 'browser', 'you', 'browser', 'browser', 'idle', 10, 1)
+      RETURNING id`
+    return row!.id
+  }
+
+  it('writes a session tab only while it is still the one seen (#2271 review)', async () => {
+    const store = new PostgresSessionTabStore(db.sql)
+    const id = await chatSession()
+    expect(await store.setIf(id, 'tab-a', undefined)).toBe(true)
+    expect(await store.setIf(id, 'tab-b', undefined)).toBe(false) // a row now
+    expect(await store.setIf(id, 'tab-b', 'tab-x')).toBe(false)
+    expect(await store.get(id)).toBe('tab-a')
+    expect(await store.setIf(id, 'tab-b', 'tab-a')).toBe(true)
+    expect(await store.get(id)).toBe('tab-b')
+  })
+
+  it("pairs a session with no row whatever tab was seen: the seen tab may be this replica's map (#3478 review)", async () => {
+    const store = new PostgresSessionTabStore(db.sql)
+    const id = await chatSession()
+    expect(await store.setIf(id, 'tab-a', 'tab-x')).toBe(true)
+    expect(await store.get(id)).toBe('tab-a')
+    expect(await store.setIf(id, 'tab-b', 'tab-x')).toBe(false) // a row now, naming another tab
+    expect(await store.get(id)).toBe('tab-a')
+  })
+
+  it("names the latest replica to claim a tab, and drops it only for that replica's own release", async () => {
+    const owners = new PostgresTabOwnerStore(db.sql)
+    expect(await owners.ownerOf('tab-a')).toBeUndefined()
+    await owners.claim('tab-a', 'agent-tools.b')
+    expect(await owners.ownerOf('tab-a')).toBe('agent-tools.b')
+    // A reconnect to C, then B sees its old socket close.
+    await owners.claim('tab-a', 'agent-tools.c')
+    await owners.release('tab-a', 'agent-tools.b')
+    expect(await owners.ownerOf('tab-a')).toBe('agent-tools.c')
+    await owners.release('tab-a', 'agent-tools.c')
+    expect(await owners.ownerOf('tab-a')).toBeUndefined()
+  })
+
+  it("drops every tab of a replica's queue at once (its start, after a restart)", async () => {
+    const owners = new PostgresTabOwnerStore(db.sql)
+    await owners.claim('tab-a', 'agent-tools.b')
+    await owners.claim('tab-b', 'agent-tools.b')
+    await owners.claim('tab-c', 'agent-tools.c')
+    await owners.releaseAll('agent-tools.b')
+    expect(await owners.ownerOf('tab-a')).toBeUndefined()
+    expect(await owners.ownerOf('tab-b')).toBeUndefined()
+    expect(await owners.ownerOf('tab-c')).toBe('agent-tools.c')
+  })
+
+  it('stops a read with the call it is for', async () => {
+    const owners = new PostgresTabOwnerStore(db.sql)
+    const stop = new AbortController()
+    stop.abort()
+    await expect(owners.ownerOf('tab-a', stop.signal)).rejects.toBeDefined()
+  })
+})

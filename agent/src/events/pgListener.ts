@@ -145,7 +145,7 @@ export class PgEventListener implements EventSource {
 
   /**
    * Also LISTEN on `channel`, on this connection and with its reconnects
-   * (bridge/relay.ts). Nothing on it is replayed: a NOTIFY sent while the
+   * (mcp/sessionRelay.ts, sessions/runtimeSync.ts, sessions/turnHost.ts). Nothing on it is replayed: a NOTIFY sent while the
    * connection is down is lost, so its user must not depend on every one.
    */
   listenAlso(channel: string, onNotify: (payload: string) => void): void {

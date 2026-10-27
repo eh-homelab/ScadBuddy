@@ -27,7 +27,7 @@ import type { SessionTabStore } from './sessionTabs.js'
 // Postgres, bridge/sessionTabs.ts, #2086), and an MCP call on the replica that
 // holds its session; so the
 // tab a call is for may be connected to another replica: then the call goes to
-// that replica through Postgres (bridge/relay.ts, #1916), and it answers "not
+// that replica through Temporal (bridge/relay.ts, #4780), and it answers "not
 // connected" only when no replica holds the tab (docs/ai/browser-bridge.md,
 // "Replicas"). Pairing requests reach every tab whatever the replica: each
 // replica re-reads them from Postgres every PAIRINGS_POLL_MS.
@@ -228,7 +228,7 @@ export class TabHub implements BrowserTabs {
     this.#pairings = options.pairings
     this.#relay = options.relay
     this.#sessionTabStore = options.sessionTabs
-    this.#relay?.serve({ holds: (tabId) => this.#tabs.has(tabId), run: (tabId, request) => this.#runHere(tabId, request) })
+    this.#relay?.serve({ run: (tabId, request) => this.#runHere(tabId, request) })
     this.#callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS
     this.#pollMs = options.pollMs ?? PAIRINGS_POLL_MS
     this.#log = options.log ?? ((m) => console.error(m))
@@ -252,6 +252,7 @@ export class TabHub implements BrowserTabs {
     const tabId = connection.tabId!
     const before = this.#tabs.get(tabId)
     this.#tabs.set(tabId, connection)
+    this.#relay?.attached(tabId)
     if (before && before !== connection) before.replaced()
     for (const [sessionId, paired] of this.#sessionTabs) if (paired === tabId) this.#sessionTabBack(sessionId)
     if (!this.#poll && this.#pairings) {
@@ -264,6 +265,7 @@ export class TabHub implements BrowserTabs {
   detach(connection: TabConnection): void {
     if (connection.tabId !== undefined && this.#tabs.get(connection.tabId) === connection) {
       this.#tabs.delete(connection.tabId)
+      this.#relay?.detached(connection.tabId)
     }
     if (this.#tabs.size === 0 && this.#poll) {
       clearInterval(this.#poll)
@@ -458,7 +460,7 @@ export class TabHub implements BrowserTabs {
     return this.#relay ? { ...how, tabId } : { problem: NOT_CONNECTED }
   }
 
-  /** A request forwarded from another replica (bridge/relay.ts) for a tab held here. */
+  /** A request forwarded from another replica (bridge/relay.ts, an activity on this replica's queue) for a tab held here. */
   async #runHere(tabId: string, request: RelayRequest): Promise<RelayAnswer> {
     const tab = this.#tabs.get(tabId)
     if (!tab) return { op: 'gone' }
@@ -479,7 +481,11 @@ export class TabHub implements BrowserTabs {
     if ('problem' in resolved) return failure('no_browser', resolved.problem)
     const { tab } = resolved
     if (tab) return this.#callTab(tab, tool, args, signal, timeoutMs)
-    const answer = await this.#relay!.forward(resolved.tabId, { op: 'call', tool, args, timeoutMs }, { signal, timeoutMs })
+    const answer = await this.#relay!.forward(resolved.tabId, { op: 'call', tool, args, timeoutMs }, {
+      signal,
+      timeoutMs,
+      sessionId: target.sessionId,
+    })
     return answer?.op === 'call' ? answer.outcome : failure('no_browser', NOT_CONNECTED)
   }
 
@@ -530,6 +536,7 @@ export class TabHub implements BrowserTabs {
       const answer = await this.#relay!.forward(resolved.tabId, { op: 'status' }, {
         signal: signal ?? new AbortController().signal,
         timeoutMs: this.#callTimeoutMs,
+        sessionId: target.sessionId,
       })
       if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
       state = answer

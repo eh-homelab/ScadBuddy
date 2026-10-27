@@ -324,48 +324,50 @@ in Postgres as well as in the hub (`ai_session_tabs`,
 [`bridge/sessionTabs.ts`](../../agent/src/bridge/sessionTabs.ts), #2086): a call that runs
 where the session's messages never arrived reads it there. The row is written on every
 message the user sends and is what every replica uses; a replica's own copy answers only
-when there is no row or it cannot be read. Then the call goes there through
-Postgres (#1916, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts)):
+when there is no row or it cannot be read. Then the call goes to the replica holding
+the tab through Temporal (#4780, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts),
+[`temporal/bridgeCall.ts`](../../agent/src/temporal/bridgeCall.ts)):
 
 ```mermaid
 sequenceDiagram
-  participant A as caller replica
-  participant PG as Postgres
   participant B as replica holding the tab
-  A->>PG: INSERT request row, NOTIFY scadbuddy_bridge {call, tab, row}
-  PG-->>B: NOTIFY (every replica hears it)
-  B->>PG: DELETE … RETURNING the row (only a replica holding the tab)
-  B->>PG: NOTIFY {ack}
-  PG-->>A: ack
+  participant PG as Postgres
+  participant A as caller replica
+  participant T as Temporal
+  B->>PG: hello: ai_tab_owners row (tab → agent-tools.<B>)
+  A->>PG: read the tab's owner queue
+  A->>T: start BridgeCall on agent-tools
+  T->>B: activity bridge.tab on agent-tools.<B> (B only, one attempt)
   B->>B: run the call on the tab, as a local call
-  B->>PG: INSERT answer row, NOTIFY {result, row}
-  PG-->>A: result
-  A->>PG: DELETE … RETURNING the answer row
+  B-->>T: the answer, as the activity's result
+  T-->>A: the workflow's result
 ```
 
-- **Bodies are rows** in `ai_bridge_messages`, inserted in the transaction that sends
-  the NOTIFY, because a NOTIFY payload is capped at 8000 bytes and a tab's result can be
-  200 000. Taking a row with `DELETE … RETURNING` runs a call once even when a reconnect
-  leaves the tab id briefly on two replicas. So a forwarded call's arguments and the
-  tab's result, page snapshots included, are written to Postgres. A row nobody took
-  stays there until a sweep finds it more than 10 minutes old, and a replica sweeps only
-  when it next forwards something, so such a row can outlive those 10 minutes.
-- **The channel is `scadbuddy_bridge`**, LISTENed on the event bus's connection
-  (`events/pgListener.ts` `listenAlso`), not `scadbuddy_events`: the backend logs every
-  payload on that one it cannot decode.
-- **No replica holds the tab:** nobody acks within 3 s (`ACK_TIMEOUT_MS`), and the call
-  answers the usual "the paired ScadBuddy tab is not connected". The ack is what tells
-  that apart from a slow tab. Before answering, the caller withdraws its request row;
-  when the row is already gone, a replica took it and its ack is late or was lost, so
-  the caller waits for the answer as if acked rather than report a tab that may be
-  running the call as not connected.
+- **The owner is a row** in `ai_tab_owners`, the queue of the replica whose socket the
+  tab reached (`agent-tools.<identity>`, `main.ts` `HOST_QUEUE`, which that replica's
+  host worker polls). A tab's hello claims it; its socket's close releases it only while
+  the row still names that replica, so a reconnect to another replica that overtakes the
+  old socket keeps the newer owner. A replica drops its own rows at start (a container
+  restart keeps its identity).
+- **One replica runs a call:** the activity is scheduled on the owner's queue only, with
+  one attempt, so the other replicas do no work for it. The arguments and the tab's
+  result are the workflow's payloads, not rows: a session's are sealed under its key
+  (the workflow is `bridge-<session>-<call>`, `payloadCodec.ts` `subjectOf`), and one of
+  128 KiB or more goes to the payload store by reference, as a durable session's do
+  ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)). A call with
+  no session (an `/mcp` caller's paired tab) is not sealed, as a command's payloads are
+  not.
+- **No replica holds the tab:** there is no row, or no worker takes the activity within
+  2 s (`ACK_TIMEOUT_MS`, its schedule-to-start timeout: the owner's pod is gone), and the
+  call answers the usual "the paired ScadBuddy tab is not connected". A row whose queue
+  nobody polls is then deleted.
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
-  plus 3 s. `browser_status` asks the same way for the tab's route and live tools.
-- **Not covered:** a NOTIFY sent while a replica's listening connection is down is lost,
-  so the call times out. A cancelled call stops waiting but is not withdrawn from the
-  tab, as with a local call. Without a database there is no relay, and only tabs on the
-  same process can be reached.
+  plus 2 s (the activity's start-to-close). `browser_status` asks the same way for the
+  tab's route and live tools.
+- **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
+  tab, as with a local call. Without Temporal and a database there is no relay, and only
+  tabs on the same process can be reached.
 
 Pairing requests reach every tab whatever the replica: each replica re-reads them from
 Postgres every 3 s (`PAIRINGS_POLL_MS`).

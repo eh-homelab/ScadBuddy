@@ -11,7 +11,9 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 // copy of the subject's payloads undecryptable: history, Visibility, Archival. Other
 // workflows' payloads (renders, prints, commands) pass through as they are. A session's
 // background task (`bgtask-<session uuid>-<task id>`, background/service.ts) is sealed
-// under its session's key, so forgetting the session forgets its tasks' payloads too.
+// under its session's key, so forgetting the session forgets its tasks' payloads too, and
+// so is a browser call between replicas made for a session (`bridge-<session uuid>-<call
+// uuid>`, bridge/relay.ts, #4780).
 //
 // The subject comes from the serialization context on encode (the workflow the payload
 // belongs to, `@temporalio/common` 1.24 gives it to every client and worker call), and
@@ -49,13 +51,15 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 const BACKGROUND_TASK = /^bgtask-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$/
+const BRIDGE_CALL =
+  /^bridge-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** The subject a workflow ID names, or undefined for a workflow that carries no conversation. */
 export function subjectOf(workflowId: string | undefined): string | undefined {
   if (workflowId === undefined) return undefined
   if (SUBJECT.test(workflowId)) return workflowId
-  const task = BACKGROUND_TASK.exec(workflowId)
-  return task ? `session-${task[1]}` : undefined
+  const session = BACKGROUND_TASK.exec(workflowId) ?? BRIDGE_CALL.exec(workflowId)
+  return session ? `session-${session[1]}` : undefined
 }
 
 /** The context a subject's data key is sealed in under the KEK. */
