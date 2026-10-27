@@ -39,6 +39,8 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_SLICES_TIMEOUT,
     PREVIEWS_SWEEP,
     PREVIEWS_TIMEOUT,
+    PRINTER_SYNC_SWEEP,
+    PRINTER_SYNC_TIMEOUT,
     PRINTER_WATCHES_SWEEP,
     PRINTER_WATCHES_TIMEOUT,
     PRUNE_INTERVAL,
@@ -134,6 +136,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         TRANSFER_PUTS_SWEEP: TRANSFER_PUTS_TIMEOUT,
         PRINTER_WATCHES_SWEEP: PRINTER_WATCHES_TIMEOUT,
         QUOTE_HOLDS_SWEEP: QUOTE_HOLDS_TIMEOUT,
+        PRINTER_SYNC_SWEEP: PRINTER_SYNC_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -281,6 +284,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         # #4250 Ruling 3: a quote's hold a release lost is dropped within the interval.
         "housekeeping_reap_quote_holds",
     ]
+    # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
+    assert PRINTER_SYNC_SWEEP not in sweeps
     # The native slices obey the switch, as the Bambuddy background slices do.
     assert PREVIEWS_SWEEP not in sweeps and NATIVE_SLICES_SWEEP not in sweeps
 

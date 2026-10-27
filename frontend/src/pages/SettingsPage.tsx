@@ -30,6 +30,7 @@ import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { PrintersPanel } from '../components/settings/Printers'
+import { syncSummary } from '../lib/printerRegistry'
 import { McpTokensSection } from '../components/McpTokensSection'
 import {
   AlertDialog,
@@ -295,6 +296,8 @@ function SettingsSections() {
   const [resetting, setResetting] = useState<FieldName | null>(null)
   const [testing, setTesting] = useState(false)
   const [test, setTest] = useState<ConnectionTest | null>(null)
+  // #4439: what the printer import did after a save whose test passed, or why it could not.
+  const [imported, setImported] = useState<string | null>(null)
   const [registering, setRegistering] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarLink | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -648,8 +651,23 @@ function SettingsSections() {
     try {
       // The server tests what it has stored, so save first or the test lags the form.
       if (!(await saveSection('connection'))) return
-      setTest(await api.testSettings())
+      const result = await api.testSettings()
+      setTest(result)
       bambuddyState.reload()
+      setImported(null)
+      // #4439: a connection that tests OK imports and links Bambuddy's printers, as the
+      // server's own Schedule would within minutes. The agent's test_connection does not:
+      // it is a read, and the import stores access codes.
+      if (result.ok) {
+        api
+          .syncPrintersFromBambuddy()
+          .then((sync) => setImported(`Printers from Bambuddy: ${syncSummary(sync)}.`))
+          .catch((cause: unknown) =>
+            setImported(
+              `Printers from Bambuddy were not imported: ${cause instanceof ApiError ? cause.detail : 'the import failed'}.`,
+            ),
+          )
+      }
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The connection test could not run.')
     } finally {
@@ -1004,6 +1022,11 @@ function SettingsSections() {
                   )}
                 </div>
                 {test?.upstream && <UpstreamAnswerDetails answer={test.upstream} />}
+                {test?.ok && imported && (
+                  <p role="status" aria-label="Printer import" className="text-xs text-muted-foreground">
+                    {imported}
+                  </p>
+                )}
                 {test && (test.scopes?.length ?? 0) > 0 && (
                   <ul aria-label="Scopes" className="space-y-1 rounded-lg p-3 text-xs ring-1 ring-foreground/10">
                     {test.scopes?.map((check) => (
@@ -1175,7 +1198,7 @@ function SettingsSections() {
             title={sectionTitle('printers')}
             description="One entry per printer, by its serial: the Bambuddy printer it is, and how ScadBuddy reaches it over the LAN. The access code is tested on the printer, stored sealed, and never shown again. Each change applies at once."
           >
-            <PrintersPanel />
+            <PrintersPanel bambuddyConfigured={connected} />
           </Section>
 
           <Section
