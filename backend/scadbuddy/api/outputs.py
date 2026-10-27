@@ -868,6 +868,10 @@ async def backfill_output(
             # It cannot answer its caller a 202 to follow: a slow start keeps the
             # default deadline, and its 503 re-send, whatever the caller preferred.
             respond_async=False,
+            # #4870: a re-render, never a finished job of the key: the attach follows
+            # the settling event of the job `start_backfill` records below, and that
+            # job's outputs are what get the manifest.
+            reuse_finished=False,
             # #2280: as the render route's, so a re-send still accepting is one claim.
             idempotency_key=idempotency_key,
         )
