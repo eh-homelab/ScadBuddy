@@ -8,6 +8,7 @@ import { ApiError, api } from '../api/client'
 import type { Settings } from '../api/types'
 import { restartMockBackend } from '../mocks/features/settings'
 import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
@@ -809,6 +810,83 @@ describe('SettingsPage sections (#322)', () => {
     expect(await screen.findByText(/Bad gateway\. Could not confirm what the server stored\./)).toBeInTheDocument()
     get.mockRestore()
     put.mockRestore()
+  })
+
+  it('says once that it could not confirm two lost writes whose rereads merge (#4821 review)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const field = screen.getByLabelText('ScadBuddy’s own URL')
+    await user.clear(field)
+    await enter(user, field, 'https://mine.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here'))
+    // Two resets, both applied and both answers lost in the same tick: their rereads
+    // merge into one read, which fails and calls each reset's `failed`.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let applied = 0
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await save(body)
+      applied += 1
+      await held
+      throw new ApiError(502, 'Bad gateway.')
+    })
+    const get = vi.spyOn(api, 'getSettings').mockRejectedValue(new TypeError('Failed to fetch'))
+    await user.click(
+      within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }),
+    )
+    await user.click(
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset to deployment value: ScadBuddy’s own URL' }),
+    )
+    await waitFor(() => expect(applied).toBe(2))
+    await act(async () => release())
+    const shown = await screen.findByText(/Could not confirm what the server stored\./)
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(shown.textContent?.match(/Could not confirm/g)).toHaveLength(1)
+    get.mockRestore()
+    put.mockRestore()
+  })
+
+  it('says on the section, once, that a lost save could not be confirmed, until a read is taken (#4821 review)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    // Every write is applied with its answer lost, and every read fails (still offline).
+    const save = api.putSettings.bind(api)
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await save(body)
+      throw new ApiError(502, 'Bad gateway.')
+    })
+    const get = vi.spyOn(api, 'getSettings').mockRejectedValue(new TypeError('Failed to fetch'))
+    const note = /Could not confirm what the server stored\./
+
+    // A lost reset puts the note on the page error, where the reset reports.
+    await user.click(
+      within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }),
+    )
+    expect(await screen.findByText(/^Bad gateway\. Could not confirm what the server stored\./)).toBeInTheDocument()
+    const calls = get.mock.calls.length
+
+    // A lost Rendering save puts it on Rendering, and adds no second one to the page error.
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls))
+    expect(await within(region('Rendering')).findByText(/^Bad gateway\. Could not confirm what the server stored\./)).toBeInTheDocument()
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(screen.getAllByText(note)).toHaveLength(2)
+    for (const shown of screen.getAllByText(note)) expect(shown.textContent?.match(new RegExp(note, 'g'))).toHaveLength(1)
+
+    // Back online: a read taken ("Load the latest", the form being edited) confirms what
+    // is stored, and the notes go; the failures they were tacked onto stay.
+    get.mockRestore()
+    put.mockRestore()
+    emitRealtime('settings.changed', ['settings'], { section: 'rendering' })
+    await user.click(await screen.findByRole('button', { name: 'Load the latest' }))
+    await waitFor(() => expect(screen.queryByText(note)).toBeNull())
+    expect(within(region('Rendering')).getByText('Bad gateway.')).toBeInTheDocument()
   })
 
   it('discards one section’s edits', async () => {

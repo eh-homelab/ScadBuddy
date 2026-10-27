@@ -311,6 +311,12 @@ const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
 
 /** #4818 review — a write whose answer was lost, and the settings could not be read again. */
 const UNCONFIRMED = 'Could not confirm what the server stored. Reload the page to see the saved settings.'
+/** `message` with the note added once: merged rereads call every caller's `failed`. */
+const withUnconfirmed = (message: string | null | undefined): string =>
+  !message ? UNCONFIRMED : message.endsWith(UNCONFIRMED) ? message : `${message} ${UNCONFIRMED}`
+/** `message` without the note, once a read has confirmed what is stored. */
+const confirmed = (message: string | null | undefined): string | undefined =>
+  message === UNCONFIRMED ? undefined : (message?.replace(` ${UNCONFIRMED}`, '') ?? undefined)
 
 function SettingsSections() {
   const settingsState = useAsync(() => api.getSettings(), [])
@@ -513,25 +519,25 @@ function SettingsSections() {
    * may have been applied with its answer lost: its fields stay its own, so no older answer
    * patches over them, and the settings are read again, seeding no field, so the form keeps
    * what was typed. Should that read fail too, nothing reads again until the next settings
-   * event, so the page says it could not confirm what is stored.
+   * event, so `unconfirmed` says, where the write reports its failure, that it could not
+   * confirm what is stored.
    */
-  const writeThrew = (sent: number, cause: unknown) => {
+  const writeThrew = (sent: number, cause: unknown, unconfirmed: () => void) => {
     if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
       failWrite(sent)
       return
     }
     priorWriter.current.delete(sent)
     const since = beginSeed()
-    numberedRead(() => since, [], () =>
-      setError((current) => (current ? `${current} ${UNCONFIRMED}` : UNCONFIRMED)),
-    )
+    numberedRead(() => since, [], unconfirmed)
   }
 
   /**
    * Numbers a read as sent and refreshes the settings. `onAccept` runs only when no newer
    * write has landed, and takes the read by returning the edits to seed `seed` with since,
-   * or refuses it with `undefined`. A taken read is the newest landed and is cached whole.
-   * `failed` runs when the read fails.
+   * or refuses it with `undefined`. A taken read is the newest landed and is cached whole;
+   * it confirms what is stored, so a note that it could not be goes. `failed` runs when the
+   * read fails.
    *
    * `seed` does not survive a merge: `useAsync.refresh` reads calls made in the same
    * microtask once, deciding by the last caller's accept, so the other callers' `onAccept`
@@ -556,6 +562,10 @@ function SettingsSections() {
       landed(sent)
       requestSeed(seed, since)
       cached.current = next
+      setError((current) => confirmed(current) ?? null)
+      setSectionError((current) =>
+        Object.fromEntries(Object.entries(current).map(([id, message]) => [id, confirmed(message)])),
+      )
       return true
     }, failed)
   }
@@ -652,7 +662,10 @@ function SettingsSections() {
       }
       return true
     } catch (cause) {
-      if (sent !== undefined) writeThrew(sent, cause)
+      if (sent !== undefined)
+        writeThrew(sent, cause, () =>
+          setSectionError((current) => ({ ...current, [id]: withUnconfirmed(current[id]) })),
+        )
       // A 422 names each refused field (`loc: ["body", <field>]`): shown beside it.
       const fieldErrors: Partial<Record<FieldName, string>> = {}
       const reported = cause instanceof ApiError ? (cause.problem as { errors?: unknown }).errors : undefined
@@ -706,7 +719,7 @@ function SettingsSections() {
         projectsState.reload()
       }
     } catch (cause) {
-      if (sent !== undefined) writeThrew(sent, cause)
+      if (sent !== undefined) writeThrew(sent, cause, () => setError(withUnconfirmed))
       setError(cause instanceof ApiError ? cause.detail : 'Could not reset the setting.')
     } finally {
       setResetting(null)
