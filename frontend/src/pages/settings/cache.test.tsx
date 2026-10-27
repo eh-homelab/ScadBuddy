@@ -1,5 +1,5 @@
 import { act, screen, waitFor } from '@testing-library/react'
-import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
@@ -240,19 +240,14 @@ describe('settings cache', () => {
     const get = vi.spyOn(api, 'getSettings')
     const order: string[] = []
     const a = fakeSeeder('a', order)
-    function Dirtying() {
-      const [dirty, setDirty] = useState(false)
-      makeDirty = () => setDirty(true)
-      return <Section id="a" dirty={dirty} seeder={a.seeder} />
-    }
-    let makeDirty: () => void = () => {}
-    renderPage(
+    const page = (dirty: boolean) => (
       <Providers>
         <Probe />
         <Loaded />
-        <Dirtying />
-      </Providers>,
+        <Section id="a" dirty={dirty} seeder={a.seeder} />
+      </Providers>
     )
+    const { rerender } = renderPage(page(false))
     await screen.findByTestId('loaded')
     await emitUntil(() => expect(a.seed).toHaveBeenCalledWith('all', a.since))
     await new Promise((resolve) => setTimeout(resolve, 300))
@@ -266,7 +261,7 @@ describe('settings cache', () => {
     const sent = get.mock.calls.length
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
     await waitFor(() => expect(get.mock.calls.length).toBe(sent + 1))
-    act(() => makeDirty())
+    rerender(page(true))
     await act(async () => answer())
     await waitFor(() => expect(cache.changedElsewhere).toBe(true))
     expect(a.seed).not.toHaveBeenCalled()
