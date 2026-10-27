@@ -152,11 +152,19 @@ describe('SettingsPage, live (#269)', () => {
     await user.click(bambuddyTest())
     await findStatus('3DP-31B-598')
 
-    // The test saved the form; this is that save's own event.
+    // The test saved the form; this is that save's own event. The clean form reads the
+    // settings again: wait until that read has landed.
+    const get = vi.spyOn(api, 'getSettings')
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+    const read = get.mock.results[0]
+    expect(read).toBeDefined()
+    await act(async () => {
+      await read?.value
+    })
     expect(screen.queryByText(/Settings were changed elsewhere/)).not.toBeInTheDocument()
     expect(field).toHaveValue('https://tested.test')
+    get.mockRestore()
   })
 
   it('shows the assistant plugin sections only while the agent says AI is available', async () => {
@@ -620,8 +628,10 @@ describe('SettingsPage sections (#322)', () => {
 
     act(() => window.history.back())
     await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
+    // The second Back's popstate: the guard's own listener, added first, has run by then.
+    const popped = new Promise<void>((resolve) => window.addEventListener('popstate', () => resolve(), { once: true }))
     act(() => window.history.back())
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await act(() => popped)
     expect(window.location.pathname).toBe('/settings/library')
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
 

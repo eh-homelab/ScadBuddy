@@ -105,12 +105,27 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
   /**
    * #4837 — the notes of lost writes that nothing has confirmed what is stored for yet. A
    * newer read supersedes a lost write's reread, and `useAsync` then drops its `failed`; so
-   * every read says them when it fails. Whatever learns what is stored lets them go: a
-   * write's answer cached whole, and any read that lands, taken or refused. A refused read
-   * still returned what is stored, whether a newer write landed first (whose cached answer
-   * let them go already) or the form is edited.
+   * every read says them when it fails. `lostAt` is the number sent last when the newest
+   * lost write threw: only an answer sent after it can confirm what that write did.
    */
   const unconfirmedWrites = useRef<(() => void)[]>([])
+  const lostAt = useRef(0)
+  /**
+   * #4849 — the answer to `sent` (a read that landed, taken or refused, or a write's answer
+   * cached whole) told what is stored. Sent after every lost write threw, it confirms them
+   * all: the notes still waiting go. When the page `shows` that answer (a taken read, a
+   * write's answer cached whole), every section drops the notes it shows too; the failures
+   * they follow stay. A refused read still returned what is stored, whether a newer write
+   * landed first or the form is edited (which says the settings changed elsewhere); so if
+   * the "Load the latest" read it offers then fails, the section shows only its error, with
+   * no note, by design (#4839 review). An answer sent before a lost write threw may predate
+   * that write: it confirms nothing.
+   */
+  const confirmLost = useCallback((sent: number, shows: boolean) => {
+    if (sent <= lostAt.current) return
+    unconfirmedWrites.current = []
+    if (shows) for (const seeder of seeders.current) seeder.confirm()
+  }, [])
   /** Whether the answer to `sent` is the newest yet; it is then the newest landed. */
   const landed = useCallback((sent: number): boolean => {
     if (sent <= writeLanded.current) return false
@@ -144,8 +159,7 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
     (sent: number, next: Settings, written: readonly FieldName[]): Settings => {
       priorWriter.current.delete(sent)
       if (landed(sent) || !cached.current) {
-        // The whole of what is stored, newer than any lost write's (#4837 review).
-        unconfirmedWrites.current = []
+        confirmLost(sent, true)
         cached.current = next
         setData(next)
         return next
@@ -156,7 +170,7 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
       setData(patched)
       return patched
     },
-    [landed, setData],
+    [landed, setData, confirmLost],
   )
   /** Numbers a write as sent, and marks it the last one sent for each of `written`. */
   const sendWrite = useCallback((written: readonly FieldName[]): number => {
@@ -186,9 +200,8 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
    * Numbers a read as sent and refreshes the settings. `onAccept` runs only when no newer
    * write has landed, and takes the read by returning the seeders' edit counts to seed
    * `seed` with since, or refuses it with `undefined`. A taken read is the newest landed and
-   * is cached whole; it confirms what is stored, so every seeder drops its note that it
-   * could not be, and the lost writes still waiting for one (`unconfirmedWrites`) go. A read
-   * that fails says those.
+   * is cached whole. Taken or refused, a read that lands confirms the lost writes
+   * (`confirmLost`); one that fails says those still waiting (`unconfirmedWrites`).
    *
    * `useAsync.refresh` reads calls made in the same microtask once, deciding by the last
    * caller's accept, so the other callers' `onAccept` and `seed` are dropped. The notes
@@ -198,27 +211,27 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
   const numberedRead = useCallback(
     (onAccept: () => Begun | undefined, seed: 'all' | readonly FieldName[] = 'all', onNewer?: () => void) => {
       const sent = ++writeSent.current
+      const take = (next: Settings): boolean => {
+        // #4803: a save or reset sent after this read has landed already, and is newer.
+        if (sent <= writeLanded.current) {
+          onNewer?.()
+          return false
+        }
+        // `onAccept` must not land a write between the check above and `landed(sent)`.
+        const begun = onAccept()
+        if (begun === undefined) return false
+        landed(sent)
+        cached.current = next
+        // A section that unmounted meanwhile has nothing left to seed.
+        for (const [seeder, since] of begun) if (seeders.current.has(seeder)) seeder.seed(seed, since)
+        return true
+      }
       refresh(
         (next) => {
           // It landed, so what is stored is known, whether or not it is taken (#4837 review).
-          // That includes a signal read refused because the form is being edited: if the
-          // "Load the latest" read it offers then fails, the section shows only its error,
-          // with no note, by design (#4839 review).
-          unconfirmedWrites.current = []
-          // #4803: a save or reset sent after this read has landed already, and is newer.
-          if (sent <= writeLanded.current) {
-            onNewer?.()
-            return false
-          }
-          // `onAccept` must not land a write between the check above and `landed(sent)`.
-          const begun = onAccept()
-          if (begun === undefined) return false
-          landed(sent)
-          cached.current = next
-          // A section that unmounted meanwhile has nothing left to seed.
-          for (const [seeder, since] of begun) if (seeders.current.has(seeder)) seeder.seed(seed, since)
-          for (const seeder of seeders.current) seeder.confirm()
-          return true
+          const taken = take(next)
+          confirmLost(sent, taken)
+          return taken
         },
         () => {
           // Merged reads call this once each: the first says the notes, the rest find none.
@@ -228,7 +241,7 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
         },
       )
     },
-    [landed, refresh],
+    [landed, refresh, confirmLost],
   )
 
   /**
@@ -241,7 +254,7 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
    * what was typed. Should that read fail too, nothing reads again until the next settings
    * event, so `unconfirmed` says, where the write reports its failure, that it could not
    * confirm what is stored. It waits in `unconfirmedWrites`: a newer read that replaced
-   * this one says it too, should it fail (#4837).
+   * this one says it too, should it fail (#4837), until `confirmLost` lets it go.
    */
   const writeThrew = useCallback(
     (sent: number, cause: unknown, unconfirmed: () => void) => {
@@ -252,6 +265,7 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
       priorWriter.current.delete(sent)
       const begun = begin()
       unconfirmedWrites.current.push(unconfirmed)
+      lostAt.current = writeSent.current
       numberedRead(() => begun, [])
     },
     [failWrite, begin, numberedRead],

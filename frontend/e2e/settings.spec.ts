@@ -58,6 +58,40 @@ test.describe('settings', () => {
     await expect(page).toHaveURL(/\/(\?view=cards)?$/)
   })
 
+  // #4840 — switching areas while a section is unsaved keeps the leave guard's sentinel
+  // on top: Back walks the areas, Forward never bounces, and once saved one Back per area
+  // leaves Settings.
+  test('switches areas while unsaved, then Back walks them and saving leaves no stray entry', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings\/general$/)
+    const areas = page.getByRole('navigation', { name: 'Settings areas' })
+    await areas.getByRole('link', { name: 'Library', exact: true }).click()
+    const rendering = page.getByRole('region', { name: 'Rendering' })
+    const timeout = page.getByRole('spinbutton', { name: 'Render timeout' })
+    await expect(timeout).toHaveValue('300')
+    await timeout.fill('45')
+    await expect(rendering.getByText('Unsaved')).toBeVisible()
+
+    const dialog = page.getByRole('alertdialog', { name: 'Leave without saving?' })
+    await areas.getByRole('link', { name: 'Printing', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings\/printing$/)
+    await page.goBack()
+    await expect(page).toHaveURL(/\/settings\/library$/)
+    await expect(dialog).toHaveCount(0)
+    await page.goForward()
+    await expect(page).toHaveURL(/\/settings\/library$/)
+    await expect(dialog).toHaveCount(0)
+    await expect(timeout).toHaveValue('45')
+
+    await rendering.getByRole('button', { name: 'Save Rendering' }).click()
+    await expect(rendering.getByText('Unsaved')).toHaveCount(0)
+    await page.goBack()
+    await expect(page).toHaveURL(/\/settings\/general$/)
+    await page.goBack()
+    await expect(page).toHaveURL(/\/(\?view=cards)?$/)
+  })
+
   // #969 — at desktop width the section nav was capped at max-w-2xl with a hidden
   // horizontal scrollbar, so the last four sections sat off-screen with no affordance.
   // The last section the mock renders for each area (hideWhenEmpty sections included, as

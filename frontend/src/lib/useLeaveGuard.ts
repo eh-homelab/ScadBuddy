@@ -29,8 +29,13 @@ function entryKey(): string {
 
 /** A copy of the current entry (the router's own state kept), marked as the sentinel. */
 function pushSentinel() {
+  window.history.pushState(marked(), '')
+}
+
+/** The current entry's state (the router's own kept), marked as the sentinel. */
+function marked(): Record<string, unknown> {
   const state: unknown = window.history.state
-  window.history.pushState({ ...(typeof state === 'object' ? state : {}), [SENTINEL]: true }, '')
+  return { ...(typeof state === 'object' ? state : {}), [SENTINEL]: true }
 }
 
 /**
@@ -38,10 +43,13 @@ function pushSentinel() {
  * restores them. The history object is the router's own, shared by every `navigate()`
  * and `<Link>`; wrapping it in place is the only hook a declarative router offers.
  */
-function intercept(navigator: Navigator, hold: (original: Navigator['push']) => Navigator['push']): () => void {
+function intercept(
+  navigator: Navigator,
+  hold: (original: Navigator['push'], replace: Navigator['replace'], replacing: boolean) => Navigator['push'],
+): () => void {
   const { push, replace } = navigator
-  navigator.push = hold(push)
-  navigator.replace = hold(replace)
+  navigator.push = hold(push, replace, false)
+  navigator.replace = hold(replace, replace, true)
   return () => {
     navigator.push = push
     navigator.replace = replace
@@ -60,8 +68,14 @@ function intercept(navigator: Navigator, hold: (original: Navigator['push']) => 
  *   `BrowserRouter`, which has no `useBlocker`, so the router's navigator is wrapped;
  * - Back: a sentinel entry is pushed on top of the page, so Back pops it without leaving
  *   the page, and the push drops any Forward entries. Each pop re-pushes it at once, so
- *   Back pressed again before the dialog is answered is held too. With `within`, a Back
- *   to an entry under that prefix passes, and the sentinel is pushed again where it lands.
+ *   Back pressed again before the dialog is answered is held too. A Back to an entry of
+ *   the page (with `within`, under that prefix) passes, and the sentinel is pushed again
+ *   where it lands.
+ *
+ * A move within the page while dirty (#4840) takes the sentinel's place, and a sentinel is
+ * pushed over it (a redirect, a replace, is marked as the sentinel instead): the sentinel
+ * stays the top entry, so saving takes it off and no Forward entry sits above it, and
+ * history grows only by the moves, as it would were the page clean.
  */
 export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
   const navigate = useNavigate()
@@ -97,38 +111,27 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
     return () => document.removeEventListener('click', onClick, true)
   }, [dirty, location.pathname, within])
 
-  useEffect(() => {
-    if (!dirty) return
-    return intercept(navigator, (original) => (to: To, state?: unknown, opts?: Parameters<Navigator['push']>[2]) => {
-      const path = typeof to === 'string' ? to : createPath(to)
-      if (bypass.current || inside(new URL(path, window.location.href).pathname)) {
-        original.call(navigator, to, state, opts)
-        return
-      }
-      setPending(path)
-    })
-  }, [dirty, navigator, location.pathname, within])
-
-  // With `within`: each entry seen here, and the one it was pushed over, so a Back from
-  // the sentinel knows whether the entry beneath the page's is still under the prefix.
+  // Each entry seen here, and the one it was pushed over, so a Back from the sentinel
+  // knows whether the entry beneath the page's is still the page's (with `within`, under
+  // the prefix).
   const navigationType = useNavigationType()
   const entries = useRef(new Map<string, { pathname: string; before: string | null }>())
   const shownKey = useRef<string | null>(null)
   useEffect(() => {
-    if (within === undefined) return
     const previous = shownKey.current
     shownKey.current = location.key
     if (entries.current.has(location.key)) return
     // A replaced entry keeps the one it was pushed over; one reached by Back or a reload
-    // before this page mounted has none known.
+    // before this page mounted has none known. A move that took the sentinel's place is
+    // recorded where it is made.
     let before: string | null = null
     if (navigationType === 'PUSH') before = previous
     else if (navigationType === 'REPLACE' && previous) before = entries.current.get(previous)?.before ?? null
     entries.current.set(location.key, { pathname: location.pathname, before })
-  }, [within, location.key, location.pathname, navigationType])
+  }, [location.key, location.pathname, navigationType])
   /** The entries a sentinel was pushed over. */
   const armed = useRef(new Set<string>())
-  /** Set while a Back of our own steps past the page's entry to the one under `within` before it. */
+  /** Set while a Back of our own steps past the page's entry to the page's one before it. */
   const stepping = useRef(false)
 
   // Saved or discarded: the sentinel comes off with a `history.back()` of our own, whose
@@ -142,9 +145,42 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
     armed.current.add(entryKey())
     pushSentinel()
   }, [])
+
   useEffect(() => {
-    const under = (pathname: string) =>
-      within !== undefined && (pathname === within || pathname.startsWith(`${within}/`))
+    if (!dirty) return
+    return intercept(navigator, (original, replace, replacing) => (to: To, state?: unknown, opts?: Parameters<Navigator['push']>[2]) => {
+      const path = typeof to === 'string' ? to : createPath(to)
+      if (bypass.current) {
+        original.call(navigator, to, state, opts)
+        return
+      }
+      if (!inside(new URL(path, window.location.href).pathname)) {
+        setPending(path)
+        return
+      }
+      if (!onSentinel()) {
+        original.call(navigator, to, state, opts)
+        return
+      }
+      // Within the page, on the sentinel (#4840): pushed over, the sentinel would be buried
+      // where saving cannot reach it. A push takes its place, and a sentinel goes over it;
+      // a replace (a redirect) replaces it and is marked as it, so it adds no entry. Saving
+      // then pops back to the entry under it, the address before the redirect: a page using
+      // this must redirect from there again (the Settings shell does).
+      const under = entryKey()
+      replace.call(navigator, to, state, opts)
+      if (replacing) {
+        window.history.replaceState(marked(), '')
+        return
+      }
+      // Known now, not when its render's effect runs: a redirect in the same event replaces it first.
+      entries.current.set(entryKey(), { pathname: window.location.pathname, before: under })
+      arm()
+    })
+  }, [dirty, navigator, location.pathname, within, arm])
+
+  const insideNow = useLatest(inside)
+  useEffect(() => {
     const onPop = () => {
       if (ownBack.current) {
         ownBack.current = false
@@ -160,22 +196,20 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
         return
       }
       if (onSentinel()) return
-      if (within !== undefined) {
-        const key = entryKey()
-        if (!step && armed.current.has(key)) {
-          // Back from the sentinel onto the page's own entry: the user means the one
-          // before it. Under the prefix, go on to it without asking.
-          const before = entries.current.get(key)?.before
-          const previous = before ? entries.current.get(before) : undefined
-          if (previous && under(previous.pathname)) {
-            stepping.current = true
-            window.history.back()
-            return
-          }
-        } else if (under(window.location.pathname)) {
-          arm()
+      const key = entryKey()
+      if (!step && armed.current.has(key)) {
+        // Back from the sentinel onto the page's own entry: the user means the one before
+        // it. Still the page's, go on to it without asking.
+        const before = entries.current.get(key)?.before
+        const previous = before ? entries.current.get(before) : undefined
+        if (previous && insideNow.current(previous.pathname)) {
+          stepping.current = true
+          window.history.back()
           return
         }
+      } else if (insideNow.current(window.location.pathname)) {
+        arm()
+        return
       }
       // Re-armed at once, not when the dialog is answered: a second Back before then
       // pops this new sentinel instead of leaving the page.
@@ -184,7 +218,7 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [dirtyNow, within, arm])
+  }, [dirtyNow, insideNow, arm])
 
   useEffect(() => {
     if (!dirty) return
