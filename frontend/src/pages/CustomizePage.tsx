@@ -83,8 +83,15 @@ const WARN = 'border-destructive/40 bg-destructive/10 text-destructive'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
-/** #4885 — how long a parameter tool waits for the schema in flight. `render` uses its own timeout. */
+/** #4885 — the budget a parameter tool gives `schemaLoaded`; `render` gives it its own `timeout_ms`. */
 const SCHEMA_WAIT_MS = 10_000
+
+/** Runs `wait` with `budget` ms and answers the ms left of it. */
+async function spend(budget: number, wait: (timeout: number) => Promise<unknown>): Promise<number> {
+  const started = performance.now()
+  await wait(budget)
+  return Math.max(0, budget - (performance.now() - started))
+}
 
 const FLYOUT_ID = 'parameters-flyout'
 /**
@@ -528,6 +535,8 @@ export function CustomizePage() {
   }, [])
 
   const live = useLatest({
+    slug,
+    version,
     schema,
     schemaLoading: schemaState.loading,
     schemaError: schemaState.error,
@@ -649,18 +658,30 @@ export function CustomizePage() {
 
   /**
    * #4885 — the tools are live as soon as the page mounts, before its schema has loaded,
-   * so a call that needs the schema waits for the fetch in flight (bounded) rather than
-   * answering "still loading" at once. A failed or absent schema still answers at once.
+   * so a call that needs the schema waits for the fetch in flight rather than answering
+   * "still loading" at once. A failed or absent schema still answers at once. The wait
+   * spends the call's `budget` ms and answers what is left of it, for the rest of the call.
+   * #4894 — the model is the one the call was made on: a call made on `/m/a` never acts on
+   * `/m/b` because the page moved while it waited.
    */
-  function schemaLoaded(timeout: number) {
-    return waitFor(
-      () => {
-        const { schema: loaded, schemaLoading, schemaError } = live.current
-        if (loaded) return loaded
-        if (schemaError || !schemaLoading) throw notLoaded(schemaError)
-        return undefined
-      },
-      { timeout, what: 'the model to load' },
+  function schemaLoaded(budget: number): Promise<number> {
+    const on = { slug, version }
+    return spend(budget, (timeout) =>
+      waitFor(
+        () => {
+          const { slug: slugNow, version: versionNow, schema: loaded, schemaLoading, schemaError } = live.current
+          if (slugNow !== on.slug || versionNow !== on.version) {
+            throw new AgentToolError(
+              'unavailable',
+              `The page moved off "${on.slug}" while this call waited for it to load; nothing was changed.`,
+            )
+          }
+          if (loaded) return loaded
+          if (schemaError || !schemaLoading) throw notLoaded(schemaError)
+          return undefined
+        },
+        { timeout, what: 'the model to load' },
+      ),
     )
   }
 
@@ -774,10 +795,9 @@ export function CustomizePage() {
     },
     render: async ({ timeout_ms }) => {
       // Only `live` is read below, so this closure may outlast the render it came from.
-      const started = performance.now()
-      await schemaLoaded(timeout_ms)
+      const left = await schemaLoaded(timeout_ms)
       await waitFor(() => (live.current.upToDate ? true : undefined), {
-        timeout: Math.max(0, timeout_ms - (performance.now() - started)),
+        timeout: left,
         what: 'the preview render of the current values',
       })
       return renderReport()

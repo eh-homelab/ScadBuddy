@@ -324,25 +324,39 @@ describe('customizer tools', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
   })
 
-  it('waits for a schema still loading instead of answering "still loading" (#4885)', async () => {
+  /**
+   * Holds `slug`'s schema GET until the returned function is called, then answers with
+   * `respond` (or falls through to the mock). Other slugs load as usual.
+   */
+  function holdSchema(slug: string, respond?: () => Response): () => void {
     let release: () => void = () => undefined
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
     server.use(
-      http.get('/api/v1/models/:slug/schema', async () => {
+      http.get('/api/v1/models/:slug/schema', async ({ params }) => {
+        if (params['slug'] !== slug) return undefined
         await gate
-        return undefined
+        return respond?.()
       }),
     )
+    return release
+  }
+
+  /** Opens the page with its schema still loading: the tools are live, `loaded` is false. */
+  async function openLoading(route = '/m/name-keychain') {
     renderPage(
       <Shell>
         <CustomizePage />
       </Shell>,
-      { route: '/m/name-keychain', path: '/m/:slug' },
+      { route, path: '/m/:slug' },
     )
-    // The tools are live before the schema is in: an agent can call them now.
     await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ loaded: false }))
+  }
+
+  it('waits for a schema still loading instead of answering "still loading" (#4885)', async () => {
+    const release = holdSchema('name-keychain')
+    await openLoading()
 
     const rendered = call('render', { timeout_ms: 10_000 })
     const set = call('set_param', { name: 'name', value: 'Nova' })
@@ -352,6 +366,38 @@ describe('customizer tools', () => {
     expect(await set).toMatchObject({ ok: true, result: { name: 'name', value: 'Nova' } })
     expect(await rendered).toMatchObject({ ok: true, result: { status: 'done' } })
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova')
+  })
+
+  it('answers unavailable, not for another model, when the page moves while a call waits (#4894)', async () => {
+    const release = holdSchema('name-keychain')
+    await openLoading()
+
+    const params = call('get_params')
+    const rendered = call('render', { timeout_ms: 10_000 })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(await call('navigate', { route: '/m/gridfinity-bin' })).toMatchObject({ ok: true })
+    await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'gridfinity-bin', loaded: true }))
+
+    expect(await params).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+    expect(await rendered).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+    release()
+  })
+
+  it('answers at once when the schema fails to load while a call waits (#4894)', async () => {
+    const release = holdSchema('name-keychain', () =>
+      HttpResponse.json({ detail: 'the schema service fell over' }, { status: 500 }),
+    )
+    await openLoading()
+
+    const params = call('get_params')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const released = performance.now()
+    release()
+
+    const outcome = await params
+    expect(outcome).toMatchObject({ ok: false, error: { code: 'timeout', message: expect.stringMatching(/^The model did not load: /) } })
+    // Well inside the 10 s wait: the failure ends it.
+    expect(performance.now() - released).toBeLessThan(2000)
   })
 
   it('reports itself in the snapshot and goes unavailable when the page does', async () => {
