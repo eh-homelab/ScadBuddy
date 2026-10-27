@@ -782,8 +782,8 @@ class OrderStore:
         until commit), so the reaper's grace counts from this hold, never the old one.
         One statement for every quote (#4725), so a large order's reopen is one round
         trip; each ``(key, quote)`` pair once, since ``ON CONFLICT DO UPDATE`` refuses to
-        touch a row twice in one statement. The rows go in sorted, `ORDER BY` the
-        arrays' ordinality, so two holds of overlapping keys lock them in one order."""
+        touch a row twice in one statement. The rows are fed sorted (`ORDER BY` the
+        arrays' ordinality), which in practice locks overlapping keys in one order."""
         pairs: set[tuple[str, str]] = set()
         for quote in quotes:
             keys = {plate.get("blob_key") for plate in quote.plates} | {quote.sliced_blob_key}

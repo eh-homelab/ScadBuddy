@@ -33,7 +33,9 @@ const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
  * `formatDueDate` the day as the locale writes it.
  */
 export function dueDay(dueAt: string): string {
-  return new Date(dueAt).toISOString().slice(0, 10)
+  const at = new Date(dueAt)
+  // Text that is no date (never sent today) shows as no day, never a render crash.
+  return Number.isNaN(at.getTime()) ? '' : at.toISOString().slice(0, 10)
 }
 
 export function dueAt(day: string): string {

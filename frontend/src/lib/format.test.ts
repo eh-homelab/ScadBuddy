@@ -106,6 +106,7 @@ describe('due dates (#4728)', () => {
     expect(stored).toBe('2026-10-20T00:00:00Z')
     expect(dueDay(stored)).toBe('2026-10-20')
     expect(dueDay('2026-10-20T00:00:00+00:00')).toBe('2026-10-20')
+    expect(dueDay('not a date')).toBe('')
     // The local calendar day, written as the locale writes it.
     expect(formatDueDate(stored)).toBe(new Date(2026, 9, 20).toLocaleDateString())
   })
