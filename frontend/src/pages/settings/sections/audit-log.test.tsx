@@ -20,10 +20,13 @@ describe('Audit log', () => {
     expect(within(section).getByRole('link', { name: 'Activity page' })).toHaveAttribute('href', '/activity')
   })
 
-  it('shows no link while the assistant is unavailable, so the section stays empty', async () => {
+  it('shows the Activity link while the assistant is unavailable', async () => {
     availability.available = false
     renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
-    await screen.findByRole('region', { name: 'Audit log' })
-    expect(document.getElementById('audit-log-body')?.childElementCount).toBe(0)
+    const section = await screen.findByRole('region', { name: 'Audit log' })
+    expect(within(section).getByRole('link', { name: 'Activity page' })).toHaveAttribute('href', '/activity')
+    // The AI card keeps its own gate.
+    expect(within(section).queryByRole('list', { name: 'AI activity entries' })).toBeNull()
+    expect(document.getElementById('ai-audit-heading')).toBeNull()
   })
 })
