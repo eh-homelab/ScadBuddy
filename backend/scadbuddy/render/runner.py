@@ -364,6 +364,25 @@ def build_defines(schema: CustomizerSchema, params: Mapping[str, ParamValue]) ->
     return defines
 
 
+def with_defaults(
+    schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> dict[str, ParamValue]:
+    """``params`` with each parameter it omits at its default (#4774), so a request that
+    leaves defaults out and one that sends them are the same render, with one key. A
+    default the schema's own checks refuse (out of its range, say) stays omitted: the
+    render then uses it as before, and no request that rendered before is refused."""
+    filled = dict(params)
+    for parameter in schema.parameters:
+        if parameter.name in filled or parameter.initial is None:
+            continue
+        try:
+            format_scad_value(parameter, parameter.initial)
+        except ValueError:
+            continue
+        filled[parameter.name] = parameter.initial
+    return filled
+
+
 def params_problem(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> str | None:
     """What is wrong with ``params`` for ``schema``, or None (#432): the message half of
     the API's `require_valid_params`, for the worker, which must not import the API."""

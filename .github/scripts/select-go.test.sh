@@ -18,6 +18,7 @@ expect true  tools/go/bambuddy-fs/Dockerfile
 expect true  .github/workflows/ci.yml
 expect true  .github/scripts/select-go.sh
 expect true  .github/scripts/select-go.test.sh
+expect true  .github/scripts/changed-paths.sh
 expect false Dockerfile
 expect false backend/scadbuddy/api/library_print.py
 expect false README.md
@@ -25,4 +26,5 @@ expect false toolsy/go.mod
 expect false go.workfoo
 expect false .github/workflows/build-image.yml
 expect false .github/scripts/select-models.sh
+expect false .github/scripts/select-lanes.sh
 exit "$fail"

@@ -38,7 +38,9 @@ from scadbuddy.render.runner import (
     UnknownParameterError,
     build_defines,
     cached_schema,
+    with_defaults,
 )
+from scadbuddy.render.schema import CustomizerSchema
 
 _COMMIT = re.compile(COMMIT_ID_PATTERN)
 
@@ -259,13 +261,8 @@ async def resolve_reference(
         normalized = normalize_inputs(inputs, None)
     except InputsError as error:
         raise ReferenceError("inputs", str(error)) from None
-    if given_inputs is not None and rendered_inputs != normalized.data:
-        raise ReferenceError(
-            "inputs",
-            f"output {output_id!r} was rendered with other inputs than these; leave"
-            " inputs out to take the output's, or give them whole, `v` included",
-        )
     pipeline = await asyncio.to_thread(declares_pipeline, source.scad.parent, slug)
+    schema: CustomizerSchema | None = None
     if not pipeline:
         schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)
@@ -274,13 +271,38 @@ async def resolve_reference(
             build_defines(schema, normalized.params)
         except (UnknownParameterError, ParameterValueError, ValueError) as error:
             raise ReferenceError("inputs", str(error)) from None
+
+    def filled(data: dict[str, Any]) -> dict[str, Any]:
+        """#4774: what an item stores and its key hashes: ``data`` with each parameter
+        it omits at the commit's default, as the render route fills a render's. A
+        pipeline's params need not be `model.scad`'s, so they stay as given."""
+        if schema is None:
+            return data
+        return {**data, "params": with_defaults(schema, data.get("params", {}))}
+
+    # Both sides filled, so the output's sparse params and the same params given whole
+    # (or the reverse) are one render, and a value that differs still is not.
+    if (
+        given_inputs is not None
+        and rendered_inputs is not None
+        and filled(rendered_inputs) != filled(normalized.data)
+    ):
+        raise ReferenceError(
+            "inputs",
+            f"output {output_id!r} was rendered with other inputs than these; leave"
+            " inputs out to take the output's, or give them whole, `v` included",
+        )
+    # An item made from an output keeps that output's inputs as it recorded them, so
+    # `quote.py` `output_matches` finds it; only a hand-made reference is filled. The key
+    # hashes what is stored, which is what `quote.py` `ensure_output` submits.
+    stored = rendered_inputs if rendered_inputs is not None else filled(normalized.data)
     libraries = facts.libraries if facts is not None else list(source.libraries)
     reference = Reference(
         slug=slug,
         commit=full,
-        inputs=normalized.data,
+        inputs=stored,
         libraries=libraries,
         template_name=await asyncio.to_thread(_template_name, source.scad.parent, slug),
-        render_key=render_key_of(slug, normalized.data, full, pipeline=pipeline),
+        render_key=render_key_of(slug, stored, full, pipeline=pipeline),
     )
     return ResolvedReference(reference, facts.colours if facts is not None else [])
