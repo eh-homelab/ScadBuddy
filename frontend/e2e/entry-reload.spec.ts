@@ -2,8 +2,8 @@ import { expect, test, type Page } from '@playwright/test'
 
 // #4873 — mid-rollout the HTML can name an entry script that the pod answering the asset
 // request does not have (a real 404, #395). index.html's inline handler reloads, at most
-// 3 times per failed URL, and only for the tags parsed from the HTML (#4874). The preview serves PAGE_CSP, so a handler whose hash is missing from it is
-// blocked and these fail.
+// 3 times per failed URL, and only for the tags parsed from the HTML (#4874). The preview
+// serves PAGE_CSP, so a handler whose hash is missing from it is blocked and these fail.
 test.skip(!!process.env.E2E_BASE_URL, 'routes the mocked build’s own entry')
 
 /** The entry `<script type="module">` the built page names. */
@@ -17,7 +17,7 @@ async function entryUrl(page: Page): Promise<string> {
 /** The entry stylesheet the built page names. */
 async function entryCss(page: Page): Promise<string> {
   const html = await (await page.request.get('/settings')).text()
-  const href = /<link rel="stylesheet" crossorigin href="([^"]+)"/.exec(html)?.[1]
+  const href = /href="(\/assets\/index-[^"]+\.css)"/.exec(html)?.[1]
   expect(href, 'the built page names an entry stylesheet').toBeTruthy()
   return href!
 }
