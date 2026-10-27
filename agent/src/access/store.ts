@@ -101,6 +101,11 @@ async function runEdit(tx: TransactionSql, edit: Edit, by: string): Promise<void
   }
 }
 
+/** The built-in sources `edits` touch: the ones whose old ai_settings keys a write keeps. */
+function legacySources(edits: readonly Edit[]): Set<string> {
+  return new Set(edits.map((e) => e.source).filter((s) => LEGACY_SOURCES.includes(s)))
+}
+
 const toolsDetail = (edits: readonly Edit[]): string =>
   edits.map((e) => `${e.source}/* tools = ${JSON.stringify(e.kind === 'replace' ? e.tools : {})}`).join('; ')
 
@@ -166,10 +171,8 @@ export class AccessStore implements AccessReader, AccessWriter {
    * it win. Drop next release (#4828).
    */
   private async writeLegacy(tx: TransactionSql, edits: readonly Edit[], by: string): Promise<void> {
-    const touched = new Set(edits.map((e) => e.source).filter((s) => LEGACY_SOURCES.includes(s)))
+    const touched = legacySources(edits)
     if (touched.size === 0) return
-    // One such write at a time, so each derives the keys from the rows the last one left.
-    await tx`SELECT pg_advisory_xact_lock(hashtext('ai_access legacy keys'))`
     let rows: AccessRow[] = await tx<AccessRow[]>`
       SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${tx(LEGACY_SOURCES)}`
     for (const edit of edits) rows = applyEdit(rows, edit, by)
@@ -206,6 +209,9 @@ export class AccessStore implements AccessReader, AccessWriter {
     let failure: unknown
     try {
       await this.sql.begin(async (tx) => {
+        // One write of the old keys at a time, so each derives them from the rows the last one
+        // left (writeLegacy). Taken before any row lock, so every writer locks in one order.
+        if (legacySources(edits).size > 0) await tx`SELECT pg_advisory_xact_lock(hashtext('ai_access legacy keys'))`
         if (options.skipUnchanged) {
           const sources = [...new Set(edits.map((e) => e.source))]
           const current = await tx<AccessRow[]>`

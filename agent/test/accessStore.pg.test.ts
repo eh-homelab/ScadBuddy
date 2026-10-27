@@ -139,4 +139,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     await expect(tools.update(set, { tool_tiers: {}, disabled_tools: ['list_models', 'browser_click'] }, ctx)).rejects.toThrow(/refused for the test/)
     expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
   })
+  it("replaceToolsOf takes the old keys' lock before it locks rows, so it cannot deadlock with another write (review m1)", async () => {
+    await store.setItem(SCAD, 'get_model', 'outward', ctx)
+    const other = await db.sql.reserve()
+    try {
+      // Another writer, in the store's order: the lock first, then the rows.
+      await other`BEGIN`
+      await other`SELECT pg_advisory_xact_lock(hashtext('ai_access legacy keys'))`
+      const replaced = store.replaceToolsOf({ [SCAD]: { get_model: 'read' } }, ctx)
+      await new Promise((r) => setTimeout(r, 300))
+      await other`UPDATE ai_access SET updated_at = now() WHERE source = ${SCAD} AND item = 'get_model'`
+      await other`COMMIT`
+      await replaced
+    } finally {
+      other.release()
+    }
+    expect(await store.rows([SCAD])).toMatchObject([{ item: 'get_model', access: 'read' }])
+  })
 })
