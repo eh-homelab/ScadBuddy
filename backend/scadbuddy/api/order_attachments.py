@@ -9,7 +9,7 @@ added by the ``order_attachment_add`` operation (``orders/operations.py``), whos
 keeps it as a blob of ScadBuddy's own store (``orders/attachments.py``).
 
 What a file is comes from its bytes. Only the types a browser shows and never runs
-(``attachments.INLINE``) are served as themselves; every other file is
+(``models.INLINE``) are served as themselves; every other file is
 ``application/octet-stream`` and a download, under a sandboxing policy, so an uploaded
 page never runs on ScadBuddy's origin.
 
@@ -42,7 +42,9 @@ from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import (
+    INLINE,
     MAX_ATTACHMENT_CAPTION,
+    THUMBNAILED,
     Attachment,
     AttachmentPatch,
     AttachmentRole,
@@ -312,7 +314,7 @@ async def get_attachment_content(
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"the file of attachment {attachment_id!r} is gone"
         )
-    inline = attachment.media_type in attachments.INLINE and not download
+    inline = attachment.media_type in INLINE and not download
     headers = {"Cache-Control": IMMUTABLE, **NOSNIFF}
     if attachment.media_type != "application/pdf" or not inline:
         headers |= INERT
@@ -343,7 +345,7 @@ async def get_attachment_thumbnail(
     order_id: str, attachment_id: str, orders: OrdersDep, state: StateDep, request: Request
 ) -> Response:
     attachment, key = await _attachment(orders, order_id, attachment_id)
-    if attachment.media_type not in ("image/png", "image/jpeg", "image/webp"):
+    if attachment.media_type not in THUMBNAILED:
         raise ApiError(status.HTTP_404_NOT_FOUND, "only a PNG, JPEG or WebP photo has a thumbnail")
     path = await attachments.blob_path(state.store.blobs, key)
     if path is None:

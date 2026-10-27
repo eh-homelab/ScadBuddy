@@ -129,6 +129,18 @@ class CachedBlobStore:
         async with self._lock(key):
             return await self._fetch(key) is not None
 
+    async def claim(self, key: str) -> bool:
+        # Touched before the row is read: a sweep whose `delete_if_stale` comes after
+        # the read finds it fresh, and one that came before leaves no row to find. A
+        # row on another backend (mid `/store/migrate`) is not this store's blob, as
+        # for `_row`. A caller that then publishes from nothing (`orders/attachments.py`
+        # `keep`) loses the swap against that row and fails as stale, as a fetch would
+        # have: it succeeds again once the migration has flipped `store_backend`.
+        # `stat` asks the backend whether the object is there (a HEAD, never a
+        # download) and forgets a row whose object was lost, so that is written again too.
+        await self.content.touch(key)
+        return await self.content.stat(key) is not None
+
     async def checkout(self, key: str) -> str | None:
         async with self._lock(key):
             sha = await self._fetch(key)

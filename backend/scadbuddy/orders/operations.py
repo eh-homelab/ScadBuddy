@@ -53,6 +53,7 @@ from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
+from scadbuddy.store.cache import StaleBlobError
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -299,6 +300,15 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 status.HTTP_409_CONFLICT,
                 "this request's upload is no longer held; send it again",
             ) from None
+        except StaleBlobError:
+            # The same bytes are stored on the other backend of a `/store/migrate`
+            # (`CachedBlobStore.claim`): the upload works once the store has moved.
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "the stored copy of these bytes is not on this store's backend (a"
+                " `/store/migrate` in progress?); send the file again once it has flipped"
+                " `store_backend` and the API has restarted",
+            ) from None
         try:
             attachment = await to_thread_to_end(
                 lambda: orders.lifecycle.add_attachment(
@@ -328,6 +338,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             ORDER_ATTACHMENT_ADD,
             attachment_check,
             attachment_run,
+            # A second attempt after a partial failure would only repeat the same
+            # claimed bytes: the caller re-sends instead.
+            run_attempts=1,
             queue="library",
             # Moves (or copies) up to the upload limit into the blob store and publishes it.
             run_timeout=PIN_TIMEOUT,
