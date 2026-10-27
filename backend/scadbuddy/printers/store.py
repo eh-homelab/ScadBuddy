@@ -426,7 +426,8 @@ class PrinterStore:
         with self.pool.connection() as conn:
             conn.execute(
                 "UPDATE printers SET bambuddy_active = (bambuddy_printer_id = ANY(%s)),"
-                " updated_at = now() WHERE kind = 'physical' AND bambuddy_printer_id IS NOT NULL"
+                " updated_at = now() WHERE kind = 'physical'"
+                " AND bambuddy_printer_id IS NOT NULL"
                 " AND bambuddy_active IS DISTINCT FROM (bambuddy_printer_id = ANY(%s))",
                 (ids, ids),
             )
@@ -441,7 +442,8 @@ class PrinterStore:
         with self.pool.connection() as conn:
             changed = conn.execute(
                 "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
-                " updated_at = now() WHERE kind = 'bambuddy_virtual' AND bambuddy_vp_id IS NOT NULL"
+                " updated_at = now() WHERE kind = 'bambuddy_virtual'"
+                " AND bambuddy_vp_id IS NOT NULL"
                 " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
                 " RETURNING id",
                 (ids, ids),
