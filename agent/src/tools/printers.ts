@@ -169,6 +169,7 @@ function virtualPrinterTools(): Tool[] {
       }),
       risk: 'outward',
       source: VP_SOURCE,
+      bambuddyScope: ['Settings (admin only)'],
       routes: ['POST /api/v1/printers/virtual'],
       summarize: ({ name, mode }) => `Create Bambuddy virtual printer ${name}${mode ? ` (${mode})` : ''}`,
       handler: async (body, ctx) =>
@@ -194,6 +195,7 @@ function virtualPrinterTools(): Tool[] {
       }),
       risk: 'outward',
       source: VP_SOURCE,
+      bambuddyScope: ['Settings (admin only)'],
       routes: ['PUT /api/v1/printers/virtual/{vp_id}'],
       summarize: ({ vp_id, ...fields }) =>
         `Change Bambuddy virtual printer ${vp_id}: ${Object.keys(fields).join(', ') || 'nothing'}`,
@@ -216,6 +218,7 @@ function virtualPrinterTools(): Tool[] {
       input: z.object({ vp_id: vpId }),
       risk: 'outward',
       source: VP_SOURCE,
+      bambuddyScope: ['Settings (admin only)'],
       routes: ['DELETE /api/v1/printers/virtual/{vp_id}'],
       summarize: ({ vp_id }) => `Delete Bambuddy virtual printer ${vp_id}`,
       handler: async ({ vp_id }, ctx) =>

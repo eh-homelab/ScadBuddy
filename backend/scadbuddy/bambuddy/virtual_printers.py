@@ -59,7 +59,6 @@ ACCESS_CODE_MAC_INFO = b"scadbuddy:bambuddy:vp-access-code-mac:v1"
 #: The request fields `access_code_request` writes; the sealed one is unkeyed.
 SEALED_FIELD = "access_code"
 MAC_FIELD = "access_code_mac"
-CONTEXT_FIELD = "seal_context"
 #: The Idempotency-Key a create's seal is bound to (already the operation row's own).
 KEY_FIELD = "seal_key"
 
@@ -190,7 +189,6 @@ def access_code_request(
     return {
         SEALED_FIELD: seal_access_code(kek, code, context),
         MAC_FIELD: access_code_mac(kek, code, context, idempotency_key),
-        CONTEXT_FIELD: context,
         KEY_FIELD: idempotency_key,
     }
 
@@ -227,17 +225,17 @@ def virtual_printer_kinds(
     async def write_check(request: dict[str, Any]) -> dict[str, Any]:
         fields: dict[str, Any] = request.get("fields", {})
         checked: dict[str, Any] = {}
-        if "target" in fields:
-            checked["target_printer_id"] = await target_id(fields)
-            if checked["target_printer_id"] is not None and request.get(SEALED_FIELD):
-                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, CODE_WITH_TARGET)
-        # First: a worker that cannot open the code fails without calling Bambuddy.
+        # First of all: a worker that cannot open the code fails without reading anything.
         if request.get(SEALED_FIELD) and (printers is None or printers.kek is None):
             raise ApiError(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "a virtual printer's access code needs SCADBUDDY_SECRET_KEY_FILE on the"
                 " print worker",
             )
+        if "target" in fields:
+            checked["target_printer_id"] = await target_id(fields)
+            if checked["target_printer_id"] is not None and request.get(SEALED_FIELD):
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, CODE_WITH_TARGET)
         if request.get(SEALED_FIELD) and "vp_id" in request and "target" not in fields:
             # An update that keeps the target: Bambuddy would replace a code sent to a
             # targeted VP with its target's (lines 236-240), so it is refused as a create's.
@@ -269,14 +267,9 @@ def virtual_printer_kinds(
         sealed = request.get(SEALED_FIELD)
         if sealed:
             assert printers is not None and printers.kek is not None
-            context = str(request.get(CONTEXT_FIELD, ""))
-            # Exactly what the route sealed under: this VP, or this create's own key.
-            key = str(request.get(KEY_FIELD, ""))
-            if context != seal_context(vp_id=vp_id, idempotency_key=key):
-                raise ApiError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    "the access code was sealed for another virtual printer",
-                )
+            # The run derives the context, never reads it from the request: an update's
+            # seal opens only for this VP (its AAD), a create's only for its own key.
+            context = seal_context(vp_id=vp_id, idempotency_key=str(request.get(KEY_FIELD, "")))
             try:
                 fields["access_code"] = open_access_code(printers.kek, sealed, context)
             except SealError:

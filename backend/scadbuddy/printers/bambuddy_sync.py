@@ -516,7 +516,9 @@ class StoreRegistry:
 async def sync_virtual_printers(registry: VirtualRegistry, client: BambuddyClient) -> None:
     """The pass's virtual-printer part alone (#4747 item 4): the registry follows a VP
     write on whichever worker ran it, so a write that outlives the route's deadline is
-    followed too. No LAN link is made here (a VP gets none), so no probe runs."""
+    followed too. No LAN link is made here (a VP gets none), so no probe runs. Bambuddy's
+    printer list is read only for its serials (`may_adopt`); if that list grows slow, it is
+    the first thing to cache."""
     now = datetime.now(UTC)
     active = [printer for printer in await client.printers() if printer.is_active]
     vps = (await client.virtual_printers()).printers

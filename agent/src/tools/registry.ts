@@ -27,7 +27,14 @@ import type { SwitchedOff } from './switches.js'
 export type Risk = Tier
 
 /** Bambuddy API-key scopes, as `backend/scadbuddy/bambuddy/errors.py` `Scope` names them. */
-export type BambuddyScope = 'Read Status' | 'Manage Library' | 'Manage Queue' | 'Manage Projects' | 'Manage Archives'
+export type BambuddyScope =
+  | 'Read Status'
+  | 'Manage Library'
+  | 'Manage Queue'
+  | 'Manage Projects'
+  | 'Manage Archives'
+  /** #4747: Bambuddy's `settings:update`, which no API key holds while its auth is on. */
+  | 'Settings (admin only)'
 
 type HttpMethod = 'get' | 'put' | 'post' | 'delete' | 'patch'
 type MethodsOf<P extends keyof paths> = {
