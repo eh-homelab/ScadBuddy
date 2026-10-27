@@ -164,9 +164,10 @@ def attached(rows: OrderStore) -> tuple[str, str]:
 
 def test_an_order_is_not_deleted_from_under_its_files_holds(rows: OrderStore) -> None:
     """#4678: nothing cascades a `blob_refs` hold, so an order's delete is refused
-    until each of its files went through `OrderStore.delete_attachment`."""
+    until each of its files went through `OrderStore.delete_attachment`. Postgres 18
+    reports an ON DELETE RESTRICT refusal as 23001 `RestrictViolation`, not 23503."""
     order_id, attachment_id = attached(rows)
-    with pytest.raises(psycopg.errors.ForeignKeyViolation), rows.transaction() as conn:
+    with pytest.raises(psycopg.errors.RestrictViolation), rows.transaction() as conn:
         conn.execute("DELETE FROM orders WHERE id = %s", (order_id,))
     with rows.transaction() as conn:
         rows.delete_attachment(conn, attachment_id)
