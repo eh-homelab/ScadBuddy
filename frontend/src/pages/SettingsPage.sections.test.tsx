@@ -59,7 +59,8 @@ function region(name: string): HTMLElement {
   return section
 }
 
-/** Every microtask queued so far, and every one they queue: a macrotask runs only after them. */
+/** Every microtask queued so far, and every one they queue: a macrotask runs only after them.
+ *  Needs real timers: under `vi.useFakeTimers()` this `setTimeout` never fires (#4831 review). */
 const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list) opens
