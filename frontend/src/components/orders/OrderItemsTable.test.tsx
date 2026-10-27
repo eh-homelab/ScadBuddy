@@ -92,8 +92,6 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(row(ITEM_DRAFT)).getAllByRole('cell')[5]).toHaveTextContent('$25.00')
     expect(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Accept unit price' })).toBeDisabled()
     expect(screen.queryByTestId('order-unpriced')).not.toBeInTheDocument()
-    quoted.mockRestore()
-    accepted.mockRestore()
   })
 
   it('keeps Accept off for the accepted price however it is typed', async () => {
@@ -145,7 +143,6 @@ describe('OrderItemsTable · unit price', () => {
     expect(input).toHaveAccessibleDescription('Enter a price per unit, such as 12.50.')
     expect(quoted).not.toHaveBeenCalled()
     expect(quotesOfDraft()).toHaveLength(0)
-    quoted.mockRestore()
   })
 
   it("shows the lifecycle's refusal in the row", async () => {
@@ -175,8 +172,6 @@ describe('OrderItemsTable · unit price', () => {
     await waitFor(() => expect(quotesOfDraft().map((q) => [q.id, q.accepted])).toEqual([['q-slice', true]]))
     expect(accepted).toHaveBeenCalledWith(ORDER_DRAFT, ITEM_DRAFT, 'q-slice')
     expect(quoted).not.toHaveBeenCalled()
-    quoted.mockRestore()
-    accepted.mockRestore()
   })
 
   it('retries a refused accept on the quote it recorded, never a second one', async () => {

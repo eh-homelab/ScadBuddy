@@ -44,7 +44,6 @@ describe('AddItemDialog (#4251)', () => {
     const added = order.items.find((i) => i.title === 'Maze for Ada')
     expect(added?.reference.commit).toBe(model.version)
     expect(added?.quantity).toBe(2)
-    add.mockRestore()
   })
 
   it('adds one of the template\'s saved outputs by its id', async () => {
@@ -61,7 +60,6 @@ describe('AddItemDialog (#4251)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
     await waitFor(() => expect(onClose).toHaveBeenCalled())
     expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { output_id: NOVA, quantity: 1 })
-    add.mockRestore()
   })
 
   it('keeps the estimate\'s filament when another output is picked, and estimates that one', async () => {
@@ -79,8 +77,6 @@ describe('AddItemDialog (#4251)', () => {
     await waitFor(() => expect(estimate).toHaveBeenLastCalledWith(NOVA, expect.any(String)))
     expect(within(dialog).getByRole('combobox', { name: 'Estimate with' })).toHaveTextContent(/Sunflower Yellow/)
     expect(priceBook).toHaveBeenCalledTimes(1)
-    priceBook.mockRestore()
-    estimate.mockRestore()
   })
 
   it("shows the order's refusal and stays open", async () => {
@@ -107,7 +103,6 @@ describe('AddItemDialog (#4251)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('a whole number of 1 or more')
     expect(add).not.toHaveBeenCalled()
-    add.mockRestore()
   })
 
   it('offers no current version of a template whose inputs version is unknown (#4727)', async () => {

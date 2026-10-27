@@ -82,16 +82,18 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
     if (!open) {
       setQuery('')
       setSlug(null)
+      setPicked('')
       setQuantity('1')
       setTitle('')
       setError(null)
       setBusy(false)
     }
   }, [open])
-  useEffect(() => {
-    // Another template starts from its own default again.
+  /** Another template, or none, starting from its own default pick in the same render. */
+  function pickTemplate(next: string | null) {
+    setSlug(next)
     setPicked('')
-  }, [slug])
+  }
 
   async function add() {
     if (!model) {
@@ -130,7 +132,7 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
           {model ? (
             <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2" data-testid="add-item-template">
               <span className="min-w-0 truncate text-sm font-medium">{model.name}</span>
-              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setSlug(null)}>
+              <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => pickTemplate(null)}>
                 Change
               </Button>
             </div>
@@ -150,7 +152,7 @@ export function AddItemDialog({ open, orderId, onAdded, onClose }: { open: boole
                         type="button"
                         className="flex w-full flex-col items-start px-3 py-1.5 text-left text-sm hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
                         onClick={() => {
-                          setSlug(m.slug)
+                          pickTemplate(m.slug)
                           setError(null)
                         }}
                       >
