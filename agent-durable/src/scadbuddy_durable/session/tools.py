@@ -127,7 +127,11 @@ def durable_tools(entries: Sequence[ManifestEntry]) -> list[DurableTool]:
 
 
 def _policy(entry: ManifestEntry, tier: str) -> RetryPolicy:
-    return _ONCE if entry.hitl == "approval" or tier == "outward" else _RETRY
+    """At most once when the stricter of the code's tier (``entry.tier``) and ``tier`` is
+    outward, or the manifest asks for approval: whether a retry is safe is the code's to
+    say, so an outward tool Settings lowered is still never run twice (#2171)."""
+    outward = "outward" in (entry.tier, tier)
+    return _ONCE if entry.hitl == "approval" or outward else _RETRY
 
 
 def gate_call(tool: DurableTool, entry: ManifestEntry, tier: str) -> None:

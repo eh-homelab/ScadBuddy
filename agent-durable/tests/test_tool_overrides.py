@@ -166,3 +166,18 @@ def test_settings_still_raise_a_tool_whose_manifest_tier_is_not_a_tier() -> None
     assert by_name["odd_tool"].needs_approval
     assert by_name["odd_tool"].retry_policy is not None
     assert by_name["odd_tool"].retry_policy.maximum_attempts == 1
+
+
+def test_an_outward_tool_lowered_below_outward_still_runs_at_most_once() -> None:
+    """#2171, review I2: whether a retry is safe is the code's to say. An outward tool
+    that asks for no approval (as ``confirm_action``) lowered to read or write runs
+    without parking and is never retried, both from the turn's overrides and per call."""
+    entry = tools.ManifestEntry("confirm_thing", "Confirms.", {"type": "object"}, "outward", None)
+    for lowered in ("read", "write"):
+        by_name = {t.name: t for t in tools.durable_tools([entry])}
+        tools.apply_overrides(by_name, [entry], {"confirm_thing": lowered}, set())
+        assert not by_name["confirm_thing"].needs_approval
+        assert by_name["confirm_thing"].retry_policy is not None
+        assert by_name["confirm_thing"].retry_policy.maximum_attempts == 1, lowered
+        tools.gate_call(by_name["confirm_thing"], entry, lowered)
+        assert by_name["confirm_thing"].retry_policy.maximum_attempts == 1, lowered

@@ -79,7 +79,7 @@ describe("a flow's tool tiers (#2704)", () => {
     const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: camera.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
     const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
     const tier = toolActivities(camera, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
-    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true })
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'get_printer_camera' })).toEqual({ tier: 'read', disabled: true, declared: 'read' })
   })
 
   it('/internal/flows/tools lists the camera off as disabled', async () => {
@@ -100,10 +100,17 @@ describe("a flow's tool tiers (#2704)", () => {
     const { svc, set } = rig()
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     const flow = env(`flow-${RUN}`)
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'read', disabled: false, declared: 'read' })
     await set({ look: 'outward' }, ['send'])
-    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false })
-    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true })
+    expect(await flow.run(tier, { tool: 'look' })).toEqual({ tier: 'outward', disabled: false, declared: 'read' })
+    expect(await flow.run(tier, { tool: 'send' })).toEqual({ tier: 'outward', disabled: true, declared: 'outward' })
+  })
+
+  it('answers the code tier as declared beside a lowered tier, so the flow retries by the stricter (review I2)', async () => {
+    const { svc, set } = rig()
+    const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
+    await set({ send: 'read' }, [])
+    expect(await env(`flow-${RUN}`).run(tier, { tool: 'send' })).toEqual({ tier: 'read', disabled: false, declared: 'outward' })
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {

@@ -382,6 +382,50 @@ async def test_a_write_tool_runs_once_even_when_its_attempt_fails(
     assert [c[0] for c in served.calls] == ["make_thing"]
 
 
+async def test_an_outward_tool_lowered_to_read_runs_once_even_when_its_attempt_fails(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """#2171, review I2: whether a retry is safe is the code's to say. A tool outward in
+    code that Settings lowered to read runs without approval, but is never sent again."""
+    served, queue = tools
+    agent.tiers["make_thing"] = "read"
+    agent.declared["make_thing"] = "outward"
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('make_thing', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [s.outward for s in run.steps] == [False]
+    assert [c[0] for c in served.calls] == ["make_thing"]
+
+
+async def test_a_read_tool_from_an_agent_that_does_not_say_its_declared_tier_runs_once(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """An agent from before `declared` says nothing of the code tier: counted outward."""
+    served, queue = tools
+    agent.tiers["make_thing"] = "read"
+    agent.declared_missing.add("make_thing")
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('make_thing', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [c[0] for c in served.calls] == ["make_thing"]
+
+
 class TurnTools:
     """The agent's turn tools (#2320): `turn_tool_tier` on the tools queue, and each call
     the activity `turn:<server>__<tool>`, here on a replica's own queue, as a pinned
