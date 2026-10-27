@@ -54,12 +54,15 @@ describe('fetchPendingInput', () => {
             { ...approval, id: 'approval:a4', expiring: true },
             // An owner kind this tab does not know is shown by its label, never a failed read.
             { ...approval, id: 'approval:a5', requested_by: { kind: 'new-kind', label: 'Robot' }, expires_at: null },
+            // A session id this tab cannot parse: counted, but never listed as sessionless, since
+            // it may well be a session's (whose feed decides it).
+            { ...approval, id: 'approval:a6', session_id: 42 },
           ],
         }),
       ),
     )
     const counts = await fetchPendingInput()
-    expect(counts?.approvals).toBe(4)
+    expect(counts?.approvals).toBe(5)
     expect(counts?.unattached).toEqual([
       { id: 'approval:a1', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Claude Code', expiresAt: '2026-10-27T10:10:00.000Z' },
       { id: 'approval:a5', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Robot' },

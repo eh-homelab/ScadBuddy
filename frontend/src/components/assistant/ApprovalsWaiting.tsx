@@ -1,6 +1,6 @@
 import { useContext, useState } from 'react'
 import { ApprovalsWaitingContext, type PendingApproval } from '../../agent/attention'
-import { decidePendingApproval, preparedBy } from '../../agent/pendingApprovals'
+import { decidePendingApproval, notTakenText, preparedBy } from '../../agent/pendingApprovals'
 import { RespondError, type RespondOutcome } from '../../agent/respond'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -15,7 +15,7 @@ type CardState =
   | { kind: 'pending'; error?: string }
   | { kind: 'sending' }
   | { kind: 'done'; outcome: RespondOutcome }
-  | { kind: 'closed'; reason: string }
+  | { kind: 'closed'; text: string }
 
 function PendingApprovalCard({ approval, onDecided }: { approval: PendingApproval; onDecided: () => void }) {
   const [state, setState] = useState<CardState>({ kind: 'pending' })
@@ -29,7 +29,7 @@ function PendingApprovalCard({ approval, onDecided }: { approval: PendingApprova
       },
       (err: unknown) => {
         if (err instanceof RespondError && err.settled) {
-          setState({ kind: 'closed', reason: err.reason ?? 'the request is no longer waiting' })
+          setState({ kind: 'closed', text: notTakenText(err) })
           onDecided()
         } else setState({ kind: 'pending', error: err instanceof Error ? err.message : String(err) })
       },
@@ -74,7 +74,7 @@ function PendingApprovalCard({ approval, onDecided }: { approval: PendingApprova
           {state.kind === 'sending'
             ? 'Sending your answer…'
             : state.kind === 'closed'
-              ? `Your decision was not taken: ${state.reason}.`
+              ? state.text
               : state.outcome === 'approved'
                 ? 'Approved. The client that prepared it can now confirm it.'
                 : 'Denied.'}
