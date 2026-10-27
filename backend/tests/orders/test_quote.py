@@ -34,6 +34,7 @@ from scadbuddy.orders.quote import (
     SlicedPlate,
     SliceQuoteRequest,
     ensure_output,
+    output_matches,
     quote_check,
     quote_run,
     read_plate,
@@ -42,6 +43,7 @@ from scadbuddy.orders.quote import (
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.job_models import Job
+from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -425,6 +427,59 @@ async def test_ensure_output_reuses_a_matching_output(shop: Shop) -> None:
     assert saved[0]["job_id"] == "job-1" and saved[0]["inputs"] == INPUTS
     assert saved[0]["name"] == f"{shop.order.number} Demo"
     assert shop.get_item().output_id == "out-10"
+
+
+#: The commit's schema the quote reads for `output_matches` (#4774).
+SCHEMA = CustomizerSchema(
+    parameters=[
+        Parameter(name="width", type="number", initial=10),
+        Parameter(name="label", type="string", initial="hi"),
+    ]
+)
+
+
+async def test_an_output_saved_before_defaults_were_filled_still_matches(shop: Shop) -> None:
+    """#4774: an output saved before renders filled defaults records only the params it
+    was sent; a reference that names their defaults is the same render, both ways, at
+    the commit's schema. Quoting it saves nothing and keeps the item's output."""
+    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
+    sparse: dict[str, Any] = {"params": {"width": 10}, "v": 0}
+    full: dict[str, Any] = {"params": {"width": 10, "label": "hi"}, "v": 0}
+    reference = shop.item.reference
+
+    async def never(body: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("a matching output is reused, never saved again")
+
+    for stored, recorded in ((full, sparse), (sparse, full)):
+        resolved = ResolvedReference(
+            reference.model_copy(update={"inputs": stored}), shop.item.colours
+        )
+        item = shop.lifecycle.update_item(
+            shop.order.id, shop.item.id, BY, reference=resolved, output_id="out-9"
+        )
+        renders = FakeRenders()
+        found = await ensure_output(
+            lifecycle=shop.lifecycle,
+            outputs=FakeOutputs(meta, recorded),
+            renders=renders,
+            create_output=never,
+            order=shop.get_order(),
+            item=item,
+            filaments={},
+            by=BY,
+            follow_every=0.0,
+            schema=SCHEMA,
+        )
+        assert found == "out-9"
+        assert renders.submitted == []
+        assert shop.get_item().output_id == "out-9"
+    # Another value of a default is another render, filled or not.
+    assert not output_matches(
+        FakeOutputs(meta, {"params": {"width": 10, "label": "bye"}, "v": 0}),
+        "out-9",
+        shop.get_item(),
+        SCHEMA,
+    )
 
 
 async def test_ensure_output_reuses_an_arranged_output(shop: Shop) -> None:

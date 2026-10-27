@@ -675,6 +675,23 @@ describe('HistoryPage', () => {
     expect(within(await row(without.name!)).getByLabelText(`No preview of ${without.name!}`)).toBeInTheDocument()
   })
 
+  it('says there is no preview when the thumbnail does not load (#4775)', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    const preview = within(reagan).getByRole('button', { name: 'Preview Reagan' })
+    await user.click(preview)
+    const dialog = await screen.findByRole('dialog', { name: 'Reagan' })
+    // The server could not draw one: the image answers 404 instead of a PNG.
+    fireEvent.error(within(dialog).getByRole('img', { name: 'Preview of Reagan' }))
+    expect(within(dialog).queryByRole('img')).not.toBeInTheDocument()
+    expect(within(dialog).getByText('No preview')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    fireEvent.error(preview.querySelector('img')!)
+    expect(within(reagan).queryByRole('button', { name: 'Preview Reagan' })).not.toBeInTheDocument()
+    expect(within(reagan).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+  })
+
   it('offers Queue, Download 3MF and Rename on every output (#2288)', async () => {
     const { user } = render()
     for (const name of ['Reagan', 'Nova', 'Workshop']) {
