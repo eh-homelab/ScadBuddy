@@ -2198,6 +2198,9 @@ export class SessionManager {
       // (only ever resumed inside each workflow's own segments, never shared).
       child = await this.insert(randomUUID(), principal, { ...fields, mode: 'durable' }, insertOptions)
       try {
+        // Its workspace files (#2329) before its workflow starts, so a copy that fails
+        // (copy() is all or nothing) leaves nothing of the child either.
+        await this.files.copy(id, child.id)
         await durable.turns.startFork(child, durable.agent)
       } catch (err) {
         // Nothing else of the child is written yet: it goes, rather than run empty.
@@ -2213,14 +2216,22 @@ export class SessionManager {
       })
       // A classic fork copies the SDK transcript, which only a classic session has.
       child = await this.insert(forkedId, principal, { ...fields, mode: 'classic' }, insertOptions)
+      try {
+        // Its workspace files (#2329), so the fork carries on with what the parent had.
+        await this.files.copy(id, child.id)
+      } catch (err) {
+        // A fork whose files could not be copied goes whole (copy() wrote none): its row
+        // and the transcript copy, which is not keyed to it.
+        await this.deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${child.id}`
+        await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+        throw err
+      }
     }
     const childId = child.id
     // The images the copied events name (#782, #2150), before the events that name them: the
     // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
     // copy every image of every ancestor.
     await this.blobs.copy(id, childId, blobNames(history))
-    // Its workspace files (#2329), so the fork carries on with what the parent had.
-    await this.files.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',

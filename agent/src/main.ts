@@ -304,7 +304,7 @@ const workspace = database
       settings,
       blobs: {
         store: new BackendWorkspaceBlobs(config.backendUrl),
-        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, previousKek?.ok ? previousKek.kek : undefined) } : {}),
+        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { sql: database.sql, previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
       },
     })
   : undefined
@@ -326,6 +326,9 @@ if (database && workspace && workspaceBytesStatus) {
     .then(async (ready) => {
       if (!ready) return
       const status = await workspaceBytesStatus()
+      if (status.store !== 'blobs' && status.unreadable_files) {
+        console.error(`workspace files: ${status.unreadable_files} file(s) in the blob store cannot be read from here: ${status.reason}`)
+      }
       if (status.store === 'refused') {
         console.error(`workspace files: every write is refused, and nothing is kept in plaintext: ${status.reason}`)
         return

@@ -325,8 +325,8 @@ export type WorkspaceBlobs = { store: WorkspaceBlobStore; sealing?: WorkspaceSea
  */
 export type WorkspaceBytesStatus =
   | { store: 'blobs'; backend: string }
-  | { store: 'postgres'; reason: string }
-  | { store: 'refused'; reason: string }
+  | { store: 'postgres'; reason: string; unreadable_files?: number }
+  | { store: 'refused'; reason: string; unreadable_files?: number }
 
 /** A row's bytes as `ai_session_files` takes them: inline, or a blob with its wrapped key. */
 type Placed = { data: Buffer | null; blobKey: string | null; keySealed: Buffer | null; kekId: string | null }
@@ -383,16 +383,22 @@ export class SessionFiles {
 
   /** Where a write's bytes go now, and why not when nowhere; never throws. */
   async bytesStatus(): Promise<WorkspaceBytesStatus> {
-    if (!this.blobs) return { store: 'postgres', reason: 'no blob store is configured' }
+    let status: WorkspaceBytesStatus
     try {
       const target = await this.#target()
-      if (!target) return { store: 'postgres', reason: 'the backend has no blob store (store_backend local)' }
-      await target.store.probe()
-      return { store: 'blobs', backend: await target.store.backend() }
+      if (target) {
+        await target.store.probe()
+        return { store: 'blobs', backend: await target.store.backend() }
+      }
+      status = { store: 'postgres', reason: this.blobs ? 'the backend has no blob store (store_backend local)' : 'no blob store is configured' }
     } catch (err) {
       const reason = err instanceof WorkspaceError || err instanceof WorkspaceBlobError ? err.message : 'the blob store could not be checked'
-      return { store: 'refused', reason: reason.replace(/; nothing was written$/, '') }
+      status = { store: 'refused', reason: reason.replace(/; nothing was written$/, '') }
     }
+    // Files already in the blob store cannot be read from here (after a switch back to
+    // store_backend local the backend's URL route answers 404): say how many.
+    const [row] = await this.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_session_files WHERE blob_key IS NOT NULL`
+    return row && row.n > 0 ? { ...status, unreadable_files: row.n } : status
   }
 
   /** The plaintext of a blob row, a segment at a time. */
@@ -402,6 +408,10 @@ export class SessionFiles {
       const fileKey = await blobs.sealing.unwrap(ws, path, stored.blob_key!, stored.key_sealed!, stored.key_kek_id)
       try {
         yield* openFile(fileKey, blobs.store.get(stored.blob_key!), digest)
+      } catch (err) {
+        // The backend cannot give the blob (store_backend switched back to local, or it is down).
+        if (err instanceof WorkspaceBlobError) throw new WorkspaceError('unavailable', `${path} is in the blob store and cannot be read now: ${err.message}`)
+        throw err
       } finally {
         fileKey.fill(0)
       }
@@ -650,35 +660,44 @@ export class SessionFiles {
 
   /**
    * A fork's copy of its parent's files. A blob's row names the parent's blob, its file
-   * key wrapped again for the child: no bytes are copied (copy-on-write, #4212).
+   * key wrapped again for the child: no bytes are copied (copy-on-write, #4212). All or
+   * nothing: every file key is wrapped for the child first (what can fail: no KEK here, a
+   * forgotten parent), then every row is written in one transaction.
    */
   async copy(fromSession: string, toSession: string): Promise<void> {
+    const from = `session:${fromSession}`
     const to = `session:${toSession}`
-    await this.sql`
-      INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size, source, created_at, updated_at)
-      SELECT ${to}, ${toSession}, path, media_type, data, sha256, size, source, created_at, updated_at
-      FROM ai_session_files WHERE workspace = ${`session:${fromSession}`} AND data IS NOT NULL
-      ON CONFLICT (workspace, path) DO NOTHING`
     const rows = await this.sql<(Row & Stored)[]>`
       SELECT path, media_type, size, sha256, source, created_at, updated_at, NULL::bytea AS data, blob_key, key_sealed, key_kek_id
-      FROM ai_session_files WHERE workspace = ${`session:${fromSession}`} AND blob_key IS NOT NULL`
-    if (rows.length === 0) return
-    const { sealing } = this.#sealing()
-    const parent: WorkspaceRef = { kind: 'session', sessionId: fromSession }
-    const child: WorkspaceRef = { kind: 'session', sessionId: toSession }
-    for (const row of rows) {
-      const fileKey = await sealing.unwrap(parent, row.path, row.blob_key!, row.key_sealed!, null)
-      try {
-        const { sealed } = await sealing.wrap(child, row.path, row.blob_key!, fileKey)
-        await this.sql`
-          INSERT INTO ai_session_files (workspace, session_id, path, media_type, blob_key, key_sealed, sha256, size, source, created_at, updated_at)
-          VALUES (${to}, ${toSession}, ${row.path}, ${row.media_type}, ${row.blob_key}, ${sealed}, ${row.sha256}, ${row.size},
-                  ${row.source === null ? null : this.sql.json(row.source)}, ${row.created_at}, ${row.updated_at})
-          ON CONFLICT (workspace, path) DO NOTHING`
-      } finally {
-        fileKey.fill(0)
+      FROM ai_session_files WHERE workspace = ${from} AND blob_key IS NOT NULL`
+    const wrapped: { row: Row & Stored; sealed: Buffer }[] = []
+    if (rows.length > 0) {
+      const { sealing } = this.#sealing()
+      const parent: WorkspaceRef = { kind: 'session', sessionId: fromSession }
+      const child: WorkspaceRef = { kind: 'session', sessionId: toSession }
+      for (const row of rows) {
+        const fileKey = await sealing.unwrap(parent, row.path, row.blob_key!, row.key_sealed!, null)
+        try {
+          wrapped.push({ row, sealed: (await sealing.wrap(child, row.path, row.blob_key!, fileKey)).sealed })
+        } finally {
+          fileKey.fill(0)
+        }
       }
     }
+    await this.sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size, source, created_at, updated_at)
+        SELECT ${to}, ${toSession}, path, media_type, data, sha256, size, source, created_at, updated_at
+        FROM ai_session_files WHERE workspace = ${from} AND data IS NOT NULL
+        ON CONFLICT (workspace, path) DO NOTHING`
+      for (const { row, sealed } of wrapped) {
+        await tx`
+          INSERT INTO ai_session_files (workspace, session_id, path, media_type, blob_key, key_sealed, sha256, size, source, created_at, updated_at)
+          VALUES (${to}, ${toSession}, ${row.path}, ${row.media_type}, ${row.blob_key}, ${sealed}, ${row.sha256}, ${row.size},
+                  ${row.source === null ? null : tx.json(row.source)}, ${row.created_at}, ${row.updated_at})
+          ON CONFLICT (workspace, path) DO NOTHING`
+      }
+    })
   }
 
   /**

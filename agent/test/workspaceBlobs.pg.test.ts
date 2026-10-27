@@ -127,7 +127,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       blobs: {
         // No cache: a test changes what the backend says between calls.
         store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }),
-        ...(k ? { sealing: new WorkspaceSealing(testPayloadKeys(db.sql), k) } : {}),
+        ...(k ? { sealing: new WorkspaceSealing(testPayloadKeys(db.sql), k, { sql: db.sql }) } : {}),
       },
     })
   const row = async (path: string, workspace = `session:${sessionId}`) => {
@@ -154,7 +154,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
         created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (key, holder_kind, holder_id))`
     backend = new FakeBackend()
     await backend.start()
-    sealing = new WorkspaceSealing(testPayloadKeys(db.sql), kek)
+    sealing = new WorkspaceSealing(testPayloadKeys(db.sql), kek, { sql: db.sql })
     files = filesWith({ fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB })
     inline = new SessionFiles(db.sql, { limits: { fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB } })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
@@ -346,6 +346,48 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
 
     it('says the bytes go to the blob store when every part is there', async () => {
       expect(await files.bytesStatus()).toEqual({ store: 'blobs', backend: 's3' })
+    })
+  })
+  describe('review of e19ae8ff6', () => {
+    it('leaves no half-made child when a fork cannot copy its files', async () => {
+      await files.write(ws, 'a.txt', Buffer.from('sealed'))
+      await inline.write(ws, 'b.txt', Buffer.from('inline'))
+      // An agent that cannot open the parent's file key (no KEK) cannot fork its files.
+      const keyless = filesWith({ fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB }, null)
+      const forking = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner, workspace: keyless })
+      await forking.store.append({ projectKey: 'p', sessionId }, [{ type: 'user', uuid: 'u1', message: {} }])
+      const sessionsBefore = await db.sql`SELECT id FROM ai_sessions`
+      await expect(forking.fork(sessionId, browser)).rejects.toMatchObject({ code: 'unavailable' })
+      expect(await db.sql`SELECT id FROM ai_sessions`).toHaveLength(sessionsBefore.length)
+      const workspaces = await db.sql<{ workspace: string }[]>`SELECT DISTINCT workspace FROM ai_session_files`
+      expect(workspaces.map((w) => w.workspace)).toEqual([`session:${sessionId}`])
+      const entries = await db.sql<{ session_id: string }[]>`SELECT DISTINCT session_id::text FROM ai_session_entries`
+      expect(entries.map((e) => e.session_id)).toEqual([sessionId])
+    })
+
+    it("never makes a payload key for a session that is gone or being forgotten", async () => {
+      const subject = `session-${sessionId}`
+      // forgetSubject has deleted the key (and left its tombstone) but not yet the rows.
+      await forgetSubject({ sql: db.sql }, subject).catch(() => undefined)
+      await expect(files.write(ws, 'late.txt', Buffer.from('late'))).rejects.toThrow()
+      expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
+      // A session deleted another way (no tombstone): no key either.
+      const { session: other } = await m.start(browser, { origin: 'chat' })
+      await db.sql`DELETE FROM ai_payload_keys WHERE subject = ${`session-${other.id}`}`
+      await db.sql`DELETE FROM ai_sessions WHERE id = ${other.id}`
+      await expect(files.write({ kind: 'session', sessionId: other.id }, 'late.txt', Buffer.from('late'))).rejects.toThrow()
+      expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${`session-${other.id}`}`).toHaveLength(0)
+    })
+
+    it('says how many files cannot be read after a switch back to store_backend local', async () => {
+      await files.write(ws, 'a.txt', Buffer.from('sealed'))
+      await files.write(ws, 'b.txt', Buffer.from('sealed too'))
+      backend.storeBackend = 'local'
+      expect(await files.bytesStatus()).toMatchObject({ store: 'postgres', unreadable_files: 2 })
+      await expect(files.read(ws, 'a.txt')).rejects.toMatchObject({ code: 'unavailable' })
+      // New writes are kept in Postgres and read back.
+      await files.write(ws, 'c.txt', Buffer.from('inline'))
+      expect((await files.read(ws, 'c.txt'))?.bytes.toString()).toBe('inline')
     })
   })
 })
