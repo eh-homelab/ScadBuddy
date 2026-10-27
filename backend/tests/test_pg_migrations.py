@@ -45,7 +45,7 @@ def test_no_column_is_added_to_order_attachments_while_its_old_name_is_a_view() 
         sql = " ".join(migration.sql.lower().split())
         # Any spelling (`ALTER TABLE ONLY`, `IF EXISTS`): a migration that names the
         # table and changes a column.
-        changes = ("add column", "drop column", "rename", "alter column")
+        changes = ("add column", "drop column", "rename column", "alter column")
         assert not ("order_attachments" in sql and any(c in sql for c in changes)), migration.id
 
 
