@@ -22,7 +22,7 @@ from scadbuddy.core.events import Event, EventBus, PrinterEvent
 from scadbuddy.core.tracing import span
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.models import LanLink, PrinterCreate
+from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
@@ -260,6 +260,36 @@ async def test_the_sweep_watches_every_lan_printer(
         assert described.status is not None and described.status.name == "RUNNING"
         with pytest.raises(RPCError):
             await client.get_workflow_handle(watch_id(other.id)).describe()
+
+
+async def test_the_sweep_stops_watching_a_row_a_virtual_printer_adopted(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #4770: prod's hand-made row keeps its LAN link once a queue-mode virtual
+    printer adopts it (#4747), but it is no printer, so it is not watched."""
+    FakeLan([]).install(monkeypatch)
+    pid = linked(printers)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    async with serving(client, queue, WatchActivities(printers, reports, None)):
+        assert await ensure_watches(printers, client, queue) == [pid]
+        printers.upsert_virtual(
+            1,
+            serial=SERIAL,
+            name="H2C Virtual",
+            model="H2C",
+            mode="queue",
+            forwards_to=None,
+            view=BambuddyView(seen_at=datetime.now(UTC), name="H2C Virtual"),
+        )
+        assert printers.require(pid).kind == "bambuddy_virtual"
+        assert printers.require(pid).lan_host == "10.0.0.9"
+
+        assert await ensure_watches(printers, client, queue) == []
+        result = await client.get_workflow_handle(watch_id(pid)).result()
+        assert result == "stopped"
 
 
 async def _running(client: Client, printer_id: str) -> bool:

@@ -661,6 +661,11 @@ class PrinterStore:
         model is filled only when it has none (#4439 "Refresh model/name only if the
         user hasn't renamed it")."""
         with self.pool.connection() as conn, conn.transaction():
+            # Under the row's lock, as `link_lan`: a rename landing between the read and
+            # the write would otherwise be reverted.
+            key = printer_uuid(printer_id)
+            if key is not None:
+                conn.execute("SELECT 1 FROM printers WHERE id = %s FOR UPDATE", (key,))
             row = self._one(conn, "id", printer_id)
             if row is None:
                 raise PrinterNotFoundError(printer_id)

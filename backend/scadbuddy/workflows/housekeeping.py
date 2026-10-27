@@ -149,10 +149,10 @@ QUOTE_HOLDS_SWEEP = "housekeeping_reap_quote_holds"
 QUOTE_HOLDS_PATCH = "housekeeping-reap-quote-holds"
 #: #4439, #4747: the Bambuddy printer sync (`printers/bambuddy_sync.py`): import and link
 #: Bambuddy's printers and virtual printers, and fill an empty LAN link (a failed probe is
-#: tried again on the next pass). Last, behind its own patch; on the prune Schedule too,
-#: so a printer added in Bambuddy, or a probe that failed, is settled within
-#: `PRUNE_INTERVAL`. Runs in the API's process (the ``library`` worker), so the access
-#: code it reads from Bambuddy never crosses a process or a payload.
+#: tried again on the next pass). Last, behind its own patch; on the sweeps' Schedule
+#: only, since it calls Bambuddy (not in `PRUNE_SWEEPS`). Runs in the API's process (the
+#: ``library`` worker), so the access code it reads from Bambuddy never crosses a process
+#: or a payload.
 PRINTER_SYNC_SWEEP = "housekeeping_sync_bambuddy_printers"
 PRINTER_SYNC_PATCH = "housekeeping-sync-bambuddy-printers"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.

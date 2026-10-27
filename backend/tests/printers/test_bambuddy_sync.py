@@ -276,6 +276,39 @@ async def test_a_link_that_followed_bambuddy_moves_with_its_address(
     assert printers.probes == [("192.168.1.77", SERIAL, CODE)]  # the stored code first
 
 
+async def test_a_failed_move_is_tried_again_on_the_next_sync(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """Review #4770: the failed sync already stored Bambuddy's new address in the view,
+    so only the recorded failure says the link still follows it."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+    printers.answer = False
+    failed = await run(printers, moved)
+    assert failed.entries[0].lan == "failed"
+    (row,) = store.list()
+    assert row.lan_host == "192.168.1.10" and row.lan_sync_error is not None
+
+    printers.answer = True
+    printers.probes.clear()
+    again = await run(printers, moved)
+
+    assert again.entries[0].lan == "relinked"
+    (row,) = store.list()
+    assert row.lan_host == "192.168.1.77" and row.lan_sync_error is None
+    assert printers.probes[0] == ("192.168.1.77", SERIAL, CODE)
+
+
+async def test_a_reason_a_later_sync_no_longer_has_is_cleared(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: None}))
+    (row,) = store.list()
+    assert row.lan_sync_error is not None  # the code withheld
+    await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)], codes={1: None}))
+    assert store.require(row.id).lan_sync_error is None
+
+
 async def test_names_follow_bambuddy_only_until_renamed(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
