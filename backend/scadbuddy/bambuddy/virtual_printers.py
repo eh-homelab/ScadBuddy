@@ -25,7 +25,6 @@ lines 236-240), so a code with a target is refused."""
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 from typing import Any
@@ -161,11 +160,11 @@ def seal_context(*, vp_id: int | None, idempotency_key: str) -> str:
 def seal_access_code(kek: Kek, code: str, context: str) -> str:
     """The code sealed for the operation's request: AES-GCM under a key derived from
     the KEK, a random IV, ``context`` as the AAD."""
-    return base64.b64encode(seal_bytes(access_code_key(kek), code.encode(), context)).decode()
+    return seal_bytes(access_code_key(kek), code.encode(), context).hex()
 
 
 def open_access_code(kek: Kek, sealed: str, context: str) -> str:
-    return open_bytes(access_code_key(kek), base64.b64decode(sealed), context).decode()
+    return open_bytes(access_code_key(kek), bytes.fromhex(sealed), context).decode()
 
 
 def access_code_mac(kek: Kek, code: str, context: str, idempotency_key: str) -> str:
