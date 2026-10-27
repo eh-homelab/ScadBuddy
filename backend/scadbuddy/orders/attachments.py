@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders.models import AttachmentKind
 from scadbuddy.store import BlobStore
+from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content_models import BlobScope
 
 #: How many leading bytes `sniff` reads.
@@ -146,12 +147,21 @@ async def keep(blobs: BlobStore, claims: ClaimStore, claim: str, sha256: str) ->
     is: a publish over it from a directory fetched before it existed (a cache that
     evicted it, another replica) would be refused as stale. Asking costs no download
     (a video runs to a gigabyte, #4677): `BlobStore.claim` touches the blob, so the
-    sweeps keep it until the row's hold is committed, as `_place`'s `dir_for` does."""
+    sweeps keep it until the row's hold is committed, as `_place`'s `dir_for` does.
+
+    Otherwise the blob is written from nothing, so it is published against no row
+    (`publish_fresh`), never against a marker this cache kept from a stored copy whose
+    object was since lost (#4785). Two runs of the same bytes at once: the one that
+    loses the swap finds the other's blob, which is the same bytes."""
     key = blob_key(sha256)
     if await blobs.claim(key):
         return key
     await asyncio.to_thread(_place, blobs, key, claims, claim)
-    await blobs.publish(key, scope=BlobScope())
+    try:
+        await blobs.publish_fresh(key, scope=BlobScope(), expected=None)
+    except StaleBlobError:
+        if not await blobs.claim(key):
+            raise
     return key
 
 

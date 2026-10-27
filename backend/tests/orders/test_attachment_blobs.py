@@ -93,6 +93,13 @@ async def test_bytes_whose_stored_object_was_lost_are_stored_again(
     assert await keep(b, claims, sha, sha) == key
     path = await blob_path(replica(tmp_path / "c", content), key)
     assert path is not None and path.read_bytes() == VIDEO
+    # And on the replica whose cache still holds the lost blob's directory.
+    lost = content.index.get(key)
+    assert lost is not None
+    await content.backend.remove(lost.ref.backend_id)
+    assert await keep(a, claims, sha, sha) == key
+    path = await blob_path(replica(tmp_path / "d", content), key)
+    assert path is not None and path.read_bytes() == VIDEO
 
 
 async def test_a_local_blob_left_half_written_is_written_again(tmp_path: Path) -> None:

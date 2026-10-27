@@ -491,7 +491,9 @@ and no reaper is needed. `subject` has no foreign key, so deleting a draft item 
 its attachments and their holds in the same transaction, each on the audit line. Nothing
 cascades a hold, so `order_id`'s foreign key is `ON DELETE RESTRICT` (#4678): an order's
 delete, which no route does yet, must first remove each attachment through
-`OrderStore.delete_attachment`. Adding, captioning, re-roling and removing are records,
+`OrderStore.delete_attachment`. That holds for a customer's delete too: its
+`ON DELETE CASCADE` to `orders` now fails for any order with a file, so such a route
+removes those files first. Adding, captioning, re-roling and removing are records,
 not steps: allowed in every state, on hold and after close, and each is on the audit
 line (`attachment.added`, `attachment.caption`, `attachment.role`,
 `attachment.removed`). Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE
