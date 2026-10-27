@@ -791,6 +791,26 @@ describe('SettingsPage sections (#322)', () => {
     put.mockRestore()
   })
 
+  it('says it could not confirm the settings when the read after a lost answer fails too (#4818 review)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    // The reset is applied but its answer is lost to a proxy 502, and the read that would
+    // confirm what the server holds fails as well (still offline): nothing reads again.
+    const save = api.putSettings.bind(api)
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await save(body)
+      throw new ApiError(502, 'Bad gateway.')
+    })
+    const get = vi.spyOn(api, 'getSettings').mockRejectedValue(new TypeError('Failed to fetch'))
+    await user.click(
+      within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }),
+    )
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    expect(await screen.findByText(/Bad gateway\. Could not confirm what the server stored\./)).toBeInTheDocument()
+    get.mockRestore()
+    put.mockRestore()
+  })
+
   it('discards one section’s edits', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)
