@@ -141,7 +141,8 @@ def test_a_render_takes_an_uploaded_id(client: TestClient, paths: DataPaths) -> 
     )
     assert accepted.status_code == 202, accepted.text
     job = wait_for_job(client, accepted.json()["job_id"])
-    assert job["params"] == {"label": asset["id"]}
+    # #4774: the omitted `width` is filled at its default.
+    assert job["params"] == {"width": 10, "label": asset["id"]}
 
     output = client.post(
         f"/api/v1/models/{MODEL_SLUG}/outputs",
@@ -150,9 +151,9 @@ def test_a_render_takes_an_uploaded_id(client: TestClient, paths: DataPaths) -> 
     ).json()
     # The value IS the asset's hash, so the output's record and its 3MF name the bytes.
     directory = paths.output_dir(MODEL_SLUG, output["id"])
-    assert json.loads((directory / "params.json").read_text()) == {"label": asset["id"]}
+    assert json.loads((directory / "params.json").read_text()) == job["params"]
     provenance = read_provenance(directory / "model.3mf")
-    assert provenance is not None and provenance.params == {"label": asset["id"]}
+    assert provenance is not None and provenance.params == job["params"]
     # And the asset outlives the job, for a re-render or "Customize this version".
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset['id']}").status_code == 200
 
@@ -316,7 +317,8 @@ def test_a_render_takes_a_sample_by_its_bare_name(client: TestClient, samples: P
     assert accepted.status_code == 202, accepted.text
     job = wait_for_job(client, accepted.json()["job_id"])
     assert job["status"] == "done"
-    assert job["params"] == {"label": "sample-cat.svg"}
+    # #4774: the omitted `width` is filled at its default.
+    assert job["params"] == {"width": 10, "label": "sample-cat.svg"}
 
 
 @pytest.mark.parametrize(

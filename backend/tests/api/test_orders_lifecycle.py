@@ -74,7 +74,8 @@ def test_the_happy_path_through_the_api(client: TestClient) -> None:
     reference = item["reference"]
     assert reference["slug"] == SLUG
     assert len(reference["commit"]) == 40
-    assert reference["inputs"]["params"] == {"width": 12}
+    # #4774: the output's render filled the omitted `label` at its default.
+    assert reference["inputs"]["params"] == {"width": 12, "label": "hi"}
     assert (item["status"], item["quantity"], item["output_id"]) == ("draft", 2, output_id)
     assert item["colours"] == [{"slot": 0, "colour": "#FF0000", "filament_id": None}]
     assert item["title"] == SLUG
@@ -168,7 +169,8 @@ def test_an_item_by_hand_and_its_edits(client: TestClient) -> None:
     )
     assert repinned.status_code == 200, repinned.text
     assert repinned.json()["status"] == "draft"
-    assert repinned.json()["reference"]["inputs"]["params"] == {"width": 8}
+    # #4774: a hand-made reference takes the commit's defaults for what it omits.
+    assert repinned.json()["reference"]["inputs"]["params"] == {"width": 8, "label": "hi"}
     assert client.get(f"/api/v1/orders/{order['id']}").json()["order"]["status"] == "draft"
     quantity = client.patch(
         f"/api/v1/orders/{order['id']}/items/{item['id']}", json={"quantity": 3}
@@ -211,7 +213,11 @@ def test_an_item_at_the_listed_revision_with_default_inputs(client: TestClient) 
         quantity=2,
     )
     assert item["reference"]["commit"] == commit
-    assert item["reference"]["inputs"] == {"params": {}, "v": listed["inputs_version"]}
+    # #4774: an item stores its inputs at the commit's defaults, as its key hashes them.
+    assert item["reference"]["inputs"] == {
+        "params": {"width": 10, "label": "hi"},
+        "v": listed["inputs_version"],
+    }
     assert item["title"] == listed["name"]
     assert item["output_id"] is None
     assert item["colours"] == []

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
+import os
 import re
 import shutil
 import tarfile
+import threading
+import time
 import zipfile
+from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,6 +20,7 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
@@ -56,7 +64,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["slug"] == model
     assert body["name"] == "First Try"
     assert body["job_id"] == job_id
-    assert body["params"] == {"width": 12}
+    assert body["params"] == {"width": 12, "label": "hi"}
     assert body["colors"] == ["#FF0000"]
     assert body["has_thumbnail"] is False
     # Reserved for the Bambuddy epic.
@@ -75,7 +83,10 @@ def test_persisting_a_job_writes_the_documented_layout(
         "preview.glb",
         "record.json",
     ]
-    assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {"width": 12}
+    assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {
+        "width": 12,
+        "label": "hi",
+    }
 
 
 @pytest.mark.requires_postgres
@@ -241,7 +252,6 @@ def test_a_new_output_lists_with_a_thumbnail_when_previews_are_on(
     assert [o["has_thumbnail"] for o in listed if o["id"] == created["id"]] == [True]
 
 
-@pytest.mark.requires_postgres
 def test_an_upload_replaces_a_drawn_thumbnail(client: TestClient, model: str) -> None:
     _drawing_thumbnails(client)
     created = client.post(
@@ -273,6 +283,94 @@ def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, 
     assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is False
     assert store.thumbnail_path(created["id"]).read_bytes() == PNG_BYTES
     assert list(store.thumbnail_path(created["id"]).parent.glob(".thumbnail.png.*")) == []
+
+
+def test_an_upload_replaces_a_thumbnail_whole(client: TestClient, model: str) -> None:
+    """A reader that opened the old file keeps reading it whole: the upload is put in
+    place by a rename, never written over the file a reader may hold."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    drawn = b"\x89PNG\r\n\x1a\ndrawn"
+    assert store.write_drawn_thumbnail(created["id"], drawn) is True
+    thumbnail = store.thumbnail_path(created["id"])
+    held = thumbnail.with_name("held.png")
+    os.link(thumbnail, held)
+
+    store.write_thumbnail(created["id"], PNG_BYTES)
+
+    assert thumbnail.read_bytes() == PNG_BYTES
+    assert held.read_bytes() == drawn
+    assert list(thumbnail.parent.glob(".thumbnail.png.*")) == []
+
+
+def _counting_draws(
+    monkeypatch: pytest.MonkeyPatch, draw: Callable[..., bytes | None]
+) -> list[str]:
+    calls: list[str] = []
+
+    def counted(glb: Path, *args: Any) -> bytes | None:
+        calls.append(glb.parent.name)
+        return draw(glb, *args)
+
+    monkeypatch.setattr(outputs_api, "draw_view", counted)
+    return calls
+
+
+def test_an_output_with_nothing_to_draw_shows_no_thumbnail(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    calls = _counting_draws(monkeypatch, lambda *_: None)
+
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    # Remembered: listed with no thumbnail, and not drawn again on the next read.
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    assert calls == [created["id"]]
+
+
+def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.config = dataclasses.replace(state.config, render_timeout=0.2)
+    release = threading.Event()
+
+    def stuck(*_: Any) -> bytes | None:
+        release.wait(30)
+        return None
+
+    calls = _counting_draws(monkeypatch, stuck)
+    slots: asyncio.Semaphore = state.outputs.thumbnail_draws
+    free = slots._value
+
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 503
+    # The thread still runs, so it still holds its slot.
+    assert slots._value == free - 1
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    assert calls == [created["id"]]
+
+    release.set()
+    deadline = time.monotonic() + 10
+    while slots._value != free and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert slots._value == free
 
 
 def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str) -> None:
@@ -327,7 +425,7 @@ def test_every_output_records_its_model_version_and_stamps_the_3mf(
         model=model,
         version=expected,
         output=body["id"],
-        params={"width": 12},
+        params={"width": 12, "label": "hi"},
         edit_url=f"https://scad.test/edit/{body['id']}",
     )
 
@@ -404,8 +502,8 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "output_id": created["id"],
         "slug": model,
         "name": "Reagan",
-        "params": {"width": 12},
-        "inputs": {"params": {"width": 12}, "v": 0},
+        "params": {"width": 12, "label": "hi"},
+        "inputs": {"params": {"width": 12, "label": "hi"}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
         "arranged_from": [],
@@ -430,8 +528,8 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "output_id": created["id"],
         "slug": model,
         "name": None,
-        "params": {"width": 12},
-        "inputs": {"params": {"width": 12}, "v": 0},
+        "params": {"width": 12, "label": "hi"},
+        "inputs": {"params": {"width": 12, "label": "hi"}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
         "arranged_from": [],
@@ -654,7 +752,9 @@ def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, mode
     )
     assert created.status_code == 201, created.text
     output = created.json()
-    assert output["inputs"] == {**sent, "v": 0}
+    # #4774: the job filled the omitted `label`, and a save that leaves it out (an
+    # agent's) still names the job's parameters: the output records them whole.
+    assert output["inputs"] == {"params": {"width": 12, "label": "hi"}, "ui": {"tab": "b"}, "v": 0}
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == output["inputs"]
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == output["inputs"]
 
@@ -666,6 +766,9 @@ def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, mode
         # Type as well as value, as the store checks them: 12.0 is not 12, True is not 1.
         ({"width": 12}, {"width": 12.0}),
         ({"width": 1}, {"width": True}),
+        # #4774: the job filled `label` at "hi"; filling the save's own omissions does
+        # not make another `label` agree.
+        ({"width": 12}, {"width": 12, "label": "bye"}),
         # A job that rendered the defaults did not render a width.
         ({}, {"width": 12}),
     ],
@@ -737,7 +840,7 @@ def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
     ).json()
     inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
     inputs_path.write_text("{not json", encoding="utf-8")
-    expected = {"params": {"width": 12}, "v": 0}
+    expected = {"params": {"width": 12, "label": "hi"}, "v": 0}
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
 
@@ -747,7 +850,7 @@ def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, mod
     output = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     ).json()
-    assert output["inputs"] == {"params": {"width": 12}, "ui": {"tab": "a"}, "v": 0}
+    assert output["inputs"] == {"params": {"width": 12, "label": "hi"}, "ui": {"tab": "a"}, "v": 0}
 
 
 def test_an_output_from_before_inputs_reads_as_params_v0(
@@ -759,11 +862,11 @@ def test_an_output_from_before_inputs_reads_as_params_v0(
     ).json()
     (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == {
-        "params": {"width": 12},
+        "params": {"width": 12, "label": "hi"},
         "v": 0,
     }
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == {
-        "params": {"width": 12},
+        "params": {"width": 12, "label": "hi"},
         "v": 0,
     }
 
@@ -784,11 +887,15 @@ def test_an_output_from_before_inputs_reads_its_params_once_per_request(
         return params(self, output_id)
 
     monkeypatch.setattr(OutputStore, "params", counting)
-    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {"width": 12}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {
+        "width": 12,
+        "label": "hi",
+    }
     assert reads == [output["id"]]
     reads.clear()
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"]["params"] == {
-        "width": 12
+        "width": 12,
+        "label": "hi",
     }
     assert reads == [output["id"]]
 
