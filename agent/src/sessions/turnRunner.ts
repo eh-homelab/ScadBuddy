@@ -12,7 +12,7 @@ import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
-import { BUILTIN_SOURCES } from '../access/model.js'
+import { BUILTIN_SOURCES, type ToolAccess } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
 import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
 import type { RiskTier, TierResolver } from '../harness/permissions.js'
@@ -100,6 +100,8 @@ export type FingerprintParts = {
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
+  /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
+  httpTier: ToolAccess | null
   builtinTools: string[]
   /** The package built-ins the session serves in place of Claude Code's (#2684): background ones and WebFetch. */
   servedBuiltins: string[]
@@ -211,7 +213,7 @@ export class TurnRunner {
     maxTurns: 'spawn', // the session row's cap, fixed for the session (fingerprint rule)
     maxBudgetUsd: 'spawn', // what is left of the budget at spawn: its own reuse check (budget rule)
     maxRetries: 'transientRetries', // the fallback's bound on Claude Code's retries, set per attempt (warmTurn.ts)
-    tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers`
+    tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers` (http_request's: `httpTier`)
     builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
     approvalGate: 'slot',
     prepareApproval: 'tiers', // bound to the principal, as `mcpServers` is (#4442)
@@ -592,6 +594,7 @@ export class TurnRunner {
         disabledTools: [...(builtIn?.disallowed ?? [])],
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
+        httpTier: httpAccess?.access ?? null,
         builtinTools: run.builtinTools ?? [],
         servedBuiltins: served,
         backgroundTasks: this.deps.background !== undefined,

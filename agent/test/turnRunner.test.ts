@@ -88,6 +88,7 @@ describe('TurnRunner', () => {
     ["a plugin's disabled tools", { pluginDisabledTools: ['recall'] }, 'plugins'],
     ['a raised built-in tier', { raisedTiers: { get_model: 'outward' } }, 'raisedTiers'],
     ['the http_request setting', { httpRequest: false }, 'httpRequest'],
+    ["http_request's tier (#2171)", { access: [{ source: 'builtin:http', item: 'http_request', access: 'outward', updated_by: 'test' }] }, 'httpTier'],
     ["a package's allow_refused approval", { allowRefused: true }, 'allowedPackageHashes'],
     ['the Hindsight recall query cap', { recallMaxQueryChars: 12 }, 'recallMaxQueryChars'],
   ])('fingerprints %s', async (_what, changed, field) => {

@@ -358,6 +358,12 @@ describe('turn tools in a durable session', () => {
     const outward = await run([row(HTTP_TOOL, 'outward')])
     expect(outward.tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)).toMatchObject({ may_park: true, tier: 'outward' })
     expect(await outward.tier({ url: 'http://example.test/' })).toEqual({ tier: 'outward' })
+    // Lowered to read or write it can never park; at its method's tier it may.
+    for (const lowered of ['read', 'write']) {
+      const listed = (await run([row(HTTP_TOOL, lowered)])).tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)
+      expect(listed, lowered).toMatchObject({ may_park: false, tier: lowered })
+    }
+    expect((await run([])).tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)?.may_park).toBe(true)
   })
 
   it('runs a read call and returns its text, with an audit row', async () => {
