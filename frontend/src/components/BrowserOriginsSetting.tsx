@@ -140,7 +140,7 @@ export function BrowserOriginsSetting() {
         </SaveFooter>
       </form>
       <CardContent className="border-t py-4">
-        <h3 className="text-sm font-medium">Approved in chats</h3>
+        <h5 className="text-sm font-medium">Approved in chats</h5>
         {current.approved.length === 0 ? (
           <p className="mt-1 text-xs text-muted-foreground">None yet. Sites you allow for one chat are listed here.</p>
         ) : (

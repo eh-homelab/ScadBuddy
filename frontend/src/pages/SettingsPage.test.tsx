@@ -76,6 +76,22 @@ describe('SettingsPage, every area at once (#2171)', () => {
     })
   })
 
+  it('nests every heading inside a section below the section’s own h3', async () => {
+    renderPage(<SettingsPage />, { route: '/settings/general' })
+    await seeded()
+    // Once the agent's sections have loaded too: their cards bring headings of their own.
+    await waitFor(() => expect(document.getElementById('ai-audit-heading')).not.toBeNull())
+    await waitFor(() => expect(document.getElementById('ai-credential-heading')).not.toBeNull())
+    const misplaced: string[] = []
+    for (const { id } of SECTION_REGISTRY) {
+      const section = document.getElementById(id)
+      for (const heading of section?.querySelectorAll('h1, h2, h3') ?? []) {
+        if (heading.id !== `${id}-heading`) misplaced.push(`${id}: ${heading.tagName} ${heading.textContent}`)
+      }
+    }
+    expect(misplaced).toEqual([])
+  })
+
   it('names no two regions alike', async () => {
     renderPage(<SettingsPage />, { route: '/settings/general' })
     await seeded()
