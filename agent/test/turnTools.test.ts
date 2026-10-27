@@ -340,17 +340,18 @@ describe('turn tools in a durable session', () => {
 
   it("takes http_request's switch and tier from ai_access (#2171): off hides it, an item set to outward parks a GET", async () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
-    const run = async (rows: AccessRow[]) => {
+    const run = async (initial: AccessRow[]) => {
+      const store = memoryAccess(initial)
       const deps: TurnToolsDeps = {
         sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-        servers: turnServers({ httpRequest: { saveRoot, sql: noDatabase() as never }, access: new AccessResolver(memoryAccess(rows).access) }),
+        servers: turnServers({ httpRequest: { saveRoot, sql: noDatabase() as never }, access: new AccessResolver(store.access) }),
         approvals: { approved: async () => false },
       }
       const activities = turnToolActivities(deps)
       const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
       const tier = (input: unknown) =>
         env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
-      return { names: tools.map((t) => t.name), tools, tier }
+      return { names: tools.map((t) => t.name), tools, tier, rows: store.rows }
     }
     const row = (item: string, access: string): AccessRow => ({ source: BUILTIN_SOURCES.http, item, access, updated_by: 'test' })
     expect((await run([row('*', 'off')])).names.filter((n) => n.startsWith(`${HTTP_SERVER}__`))).toEqual([])
@@ -358,10 +359,14 @@ describe('turn tools in a durable session', () => {
     const outward = await run([row(HTTP_TOOL, 'outward')])
     expect(outward.tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)).toMatchObject({ may_park: true, tier: 'outward' })
     expect(await outward.tier({ url: 'http://example.test/' })).toEqual({ tier: 'outward' })
-    // Lowered to read or write it can never park; at its method's tier it may.
+    // Lowered to read or write it is still listed as may_park, so a raise to outward later in
+    // the turn parks the call, as a classic turn would (review M1).
     for (const lowered of ['read', 'write']) {
-      const listed = (await run([row(HTTP_TOOL, lowered)])).tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)
-      expect(listed, lowered).toMatchObject({ may_park: false, tier: lowered })
+      const turn = await run([row(HTTP_TOOL, lowered)])
+      const listed = turn.tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)
+      expect(listed, lowered).toMatchObject({ may_park: true, tier: lowered })
+      turn.rows.splice(0, turn.rows.length, row(HTTP_TOOL, 'outward'))
+      expect(await turn.tier({ url: 'http://example.test/' }), lowered).toEqual({ tier: 'outward' })
     }
     expect((await run([])).tools.find((t) => t.name === `${HTTP_SERVER}__${HTTP_TOOL}`)?.may_park).toBe(true)
   })

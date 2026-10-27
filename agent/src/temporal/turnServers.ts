@@ -261,10 +261,9 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
               }).instance,
           ),
         tierOf: (name, input) => httpTier(name, input) ?? 'outward',
-        // http_request is outward by its method, unless its access is set to read or write;
-        // reading a saved body never is.
-        mayPark: (name) =>
-          name !== HTTP_READ_TOOL_NAME && !(name === HTTP_TOOL_NAME && (fixedHttpTier === 'read' || fixedHttpTier === 'write')),
+        // http_request may park whatever its access at the listing: a raise to outward later in
+        // the turn is asked about, as in a classic turn. Reading a saved body never parks.
+        mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
         // http_request's tier is its method's, unless its access is a tier; reading a saved body is always read.
         fixedTier: (name) => (name === HTTP_READ_TOOL_NAME ? 'read' : name === HTTP_TOOL_NAME ? fixedHttpTier : undefined),
         pinned: true,
