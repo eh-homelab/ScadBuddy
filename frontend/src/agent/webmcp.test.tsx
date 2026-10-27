@@ -37,6 +37,11 @@ afterEach(() => {
   window.localStorage.clear()
 })
 
+/** Lets a sync whose load has already been called run to its end. */
+async function flushMicrotasks() {
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+}
+
 /** What the browser would list now: registered and not yet aborted. */
 function active(): string[] {
   return registered.filter((entry) => !entry.signal?.aborted).map((entry) => entry.name)
@@ -88,8 +93,8 @@ describe('WebMCP', () => {
       // Route changes retry; the same failure is not warned about again.
       const loadsBefore = load.mock.calls.length
       bridge.register({ get_params: () => null }, { label: 'customize' })()
-      await waitFor(() => expect(load.mock.calls.length).toBeGreaterThanOrEqual(loadsBefore + 2))
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      await waitFor(() => expect(load.mock.calls.length).toBe(loadsBefore + 2))
+      await flushMicrotasks()
       expect(warn).toHaveBeenCalledTimes(1)
 
       // A different failure is warned about.
@@ -98,6 +103,35 @@ describe('WebMCP', () => {
       await waitFor(() => expect(warn).toHaveBeenCalledTimes(2))
       expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('catalog-other.js'))
       expect(registered).toEqual([])
+    } finally {
+      disconnect()
+      warn.mockRestore()
+    }
+  })
+
+  it('warns again about the same failure once the tools have registered in between', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let stale = true
+    const load = vi.fn(() =>
+      stale
+        ? Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/catalog-old.js'))
+        : import('./catalog'),
+    )
+    const bridge = new AgentBridge(load)
+    bridge.register({ search: () => [] }, { label: 'page' })
+    setWebMcpEnabled(true)
+    const disconnect = connectWebMcp(bridge)
+    try {
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1))
+
+      stale = false
+      const off = bridge.register({ get_params: () => null }, { label: 'customize' })
+      await waitFor(() => expect(active()).toContain('get_params'))
+
+      stale = true
+      off()
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(2))
+      expect(warn.mock.calls[1]).toEqual(warn.mock.calls[0])
     } finally {
       disconnect()
       warn.mockRestore()
