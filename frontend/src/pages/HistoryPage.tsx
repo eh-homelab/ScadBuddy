@@ -280,13 +280,7 @@ export function HistoryPage() {
           <DialogHeader>
             <DialogTitle>{previewFor ? (previewFor.name ?? shortId(previewFor.id)) : ''}</DialogTitle>
           </DialogHeader>
-          {previewFor && (
-            <img
-              src={api.outputThumbnailUrl(previewFor.id)}
-              alt={`Preview of ${previewFor.name ?? shortId(previewFor.id)}`}
-              className="mx-auto max-h-[70vh] w-auto rounded-lg bg-muted"
-            />
-          )}
+          {previewFor && <LargePreview key={previewFor.id} output={previewFor} />}
         </DialogContent>
       </Dialog>
       <SendDialog
@@ -501,6 +495,20 @@ function OutputLibraries({
   )
 }
 
+/** The preview dialog's picture; "No preview" when it does not load (#4775). */
+function LargePreview({ output }: { output: Output }) {
+  const [broken, setBroken] = useState(false)
+  if (broken) return <p className="py-8 text-center text-sm text-muted-foreground">No preview</p>
+  return (
+    <img
+      src={api.outputThumbnailUrl(output.id)}
+      alt={`Preview of ${output.name ?? shortId(output.id)}`}
+      className="mx-auto max-h-[70vh] w-auto rounded-lg bg-muted"
+      onError={() => setBroken(true)}
+    />
+  )
+}
+
 function OutputRow({
   output,
   schema,
@@ -559,6 +567,8 @@ function OutputRow({
   const arrangedFrom = (output.arranged_from ?? []).length
   // #975 — what each row's buttons are named after, so a list of them can tell the rows apart.
   const label = output.name ?? shortId(output.id)
+  /** #4775 — the thumbnail would not load (the server could not draw one): say so. */
+  const [thumbnailBroken, setThumbnailBroken] = useState(false)
   /** #2288 — the name being typed, while Rename is open. */
   const [naming, setNaming] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
@@ -585,14 +595,19 @@ function OutputRow({
       <Card size="sm" className="px-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         {/* #2288 — every output's picture; an arranged one also shows its plates below. */}
-        {output.has_thumbnail ? (
+        {output.has_thumbnail && !thumbnailBroken ? (
           <button
             type="button"
             onClick={onPreview}
             aria-label={`Preview ${label}`}
             className="shrink-0 rounded-lg border bg-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
-            <img src={api.outputThumbnailUrl(output.id)} alt="" className="h-16 w-16 rounded-lg object-contain" />
+            <img
+              src={api.outputThumbnailUrl(output.id)}
+              alt=""
+              className="h-16 w-16 rounded-lg object-contain"
+              onError={() => setThumbnailBroken(true)}
+            />
           </button>
         ) : (
           <div
