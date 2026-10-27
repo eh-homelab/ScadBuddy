@@ -470,7 +470,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_printer: (input) => setting(registryPrinter(input.printer), { action: 'deleted' }),
   // #4439, #4747: every row the sync made or changed; a dry run touched nothing. #4798: the
   // backend's `changed` covers an `already_linked` row whose name, view or target moved, and a
-  // LAN link moved to Bambuddy's new address (`relinked`) is a change in any case.
+  // LAN link moved to Bambuddy's new address (`relinked`) is a change in any case. A VP whose
+  // target is missing (`target_missing`) keeps its own action, so it is recorded as any other.
   sync_printers_from_bambuddy: (_input, result) => {
     const entries = field(result, 'entries')
     if (field(result, 'dry_run') !== false || !Array.isArray(entries)) return []

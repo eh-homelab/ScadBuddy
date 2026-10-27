@@ -224,6 +224,7 @@ describe('printer registry tools (#3823)', () => {
       }),
     )
     const t = tool('sync_printers_from_bambuddy')
+    expect(t.description).toMatch(/`target_missing`/)
     expect(t.summarize({ dry_run: true })).toMatch(/nothing written/)
     expect(t.summarize({ dry_run: false })).toMatch(/LAN links/)
     const planned = await t.execute({ dry_run: true }, ctx())

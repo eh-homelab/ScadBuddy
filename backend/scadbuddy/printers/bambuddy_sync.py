@@ -14,7 +14,7 @@ one idempotent pass that brings the registry up to what Bambuddy knows.
   else: no log, span, response, activity row or Temporal payload.
 - Each Bambuddy virtual printer gets a ``bambuddy_virtual`` row (Ruling 4), naming the
   printer it forwards to, or none ("any <model>"). One whose Bambuddy target has no row
-  here, and gets none from this pass, is a ``conflict`` (#4797), never "any".
+  here, and gets none from this pass, says ``target_missing`` (#4797), never "any".
 
 The pass runs in the API, from ``POST /printers/sync-bambuddy`` and from the housekeeping
 sweep ``housekeeping_sync_bambuddy_printers`` on the ``library`` worker (the API's own
@@ -120,6 +120,10 @@ class SyncEntry(BaseModel):
     #: Whether this sync wrote the row (its link, name, Bambuddy view, target or LAN
     #: link); never in a dry run (#4798).
     changed: bool = False
+    #: A virtual printer whose Bambuddy target has no row here and gets none from this
+    #: pass (#4797): ``forwards_to`` is NULL, which is not "any <model>". ``action`` keeps
+    #: what happened to the VP's own row; ``reason`` names the target.
+    target_missing: bool = False
 
 
 class PrinterSyncResult(BaseModel):
@@ -307,7 +311,7 @@ async def _sync_printer(
 ) -> SyncEntry:
     store = printers.store
     action, row, reason = plan_printer(printer, rows)
-    planned = row
+    planned = None if row is None else _sync_fields(row)
     entry = SyncEntry(
         kind="physical",
         name=printer.name,
@@ -363,15 +367,25 @@ async def _sync_printer(
     assert row is not None
     entry.printer_id = row.id
     previous_ip = None if row.bambuddy_view is None else row.bambuddy_view.ip_address
-    before = row
     row = await asyncio.to_thread(
         store.record_bambuddy_view, row.id, printer_view(printer, now), model=printer.model
     )
-    entry.lan, entry.lan_reason = await _sync_lan(printers, client, row, printer, previous_ip)
-    if action != "already_linked" or row != before:
+    # What this pass wrote, never `updated_at`: a write by anything else meanwhile (a
+    # watch, a no-op patch) is not the sync's change (#4850 review).
+    wrote = planned is None or _sync_fields(row) != planned
+    if wrote:
         printers.changed(row.id)
-    entry.changed = planned is None or await asyncio.to_thread(store.get, row.id) != planned
+    entry.lan, entry.lan_reason, lan_wrote = await _sync_lan(
+        printers, client, row, printer, previous_ip
+    )
+    entry.changed = wrote or lan_wrote
     return entry
+
+
+def _sync_fields(row: PrinterRow) -> tuple[object, ...]:
+    """The values `_sync_printer` writes before the LAN link, which `_sync_lan` reports
+    on its own."""
+    return (row.id, row.serial, row.name, row.model, row.bambuddy_printer_id, row.bambuddy_view)
 
 
 async def fill_lan_after_link(
@@ -395,14 +409,34 @@ async def _sync_lan(
     row: PrinterRow,
     printer: Printer,
     previous_ip: str | None,
-) -> tuple[LanAction, str | None]:
+) -> tuple[LanAction, str | None, bool]:
     """Fill an empty LAN link from Bambuddy, or move one that followed Bambuddy's
-    address (Ruling 3). Records the outcome's reason on the row (`lan_sync_error`), and
-    clears a reason an earlier sync left when this one has none."""
-    action, reason = await _lan_outcome(printers, client, row, printer, previous_ip)
-    if reason is None and action in ("kept", "none") and row.lan_sync_error is not None:
-        await _set_lan_state(printers, row, None, move_pending=None)
-    return action, reason
+    address (Ruling 3), and whether that wrote the row. The one writer of the row's
+    `lan_sync_error` and `lan_move_pending`, in one write: the outcome's reason, or none
+    when it has none and the link is kept or absent."""
+    action, reason, move_pending = await _lan_outcome(printers, client, row, printer, previous_ip)
+    if action in ("linked", "relinked"):
+        return action, reason, True  # `link_lan` cleared both
+    if reason is not None:
+        error = reason
+    elif action in ("kept", "none"):
+        error = None  # a reason an earlier sync left
+    else:
+        error = row.lan_sync_error
+    pending = row.lan_move_pending if move_pending is None else move_pending
+    if (error, pending) == (row.lan_sync_error, row.lan_move_pending):
+        return action, reason, False
+    with contextlib.suppress(PrinterNotFoundError):
+        await asyncio.to_thread(
+            printers.store.set_lan_sync_error, row.id, error, move_pending=pending
+        )
+    printers.changed(row.id)
+    return action, reason, True
+
+
+#: A LAN outcome, the reason to record, and the `lan_move_pending` to record (``None``:
+#: leave it).
+LanOutcome = tuple[LanAction, str | None, bool | None]
 
 
 async def _lan_outcome(
@@ -411,35 +445,34 @@ async def _lan_outcome(
     row: PrinterRow,
     printer: Printer,
     previous_ip: str | None,
-) -> tuple[LanAction, str | None]:
+) -> LanOutcome:
     ip = printer.ip_address
     if is_synthetic_serial(row.serial) or ip is None:
-        return ("kept", None) if row.lan_host is not None else ("none", None)
+        return ("kept", None, None) if row.lan_host is not None else ("none", None, None)
     if row.lan_host is not None:
         # A move is due when the link followed Bambuddy's last address, or when an
         # earlier move failed: that sync already recorded the new address in the view,
         # so only `lan_move_pending` still says the link was following it (#4796). A sync
         # with no address (above) leaves it, so the move is tried when the address is back.
         if ip == row.lan_host:
-            if row.lan_move_pending:  # Bambuddy is back at the link's address
-                await _set_lan_state(printers, row, None, move_pending=False)
-            return "kept", None
+            return "kept", None, False  # Bambuddy is at the link's address: no move due
         followed = previous_ip is not None and row.lan_host == previous_ip
         if not (followed or row.lan_move_pending):
-            return "kept", None
+            return "kept", None, None
         return await _move_lan(printers, client, row, printer, ip)
     try:
         code = await client.printer_access_code(printer.id)
     except ApiError:
-        return await _lan_failed(printers, row, "failed", LAN_UNREADABLE)
+        return "failed", LAN_UNREADABLE, None
     if code is None:
-        return await _lan_failed(printers, row, "withheld", LAN_WITHHELD)
-    return await _link(printers, row, ip, code, expect_host=None, failed=LAN_PROBE_FAILED)
+        return "withheld", LAN_WITHHELD, None
+    action, reason = await _link(printers, row, ip, code, expect_host=None, failed=LAN_PROBE_FAILED)
+    return action, reason, None
 
 
 async def _move_lan(
     printers: Printers, client: BambuddyClient, row: PrinterRow, printer: Printer, ip: str
-) -> tuple[LanAction, str | None]:
+) -> LanOutcome:
     """Bambuddy's address moved: probe the new one with the stored code, then with
     Bambuddy's when it differs; the first that passes is the link (#4747 item 2, "the
     stored code stays unless Bambuddy's differs and the probe passes with it")."""
@@ -452,22 +485,22 @@ async def _move_lan(
         logger.warning("could not open a printer's access code", extra={"printer_id": row.id})
         stored = None
     if stored is not None:
-        outcome = await _link(printers, row, ip, stored, expect_host=old_host, failed=None)
-        if outcome[0] == "linked":
-            return "relinked", None
-        if outcome[0] == "kept":  # the user linked it meanwhile: that link wins
-            return "kept", None
+        outcome, _ = await _link(printers, row, ip, stored, expect_host=old_host, failed=None)
+        if outcome == "linked":
+            return "relinked", None, None
+        if outcome == "kept":  # the user linked it meanwhile: that link wins, with no move
+            return "kept", None, False
     try:
         code = await client.printer_access_code(printer.id)
     except ApiError:
         code = None
     if code is not None and code != stored:
-        outcome = await _link(printers, row, ip, code, expect_host=old_host, failed=None)
-        if outcome[0] == "linked":
-            return "relinked", None
-        if outcome[0] == "kept":
-            return "kept", None
-    return await _lan_failed(printers, row, "failed", LAN_MOVE_FAILED, move_pending=True)
+        outcome, _ = await _link(printers, row, ip, code, expect_host=old_host, failed=None)
+        if outcome == "linked":
+            return "relinked", None, None
+        if outcome == "kept":
+            return "kept", None, False
+    return "failed", LAN_MOVE_FAILED, True
 
 
 async def _link(
@@ -479,50 +512,23 @@ async def _link(
     expect_host: str | None,
     failed: str | None,
 ) -> tuple[LanAction, str | None]:
-    """One probe and link; ``failed`` is recorded on the row when it does not pass
-    (``None``: the caller records its own)."""
+    """One probe and link; ``failed`` is the reason when it does not pass (``None``: the
+    caller has its own)."""
     try:
         body = LanLink(host=host, access_code=code)
     except ValidationError:
-        reason = LAN_UNSAFE if failed is not None else None
-        return await _lan_failed(printers, row, "failed", reason)
+        return "failed", LAN_UNSAFE if failed is not None else None
     try:
         await probe_and_link(printers, row, body, expect_host=expect_host)
     except LanLinkChangedError:
         return "kept", None
     except UnsafeAddressError:
-        return await _lan_failed(printers, row, "failed", LAN_UNSAFE if failed else None)
+        return "failed", LAN_UNSAFE if failed else None
     except KekMissingError:
-        return await _lan_failed(printers, row, "failed", LAN_KEK_MISSING if failed else None)
+        return "failed", LAN_KEK_MISSING if failed else None
     except (LanProbeFailedError, SerialUnknownError, PrinterNotFoundError):
-        return await _lan_failed(printers, row, "failed", failed)
+        return "failed", failed
     return "linked", None
-
-
-async def _lan_failed(
-    printers: Printers,
-    row: PrinterRow,
-    action: LanAction,
-    reason: str | None,
-    *,
-    move_pending: bool | None = None,
-) -> tuple[LanAction, str | None]:
-    if reason is not None and (
-        reason != row.lan_sync_error
-        or (move_pending is not None and move_pending != row.lan_move_pending)
-    ):
-        await _set_lan_state(printers, row, reason, move_pending=move_pending)
-    return action, reason
-
-
-async def _set_lan_state(
-    printers: Printers, row: PrinterRow, reason: str | None, *, move_pending: bool | None
-) -> None:
-    with contextlib.suppress(PrinterNotFoundError):
-        await asyncio.to_thread(
-            printers.store.set_lan_sync_error, row.id, reason, move_pending=move_pending
-        )
-    printers.changed(row.id)
 
 
 async def _sync_virtual(
@@ -560,7 +566,7 @@ async def _sync_virtual(
         else VP_TARGET_MISSING.format(target=vp.target_printer_id)
     )
     if dry_run:
-        return _target_conflict(entry, target_missing)
+        return _with_target(entry, target_missing)
     try:
         synced, done, changed = await asyncio.to_thread(
             printers.store.upsert_virtual,
@@ -581,14 +587,14 @@ async def _sync_virtual(
         entry.reason = SERIAL_KEPT.format(vp_id=vp.id)
     if changed:
         printers.changed(synced.id)
-    return _target_conflict(entry, target_missing)
+    return _with_target(entry, target_missing)
 
 
-def _target_conflict(entry: SyncEntry, target_missing: str | None) -> SyncEntry:
-    """The entry as a ``conflict`` naming the missing target, beside any other reason.
-    The row is still written: only what it forwards to is unknown."""
+def _with_target(entry: SyncEntry, target_missing: str | None) -> SyncEntry:
+    """The entry with its missing target named beside any other reason; its action
+    stays what happened to the VP's own row (#4850 review)."""
     if target_missing is not None:
-        entry.action = "conflict"
+        entry.target_missing = True
         entry.reason = (
             target_missing if entry.reason is None else f"{entry.reason}; {target_missing}"
         )

@@ -104,7 +104,9 @@ export const printerTools: Tool[] = [
       'gives the code only while its auth is off; otherwise the row says it is withheld); a `bambuddy_virtual` ' +
       'row for every Bambuddy virtual printer. It never unlinks, deletes or overwrites: each entry says ' +
       '`created`, `linked`, `already_linked`, `skipped`, `conflict` or `missing`, with a `reason`, its LAN ' +
-      'outcome, and whether the sync `changed` the row. `dry_run` plans the same and writes nothing. The access code is never in the result. Running ' +
+      'outcome, and whether the sync `changed` the row. A virtual printer whose Bambuddy target has no row ' +
+      'here says `target_missing` (its `forwards_to` is null, which is then not "any printer of its model"), ' +
+      'beside its own action. `dry_run` plans the same and writes nothing. The access code is never in the result. Running ' +
       'it again changes nothing.',
     input: z.object({
       dry_run: z.boolean().default(false).describe('Plan and report without writing anything'),

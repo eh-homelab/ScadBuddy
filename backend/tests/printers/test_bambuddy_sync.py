@@ -23,7 +23,7 @@ from scadbuddy.printers.bambuddy_sync import (
 )
 from scadbuddy.printers.component import Printers
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.models import LanLink, PrinterCreate
+from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterRow
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
@@ -51,6 +51,8 @@ class FakeClient:
         self.codes = codes or {}
         self.code_reads: list[int] = []
         self.vp_error: ApiError | None = None
+        #: Run inside a code read: a write by something else in the middle of a sync.
+        self.during_code_read: Callable[[], None] | None = None
 
     async def printers(self) -> list[Printer]:
         return [Printer.model_validate(p) for p in self._printers]
@@ -62,6 +64,8 @@ class FakeClient:
 
     async def printer_access_code(self, printer_id: int) -> str | None:
         self.code_reads.append(printer_id)
+        if self.during_code_read is not None:
+            self.during_code_read()
         return self.codes.get(printer_id)
 
 
@@ -201,6 +205,25 @@ async def test_each_entry_says_whether_the_sync_changed_its_row(
     ]
     dry = await run(printers, renamed, dry_run=True)
     assert not any(e.changed for e in dry.entries)
+
+
+async def test_a_write_by_something_else_during_a_sync_is_not_its_change(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4850 review: `changed` is what this sync wrote, never a bumped `updated_at`."""
+    client = FakeClient([bambuddy(1, SERIAL)], codes={1: None})
+    await run(printers, client)  # linked; the code withheld, and recorded so
+    (row,) = store.list()
+
+    def bump() -> None:
+        with store.pool.connection() as conn:
+            conn.execute("UPDATE printers SET updated_at = now() WHERE id = %s", (row.id,))
+
+    client.during_code_read = bump
+    again = await run(printers, client)
+    assert again.entries[0].lan == "withheld"
+    assert store.require(row.id).updated_at > row.updated_at
+    assert again.entries[0].changed is False
 
 
 async def test_dry_run_plans_and_writes_nothing(
@@ -403,6 +426,28 @@ async def test_a_pending_move_ends_when_bambuddy_returns_to_the_links_address(
     (row,) = store.list()
     assert row.lan_host == "192.168.1.10"
     assert row.lan_sync_error is None and not row.lan_move_pending
+    assert back.entries[0].changed
+
+
+async def test_ending_a_pending_move_writes_the_lan_state_once(
+    printers: FakePrinters, store: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4850 review: the pending flag and the stale reason clear in one write."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    printers.answer = False
+    await run(printers, FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE}))
+    writes: list[tuple[str | None, bool | None]] = []
+    real = store.set_lan_sync_error
+
+    def counted(
+        printer_id: str, error: str | None, *, move_pending: bool | None = None
+    ) -> PrinterRow:
+        writes.append((error, move_pending))
+        return real(printer_id, error, move_pending=move_pending)
+
+    monkeypatch.setattr(store, "set_lan_sync_error", counted)
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    assert writes == [(None, False)]
 
 
 async def test_a_reason_a_later_sync_no_longer_has_is_cleared(
@@ -452,7 +497,7 @@ async def test_virtual_printers_import_with_their_target(
     assert printers.probes == [("192.168.1.10", SERIAL, CODE)]  # never a VP
 
 
-async def test_a_vp_whose_target_has_no_row_is_a_conflict_never_any(
+async def test_a_vp_whose_target_has_no_row_says_so_never_any(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
     """#4797: Bambuddy forwards the VP to printer 1, which has no row here (no serial,
@@ -460,13 +505,17 @@ async def test_a_vp_whose_target_has_no_row_is_a_conflict_never_any(
     and the row keeps Bambuddy's target id in its view."""
     result = await run(printers, FakeClient([bambuddy(1, None)], [vp(5, VP_SERIAL, 1)]))
     entry = next(e for e in result.entries if e.bambuddy_vp_id == 5)
-    assert entry.action == "conflict" and entry.reason == VP_TARGET_MISSING.format(target=1)
+    # #4850 review: the VP's own row was created, and the entry still says so.
+    assert (entry.action, entry.target_missing) == ("created", True)
+    assert entry.reason == VP_TARGET_MISSING.format(target=1) and entry.changed
     assert entry.forwards_to is None and entry.target_model is None
     row = next(r for r in store.list() if r.bambuddy_vp_id == 5)
     assert row.forwards_to is None
     assert row.bambuddy_view is not None and row.bambuddy_view.target_printer_id == 1
     dry = await run(printers, FakeClient([bambuddy(1, None)], [vp(5, VP_SERIAL, 1)]), dry_run=True)
-    assert [e.action for e in dry.entries if e.bambuddy_vp_id == 5] == ["conflict"]
+    assert [(e.action, e.target_missing) for e in dry.entries if e.bambuddy_vp_id == 5] == [
+        ("already_linked", True)
+    ]
 
 
 async def test_a_vp_whose_target_this_sync_makes_is_not_missing(
@@ -481,7 +530,7 @@ async def test_a_vp_whose_target_this_sync_makes_is_not_missing(
     assert [(e.action, e.reason) for e in real.entries] == [("created", None), ("created", None)]
 
 
-async def test_a_vp_whose_target_row_was_deleted_is_a_conflict(
+async def test_a_vp_whose_target_row_was_deleted_says_so(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
     """#4797: deleting the target row sets `forwards_to` NULL (ON DELETE SET NULL);
@@ -493,7 +542,30 @@ async def test_a_vp_whose_target_row_was_deleted_is_a_conflict(
     gone = FakeClient([bambuddy(1, SERIAL, is_active=False)], [vp(5, VP_SERIAL, 1)])
     result = await run(printers, gone)
     (entry,) = result.entries
-    assert entry.action == "conflict" and entry.reason == VP_TARGET_MISSING.format(target=1)
+    assert (entry.action, entry.target_missing) == ("already_linked", True)
+    assert entry.reason == VP_TARGET_MISSING.format(target=1)
+
+
+async def test_a_deleted_target_bambuddy_still_lists_comes_back_and_is_not_missing(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4850 review: the deleted target is still active in Bambuddy, so this sync
+    creates its row again and the VP forwards to it."""
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE})
+    await run(printers, client)
+    target = store.by_serial(SERIAL)
+    assert target is not None
+    store.delete(target.id)
+    result = await run(printers, client)
+    again = store.by_serial(SERIAL)
+    assert again is not None
+    assert [(e.action, e.target_missing, e.reason) for e in result.entries] == [
+        ("created", False, None),
+        ("already_linked", False, None),
+    ]
+    assert result.entries[1].forwards_to == again.id
+    virtual = next(r for r in store.list() if r.bambuddy_vp_id == 5)
+    assert virtual.forwards_to == again.id
 
 
 async def test_a_hand_made_row_with_the_vps_serial_is_adopted_with_its_lan_link(

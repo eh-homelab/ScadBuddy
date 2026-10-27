@@ -348,6 +348,15 @@ describe('extractors', () => {
       { type: 'setting', id: `printer:${R}`, action: 'modified' },
       { type: 'setting', id: `printer:${S}`, action: 'modified' },
     ])
+    // #4850 review: a VP whose target is missing keeps its own action, and its row is recorded.
+    expect(
+      touches(
+        'sync_printers_from_bambuddy',
+        {},
+        { dry_run: false, entries: [{ printer_id: S, action: 'created', target_missing: true, changed: true }] },
+        'outward',
+      ),
+    ).toEqual([{ type: 'setting', id: `printer:${S}`, action: 'created' }])
     // A relink is recorded even from a backend that does not say `changed`.
     expect(
       touches('sync_printers_from_bambuddy', {}, { dry_run: false, entries: [{ printer_id: R, action: 'already_linked', lan: 'relinked' }] }, 'outward'),
