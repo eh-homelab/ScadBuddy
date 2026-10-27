@@ -88,6 +88,10 @@ describe('SettingsPage, every area at once (#2171)', () => {
     const names = [...document.querySelectorAll('section[aria-labelledby], [role="region"]')].map(nameOf)
     const repeated = names.filter((name, index) => names.indexOf(name) !== index)
     expect(repeated).toEqual([])
+    // The area is announced by a heading of its own, the first thing in its part of the page.
+    const area = screen.getByRole('heading', { level: 2, name: 'General' })
+    expect(area).toBe(document.querySelector('[data-area="general"]')?.firstElementChild)
+    expect(screen.queryByRole('heading', { level: 2, name: 'Printing' })).toBeNull()
   })
 })
 

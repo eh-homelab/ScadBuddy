@@ -268,6 +268,8 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
           <div className="mt-5">
             {AREAS.map((area) => (
               <div key={area.id} data-area={area.id} hidden={area.id !== target.area} className="space-y-4">
+                {/* Announces the area on a switch; the page's h1 stays "Settings". */}
+                <h2 className="sr-only">{area.title}</h2>
                 {area.servedByAgent && down && (
                   <p role="status" className="text-sm text-muted-foreground">
                     The assistant service is not answering: the settings it serves are hidden until it does.
