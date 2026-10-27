@@ -5,6 +5,8 @@ clear outside the run."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 from typing import Any
 
@@ -16,11 +18,14 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.virtual_printers import (
     access_code_mac,
+    access_code_request,
     open_access_code,
     seal_access_code,
     seal_context,
+    virtual_printer_kinds,
 )
-from scadbuddy.core.secrets import SealError
+from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import SealError, kek_from_base64
 from scadbuddy.printers.component import PRINTERS, Printers
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
@@ -31,6 +36,8 @@ pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000001"
 CODE = "vpc0de12"
+#: The KEK after a rotation; `KEK` is then the previous one.
+ROTATED = kek_from_base64(base64.b64encode(b"\x11" * 32).decode())
 
 
 def registry(client: TestClient) -> Printers:
@@ -93,6 +100,70 @@ def test_two_seals_of_one_code_differ_and_open_only_in_their_context() -> None:
     assert open_access_code(KEK, second, context) == CODE
     with pytest.raises(SealError):
         open_access_code(KEK, first, seal_context(vp_id=4, idempotency_key="k1"))
+
+
+@respx.mock
+def test_a_code_sealed_before_a_kek_rotation_opens_under_the_previous_key(
+    client: TestClient,
+) -> None:
+    """#4888 finding 1: the route sealed the code under the KEK of its day; the run
+    starts after a rotation, with that key as `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`. The
+    write goes through with the code."""
+    configure(client)
+    bambuddy([])
+    created = respx.post(f"{API}/virtual-printers").mock(
+        return_value=httpx.Response(200, json=vp(1, None))
+    )
+    request = {
+        "fields": {"name": "X"},
+        **access_code_request(KEK, CODE, vp_id=None, idempotency_key="k-rotate"),
+    }
+    store = registry(client).store
+    store.kek, store.previous_kek = ROTATED, KEK
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    kinds = {
+        kind.name: kind
+        for kind in virtual_printer_kinds(settings_store=state.settings_store, printers=store)
+    }
+    asyncio.run(kinds["bambuddy_vp_create"].run(request, {}))
+    assert json.loads(created.calls.last.request.read())["access_code"] == CODE
+
+    store.previous_kek = None  # without the previous key, the same seal does not open
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(kinds["bambuddy_vp_create"].run(request, {}))
+    assert refused.value.status == 503
+
+
+def test_open_access_code_tries_the_previous_key_after_the_current_one() -> None:
+    context = seal_context(vp_id=3, idempotency_key="k1")
+    old = seal_access_code(KEK, CODE, context)
+    new = seal_access_code(ROTATED, CODE, context)
+    assert open_access_code(ROTATED, old, context, previous=KEK) == CODE
+    assert open_access_code(ROTATED, new, context, previous=KEK) == CODE
+    with pytest.raises(SealError):
+        open_access_code(ROTATED, old, context)
+
+
+@respx.mock
+def test_a_target_that_is_not_a_uuid_is_a_422(client: TestClient) -> None:
+    """#4888 finding 2: the bound is in the model (and so the spec), not a 404 later."""
+    configure(client)
+    registry(client).store.kek = KEK
+    bambuddy([])
+    created = respx.post(f"{API}/virtual-printers")
+    response = client.post(
+        "/api/v1/printers/virtual", json={"name": "X", "target": "not-a-uuid"}, headers=press()
+    )
+    assert response.status_code == 422, response.text
+    changed = client.put(
+        "/api/v1/printers/virtual/1", json={"target": "not-a-uuid"}, headers=press()
+    )
+    assert changed.status_code == 422, changed.text
+    assert not created.called
+    spec = client.get("/openapi.json").json()["components"]["schemas"]
+    for model in ("VirtualPrinterCreate", "VirtualPrinterUpdate"):
+        options = spec[model]["properties"]["target"]["anyOf"]
+        assert {"type": "string", "format": "uuid"} in options
 
 
 def test_the_mac_matches_only_a_resend_of_the_same_request() -> None:

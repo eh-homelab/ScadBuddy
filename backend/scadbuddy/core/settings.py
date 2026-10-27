@@ -278,6 +278,11 @@ class Settings(BaseSettings):
     # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
     # start. Every process that reads them (the API and both workers) needs the same file.
     secret_key_file: Path | None = None
+    # SCADBUDDY_SECRET_KEY_PREVIOUS_FILE: during a rotation, the KEK before it (the
+    # agent's variable of the same name). Tried after the current key only where a value
+    # sealed before the rotation may still be in flight: a virtual printer's access code
+    # sealed by the API and opened by the print worker's run (#4888).
+    secret_key_previous_file: Path | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -561,6 +566,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "secret_key_file": (
             "The key the stored API keys are encrypted with. A key kept in the database it"
             " protects would protect nothing."
+        ),
+        "secret_key_previous_file": (
+            "The key before a rotation of the one above, so a value sealed under it still"
+            " opens. A key kept in the database would protect nothing."
         ),
         "allowed_origins": (
             "Which pages may open the realtime socket and make writes. Like the agent's"

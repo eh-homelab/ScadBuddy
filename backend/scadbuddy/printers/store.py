@@ -241,9 +241,19 @@ def _row(data: dict[str, Any]) -> PrinterRow:
 
 
 class PrinterStore:
-    def __init__(self, pool: Pool, kek: Kek | None, *, events: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        pool: Pool,
+        kek: Kek | None,
+        *,
+        events: EventBus | None = None,
+        previous_kek: Kek | None = None,
+    ) -> None:
         self.pool = pool
         self.kek = kek
+        #: The KEK before a rotation (`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`), tried after
+        #: ``kek`` where a value sealed before the rotation may still be opened (#4888).
+        self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
 

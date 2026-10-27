@@ -113,7 +113,10 @@ class Printers:
             name="scadbuddy-printers",
         )
         self._store = PrinterStore(
-            self._pool, settings_kek(core.settings.secret_key_file), events=core.events
+            self._pool,
+            settings_kek(core.settings.secret_key_file),
+            events=core.events,
+            previous_kek=settings_kek(core.settings.secret_key_previous_file),
         )
         self._reports = PrinterReportStore(self._pool)
         self._opened = False
