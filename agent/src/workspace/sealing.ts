@@ -74,14 +74,12 @@ export class WorkspaceSealing {
   readonly #keys: PayloadKeys
   readonly #kek: Kek
   readonly #previous: Kek | undefined
-  readonly #sql: Sql
 
-  /** `sql` reads whether a session still stands before its key may be made; `previous` is the KEK being rotated away from. */
-  constructor(keys: PayloadKeys, kek: Kek, options: { sql: Sql; previous?: Kek | undefined }) {
+  /** `previous` is the KEK being rotated away from. */
+  constructor(keys: PayloadKeys, kek: Kek, options: { previous?: Kek | undefined } = {}) {
     this.#keys = keys
     this.#kek = kek
     this.#previous = options.previous
-    this.#sql = options.sql
   }
 
   /** `fileKey` wrapped for the row (`workspace`, `path`, `blobKey`), and the KEK's id for a principal's. */
@@ -93,10 +91,10 @@ export class WorkspaceSealing {
   ): Promise<{ sealed: Buffer; kekId: string | null }> {
     const context = fileKeyContext(workspaceKey(ws), path, blobKey)
     if (ws.kind === 'principal') return { sealed: sealBytes(this.#kek.key, fileKey, context), kekId: this.#kek.id }
-    // A key is made only for a session that stands: a write racing its deletion or its
-    // forget (whose tombstone already stops keyFor) never leaves a key nothing deletes.
-    const [standing] = await this.#sql`SELECT 1 FROM ai_sessions WHERE id = ${ws.sessionId}`
-    const dek = await this.#keys.keyFor(`session-${ws.sessionId}`, standing !== undefined)
+    // A key is made only for a session that stands, checked in keyFor's own locked insert:
+    // a write racing its deletion or its forget (whose tombstone stops keyFor too) never
+    // leaves a key nothing deletes.
+    const dek = await this.#keys.keyFor(`session-${ws.sessionId}`, true, { onlyForStandingSession: true })
     try {
       return { sealed: sealBytes(dek, fileKey, context), kekId: null }
     } finally {

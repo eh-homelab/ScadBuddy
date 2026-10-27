@@ -117,10 +117,20 @@ export function openPayload(dek: Buffer, subject: string, payload: Payload): Pay
   }
 }
 
+/** What `keyFor` may also require of a key it makes. */
+export type KeyForOptions = {
+  /**
+   * Make the key only while the session `session-<id>` names has its `ai_sessions` row,
+   * checked in the insert itself (workspace/sealing.ts, #4789): a write racing the
+   * session's deletion never leaves a key nothing deletes. SubjectForgotten otherwise.
+   */
+  onlyForStandingSession?: boolean
+}
+
 /** Where a subject's data key is found, and made when `create` and none exists. */
 export interface PayloadKeys {
   /** The subject's data key; SubjectForgotten when there is none and `create` is false. */
-  keyFor(subject: string, create: boolean): Promise<Buffer>
+  keyFor(subject: string, create: boolean, options?: KeyForOptions): Promise<Buffer>
 }
 
 export type PgPayloadKeysOptions = {
@@ -155,7 +165,8 @@ export class PgPayloadKeys implements PayloadKeys {
     this.#cache.delete(subject)
   }
 
-  async keyFor(subject: string, create: boolean): Promise<Buffer> {
+  async keyFor(subject: string, create: boolean, options: KeyForOptions = {}): Promise<Buffer> {
+    const standing = options.onlyForStandingSession === true
     const cached = this.#cache.get(subject)
     if (cached && cached.until > Date.now()) return Buffer.from(cached.key)
     if (cached) this.forget(subject)
@@ -174,6 +185,7 @@ export class PgPayloadKeys implements PayloadKeys {
             INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)
             SELECT ${subject}, ${sealed}, ${this.#kek.id}
             WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject})
+              AND (NOT ${standing}::boolean OR EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = substr(${subject}, 9)))
             ON CONFLICT (subject) DO NOTHING`
         })
       } finally {

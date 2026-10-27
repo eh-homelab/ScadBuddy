@@ -304,7 +304,7 @@ const workspace = database
       settings,
       blobs: {
         store: new BackendWorkspaceBlobs(config.backendUrl),
-        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { sql: database.sql, previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
+        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
       },
     })
   : undefined
@@ -313,7 +313,14 @@ if (workspace) toolServices.workspace = workspace
 let workspaceBytes: { at: number; status: Promise<WorkspaceBytesStatus> } | undefined
 const workspaceBytesStatus = workspace
   ? (): Promise<WorkspaceBytesStatus> => {
-      if (!workspaceBytes || Date.now() - workspaceBytes.at > 60_000) workspaceBytes = { at: Date.now(), status: workspace.bytesStatus() }
+      if (!workspaceBytes || Date.now() - workspaceBytes.at > 60_000) {
+        const status = workspace.bytesStatus()
+        workspaceBytes = { at: Date.now(), status }
+        // Never cached past a failure: the next status asks again.
+        status.catch(() => {
+          if (workspaceBytes?.status === status) workspaceBytes = undefined
+        })
+      }
       return workspaceBytes.status
     }
   : undefined

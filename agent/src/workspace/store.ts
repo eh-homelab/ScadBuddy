@@ -397,8 +397,13 @@ export class SessionFiles {
     }
     // Files already in the blob store cannot be read from here (after a switch back to
     // store_backend local the backend's URL route answers 404): say how many.
-    const [row] = await this.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_session_files WHERE blob_key IS NOT NULL`
-    return row && row.n > 0 ? { ...status, unreadable_files: row.n } : status
+    // Left out when the count cannot be read: the status answers whatever Postgres does.
+    try {
+      const [row] = await this.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_session_files WHERE blob_key IS NOT NULL`
+      return row && row.n > 0 ? { ...status, unreadable_files: row.n } : status
+    } catch {
+      return status
+    }
   }
 
   /** The plaintext of a blob row, a segment at a time. */

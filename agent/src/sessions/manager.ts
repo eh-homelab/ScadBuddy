@@ -15,7 +15,7 @@ import type { Context } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
-import type { PayloadKeys } from '../temporal/payloadCodec.js'
+import { payloadKeyLock, type PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -2142,6 +2142,21 @@ export class SessionManager {
    * through that reply and nothing after it (forkPoint.ts). With `audit`, the fork
    * is a `resource` row on the child (action `session_fork`).
    */
+  /**
+   * Removes a fork that failed before it was announced: its transcript copy (not keyed to
+   * it), its row (whose cascade takes the rest), and the payload key its transcript or its
+   * files were sealed under. No tombstone: no session takes that id again.
+   */
+  private async dropFailedFork(childId: string): Promise<void> {
+    await this.deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${childId}`
+    await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${childId}`
+    await this.deps.sql.begin(async (tx) => {
+      // The lock a key's creation takes (payloadCodec.ts), so this never races one.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(`session-${childId}`)}))`
+      await tx`DELETE FROM ai_payload_keys WHERE subject = ${`session-${childId}`}`
+    })
+  }
+
   async fork(
     id: string,
     principal: Owner,
@@ -2204,7 +2219,7 @@ export class SessionManager {
         await durable.turns.startFork(child, durable.agent)
       } catch (err) {
         // Nothing else of the child is written yet: it goes, rather than run empty.
-        await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+        await this.dropFailedFork(child.id)
         throw err
       }
     } else {
@@ -2220,10 +2235,8 @@ export class SessionManager {
         // Its workspace files (#2329), so the fork carries on with what the parent had.
         await this.files.copy(id, child.id)
       } catch (err) {
-        // A fork whose files could not be copied goes whole (copy() wrote none): its row
-        // and the transcript copy, which is not keyed to it.
-        await this.deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${child.id}`
-        await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+        // A fork whose files could not be copied goes whole (copy() wrote none).
+        await this.dropFailedFork(child.id)
         throw err
       }
     }

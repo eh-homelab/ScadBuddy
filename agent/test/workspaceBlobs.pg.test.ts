@@ -127,7 +127,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       blobs: {
         // No cache: a test changes what the backend says between calls.
         store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }),
-        ...(k ? { sealing: new WorkspaceSealing(testPayloadKeys(db.sql), k, { sql: db.sql }) } : {}),
+        ...(k ? { sealing: new WorkspaceSealing(testPayloadKeys(db.sql), k) } : {}),
       },
     })
   const row = async (path: string, workspace = `session:${sessionId}`) => {
@@ -154,7 +154,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
         created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (key, holder_kind, holder_id))`
     backend = new FakeBackend()
     await backend.start()
-    sealing = new WorkspaceSealing(testPayloadKeys(db.sql), kek, { sql: db.sql })
+    sealing = new WorkspaceSealing(testPayloadKeys(db.sql), kek)
     files = filesWith({ fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB })
     inline = new SessionFiles(db.sql, { limits: { fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB } })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
@@ -388,6 +388,39 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       // New writes are kept in Postgres and read back.
       await files.write(ws, 'c.txt', Buffer.from('inline'))
       expect((await files.read(ws, 'c.txt'))?.bytes.toString()).toBe('inline')
+    })
+  })
+  describe('review of dd9b49be5', () => {
+    it("removes a failed fork's payload key with its row", async () => {
+      await files.write(ws, 'a.txt', Buffer.from('one'))
+      await files.write(ws, 'b.txt', Buffer.from('two'))
+      // The second file key cannot be opened: the copy fails after it wrapped the first for the child.
+      await db.sql`UPDATE ai_session_files SET key_sealed = ${Buffer.alloc(61, 1)} WHERE path = 'b.txt'`
+      const forking = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner, workspace: files })
+      await forking.store.append({ projectKey: 'p', sessionId }, [{ type: 'user', uuid: 'u1', message: {} }])
+      await expect(forking.fork(sessionId, browser)).rejects.toBeInstanceOf(SealError)
+      const orphans = await db.sql`
+        SELECT subject FROM ai_payload_keys k
+        WHERE NOT EXISTS (SELECT 1 FROM ai_sessions s WHERE 'session-' || s.id::text = k.subject)`
+      expect(orphans).toHaveLength(0)
+    })
+
+    it('makes a payload key only for a session whose row stands, in the one locked insert', async () => {
+      const keys = testPayloadKeys(db.sql)
+      const gone = 'session-00000000-0000-4000-8000-000000000000'
+      await expect(keys.keyFor(gone, true, { onlyForStandingSession: true })).rejects.toBeInstanceOf(SubjectForgotten)
+      expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${gone}`).toHaveLength(0)
+      expect((await keys.keyFor(`session-${sessionId}`, true, { onlyForStandingSession: true })).length).toBe(32)
+    })
+
+    it('never throws from bytesStatus, even when the count cannot be read', async () => {
+      backend.storeBackend = 'local'
+      await db.sql`ALTER TABLE ai_session_files RENAME TO ai_session_files_away`
+      try {
+        expect(await files.bytesStatus()).toEqual({ store: 'postgres', reason: 'the backend has no blob store (store_backend local)' })
+      } finally {
+        await db.sql`ALTER TABLE ai_session_files_away RENAME TO ai_session_files`
+      }
     })
   })
 })

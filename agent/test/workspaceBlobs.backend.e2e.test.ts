@@ -100,7 +100,7 @@ describe.skipIf(skip !== undefined)(`workspace files through the real backend${s
     expect(await db.ready()).toBe(true)
     backend = await startBackend(throwaway.url)
     files = new SessionFiles(db.sql, {
-      blobs: { store: new BackendWorkspaceBlobs(backend.base), sealing: new WorkspaceSealing(testPayloadKeys(db.sql), kek, { sql: db.sql }) },
+      blobs: { store: new BackendWorkspaceBlobs(backend.base), sealing: new WorkspaceSealing(testPayloadKeys(db.sql), kek) },
     })
   }, 240_000)
   afterAll(async () => {
