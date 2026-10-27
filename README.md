@@ -1543,10 +1543,8 @@ it is not in `CI Summary`. Its two other jobs also run on a PR, neither one requ
 `fakes` (the two fakes' own tests, and ruff and mypy over them) and `native` (the
 backend's native-run tests against the fake printer, `tests/test_print_native_workflow.py`
 and `tests/api/test_hot_path_native.py`, with mosquitto, Postgres and Temporal; it fails
-if one skips). Both run on a PR that touches `e2e-stack/**`, the native path's code
-(`printers/`, `slicing/`, `spools/`, `print_library/`, `bambuddy/`, `analyzers/`, the
-print and slicing workflows, the print routes), those tests or the workflow; the
-workflow's `paths` list names each one.
+if one skips). Both run on a PR that touches `e2e-stack/**`, `backend/**` or the
+workflow.
 
 ### Switching continuous deploy off
 

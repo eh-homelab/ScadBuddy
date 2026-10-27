@@ -9,17 +9,18 @@
 # No job here is a required check: none is in ci.yml's `CI Summary` needs (plan
 # decision 6). The `stack` job runs weekly and on demand, never on a PR: it builds three
 # images and prints twice. On a PR that touches the `paths` below (e2e-stack/, the
-# native path's code, its tests, this file) only the other two jobs run:
+# backend, this file) only the other two jobs run:
 # - `fakes`: the two fakes' own tests and ruff and mypy over them (#4187, below), a
 #   minute's work.
 # - `native`: the backend's tests that drive a native run against the fake printer
 #   (#4541, below), a few minutes'.
 #
 # #4541: those tests (`tests/test_print_native_workflow.py` and
-# `tests/api/test_hot_path_native.py`, among them the AC1 check that a native run builds no Bambuddy client) need the fake
-# printer, and so mosquitto and e2e-stack/, as well as Postgres and Temporal: every
-# backend-pytest shard skips them, for #4187's reason. The `native` job runs them here,
-# on a runner with all four, and fails if any skips.
+# `tests/api/test_hot_path_native.py`, among them the AC1 check that a native run
+# builds no Bambuddy client) need the fake printer, and so mosquitto and e2e-stack/,
+# as well as Postgres and Temporal: every backend-pytest shard skips them, for #4187's
+# reason. The `native` job runs them here, on a runner with all four, and fails if any
+# skips.
 #
 # #4187, settled here rather than in backend-pytest: the fake printer's test needs
 # mosquitto, which the test image does not carry, and mounting e2e-stack/ into the four
@@ -36,31 +37,11 @@ on:
   pull_request:
     paths:
       - e2e-stack/**
-      - backend/tests/printers/test_fake_printer.py
-      - backend/tests/test_bambuddy_recorder.py
       - .github/workflows/hot-path-e2e.yml
-      # What a native run reads and the tests that drive one (`native`, #4541).
-      - backend/scadbuddy/printers/**
-      - backend/scadbuddy/slicing/**
-      - backend/scadbuddy/spools/**
-      - backend/scadbuddy/print_library/**
-      - backend/scadbuddy/bambuddy/**
-      - backend/scadbuddy/analyzers/**
-      - backend/scadbuddy/api/analyzers.py
-      - backend/scadbuddy/api/printing.py
-      - backend/scadbuddy/api/printers.py
-      - backend/scadbuddy/api/prints.py
-      - backend/scadbuddy/api/library_print.py
-      - backend/scadbuddy/workflows/client.py
-      - backend/scadbuddy/workflows/print*.py
-      - backend/scadbuddy/workflows/slicing*.py
-      - backend/tests/support/fake_lan.py
-      - backend/tests/conftest.py
-      - backend/tests/api/conftest.py
-      - backend/pyproject.toml
-      - backend/uv.lock
-      - backend/tests/test_print_native_workflow.py
-      - backend/tests/api/test_hot_path_native.py
+      # The whole backend (#4766 review): what a native run reads reaches through
+      # settings, the store, the workflows and the routes, and no shorter list kept up.
+      # The `native` job is a few minutes.
+      - backend/**
 
 permissions:
   contents: read

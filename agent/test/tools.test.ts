@@ -929,6 +929,21 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         expect(firstText(project)).toMatch(/Garage prints over the LAN.*no Bambuddy project/)
         expect(pending.inputs).toHaveLength(1)
       })
+
+      it('an input-only check reads no choices and passes a project on; the run refuses it', async () => {
+        const run: { body?: Record<string, unknown> } = {}
+        const asked: URLSearchParams[] = []
+        server.use(row(2), linkedNative(asked), ...capturedRun(run, NATIVE))
+        const args = { ...chosen, printer: PRINTER, project_id: 7 }
+        const { input } = await tool('print_output').prepareApproval(args, ctx(), { summary: false })
+        expect(input).toMatchObject({ printer: PRINTER, printer_id: 2, project_id: 7 })
+        expect(asked).toEqual([])
+        const result = await runTool({ ...tool('print_output'), gated: false }, input, ctx())
+        expect(result.isError).toBe(true)
+        expect(firstText(result)).toMatch(/Garage prints over the LAN.*no Bambuddy project/)
+        expect(asked).toHaveLength(1)
+        expect(run.body).toBeUndefined()
+      })
     })
 
     it("keeps a Bambuddy run's queue item ids and its Bambuddy URL, with no follow handle", async () => {

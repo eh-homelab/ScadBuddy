@@ -448,6 +448,7 @@ async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path
     replace it by joining the threads that never started (#4541's CI job hit it)."""
     module = _load()
     assert MOSQUITTO is not None
+    ftps_port = _free_port()
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen()
@@ -457,7 +458,7 @@ async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path
                 access_code=ACCESS_CODE,
                 host="127.0.0.1",
                 mqtt_port=_free_port(),
-                ftps_port=_free_port(),
+                ftps_port=ftps_port,
                 control_port=taken.getsockname()[1],
                 sdcard=tmp_path / "sdcard",
                 state=tmp_path / "state",
@@ -467,3 +468,6 @@ async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path
         with pytest.raises(OSError) as raised:
             await asyncio.wait_for(printer.run(), 60)
     assert raised.value.errno == errno.EADDRINUSE
+    # The FTPS server, whose thread never ran, was closed: its port binds again.
+    with socket.socket() as again:
+        again.bind(("127.0.0.1", ftps_port))
