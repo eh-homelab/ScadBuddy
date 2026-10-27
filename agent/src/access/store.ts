@@ -159,7 +159,10 @@ export class AccessStore implements AccessReader, AccessWriter {
   async resetItemIf(source: string, item: string, only: ToolAccess, context?: AuditContext): Promise<void> {
     checkSource(source)
     if (item === '' || item === SOURCE_ITEM) throw new AccessError(`${JSON.stringify(item)} is not a tool name`)
-    await this.write(context, [{ source, kind: 'resetIf', item, only }], () => `${source}/${item} reset if ${JSON.stringify(only)}`)
+    // Under the row's lock: with no row holding `only` there is nothing to send or record.
+    await this.write(context, [{ source, kind: 'resetIf', item, only }], () => `${source}/${item} reset if ${JSON.stringify(only)}`, {
+      skipUnchanged: true,
+    })
   }
 
   async setEnabled(source: string, enabled: boolean, context?: AuditContext): Promise<void> {

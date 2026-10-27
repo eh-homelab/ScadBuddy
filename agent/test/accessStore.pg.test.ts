@@ -50,6 +50,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     expect(await store.rows([SCAD])).toEqual([])
   })
 
+  it('resetItemIf records an audit row only when it removed a row (review of #4838)', async () => {
+    await store.setItem(SCAD, 'get_printer_camera', 'outward', ctx)
+    const before = audit.entries.length
+    await store.resetItemIf(SCAD, 'get_printer_camera', 'off', ctx)
+    await store.resetItemIf(SCAD, 'no_row_here', 'off', ctx)
+    expect(audit.entries).toHaveLength(before)
+    await store.setItem(SCAD, 'get_printer_camera', 'off', ctx)
+    await store.resetItemIf(SCAD, 'get_printer_camera', 'off', ctx)
+    expect(audit.entries).toHaveLength(before + 2)
+    expect(audit.entries.at(-1)).toMatchObject({ outcome: 'ok', detail: 'builtin:scadbuddy/get_printer_camera reset if "off"' })
+  })
+
   it("setEnabled writes '*' as on or off", async () => {
     await store.setEnabled('remote:mem', false, ctx)
     expect(await store.rows(['remote:mem'])).toMatchObject([{ item: '*', access: 'off' }])
