@@ -259,6 +259,30 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(drawer).getByTestId('quote-from-slice')).toBeDisabled()
   })
 
+  it('clears a picked-up quote once it lands, reloads once, and never follows it again (#4736 review)', async () => {
+    const at = new Date().toISOString()
+    const subject = `order_item:${ITEM_DRAFT}`
+    seedOperation({ id: 'op-landing', kind: 'order_item_quote', subject, status: 'running', created_at: at })
+    // The activity row stays `running` after the operation ends, as a swallowed write leaves it.
+    seedActivity([
+      { id: 'operation:op-landing', kind: 'operation.order_item_quote', principal: 'browser', session: null, via_tool: null, subject, status: 'running', title: `Order item quote ${subject}`, parent_id: null, detail: {}, created_at: at, updated_at: at, finished_at: null },
+    ])
+    const followed = vi.spyOn(api, 'followQuote')
+    const running = vi.spyOn(api, 'runningQuotes')
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(await within(row(ITEM_DRAFT)).findByText('Quoting…')).toBeInTheDocument()
+    const reload = vi.spyOn(api, 'order')
+    const landed = manual('q-landed', 900, at)
+    state.quotes.push({ ...landed, source: 'slice' })
+    seedOperation({ id: 'op-landing', kind: 'order_item_quote', subject, status: 'succeeded', created_at: at, finished_at: at, result: { ...landed } })
+    await waitFor(() => expect(within(row(ITEM_DRAFT)).queryByText('Quoting…')).not.toBeInTheDocument(), { timeout: 5000 })
+    // The reload it brought looks again, lists the stale row, and does not follow it.
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(2))
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(followed).toHaveBeenCalledTimes(1)
+  })
+
   it('shows a cancelled item’s price without an editor', async () => {
     state.quotes.push(manual('q-pending', 900, '2026-10-24T23:00:00Z'))
     const draft = state.items.find((i) => i.id === ITEM_DRAFT)

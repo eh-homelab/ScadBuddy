@@ -41,6 +41,14 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+/** A `followQuote` whose first read finds the operation running, then ends as `end` does. */
+function stillRunning(end: () => Promise<Quote>): typeof api.followQuote {
+  return (_id, _signal, onRunning) => {
+    onRunning?.()
+    return end()
+  }
+}
+
 // #4693 — the page follows a slice quote, so the dialog that chose it can close at once.
 describe('useSliceQuotes (#4693)', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -136,13 +144,13 @@ describe('useSliceQuotes (#4693)', () => {
       ],
       next_cursor: null,
     })
-    const followed = vi.spyOn(api, 'followQuote').mockReturnValue(pending.promise)
+    const followed = vi.spyOn(api, 'followQuote').mockImplementation(stillRunning(() => pending.promise))
     const onQuoted = vi.fn()
     const items = [{ id: 'item-1', order_id: 'order-1', quotes: [{ id: 'q-old', source: 'slice' }] }] as unknown as OrderItemDetail[]
     const { result } = renderHook(() => useSliceQuotes('order-1', items, onQuoted))
     await waitFor(() => expect(result.current.runs.get('item-1')).toMatchObject({ error: null, known: ['q-old'], startedAt: Date.parse('2026-10-26T10:00:00Z') }))
     expect(followed).toHaveBeenCalledTimes(1)
-    expect(followed).toHaveBeenCalledWith('op-1', expect.any(AbortSignal))
+    expect(followed).toHaveBeenCalledWith('op-1', expect.any(AbortSignal), expect.any(Function))
     expect(result.current.runs.has('item-9')).toBe(false)
     await act(async () => pending.resolve({} as Quote))
     await waitFor(() => expect(result.current.runs.has('item-1')).toBe(false))
@@ -151,7 +159,7 @@ describe('useSliceQuotes (#4693)', () => {
 
   it('looks again on each reload of the items, so a quote started in another tab shows (#4736 review)', async () => {
     const running = vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [], next_cursor: null })
-    vi.spyOn(api, 'followQuote').mockReturnValue(new Promise<Quote>(() => undefined))
+    vi.spyOn(api, 'followQuote').mockImplementation(stillRunning(() => new Promise<Quote>(() => undefined)))
     const first = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
     const { result, rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, vi.fn()), { initialProps: { items: first } })
     await waitFor(() => expect(running).toHaveBeenCalledTimes(1))
@@ -163,7 +171,7 @@ describe('useSliceQuotes (#4693)', () => {
 
   it('follows an operation once, though its activity row stays running after it ended (#4736 review)', async () => {
     const running = vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-stale', subject: 'order_item:item-1' }], next_cursor: null })
-    const followed = vi.spyOn(api, 'followQuote').mockResolvedValue({} as Quote)
+    const followed = vi.spyOn(api, 'followQuote').mockImplementation(stillRunning(async () => ({}) as Quote))
     const onQuoted = vi.fn()
     const first = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
     const { rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: first } })
@@ -198,9 +206,20 @@ describe('useSliceQuotes (#4693)', () => {
     expect(onQuoted).toHaveBeenCalledTimes(1)
   })
 
+  it('shows nothing for a stale row whose operation already failed (#4736 review)', async () => {
+    vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-old', subject: 'order_item:item-1' }], next_cursor: null })
+    // The first read finds it ended: never running, so `onRunning` is not told.
+    const followed = vi.spyOn(api, 'followQuote').mockRejectedValue(new ApiError(422, 'An old failure.'))
+    const items = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
+    const { result } = renderHook(() => useSliceQuotes('order-1', items, vi.fn()))
+    await waitFor(() => expect(followed).toHaveBeenCalledTimes(1))
+    await act(async () => {})
+    expect(result.current.runs.has('item-1')).toBe(false)
+  })
+
   it('shows a picked-up quote that failed as failed (#4736)', async () => {
     vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-1', subject: 'order_item:item-1' }], next_cursor: null })
-    vi.spyOn(api, 'followQuote').mockRejectedValue(new ApiError(422, 'No printer takes this plate.'))
+    vi.spyOn(api, 'followQuote').mockImplementation(stillRunning(() => Promise.reject(new ApiError(422, 'No printer takes this plate.'))))
     const items = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
     const { result } = renderHook(() => useSliceQuotes('order-1', items, vi.fn()))
     await waitFor(() => expect(result.current.runs.get('item-1')?.error).toContain('No printer takes this plate.'))

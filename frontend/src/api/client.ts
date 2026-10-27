@@ -2141,9 +2141,14 @@ export const api = {
    * few (each is minutes of slicing), so one page holds them.
    */
   runningQuotes: () => request<ActivityPage>('/activity?kind=operation.order_item_quote&status=running&limit=200'),
-  /** #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows its own (`followRunning`). */
-  followQuote: async (operationId: string, signal?: AbortSignal) => {
+  /**
+   * #4736 — a slice quote another page started, followed to its quote as `quoteItem` follows
+   * its own (`followRunning`). `onRunning` is told once the first read finds it still
+   * running: an activity row can say running of one that has already ended.
+   */
+  followQuote: async (operationId: string, signal?: AbortSignal, onRunning?: () => void) => {
     const op = await reattach(() => request<Operation>(`/operations/${seg(operationId)}`, { signal }), signal)
+    if (op.status === 'running') onRunning?.()
     return followRunning<Quote>(op, signal)
   },
   // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------

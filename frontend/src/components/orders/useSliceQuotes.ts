@@ -145,15 +145,23 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           followed.current.add(operationId)
           const started = row.created_at ? Date.parse(row.created_at) : NaN
           const run: SliceQuoteRun = { startedAt: Number.isNaN(started) ? Date.now() : started, error: null, known: item.quotes.map((q) => q.id) }
-          update(forOrder, itemId, run)
+          // Shown only once its operation reads as running: one that already ended behind a
+          // stale row is no run of this page's, and its old failure no error to show.
+          let shown = false
           api
-            .followQuote(operationId, signal)
+            .followQuote(operationId, signal, () => {
+              shown = true
+              update(forOrder, itemId, run)
+            })
             .then(
               () => {
+                if (!shown) return
                 update(forOrder, itemId, null)
                 if (current.current === forOrder) quoted.current()
               },
-              (cause: unknown) => update(forOrder, itemId, mayHaveRun(cause) ? { ...run, detached: true } : { ...run, error: refusalText(cause) }),
+              (cause: unknown) => {
+                if (shown) update(forOrder, itemId, mayHaveRun(cause) ? { ...run, detached: true } : { ...run, error: refusalText(cause) })
+              },
             )
         }
       },
