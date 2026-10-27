@@ -422,6 +422,8 @@ describe('customizer tools', () => {
     } finally {
       release()
     }
+    // One preview render of name-keychain, and no second one hiding behind the first.
+    expect(held).toBe(1)
   })
 
   it('answers at once when the schema fails to load while a call waits (#4894)', async () => {
