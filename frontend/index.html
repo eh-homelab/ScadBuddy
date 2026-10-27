@@ -21,8 +21,9 @@
       could then fail into this handler and the split with staleChunks.ts would break.
       Up to 3 reloads per URL, as the next one can reach an old pod again. A failed script
       waits a little longer each time (0, 0.5, 1 s); a failed stylesheet reloads at once,
-      as the entry script may already be rendering and a late reload would flash; then the URL is left failed for this tab, so it cannot loop
-      and a later deploy (new names) still recovers. Without sessionStorage there is no
+      as the entry script may already be rendering and a late reload would flash. Then the
+      URL is left failed for this tab, so it cannot loop, and a later deploy (new names)
+      still recovers. Without sessionStorage there is no
       guard, so no reload. Its sha256 is in PAGE_CSP (backend/scadbuddy/api/static.py,
       frontend/page-csp.txt); src/entryReload.test.ts fails when they drift.
     -->
