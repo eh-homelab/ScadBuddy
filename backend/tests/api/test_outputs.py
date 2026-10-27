@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
+import os
 import re
 import shutil
 import tarfile
+import threading
+import time
 import zipfile
+from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,6 +20,7 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
@@ -244,7 +252,6 @@ def test_a_new_output_lists_with_a_thumbnail_when_previews_are_on(
     assert [o["has_thumbnail"] for o in listed if o["id"] == created["id"]] == [True]
 
 
-@pytest.mark.requires_postgres
 def test_an_upload_replaces_a_drawn_thumbnail(client: TestClient, model: str) -> None:
     _drawing_thumbnails(client)
     created = client.post(
@@ -276,6 +283,94 @@ def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, 
     assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is False
     assert store.thumbnail_path(created["id"]).read_bytes() == PNG_BYTES
     assert list(store.thumbnail_path(created["id"]).parent.glob(".thumbnail.png.*")) == []
+
+
+def test_an_upload_replaces_a_thumbnail_whole(client: TestClient, model: str) -> None:
+    """A reader that opened the old file keeps reading it whole: the upload is put in
+    place by a rename, never written over the file a reader may hold."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    drawn = b"\x89PNG\r\n\x1a\ndrawn"
+    assert store.write_drawn_thumbnail(created["id"], drawn) is True
+    thumbnail = store.thumbnail_path(created["id"])
+    held = thumbnail.with_name("held.png")
+    os.link(thumbnail, held)
+
+    store.write_thumbnail(created["id"], PNG_BYTES)
+
+    assert thumbnail.read_bytes() == PNG_BYTES
+    assert held.read_bytes() == drawn
+    assert list(thumbnail.parent.glob(".thumbnail.png.*")) == []
+
+
+def _counting_draws(
+    monkeypatch: pytest.MonkeyPatch, draw: Callable[..., bytes | None]
+) -> list[str]:
+    calls: list[str] = []
+
+    def counted(glb: Path, *args: Any) -> bytes | None:
+        calls.append(glb.parent.name)
+        return draw(glb, *args)
+
+    monkeypatch.setattr(outputs_api, "draw_view", counted)
+    return calls
+
+
+def test_an_output_with_nothing_to_draw_shows_no_thumbnail(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    calls = _counting_draws(monkeypatch, lambda *_: None)
+
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    # Remembered: listed with no thumbnail, and not drawn again on the next read.
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    assert calls == [created["id"]]
+
+
+def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.config = dataclasses.replace(state.config, render_timeout=0.2)
+    release = threading.Event()
+
+    def stuck(*_: Any) -> bytes | None:
+        release.wait(30)
+        return None
+
+    calls = _counting_draws(monkeypatch, stuck)
+    slots: asyncio.Semaphore = state.outputs.thumbnail_draws
+    free = slots._value
+
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 503
+    # The thread still runs, so it still holds its slot.
+    assert slots._value == free - 1
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    assert calls == [created["id"]]
+
+    release.set()
+    deadline = time.monotonic() + 10
+    while slots._value != free and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert slots._value == free
 
 
 def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str) -> None:
