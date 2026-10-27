@@ -1,12 +1,12 @@
 """The agent's tools a flow may call, at their tiers now (#2704), as the API reads them.
 
 The agent resolves a tool's tier for its own turns with `effectiveTool`
-(agent/src/tools/registry.ts): the tool's definition, Settings' raised tiers and its
-disabled tools. The API asks the agent sidecar in its own pod for that same answer
+(agent/src/tools/registry.ts): the tool's definition, Settings' tiers (raised or lowered,
+#2171) and its disabled tools. The API asks the agent sidecar in its own pod for that same answer
 (`GET /internal/flows/tools` on the pod's loopback, agent/src/routes/flowTools.ts) when it
 checks a grant's tools (a run's start, a grant's approval) and lists the editor's, and a
 run starts with it as its tiers (`FlowStart.tool_tiers`), which each call's own answer
-from the agent (`flow_tool_tier`, workflows/flow_tools.py) may only raise.
+from the agent (`flow_tool_tier`, workflows/flow_tools.py) replaces, in either direction.
 
 Ruling (#2704): the loopback route, not an activity. The API needs the answer inside a
 request, with no workflow to run an activity from; the agent is a sidecar of every API
