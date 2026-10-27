@@ -241,9 +241,19 @@ def _row(data: dict[str, Any]) -> PrinterRow:
 
 
 class PrinterStore:
-    def __init__(self, pool: Pool, kek: Kek | None, *, events: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        pool: Pool,
+        kek: Kek | None,
+        *,
+        events: EventBus | None = None,
+        previous_kek: Kek | None = None,
+    ) -> None:
         self.pool = pool
         self.kek = kek
+        #: The KEK before a rotation (`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`), tried after
+        #: ``kek`` where a value sealed before the rotation may still be opened (#4888).
+        self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
 
@@ -420,6 +430,21 @@ class PrinterStore:
                 " AND bambuddy_active IS DISTINCT FROM (bambuddy_printer_id = ANY(%s))",
                 (ids, ids),
             )
+
+    def mark_virtual_listed(self, listed: Iterable[int]) -> tuple[str, ...]:
+        """Record which virtual printers Bambuddy lists now on their rows' ``bambuddy_active``
+        (#4889): a VP's row is kept when Bambuddy drops the VP, marked no longer listed.
+        Writes only the rows that change, and returns their ids."""
+        ids = sorted(set(listed))
+        with self.pool.connection() as conn:
+            changed = conn.execute(
+                "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
+                " updated_at = now() WHERE bambuddy_vp_id IS NOT NULL"
+                " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
+                " RETURNING id",
+                (ids, ids),
+            ).fetchall()
+        return tuple(str(row["id"]) for row in changed)
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
         """Take the Bambuddy link off, and remember which it was, so the next strip read

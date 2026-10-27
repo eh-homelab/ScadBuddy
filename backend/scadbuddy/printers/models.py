@@ -89,6 +89,7 @@ class PrinterRow(BaseModel):
     preferred_path: PrintPath = "auto"
     #: Whether Bambuddy listed its printer as active when it last answered: what the
     #: strip shows while Bambuddy is down.
+    #: For a virtual printer's row, whether Bambuddy still lists the VP (#4889).
     bambuddy_active: bool = True
     kind: PrinterKind = "physical"
     #: The Bambuddy virtual printer this row is (``kind`` ``bambuddy_virtual``).

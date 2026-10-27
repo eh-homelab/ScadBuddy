@@ -36,7 +36,7 @@ function shown<T extends Row>(row: T): Omit<T, 'serial'> {
 const ROW_FIELDS =
   'Each row has `id` (the registry id the printer tools take), `name`, `model`, `bambuddy_printer_id` (the ' +
   'Bambuddy printer it is, or null), `lan_host` and `has_access_code` (its LAN link, the code itself never ' +
-  'shown), `preferred_path` and `bambuddy_active`; `kind` (`physical`, or `bambuddy_virtual` for one of ' +
+  'shown), `preferred_path` and `bambuddy_active` (for a virtual printer, whether Bambuddy still lists it); `kind` (`physical`, or `bambuddy_virtual` for one of ' +
   "Bambuddy's virtual printers, never a printer to print on: `bambuddy_vp_id`, `vp_mode`, and `forwards_to`, " +
   "the registry printer it forwards to: null with `bambuddy_view.target_printer_id` null is Bambuddy's 'any " +
   "printer of its model', but null with a `target_printer_id` means its target has no row here, never 'any'); " +

@@ -1050,7 +1050,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     print_runs = PrintRunStore(pool, events=events, activity=activity)
     operations = OperationStore(pool, events=events, activity=activity)
     kek = settings_kek(settings.secret_key_file)
-    printers = PrinterStore(pool, kek)
+    printers = PrinterStore(pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file))
     reports = PrinterReportStore(pool)
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9).
     # The follow's newest-failure read shares its newest-run query (#4540 review).

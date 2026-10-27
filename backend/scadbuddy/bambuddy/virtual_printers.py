@@ -29,6 +29,7 @@ import hashlib
 import hmac
 import logging
 from typing import Any
+from uuid import UUID
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -108,8 +109,9 @@ class VirtualPrinterCreate(BaseModel):
         pattern=r"^[^\x00-\x1f\x7f]+$",
         repr=False,
     )
-    #: A registry printer's id; ``None`` for a model-based VP ("any <model>").
-    target: str | None = None
+    #: A registry printer's id; ``None`` for a model-based VP ("any <model>"). A UUID
+    #: in the spec (#4888); the request records it as its string.
+    target: UUID | None = None
     auto_dispatch: bool = True
     queue_force_color_match: bool = False
     save_ams_mapping: bool = False
@@ -135,7 +137,7 @@ class VirtualPrinterUpdate(BaseModel):
         pattern=r"^[^\x00-\x1f\x7f]+$",
         repr=False,
     )
-    target: str | None = None
+    target: UUID | None = None
     auto_dispatch: bool | None = None
     queue_force_color_match: bool | None = None
     save_ams_mapping: bool | None = None
@@ -170,8 +172,17 @@ def seal_access_code(kek: Kek, code: str, context: str) -> str:
     return seal_bytes(access_code_key(kek), code.encode(), context).hex()
 
 
-def open_access_code(kek: Kek, sealed: str, context: str) -> str:
-    return open_bytes(access_code_key(kek), bytes.fromhex(sealed), context).decode()
+def open_access_code(kek: Kek, sealed: str, context: str, *, previous: Kek | None = None) -> str:
+    """The sealed code, under the current KEK or else, during a rotation, the previous
+    one (`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`): a code the route sealed before the
+    rotation still opens in a run after it (#4888)."""
+    raw = bytes.fromhex(sealed)
+    try:
+        return open_bytes(access_code_key(kek), raw, context).decode()
+    except SealError:
+        if previous is None:
+            raise
+        return open_bytes(access_code_key(previous), raw, context).decode()
 
 
 def access_code_mac(kek: Kek, code: str, context: str, idempotency_key: str) -> str:
@@ -273,7 +284,9 @@ def virtual_printer_kinds(
             # without one fails here rather than binding to an empty key.
             context = seal_context(vp_id=vp_id, idempotency_key=str(request[KEY_FIELD]))
             try:
-                fields["access_code"] = open_access_code(printers.kek, sealed, context)
+                fields["access_code"] = open_access_code(
+                    printers.kek, sealed, context, previous=printers.previous_kek
+                )
             except SealError:
                 raise ApiError(
                     status.HTTP_503_SERVICE_UNAVAILABLE,
