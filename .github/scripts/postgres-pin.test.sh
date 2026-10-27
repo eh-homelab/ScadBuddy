@@ -25,24 +25,24 @@ fails() {  # fails <what> <expected text> <args...>
   fi
 }
 
-service "$work/ci.yml" "mirror.gcr.io/library/postgres:17@$pin"
+service "$work/ci.yml" "mirror.gcr.io/library/postgres:18@$pin"
 "$here/postgres-pin.sh" "$work/ci.yml" >/dev/null
 
-service "$work/bare.yml" "mirror.gcr.io/library/postgres:17"
+service "$work/bare.yml" "mirror.gcr.io/library/postgres:18"
 fails "a bare tag" "$work/bare.yml:5:" "$work/ci.yml" "$work/bare.yml"
 
-service "$work/hub.yml" "postgres:17@$pin"
+service "$work/hub.yml" "postgres:18@$pin"
 fails "a Docker Hub image" "$work/hub.yml:5:" "$work/hub.yml"
 
 # Another image whose name merely contains postgres is not the service's.
 printf 'jobs:\n  test:\n    services:\n      exporter:\n        image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0\n' >"$work/exporter.yml"
 "$here/postgres-pin.sh" "$work/ci.yml" "$work/exporter.yml" >/dev/null
 
-service "$work/split.yml" "mirror.gcr.io/library/postgres:17@$other"
+service "$work/split.yml" "mirror.gcr.io/library/postgres:18@$other"
 fails "two digests" "$work/split.yml:5:" "$work/ci.yml" "$work/split.yml"
 
 # The fake registry: one file per manifest or blob under $work/registry, the tag's
-# digest in manifests/17.digest. The stub reads only the URL and -I / -D.
+# digest in manifests/18.digest. The stub reads only the URL and -I / -D.
 reg="$work/registry"
 mkdir -p "$work/bin" "$reg/manifests" "$reg/blobs"
 cat >"$work/bin/curl" <<STUB
@@ -59,7 +59,7 @@ path="$reg/\${url#https://registry.test/v2/library/postgres/}"
 if [ "\$head" = 1 ]; then
   if [ -e "\$path" ]; then printf 200; else printf 404; fi
 elif [ "\$headers" = 1 ]; then
-  printf 'HTTP/2 200\r\nDocker-Content-Digest: %s\r\n\r\n' "\$(cat "$reg/manifests/17.digest")"
+  printf 'HTTP/2 200\r\nDocker-Content-Digest: %s\r\n\r\n' "\$(cat "$reg/manifests/18.digest")"
 else
   cat "\$path" || exit 22
 fi
@@ -79,7 +79,7 @@ image() {  # image <index digest> <amd64 manifest digest> <blob...>
 }
 
 image "$pin" sha256:amd64-a sha256:config-a sha256:layer-1 sha256:layer-2
-echo "$pin" >"$reg/manifests/17.digest"
+echo "$pin" >"$reg/manifests/18.digest"
 PATH="$work/bin:$PATH" "$here/postgres-pin.sh" --check "$work/ci.yml" >/dev/null
 
 rm "$reg/blobs/sha256:layer-2"
@@ -94,14 +94,14 @@ mv "$reg/manifests/$pin" "$work/index"
 fails "an index that cannot be read" "could not read the index $pin" --check "$work/ci.yml"
 mv "$work/index" "$reg/manifests/$pin"
 
-: >"$reg/manifests/17.digest"
-fails "a tag the mirror gives no digest for" "the mirror gave no digest for postgres:17" --check "$work/ci.yml"
+: >"$reg/manifests/18.digest"
+fails "a tag the mirror gives no digest for" "the mirror gave no digest for postgres:18" --check "$work/ci.yml"
 printf '{"manifests":[{"digest":"sha256:arm","platform":{"os":"linux","architecture":"arm64"}}]}' >"$reg/manifests/$other"
-echo "$other" >"$reg/manifests/17.digest"
+echo "$other" >"$reg/manifests/18.digest"
 fails "a moved tag with no linux/amd64 image" "$other (no linux/amd64 manifest)" --check "$work/ci.yml"
 
 image "$other" sha256:amd64-b sha256:config-b sha256:layer-1 sha256:layer-3
-echo "$other" >"$reg/manifests/17.digest"
+echo "$other" >"$reg/manifests/18.digest"
 fails "a moved tag" "moved to $other and the mirror holds all of its blobs" --check "$work/ci.yml"
 
 rm "$reg/blobs/sha256:layer-3"

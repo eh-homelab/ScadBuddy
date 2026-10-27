@@ -3,14 +3,14 @@
 # (default: every .github/workflows/*.y*ml, and e2e-stack/compose.yaml's, which runs the
 # same image) are pinned by digest (#4729). A service
 # container pulls from mirror.gcr.io with no Docker Hub fallback (#3370), so when the
-# moving `postgres:17` tag reached a layer the mirror did not yet hold, every job with
+# moving `postgres:18` tag reached a layer the mirror did not yet hold, every job with
 # the service failed before any test ran. A digest whose every blob the mirror holds
 # cannot do that.
 #
 # Without --check (the `lint` job, no network): every `image:` of the postgres image is
-# mirror.gcr.io/library/postgres:17@sha256:<64 hex>, and all of them the same digest.
+# mirror.gcr.io/library/postgres:18@sha256:<64 hex>, and all of them the same digest.
 # With --check (the weekly postgres-pin.yml): also that the mirror holds every blob of
-# the pin's linux/amd64 image, and that `17` on the mirror still points at the pin. A
+# the pin's linux/amd64 image, and that `18` on the mirror still points at the pin. A
 # moved tag exits 1, the reminder to move the pin in a reviewed PR, saying whether the
 # mirror holds all of the new digest's blobs yet (move it only once it does).
 # Needs curl and jq for --check; POSTGRES_PIN_REGISTRY overrides the registry (tests).
@@ -22,7 +22,7 @@ if [ "$#" = 0 ]; then
   set -- "$root"/.github/workflows/*.y*ml "$root"/e2e-stack/compose.yaml
 fi
 
-image='mirror.gcr.io/library/postgres:17'
+image='mirror.gcr.io/library/postgres:18'
 lines="$(grep -HnE '^[[:space:]]*image:.*(library/postgres|[/[:space:]]postgres)[:@]' "$@")" || {
   echo "no postgres service image in $*" >&2; exit 2
 }
@@ -32,7 +32,7 @@ pin=''
 while IFS= read -r line; do
   at="$(cut -d: -f1,2 <<<"$line")"  # file:lineno
   text="$(cut -d: -f3- <<<"$line")"
-  if ! [[ "$text" =~ ^[[:space:]]*image:[[:space:]]*mirror\.gcr\.io/library/postgres:17@(sha256:[0-9a-f]{64})[[:space:]]*(#.*)?$ ]]; then
+  if ! [[ "$text" =~ ^[[:space:]]*image:[[:space:]]*mirror\.gcr\.io/library/postgres:18@(sha256:[0-9a-f]{64})[[:space:]]*(#.*)?$ ]]; then
     echo "$at: the postgres service image is not $image@sha256:<digest> (#4729)" >&2
     bad=1
     continue
@@ -83,19 +83,19 @@ if [ -n "$lacking" ]; then
 fi
 echo "the mirror holds every blob of the pin's linux/amd64 image"
 
-tag="$(curl -fsS --retry 3 -o /dev/null -D - -H "Accept: $index_types" "$registry/manifests/17" \
+tag="$(curl -fsS --retry 3 -o /dev/null -D - -H "Accept: $index_types" "$registry/manifests/18" \
   | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }')" || {
-  echo "could not read postgres:17 from the mirror" >&2; exit 2
+  echo "could not read postgres:18 from the mirror" >&2; exit 2
 }
-if [ -z "$tag" ]; then echo "the mirror gave no digest for postgres:17" >&2; exit 2; fi
-echo "postgres:17 on the mirror: $tag"
+if [ -z "$tag" ]; then echo "the mirror gave no digest for postgres:18" >&2; exit 2; fi
+echo "postgres:18 on the mirror: $tag"
 if [ "$tag" != "$pin" ]; then
   lacking="$(missing "$tag")" || exit $?
   if [ -n "$lacking" ]; then
-    echo "postgres:17 moved to $tag, but the mirror lacks some of its blobs; keep the pin until it holds them:" >&2
+    echo "postgres:18 moved to $tag, but the mirror lacks some of its blobs; keep the pin until it holds them:" >&2
     echo "$lacking" >&2
   else
-    echo "postgres:17 moved to $tag and the mirror holds all of its blobs. Move every pin to it in a reviewed PR." >&2
+    echo "postgres:18 moved to $tag and the mirror holds all of its blobs. Move every pin to it in a reviewed PR." >&2
   fi
   exit 1
 fi
