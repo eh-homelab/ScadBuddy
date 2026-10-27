@@ -656,26 +656,35 @@ export function CustomizePage() {
     return schema
   }
 
+  /** The model a call was made on, to check the page against after every wait. */
+  type CallOn = { slug: string; version: string | undefined }
+
+  /**
+   * #4894, #4900 — throws `unavailable` when the page has moved off the model the call was
+   * made on, so a wait that outlasts the move never acts on, or reports, another model.
+   */
+  function stillOn(on: CallOn) {
+    const { slug: slugNow, version: versionNow } = live.current
+    if (slugNow !== on.slug || versionNow !== on.version) {
+      throw new AgentToolError(
+        'unavailable',
+        `The page moved off "${on.slug}" while this call waited; nothing was changed.`,
+      )
+    }
+  }
+
   /**
    * #4885 — the tools are live as soon as the page mounts, before its schema has loaded,
    * so a call that needs the schema waits for the fetch in flight rather than answering
    * "still loading" at once. A failed or absent schema still answers at once. The wait
    * spends the call's `budget` ms and answers what is left of it, for the rest of the call.
-   * #4894 — the model is the one the call was made on: a call made on `/m/a` never acts on
-   * `/m/b` because the page moved while it waited.
    */
-  function schemaLoaded(budget: number): Promise<number> {
-    const on = { slug, version }
+  function schemaLoaded(on: CallOn, budget: number): Promise<number> {
     return spend(budget, (timeout) =>
       waitFor(
         () => {
-          const { slug: slugNow, version: versionNow, schema: loaded, schemaLoading, schemaError } = live.current
-          if (slugNow !== on.slug || versionNow !== on.version) {
-            throw new AgentToolError(
-              'unavailable',
-              `The page moved off "${on.slug}" while this call waited for it to load; nothing was changed.`,
-            )
-          }
+          stillOn(on)
+          const { schema: loaded, schemaLoading, schemaError } = live.current
           if (loaded) return loaded
           if (schemaError || !schemaLoading) throw notLoaded(schemaError)
           return undefined
@@ -794,12 +803,16 @@ export function CustomizePage() {
       return { name, value: initial }
     },
     render: async ({ timeout_ms }) => {
-      // Only `live` is read below, so this closure may outlast the render it came from.
-      const left = await schemaLoaded(timeout_ms)
-      await waitFor(() => (live.current.upToDate ? true : undefined), {
-        timeout: left,
-        what: 'the preview render of the current values',
-      })
+      // Past `on`, only `live` is read, so this closure may outlast the render it came from.
+      const on = { slug, version }
+      const left = await schemaLoaded(on, timeout_ms)
+      await waitFor(
+        () => {
+          stillOn(on)
+          return live.current.upToDate ? true : undefined
+        },
+        { timeout: left, what: 'the preview render of the current values' },
+      )
       return renderReport()
     },
     select_plate: async ({ printer_model }) => {
@@ -822,7 +835,7 @@ export function CustomizePage() {
    */
   function afterSchema<N extends 'get_params' | 'set_param' | 'set_params' | 'reset_param'>(name: N): ToolImpl<N> {
     return async (args) => {
-      await schemaLoaded(SCHEMA_WAIT_MS)
+      await schemaLoaded({ slug, version }, SCHEMA_WAIT_MS)
       return (latestTools.current[name] as ToolImpl<N>)(args)
     }
   }
