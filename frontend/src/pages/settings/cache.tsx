@@ -59,9 +59,13 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
 
   /** Every seeder with its edit counts taken now. */
   const begin = useCallback(() => [...seeders.current].map((seeder) => [seeder, seeder.begin()] as const), [])
-  const seedAll = useCallback(() => {
-    for (const [seeder, since] of begin()) seeder.seed('all', since)
-  }, [begin])
+  const seedAll = useCallback(
+    (begun = begin()) => {
+      // A section that unmounted meanwhile has nothing left to seed.
+      for (const [seeder, since] of begun) if (seeders.current.has(seeder)) seeder.seed('all', since)
+    },
+    [begin],
+  )
 
   const own = useCallback(async <T,>(work: () => Promise<T>): Promise<T> => {
     owning.current++
@@ -94,10 +98,13 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
       setChangedElsewhere(true)
       return
     }
-    // Decided when the answer lands, not when the event came: typing may have started since.
+    // The edit counts are taken now, before the read is sent (#767): a field typed into
+    // meanwhile keeps its draft even before its section reports dirty. Whether to follow
+    // is decided when the answer lands, not when the event came: typing may have started since.
+    const begun = begin()
     refresh(() => {
       if (!anyDirty()) {
-        seedAll()
+        seedAll(begun)
         return true
       }
       setChangedElsewhere(true)

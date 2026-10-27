@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { FieldName } from './fields'
 
 type Drafts = Partial<Record<FieldName, string>>
@@ -69,7 +69,8 @@ function useRegistry(): DirtyRegistry {
 export function useReportDirty(id: string, dirty: boolean, drafts?: Drafts): void {
   const registry = useRegistry()
   const published = JSON.stringify(drafts ?? {})
-  useEffect(() => {
+  // In the commit itself: a settings event or an agent call read right after an edit sees it.
+  useLayoutEffect(() => {
     registry.set(id, { dirty, drafts: JSON.parse(published) as Drafts })
   }, [registry, id, dirty, published])
   useEffect(() => () => registry.remove(id), [registry, id])

@@ -157,6 +157,16 @@ describe('the settings agent scope', () => {
     }
   })
 
+  it('get_form right after set_field reports the edit unsaved, with no extra tick (#2171)', async () => {
+    renderShell()
+    await screen.findByLabelText('Bambuddy URL')
+    expect(await bridge.call('set_field', { field: 'bambuddy_url', value: 'https://other.test' })).toMatchObject({ ok: true })
+    expect(await bridge.call('get_form', {})).toMatchObject({
+      ok: true,
+      result: { unsaved: true, values: { bambuddy_url: 'https://other.test' } },
+    })
+  })
+
   it('refuses a value that is not a choice', async () => {
     renderShell()
     await screen.findByLabelText('Show dimensions in')

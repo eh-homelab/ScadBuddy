@@ -1,5 +1,5 @@
 import { act, screen, waitFor } from '@testing-library/react'
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
@@ -7,7 +7,7 @@ import { emitRealtime } from '../../mocks/realtime'
 import { renderPage } from '../../test/utils'
 import { BambuddyResourcesProvider, useBambuddyResources } from './bambuddyResources'
 import { SettingsCacheProvider, SettingsLoaded, useLoadedSettings, useSettingsCache, type Seeder, type SettingsCache } from './cache'
-import { SettingsDirtyProvider, useDirtySections, usePeerDraft, useReportDirty } from './dirty'
+import { SettingsDirtyProvider, useAnyDirty, useDirtySections, usePeerDraft, useReportDirty } from './dirty'
 import type { FieldName } from './fields'
 import type { Edits } from './seed'
 
@@ -203,6 +203,75 @@ describe('settings cache', () => {
     expect(cache.changedElsewhere).toBe(false)
   })
 
+  it("follows an event with each seeder's edit counts taken before the read is sent (#2171)", async () => {
+    const get = vi.spyOn(api, 'getSettings')
+    // A seeder whose counts are what has been typed so far: one more keystroke while the
+    // read is in flight, not yet reported dirty, must keep its draft.
+    let typed = 0
+    const seed = vi.fn((_names: 'all' | readonly FieldName[], _since: Edits) => {})
+    const seeder: Seeder = { begin: () => new Map<FieldName, number>([['public_url', typed]]), seed }
+    renderPage(
+      <Providers>
+        <Probe />
+        <Loaded />
+        <Section id="a" seeder={seeder} />
+      </Providers>,
+    )
+    await screen.findByTestId('loaded')
+    await emitUntil(() => expect(seed).toHaveBeenCalledWith('all', expect.any(Map)))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    seed.mockClear()
+
+    let answer: () => void = () => {}
+    get.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => (answer = resolve))
+      return mockSettings()
+    })
+    const sent = get.mock.calls.length
+    emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+    await waitFor(() => expect(get.mock.calls.length).toBe(sent + 1))
+    typed++
+    await act(async () => answer())
+    await waitFor(() => expect(seed).toHaveBeenCalledTimes(1))
+    expect(seed).toHaveBeenCalledWith('all', new Map([['public_url', 0]]))
+  })
+
+  it('says changed elsewhere, and seeds nothing, when a section turns dirty while the read is in flight', async () => {
+    const get = vi.spyOn(api, 'getSettings')
+    const order: string[] = []
+    const a = fakeSeeder('a', order)
+    function Dirtying() {
+      const [dirty, setDirty] = useState(false)
+      makeDirty = () => setDirty(true)
+      return <Section id="a" dirty={dirty} seeder={a.seeder} />
+    }
+    let makeDirty: () => void = () => {}
+    renderPage(
+      <Providers>
+        <Probe />
+        <Loaded />
+        <Dirtying />
+      </Providers>,
+    )
+    await screen.findByTestId('loaded')
+    await emitUntil(() => expect(a.seed).toHaveBeenCalledWith('all', a.since))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    a.seed.mockClear()
+
+    let answer: () => void = () => {}
+    get.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => (answer = resolve))
+      return mockSettings()
+    })
+    const sent = get.mock.calls.length
+    emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+    await waitFor(() => expect(get.mock.calls.length).toBe(sent + 1))
+    act(() => makeDirty())
+    await act(async () => answer())
+    await waitFor(() => expect(cache.changedElsewhere).toBe(true))
+    expect(a.seed).not.toHaveBeenCalled()
+  })
+
   it('says changed elsewhere while any section is dirty, and Load the latest seeds every seeder', async () => {
     const order: string[] = []
     const a = fakeSeeder('a', order)
@@ -261,6 +330,26 @@ describe('dirty registry', () => {
       </Providers>,
     )
     await waitFor(() => expect(dirtyNow).toEqual([]))
+  })
+
+  it('reports a section dirty as its render commits, before any passive effect (#2171)', async () => {
+    let seenInLayout: boolean | undefined
+    function Reader() {
+      const anyDirty = useAnyDirty()
+      // Runs in the same commit, after the reporter above it in the tree.
+      useLayoutEffect(() => {
+        seenInLayout = anyDirty()
+      })
+      return null
+    }
+    renderPage(
+      <Providers>
+        <Section id="a" dirty />
+        <Reader />
+      </Providers>,
+    )
+    await waitFor(() => expect(seenInLayout).toBeDefined())
+    expect(seenInLayout).toBe(true)
   })
 
   it('hands one section’s published draft to another', async () => {
