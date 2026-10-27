@@ -243,6 +243,8 @@ def _pinned_call_patched(call_id: str) -> bool:
 #: (agent/src/temporal/flowTools.ts, #2704): runs recorded before take the run's start's.
 FLOW_TOOL_TIER = "flow_tool_tier"
 FLOW_LIVE_TIERS_PATCH = "flow-live-tiers-2704"
+#: #2171: the agent's tier is taken as given, lowered or raised; runs before it only raised.
+FLOW_ACCESS_PATCH = "flow-access-2171"
 #: Lowest first (agent/src/harness/permissions.ts RISK_TIERS).
 RISK_TIERS = ("read", "write", "outward")
 _TIER_TIMEOUT = timedelta(seconds=30)
@@ -889,9 +891,10 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
 async def _live_tier(name: str, own: str | None) -> str:
     """The tool's tier as the agent resolves it now (`effectiveTool`: its definition,
     Settings' raised tiers, disabled tools), as its own turns do, and as its activity will
-    check the call again when it runs. The answer only raises: a tool the run started
-    with at a higher tier keeps it. One the agent does not have, or will not say, is
-    refused; nothing falls back to the tiers the run started with."""
+    check the call again when it runs. Under `flow-access-2171` the answer is taken as
+    given, lowered or raised (#2171); before it, the answer only raised: a tool the run
+    started with at a higher tier kept it. One the agent does not have, or will not say,
+    is refused; nothing falls back to the tiers the run started with."""
     owner: StepOwner = workflow.instance()
     try:
         tiered: dict[str, Any] = await workflow.execute_activity(
@@ -916,6 +919,8 @@ async def _live_tier(name: str, own: str | None) -> str:
         raise ToolFailedError(f"the agent gave no tier for {name}")
     if tiered.get("disabled") is True:
         raise ValueError(f"{name} is disabled in Settings → Plugins")
+    if workflow.patched(FLOW_ACCESS_PATCH):
+        return str(tier)
     if own in RISK_TIERS and RISK_TIERS.index(own) > RISK_TIERS.index(tier):
         return own
     return str(tier)

@@ -28,7 +28,9 @@ nothing picked up, sent once more to the replica live then, recorded by
 `test_an_approved_turn_tool_nothing_picks_up_goes_to_the_replica_live_then`); `beatless`
 on #4262's (a `turn_tool_tier` whose three attempts missed their beats, asked once more
 with no heartbeat timeout, recorded by
-`test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats`). Never
+`test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats`); `lowered` on
+#2171's (a tool lowered from outward while the run waited, run without approval, recorded by
+`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`). Never
 re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
@@ -66,6 +68,7 @@ NAMES = [
     "rehomed",
     "retried",
     "beatless",
+    "lowered",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 

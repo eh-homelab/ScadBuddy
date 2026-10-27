@@ -207,11 +207,11 @@ async def test_a_tool_the_agent_raises_in_settings_waits_for_approval(
     assert served.calls == []
 
 
-async def test_the_agents_tier_never_lowers_the_runs_own(
+async def test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call(
     outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
 ) -> None:
-    """An agent that answers lower than the tiers the run started with (an older replica,
-    a tier lowered since) only raises: the call still waits for approval."""
+    """#2171: the agent's tier is taken as given, in either direction: a tool lowered
+    since the run started runs without approval. Records `lowered.json`."""
     served, queue = tools
     run_id = await outward.run(
         script(
@@ -226,8 +226,49 @@ async def test_the_agents_tier_never_lowers_the_runs_own(
     await AgentClient(outward.client, run.workflow_id).provide_callback_result(
         run.waiting_on[0].call_id, result={"answer": "yes"}
     )
-    parked = await outward.row(run_id, lambda r: any(w.kind == "approval" for w in r.waiting_on))
-    assert [w.fn for w in parked.waiting_on] == ["tool:send_to_bambuddy"]
+    run = await outward.finished(run_id)
+    assert run.status == "succeeded"
+    assert [s.outward for s in run.steps if s.fn == "tool:send_to_bambuddy"] == [False]
+    assert [c[0] for c in served.calls] == ["send_to_bambuddy"]
+    if RECORD:
+        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+        (HISTORIES / "lowered.json").write_text((await handle.fetch_history()).to_json())
+
+
+async def test_a_tool_lowered_from_outward_runs_without_approval(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    served, queue = tools
+    agent.tiers["send_to_bambuddy"] = "write"
+    run_id = await outward.run(
+        script("return await tool('send_to_bambuddy', {'output_id': 'o1'})"),
+        tools_queue=queue,
+        tool_tiers={"send_to_bambuddy": "outward"},
+    )
+    run = await outward.finished(run_id)
+    assert run.status == "succeeded"
+    assert [s.outward for s in run.steps] == [False]
+    assert [c[0] for c in served.calls] == ["send_to_bambuddy"]
+
+
+async def test_the_camera_off_is_refused_before_it_parks(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    served, queue = tools
+    agent.tiers["get_printer_camera"] = "outward"
+    agent.disabled.add("get_printer_camera")
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('get_printer_camera', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "disabled" in (run.result or "")
+    assert run.steps == []
     assert served.calls == []
 
 
