@@ -194,6 +194,32 @@ function baseline(settings: Settings, name: FieldName): string {
   return serverValue(settings, name)
 }
 
+/** The flag each secret is reported under. */
+const SECRET_FLAGS: Record<Secret, keyof Settings> = {
+  bambuddy_api_key: 'has_api_key',
+  bambuddy_render_api_key: 'has_render_api_key',
+  google_fonts_api_key: 'has_google_fonts_api_key',
+  store_s3_secret_access_key: 'has_store_s3_secret_access_key',
+}
+
+/**
+ * A copy of `settings` with `names` (their values, secret flags and sources) taken from
+ * `from`. Always a new object, so a seed queued with it is applied even when nothing moved.
+ */
+function patchFields(settings: Settings, from: Settings, names: FieldName[]): Settings {
+  const out: Record<string, unknown> = { ...settings }
+  const sources = { ...settings.sources }
+  for (const name of names) {
+    const key = isSecret(name) ? SECRET_FLAGS[name] : name
+    out[key] = (from as Record<string, unknown>)[key]
+    const source = from.sources?.[name]
+    if (source === undefined) delete sources[name]
+    else sources[name] = source
+  }
+  out.sources = sources
+  return out as Settings
+}
+
 /** Each section's id, in page order: what the section nav marks as in view. */
 const SECTION_IDS: readonly string[] = SECTIONS.map((section) => section.id)
 
@@ -405,13 +431,69 @@ function SettingsSections() {
 
   const guard = useLeaveGuard(dirty)
 
+  // #4776, #4803: every write (a save, a reset) and every reload of the settings is
+  // numbered as sent. Only the newest answer to land is cached whole; an older one landing
+  // after it would take the settings back a step.
+  const writeSent = useRef(0)
+  const writeLanded = useRef(0)
+  /** Whether the answer to `sent` is the newest yet; it is then the newest landed. */
+  const landed = (sent: number): boolean => {
+    if (sent <= writeLanded.current) return false
+    writeLanded.current = sent
+    return true
+  }
+  /** The write each field was last sent in: a late answer is still the truth for these. */
+  const fieldWriter = useRef(new Map<FieldName, number>())
+  /**
+   * The settings as last cached, read when an answer lands: the render's `settings` can
+   * be a step behind when two answers land together.
+   */
+  const cached = useRef<Settings | undefined>(undefined)
+  useEffect(() => {
+    if (settings && cached.current === undefined) cached.current = settings
+  }, [settings])
+
+  /**
+   * Caches a write's answer and returns what is cached. The newest answer is cached whole.
+   * A late one is not: a newer answer has landed. Yet the server may have applied the
+   * writes in another order than they were sent, so that newer answer can lack this
+   * write's fields. The late answer's own fields, the ones no newer write was sent for,
+   * are patched into the cache from it.
+   */
+  const cacheWrite = (sent: number, next: Settings, written: FieldName[], seed: FieldName[], since: Edits): Settings => {
+    requestSeed(seed, since)
+    if (landed(sent) || !cached.current) {
+      cached.current = next
+      settingsState.setData(next)
+      return next
+    }
+    const own = written.filter((name) => fieldWriter.current.get(name) === sent)
+    const patched = patchFields(cached.current, next, own)
+    cached.current = patched
+    settingsState.setData(patched)
+    return patched
+  }
+  /** Numbers a write as sent, and marks it the last one sent for each of `written`. */
+  const sendWrite = (written: FieldName[]): number => {
+    const sent = ++writeSent.current
+    for (const name of written) fieldWriter.current.set(name, sent)
+    return sent
+  }
+
   // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
   // follows them; an edited one (`dirty`) is never overwritten, and says so.
   const [changedElsewhere, setChangedElsewhere] = useState(false)
   const loadLatest = () => {
     setChangedElsewhere(false)
-    requestSeed('all', beginSeed())
-    settingsState.refresh()
+    const since = beginSeed()
+    const sent = ++writeSent.current
+    settingsState.refresh((next) => {
+      // #4803: a save or reset sent after this read has landed already, and is newer.
+      if (!landed(sent)) return false
+      requestSeed('all', since)
+      cached.current = next
+      return true
+    })
   }
 
   // Read when the answer lands, not when the event came: typing may have started since.
@@ -423,9 +505,14 @@ function SettingsSections() {
       setChangedElsewhere(true)
       return
     }
-    settingsState.refresh(() => {
+    const sent = ++writeSent.current
+    settingsState.refresh((next) => {
+      // #4803: a save or reset sent after this read has landed already, and is newer.
+      if (sent <= writeLanded.current) return false
       if (!isDirty.current()) {
+        landed(sent)
         requestSeed('all', beginSeed())
+        cached.current = next
         return true
       }
       setChangedElsewhere(true)
@@ -475,11 +562,6 @@ function SettingsSections() {
     return body as SettingsUpdate
   }
 
-  // #4776: saves are numbered as sent. Only the newest answer to land is cached; an older
-  // one landing after it would take the settings back a step.
-  const saveSent = useRef(0)
-  const saveLanded = useRef(0)
-
   /** Save one section; true when it saved, or had nothing to save. */
   async function saveSection(id: SectionId): Promise<boolean> {
     const body = patchFor(id)
@@ -489,23 +571,14 @@ function SettingsSections() {
     setSectionError((current) => ({ ...current, [id]: undefined }))
     try {
       const since = beginSeed()
-      const sent = ++saveSent.current
+      const written = Object.keys(body) as FieldName[]
+      const sent = sendWrite(written)
       const next = await api.putSettings(body)
       const names = [...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])]
-      if (sent > saveLanded.current) {
-        saveLanded.current = sent
-        requestSeed(names, since)
-        settingsState.setData(next)
-      } else {
-        // #4776: a newer save's answer landed first and holds the newer settings, so this
-        // one is not cached; it still seeds its own section's fields, so its draft is clean.
-        const kept = new Map(names.map((name) => [name, since.get(name) ?? 0]))
-        const values = Object.fromEntries(names.map((name) => [name, baseline(next, name)]))
-        setDraft((current) => seedDraft(current, values, editedSince(kept, edits.current)))
-        setClearing((current) => current.filter((name) => !names.includes(name)))
-      }
-      if (id === 'preview') setDisplayUnit(next.display_unit)
-      if (id === 'connection') setBambuddyLinks(next)
+      // What is cached, not this answer: a late answer is only patched in (#4803).
+      const shown = cacheWrite(sent, next, written, names, since)
+      if (id === 'preview') setDisplayUnit(shown.display_unit)
+      if (id === 'connection') setBambuddyLinks(shown)
       setSavedAt((current) => ({ ...current, [id]: new Date().toLocaleTimeString() }))
       if (id === 'connection') {
         targetsState.reload()
@@ -556,10 +629,10 @@ function SettingsSections() {
         settings?.store_backend === 'bambuddy' &&
         settings.library_backend !== 'native'
       const since = beginSeed()
+      const written: FieldName[] = fallBack ? [name, 'store_backend'] : [name]
+      const sent = sendWrite(written)
       const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
-      requestSeed(fallBack ? [name, 'store_backend'] : [name], since)
-      settingsState.setData(next)
-      setBambuddyLinks(next)
+      setBambuddyLinks(cacheWrite(sent, next, written, written, since))
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
         targetsState.reload()
         projectsState.reload()
