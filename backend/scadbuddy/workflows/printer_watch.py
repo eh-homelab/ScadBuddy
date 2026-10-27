@@ -183,11 +183,22 @@ async def stop_watch(client: Client, printer_id: str) -> None:
 
 
 async def ensure_watches(printers: PrinterStore, client: Client, task_queue: str) -> list[str]:
-    """The housekeeping sweep: a watch for every LAN-linked row. Returns their ids."""
+    """The housekeeping sweep: a watch for every LAN-linked physical row. Returns their
+    ids. A Bambuddy virtual printer's row is no printer (#4747): one that kept the LAN link
+    it had before the sync adopted it (prod's 09400A391800001) is not watched, and a watch
+    started before the adoption is stopped."""
     rows = await asyncio.to_thread(printers.list)
     started: list[str] = []
     for row in rows:
         if row.lan_host is None:
+            continue
+        if row.kind != "physical":
+            try:
+                await stop_watch(client, row.id)
+            except Exception:
+                logger.warning(
+                    "could not stop a virtual printer's watch", extra={"printer_id": row.id}
+                )
             continue
         try:
             await ensure_watch(client, task_queue, row.id)

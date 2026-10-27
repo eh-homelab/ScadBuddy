@@ -76,6 +76,38 @@ describe('SettingsPage', () => {
     expect(await findStatus('3DP-31B-598')).toBeInTheDocument()
   })
 
+  it("imports Bambuddy's printers once the connection tests OK (#4439)", async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+
+    const imported = await screen.findByRole('status', { name: 'Printer import' })
+    expect(imported).toHaveTextContent('Printers from Bambuddy: 1 added, 1 linked, 1 already linked, 1 skipped')
+    const section = screen.getByRole('region', { name: 'Printers' })
+    expect(await within(section).findByRole('listitem', { name: 'Printer H2C Virtual' })).toBeInTheDocument()
+    expect(within(section).getByRole('button', { name: 'Import from Bambuddy' })).toBeEnabled()
+  })
+
+  it('imports nothing when the connection test fails (#4439)', async () => {
+    const posts: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST') posts.push(new URL(request.url).pathname)
+    })
+    server.use(
+      http.post('/api/v1/settings/test', () =>
+        HttpResponse.json({ ok: false, detail: "The key needs the 'Read Status' scope", printers: [] }),
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+
+    expect(await findStatus("'Read Status' scope")).toBeInTheDocument()
+    expect(posts).not.toContain('/api/v1/printers/sync-bambuddy')
+  })
+
   it('names the missing scope rather than the bare status code', async () => {
     server.use(
       http.post('/api/v1/settings/test', () =>
