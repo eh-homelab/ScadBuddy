@@ -60,31 +60,43 @@ test.describe('settings', () => {
 
   // #969 — at desktop width the section nav was capped at max-w-2xl with a hidden
   // horizontal scrollbar, so the last four sections sat off-screen with no affordance.
-  test('shows every area link, and each area’s section links, at desktop width', async ({ page }) => {
-    test.setTimeout(90_000)
-    await page.setViewportSize({ width: 1440, height: 900 })
-    const areas = ['general', 'printing', 'library', 'assistant', 'tools', 'mcp', 'audits', 'system']
-    for (const area of areas) {
+  // The last section the mock renders for each area (hideWhenEmpty sections included, as
+  // the mock backend has what they need).
+  const LAST_SECTION = {
+    general: 'Connection',
+    printing: 'Hotend usage',
+    library: 'Preview',
+    assistant: 'Memory',
+    tools: 'Remote MCP plugins',
+    mcp: 'OIDC sign-in',
+    audits: 'Audit log',
+    system: 'About',
+  } as const
+  for (const [area, last] of Object.entries(LAST_SECTION)) {
+    test(`shows every area link, and the ${area} area’s section links, at desktop width`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 })
       await page.goto(`/settings/${area}`)
-      for (const label of ['Settings areas', 'Settings sections']) {
+      for (const [label, lastName] of [
+        ['Settings areas', 'System'],
+        ['Settings sections', last],
+      ] as const) {
         const nav = page.getByRole('navigation', { name: label })
         const links = nav.getByRole('link')
-        await expect(links.first()).toBeVisible()
+        await expect(links.last()).toHaveText(lastName)
+        if (label === 'Settings areas') await expect(links).toHaveCount(8)
         const navBox = (await nav.boundingBox())!
         for (const link of await links.all()) {
           const box = (await link.boundingBox())!
           const name = await link.textContent()
-          expect(box.x, `${area}: ${name} starts inside the ${label} nav`).toBeGreaterThanOrEqual(navBox.x)
-          expect(box.x + box.width, `${area}: ${name} ends inside the ${label} nav`).toBeLessThanOrEqual(
-            navBox.x + navBox.width,
-          )
+          expect(box.x, `${name} starts inside the ${label} nav`).toBeGreaterThanOrEqual(navBox.x)
+          expect(box.x + box.width, `${name} ends inside the ${label} nav`).toBeLessThanOrEqual(navBox.x + navBox.width)
         }
         const list = nav.getByRole('list')
         const overflow = await list.evaluate((el) => el.scrollWidth - el.clientWidth)
-        expect(overflow, `${area}: the ${label} nav does not scroll sideways`).toBeLessThanOrEqual(0)
+        expect(overflow, `the ${label} nav does not scroll sideways`).toBeLessThanOrEqual(0)
       }
-    }
-  })
+    })
+  }
 
   test('moves between areas with a draft, and asks only when leaving Settings', async ({ page }) => {
     await page.goto('/settings/library')
