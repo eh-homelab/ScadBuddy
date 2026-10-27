@@ -31,6 +31,21 @@ def test_files_are_named_and_ordered_by_timestamp() -> None:
     assert [m.id for m in _LEGACY] == list(LEGACY_VERSIONS)
 
 
+def test_no_column_is_added_to_order_attachments_while_its_old_name_is_a_view() -> None:
+    """#4678's rename leaves `attachments` as a view for the previous build (#4754),
+    whose `SELECT *` froze its columns: an old replica's insert through it would leave
+    a newer column at its default. A column waits until #4754's drop."""
+    ids = [m.id for m in MIGRATIONS]
+    rename = ids.index("20261026T2151Z_rename_order_attachments")
+    later = MIGRATIONS[rename + 1 :]
+    dropped = next(
+        (i for i, m in enumerate(later) if "DROP VIEW IF EXISTS attachments" in m.sql), len(later)
+    )
+    for migration in later[:dropped]:
+        sql = " ".join(migration.sql.lower().split())
+        assert not ("alter table order_attachments" in sql and "add column" in sql), migration.id
+
+
 def test_load_refuses_a_misnamed_file(tmp_path: Path) -> None:
     (tmp_path / "20260102T0000Z_b.sql").write_text("SELECT 2")
     (tmp_path / "20260101T2359Z_a.sql").write_text("SELECT 1")

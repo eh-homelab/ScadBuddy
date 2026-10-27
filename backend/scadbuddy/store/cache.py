@@ -134,8 +134,10 @@ class CachedBlobStore:
         # the read finds it fresh, and one that came before leaves no row to find. A
         # row on another backend (mid `/store/migrate`) is not this store's blob, as
         # for `_row`: the caller writes the bytes again, which costs only an upload.
+        # `stat` asks the backend whether the object is there (a HEAD, never a
+        # download) and forgets a row whose object was lost, so that is written again too.
         await self.content.touch(key)
-        return await asyncio.to_thread(self._row, key) is not None
+        return await self.content.stat(key) is not None
 
     async def checkout(self, key: str) -> str | None:
         async with self._lock(key):

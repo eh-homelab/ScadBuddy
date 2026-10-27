@@ -79,6 +79,22 @@ async def test_bytes_stored_already_are_kept_without_downloading_them(
     assert calls == 1
 
 
+async def test_bytes_whose_stored_object_was_lost_are_stored_again(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    a, b = replica(tmp_path / "a", content), replica(tmp_path / "b", content)
+    claims, sha = claim(tmp_path)
+    key = await keep(a, claims, sha, sha)
+    lost = content.index.get(key)
+    assert lost is not None
+    await content.backend.remove(lost.ref.backend_id)
+    # The row is there, its object is not: `claim` forgets the row, and `keep` stores
+    # the bytes again rather than name a blob nothing can serve.
+    assert await keep(b, claims, sha, sha) == key
+    path = await blob_path(replica(tmp_path / "c", content), key)
+    assert path is not None and path.read_bytes() == VIDEO
+
+
 async def test_a_local_blob_left_half_written_is_written_again(tmp_path: Path) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
     claims, sha = claim(tmp_path)
