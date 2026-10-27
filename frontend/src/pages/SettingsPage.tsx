@@ -309,6 +309,9 @@ const FOLD_IDS: readonly string[] = [...SECTION_IDS, ...ASSISTANT_GROUPS.map((gr
 const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
   ASSISTANT_GROUPS.find((group) => group.id === id)?.title ?? id
 
+/** #4818 review — a write whose answer was lost, and the settings could not be read again. */
+const UNCONFIRMED = 'Could not confirm what the server stored. Reload the page to see the saved settings.'
+
 function SettingsSections() {
   const settingsState = useAsync(() => api.getSettings(), [])
   const settings = settingsState.data
@@ -504,9 +507,13 @@ function SettingsSections() {
   }
   /**
    * #4816 — a write that threw. Only a refusal (a 4xx) was surely not applied, and gives its
-   * fields back. Any other failure (no answer, a 5xx, a timeout) may have been applied with
-   * its answer lost: its fields stay its own, so no older answer patches over them, and the
-   * settings are read again, seeding no field, so the form keeps what was typed.
+   * fields back. That includes 408 and 429 on purpose: a proxy or the server refused the
+   * request before applying anything. The rule is the 4xx range, not "any status": a 5xx
+   * can come after the write was applied. Any other failure (no answer, a 5xx, a timeout)
+   * may have been applied with its answer lost: its fields stay its own, so no older answer
+   * patches over them, and the settings are read again, seeding no field, so the form keeps
+   * what was typed. Should that read fail too, nothing reads again until the next settings
+   * event, so the page says it could not confirm what is stored.
    */
   const writeThrew = (sent: number, cause: unknown) => {
     if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
@@ -515,15 +522,30 @@ function SettingsSections() {
     }
     priorWriter.current.delete(sent)
     const since = beginSeed()
-    numberedRead(() => since, [])
+    numberedRead(() => since, [], () =>
+      setError((current) => (current ? `${current} ${UNCONFIRMED}` : UNCONFIRMED)),
+    )
   }
 
   /**
    * Numbers a read as sent and refreshes the settings. `onAccept` runs only when no newer
    * write has landed, and takes the read by returning the edits to seed `seed` with since,
    * or refuses it with `undefined`. A taken read is the newest landed and is cached whole.
+   * `failed` runs when the read fails.
+   *
+   * `seed` does not survive a merge: `useAsync.refresh` reads calls made in the same
+   * microtask once, deciding by the last caller's accept, so the other callers' `onAccept`
+   * and `seed` are dropped (every caller's `failed` is kept). Left so on purpose: the three
+   * callers are each started by a different event (a write's failure, a click, a realtime
+   * signal), and two events never share a microtask, so only `writeThrew`'s own reads can
+   * merge, and they all seed `[]`. A new caller started from the same event as another
+   * must not rely on its own `seed` (or `onAccept`) being used.
    */
-  const numberedRead = (onAccept: () => Edits | undefined, seed: 'all' | FieldName[] = 'all') => {
+  const numberedRead = (
+    onAccept: () => Edits | undefined,
+    seed: 'all' | FieldName[] = 'all',
+    failed?: () => void,
+  ) => {
     const sent = ++writeSent.current
     settingsState.refresh((next) => {
       // #4803: a save or reset sent after this read has landed already, and is newer.
@@ -535,7 +557,7 @@ function SettingsSections() {
       requestSeed(seed, since)
       cached.current = next
       return true
-    })
+    }, failed)
   }
 
   // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
