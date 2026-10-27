@@ -37,7 +37,8 @@ function intercept(navigator: Navigator, hold: (original: Navigator['push']) => 
  * #322 — an in-app "leave with unsaved changes?" guard. Bambuddy embeds ScadBuddy in a
  * sandboxed iframe without `allow-modals`, so neither `beforeunload` nor `confirm()` can
  * ask; instead, while `dirty`, a navigation to another page is held and the page shows
- * its own dialog. Navigations within the page (the section nav) pass. Held are:
+ * its own dialog. Navigations within the page (the section nav) pass, and with `within`
+ * so does every path under that prefix. Held are:
  *
  * - clicks on in-app links, plain anchors included;
  * - every router navigation, `navigate()` calls included: the app uses a declarative
@@ -46,10 +47,14 @@ function intercept(navigator: Navigator, hold: (original: Navigator['push']) => 
  *   the page, and the push drops any Forward entries. Each pop re-pushes it at once, so
  *   Back pressed again before the dialog is answered is held too.
  */
-export function useLeaveGuard(dirty: boolean) {
+export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
   const navigate = useNavigate()
   const location = useLocation()
   const { navigator } = useContext(UNSAFE_NavigationContext)
+  const within = options?.within
+  /** The page's own path, or with `within` any path under that prefix. */
+  const inside = (pathname: string) =>
+    pathname === location.pathname || (within !== undefined && (pathname === within || pathname.startsWith(`${within}/`)))
   const [pending, setPending] = useState<string | typeof BACK | null>(null)
   const bypass = useRef(false)
   /** Set while a confirmed Back leaves, so its own `popstate` is not held again. */
@@ -66,7 +71,7 @@ export function useLeaveGuard(dirty: boolean) {
       if (anchor.hasAttribute('download')) return
       const url = new URL(anchor.href, window.location.href)
       if (url.origin !== window.location.origin) return
-      if (url.pathname === location.pathname) return
+      if (inside(url.pathname)) return
       event.preventDefault()
       event.stopPropagation()
       setPending(`${url.pathname}${url.search}${url.hash}`)
@@ -74,19 +79,19 @@ export function useLeaveGuard(dirty: boolean) {
     // Capture, so it runs before the router's own link handler.
     document.addEventListener('click', onClick, true)
     return () => document.removeEventListener('click', onClick, true)
-  }, [dirty, location.pathname])
+  }, [dirty, location.pathname, within])
 
   useEffect(() => {
     if (!dirty) return
     return intercept(navigator, (original) => (to: To, state?: unknown, opts?: Parameters<Navigator['push']>[2]) => {
       const path = typeof to === 'string' ? to : createPath(to)
-      if (bypass.current || new URL(path, window.location.href).pathname === location.pathname) {
+      if (bypass.current || inside(new URL(path, window.location.href).pathname)) {
         original.call(navigator, to, state, opts)
         return
       }
       setPending(path)
     })
-  }, [dirty, navigator, location.pathname])
+  }, [dirty, navigator, location.pathname, within])
 
   // Saved or discarded: the sentinel comes off with a `history.back()` of our own, whose
   // popstate comes a task later. Typing again in between makes the page dirty before it
