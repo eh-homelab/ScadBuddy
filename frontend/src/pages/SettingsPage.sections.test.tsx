@@ -59,6 +59,9 @@ function region(name: string): HTMLElement {
   return section
 }
 
+/** Every microtask queued so far, and every one they queue: a macrotask runs only after them. */
+const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
 // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list) opens
 // Settings scrolled to it, once the page has loaded. #2345 — only the pane scrolls, never
 // the window, and the section stays in view while the sections above it load; #2346 — a
@@ -842,8 +845,9 @@ describe('SettingsPage sections (#322)', () => {
     await waitFor(() => expect(applied).toBe(2))
     await act(async () => release())
     const shown = await screen.findByText(/Could not confirm what the server stored\./)
-    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
-    expect(get).toHaveBeenCalledTimes(1)
+    // The one merged reread has failed; let every `failed` it calls run.
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+    await act(flushMicrotasks)
     expect(shown.textContent?.match(/Could not confirm/g)).toHaveLength(1)
     get.mockRestore()
     put.mockRestore()
@@ -873,9 +877,10 @@ describe('SettingsPage sections (#322)', () => {
     await user.clear(timeout)
     await user.type(timeout, '45')
     await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
-    await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(calls + 1))
     expect(await within(region('Rendering')).findByText(/^Bad gateway\. Could not confirm what the server stored\./)).toBeInTheDocument()
-    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    await act(flushMicrotasks)
+    expect(get).toHaveBeenCalledTimes(calls + 1)
     expect(screen.getAllByText(note)).toHaveLength(2)
     for (const shown of screen.getAllByText(note)) expect(shown.textContent?.match(new RegExp(note, 'g'))).toHaveLength(1)
 
