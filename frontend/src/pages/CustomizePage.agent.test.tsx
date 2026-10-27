@@ -324,6 +324,36 @@ describe('customizer tools', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
   })
 
+  it('waits for a schema still loading instead of answering "still loading" (#4885)', async () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get('/api/v1/models/:slug/schema', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    renderPage(
+      <Shell>
+        <CustomizePage />
+      </Shell>,
+      { route: '/m/name-keychain', path: '/m/:slug' },
+    )
+    // The tools are live before the schema is in: an agent can call them now.
+    await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ loaded: false }))
+
+    const rendered = call('render', { timeout_ms: 10_000 })
+    const set = call('set_param', { name: 'name', value: 'Nova' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    release()
+
+    expect(await set).toMatchObject({ ok: true, result: { name: 'name', value: 'Nova' } })
+    expect(await rendered).toMatchObject({ ok: true, result: { status: 'done' } })
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova')
+  })
+
   it('reports itself in the snapshot and goes unavailable when the page does', async () => {
     const view = await open()
     await call('set_param', { name: 'name', value: 'Nova' })
