@@ -394,11 +394,13 @@ describe('customizer tools', () => {
       release = resolve
     })
     let held = 0
+    let passed = 0
     server.use(
       http.post('/api/v1/models/:slug/render', async ({ params }) => {
         if (params['slug'] !== 'name-keychain') return undefined
         held += 1
         await gate
+        passed += 1
         return undefined
       }),
     )
@@ -422,7 +424,13 @@ describe('customizer tools', () => {
     } finally {
       release()
     }
-    // One preview render of name-keychain, and no second one hiding behind the first.
+    // One preview render of name-keychain, and no second one hiding behind the first: once
+    // every held request has gone through and gridfinity-bin has rendered, the page is
+    // settled, so a render the release set off has had its chance to start.
+    await waitFor(() => {
+      expect(passed).toBe(held)
+      expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'gridfinity-bin', render: 'done' })
+    })
     expect(held).toBe(1)
   })
 
