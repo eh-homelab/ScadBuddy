@@ -4,7 +4,7 @@ import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { BrowserRouter, MemoryRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { Settings } from '../api/types'
 import { restartMockBackend } from '../mocks/features/settings'
 import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handlers'
@@ -637,6 +637,51 @@ describe('SettingsPage sections (#322)', () => {
     expect(timeout).toHaveValue(45)
     expect(url).toHaveValue('https://later.test')
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
+    put.mockRestore()
+  })
+
+  it('patches an older save’s fields when a newer write for them failed (#4807)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const field = screen.getByLabelText('ScadBuddy’s own URL')
+    await user.clear(field)
+    await enter(user, field, 'https://mine.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here'))
+
+    // Connection's save reaches the server only after Rendering's has been applied and
+    // answered; the reset sent between them is refused. Rendering's answer, the newest,
+    // lacks Connection's URL, so Connection's late answer must still patch it in.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      if ('reset' in body) throw new ApiError(500, 'The reset failed.')
+      if ('public_url' in body) await held
+      return save(body)
+    })
+    await user.clear(field)
+    await enter(user, field, 'https://older.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    await user.click(
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset to deployment value: ScadBuddy’s own URL' }),
+    )
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('The reset failed.')).toBeInTheDocument()
+
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+
+    await act(async () => release())
+    await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
+    expect(field).toHaveValue('https://older.test')
+    expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here')
+    expect(timeout).toHaveValue(45)
     put.mockRestore()
   })
 
