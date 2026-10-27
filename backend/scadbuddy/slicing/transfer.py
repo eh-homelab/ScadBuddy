@@ -29,6 +29,9 @@ INTERNAL_BLOBS = "/api/v1/internal/blobs"
 #: The internal PUT route takes only a key with this prefix: a token never writes a
 #: stored key.
 PENDING_PREFIX = "pending-"
+#: A pending key the internal PUT route stores as a sealed workspace file of the agent's
+#: (`workspace-<sha256>`, kind ``workspace``, #4789), not as a slice.
+WORKSPACE_PENDING_PREFIX = f"{PENDING_PREFIX}workspace-"
 
 
 class TransferUnavailableError(RuntimeError):
@@ -149,23 +152,28 @@ class Transfers:
             return TransferUrl(url=url, expires_at=expires_at)
         return self.internal_get(key)
 
-    def mint_put(self) -> PendingPut:
-        """The internal PUT route of a new pending key, on every backend."""
-        pending_key = f"{PENDING_PREFIX}{uuid.uuid4().hex}"
+    def mint_put(self, prefix: str = PENDING_PREFIX) -> PendingPut:
+        """The internal PUT route of a new pending key, on every backend; with
+        `WORKSPACE_PENDING_PREFIX` the body is stored as a workspace file."""
+        pending_key = f"{prefix}{uuid.uuid4().hex}"
         return PendingPut(url=self._internal("PUT", pending_key), pending_key=pending_key)
 
     async def finish_put(self, put: PendingPut, *, sha256: str, size: int) -> str:
         """The key the PUT to ``put`` was stored under, once the worker's reported
         sha256 and size are the ones the route stored and the key is stored still (the
         `slice` kind is swept, and nothing holds it until the caller's `BlobRefs.add`)."""
-        row = await asyncio.to_thread(self.puts.get, put.pending_key)
+        return await self.finish_pending(put.pending_key, sha256=sha256, size=size)
+
+    async def finish_pending(self, pending_key: str, *, sha256: str, size: int) -> str:
+        """`finish_put` by the pending key alone (the agent's workspace files, #4789)."""
+        row = await asyncio.to_thread(self.puts.get, pending_key)
         if row is None:
-            raise TransferRecordError(f"nothing was PUT to {put.pending_key}")
+            raise TransferRecordError(f"nothing was PUT to {pending_key}")
         if row.sha256 != sha256 or row.size != size:
             raise TransferRecordError(
-                f"{put.pending_key} was PUT as {row.size} bytes of sha256 {row.sha256},"
+                f"{pending_key} was PUT as {row.size} bytes of sha256 {row.sha256},"
                 f" not {size} bytes of {sha256}"
             )
         if await self.content.stat(row.key) is None:
-            raise TransferRecordError(f"{put.pending_key}'s {row.key} is no longer stored")
+            raise TransferRecordError(f"{pending_key}'s {row.key} is no longer stored")
         return row.key

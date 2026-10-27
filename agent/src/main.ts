@@ -101,6 +101,8 @@ import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
+import { BackendWorkspaceBlobs } from './workspace/blobs.js'
+import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
 import { toolSwitches } from './tools/switches.js'
 
@@ -174,6 +176,13 @@ const database = config.databaseUrl
           console.log(
             `secret key rotation: re-wrapped ${payloadKeys.rewrapped} payload key(s)` +
               (payloadKeys.failed ? `; ${payloadKeys.failed} could not be opened with the previous key` : ''),
+          )
+        }
+        const files = await rewrapWorkspaceKeys(sql, previousKek.kek, kek.kek)
+        if (files.rewrapped || files.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${files.rewrapped} workspace file key(s)` +
+              (files.failed ? `; ${files.failed} could not be opened with the previous key` : ''),
           )
         }
         const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
@@ -280,8 +289,38 @@ if (database) {
 // /mcp caller's own outside a session, in ai_session_files. The workspace_* tools
 // and http_request's save_to_workspace write it; a principal's files are swept
 // 24 h after their last write.
-const workspace = database ? new SessionFiles(database.sql, { settings }) : undefined
+// The data keys that seal a session's transcript (D7), its workspace files' keys and, below,
+// its durable payloads: one instance, so forgetting a subject drops its key from the one cache.
+const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
+// The files' bytes are sealed blobs of the backend's store (#4789, workspace/blobs.ts) whenever
+// the KEK is mounted; where the backend keeps no blobs (store_backend local) they stay in Postgres.
+const workspace = database
+  ? new SessionFiles(database.sql, {
+      settings,
+      ...(dataKeys && kek.ok
+        ? {
+            blobs: {
+              store: new BackendWorkspaceBlobs(config.backendUrl, { warn: (message) => console.warn(message) }),
+              sealing: new WorkspaceSealing(dataKeys, kek.kek, previousKek?.ok ? previousKek.kek : undefined),
+            },
+          }
+        : {}),
+    })
+  : undefined
 if (workspace) toolServices.workspace = workspace
+// The files written before #4789 (or while the backend kept no blobs) move to blobs, in the
+// background once migrations have applied; what is left is retried at the next start.
+if (database && workspace && dataKeys) {
+  void database
+    .ready()
+    .then(async (ready) => {
+      if (!ready) return
+      const { moved, unavailable } = await workspace.moveToBlobs()
+      if (moved) console.log(`workspace files: moved ${moved} file(s) from Postgres to the blob store`)
+      if (unavailable) console.log('workspace files: the backend keeps no blobs (store_backend local); files stay in Postgres')
+    })
+    .catch((err: unknown) => console.error('workspace files: moving them to the blob store failed; retried at the next start:', (err as Error).message))
+}
 // What workspace_read redacts from text in every mode (classic, durable, /mcp):
 // each saved Claude credential's secret, read at the call (a classic turn adds its
 // plugin tokens, tools/harness.ts). None without the KEK, which opens them.
@@ -349,9 +388,6 @@ const backgroundTasks =
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
 const runtime = await readStartSettings({ database, settings }, console.log)
-// The data keys that seal a session's transcript (D7) and, below, its durable payloads: one
-// instance, so forgetting a subject drops its key from the one cache.
-const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
 if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
 // Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
 if (database && dataKeys) {

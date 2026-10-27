@@ -30,6 +30,7 @@ from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     PENDING_PREFIX,
     TRANSFER_HEADER,
+    WORKSPACE_PENDING_PREFIX,
     TransferPuts,
 )
 from scadbuddy.slicing.transfer_token import Method, TokenError, transfer_key, verify
@@ -97,11 +98,18 @@ async def put_blob(
         async for chunk in request.stream():
             await asyncio.to_thread(body.write, chunk)
         await asyncio.to_thread(body.seek, 0)
-        ref = await content.put("slice", body, name="sliced.3mf", scope=BlobScope(folder="work"))
+        # A sealed workspace file of the agent's (#4789), or a sliced 3MF.
+        workspace = key.startswith(WORKSPACE_PENDING_PREFIX)
+        ref = await content.put(
+            "workspace" if workspace else "slice",
+            body,
+            name="file.sealed" if workspace else "sliced.3mf",
+            scope=BlobScope(folder="work"),
+        )
     await asyncio.to_thread(
         TransferPuts(state.projection.pool).record,
         key,
-        key=f"slice-{ref.sha256}",
+        key=f"{ref.kind}-{ref.sha256}",
         sha256=ref.sha256,
         size=ref.size,
     )

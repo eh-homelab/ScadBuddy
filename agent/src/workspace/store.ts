@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
+import type { WorkspaceBlobStore } from './blobs.js'
+import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing.js'
 
 // The assistant's workspace (#2329): files of its own, in `ai_session_files`,
 // that the workspace_* tools (tools/workspace.ts) list, read, write, edit and
@@ -17,6 +19,14 @@ import type { SettingsReader } from '../approvals/service.js'
 // per workspace by the settings WORKSPACE_FILE_MAX_SETTING and
 // WORKSPACE_MAX_SETTING, checked under a per-workspace lock so two writes at
 // once cannot both pass.
+//
+// The bytes (#4789): with `blobs` (main.ts, whenever the KEK is mounted) a file's
+// bytes are a blob of the backend's content store, sealed under a file key of
+// their own (sealing.ts) and held in `blob_refs` while the row stands (a trigger,
+// migration 20261027T0114Z); the row keeps the metadata and the wrapped key. Where
+// the backend keeps no blobs (store_backend local), or without `blobs`, the bytes
+// stay in `data`, as before; reads take either. `moveToBlobs` moves the rows kept
+// in `data` to blobs (main.ts, at start).
 
 /** `ai_settings` key: the largest file (bytes). */
 export const WORKSPACE_FILE_MAX_SETTING = 'workspace_file_max_bytes'
@@ -111,6 +121,13 @@ function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
   return ws.kind === 'session'
     ? { key: `session:${ws.sessionId}`, sessionId: ws.sessionId }
     : { key: `principal:${ws.principalKind}:${ws.principalId}`, sessionId: null }
+}
+
+/** The workspace a stored `workspace` key names. */
+function refOf(key: string): WorkspaceRef {
+  if (key.startsWith('session:')) return { kind: 'session', sessionId: key.slice('session:'.length) }
+  const [, principalKind = '', ...id] = key.split(':')
+  return { kind: 'principal', principalKind, principalId: id.join(':') }
 }
 
 /** Where a file came from, for the audit log and the panel: a tool and its ids, or a URL. */
@@ -288,15 +305,70 @@ async function lockSession(tx: TransactionSql, sessionId: string | null): Promis
   if (sessionId !== null) await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR NO KEY UPDATE`
 }
 
+/** Where a row's bytes are: `data`, or a sealed blob and its wrapped file key. */
+type Stored = { data: Buffer | null; blob_key: string | null; key_sealed: Buffer | null; key_kek_id: string | null }
+
+/** How the bytes leave Postgres: the backend's blob store, and who seals for it. */
+export type WorkspaceBlobs = { store: WorkspaceBlobStore; sealing: WorkspaceSealing }
+
+/** A row's bytes as `ai_session_files` takes them: inline, or a blob with its wrapped key. */
+type Placed = { data: Buffer | null; blobKey: string | null; keySealed: Buffer | null; kekId: string | null }
+
+async function collect(parts: AsyncIterable<Buffer>): Promise<Buffer> {
+  const out: Buffer[] = []
+  for await (const part of parts) out.push(part)
+  return Buffer.concat(out)
+}
+
 export class SessionFiles {
   private readonly sql: Sql
   private readonly settings: SettingsReader | undefined
   private readonly fixed: Partial<WorkspaceLimits>
+  private readonly blobs: WorkspaceBlobs | undefined
 
-  constructor(sql: Sql, options: { settings?: SettingsReader | undefined; limits?: Partial<WorkspaceLimits> } = {}) {
+  constructor(
+    sql: Sql,
+    options: { settings?: SettingsReader | undefined; limits?: Partial<WorkspaceLimits>; blobs?: WorkspaceBlobs | undefined } = {},
+  ) {
     this.sql = sql
     this.settings = options.settings
     this.fixed = options.limits ?? {}
+    this.blobs = options.blobs
+  }
+
+  #blobs(): WorkspaceBlobs {
+    if (!this.blobs) throw new Error('this workspace file is in the blob store, and this process has no blob store (SCADBUDDY_SECRET_KEY_FILE)')
+    return this.blobs
+  }
+
+  /** The plaintext of a blob row, a segment at a time. */
+  #open(ws: WorkspaceRef, path: string, digest: string, stored: Stored): AsyncGenerator<Buffer> {
+    const blobs = this.#blobs()
+    return (async function* () {
+      const fileKey = await blobs.sealing.unwrap(ws, path, stored.blob_key!, stored.key_sealed!, stored.key_kek_id)
+      try {
+        yield* openFile(fileKey, blobs.store.get(stored.blob_key!), digest)
+      } finally {
+        fileKey.fill(0)
+      }
+    })()
+  }
+
+  /**
+   * Where `data` goes: sealed and uploaded as a blob when there is a blob store, else
+   * inline (no `blobs`, or a backend that keeps none).
+   */
+  async #place(ws: WorkspaceRef, path: string, data: Buffer, digest: string): Promise<Placed> {
+    if (!this.blobs) return { data, blobKey: null, keySealed: null, kekId: null }
+    const fileKey = newFileKey()
+    try {
+      const blobKey = await this.blobs.store.put(sealFile(fileKey, data, digest))
+      if (blobKey === undefined) return { data, blobKey: null, keySealed: null, kekId: null }
+      const { sealed, kekId } = await this.blobs.sealing.wrap(ws, path, blobKey, fileKey)
+      return { data: null, blobKey, keySealed: sealed, kekId }
+    } finally {
+      fileKey.fill(0)
+    }
   }
 
   /** The caps now: the settings, else the defaults (25 MB a file, 200 MB a workspace). */
@@ -339,10 +411,12 @@ export class SessionFiles {
 
   /** One file with its bytes and sha256, or undefined. */
   async read(ws: WorkspaceRef, path: string): Promise<WorkspaceFile | undefined> {
-    const [row] = await this.sql<(Row & { data: Buffer })[]>`
-      SELECT path, media_type, size, sha256, source, created_at, updated_at, data FROM ai_session_files
-      WHERE workspace = ${keyOf(ws).key} AND path = ${workspacePath(path)}`
-    return row ? { ...infoOf(row), bytes: row.data } : undefined
+    const [row] = await this.sql<(Row & Stored)[]>`
+      SELECT path, media_type, size, sha256, source, created_at, updated_at, data, blob_key, key_sealed, key_kek_id
+      FROM ai_session_files WHERE workspace = ${keyOf(ws).key} AND path = ${workspacePath(path)}`
+    if (!row) return undefined
+    const bytes = row.data ?? (await collect(this.#open(ws, row.path, row.sha256, row)))
+    return { ...infoOf(row), bytes }
   }
 
   /**
@@ -355,8 +429,30 @@ export class SessionFiles {
   async *chunks(ws: WorkspaceRef, path: string, expectedSha256: string, chunkBytes = STREAM_CHUNK_BYTES): AsyncGenerator<Buffer> {
     const name = workspacePath(path)
     const { key } = keyOf(ws)
+    const [stored] = await this.sql<(Stored & { sha256: string })[]>`
+      SELECT NULL::bytea AS data, blob_key, key_sealed, key_kek_id, sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}`
+    if (stored?.blob_key) {
+      if (stored.sha256 !== expectedSha256) {
+        throw new WorkspaceError('conflict', `${name} changed: its sha256 is ${stored.sha256}, not ${expectedSha256}`)
+      }
+      let sent = 0
+      for await (const part of this.#open(ws, name, stored.sha256, stored)) {
+        // Read again between segments, as from `data`: a file replaced mid-send is a conflict, not a mix.
+        if (sent > 0) {
+          const [now] = await this.sql<{ sha256: string }[]>`
+            SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}`
+          if (!now) throw new WorkspaceError('not_found', `no file ${name} in the workspace; workspace_list lists them`)
+          if (now.sha256 !== expectedSha256) {
+            throw new WorkspaceError('conflict', `${name} changed while it was being sent: its sha256 is ${now.sha256}, not ${expectedSha256}`)
+          }
+        }
+        if (part.length > 0) yield part
+        sent += 1
+      }
+      return
+    }
     for (let offset = 0; ; ) {
-      const [row] = await this.sql<{ part: Buffer; size: number; sha256: string }[]>`
+      const [row] = await this.sql<{ part: Buffer | null; size: number; sha256: string }[]>`
         SELECT substring(data FROM ${offset + 1}::int FOR ${chunkBytes}::int) AS part, size, sha256
         FROM ai_session_files WHERE workspace = ${key} AND path = ${name}`
       if (!row) throw new WorkspaceError('not_found', `no file ${name} in the workspace; workspace_list lists them`)
@@ -366,6 +462,8 @@ export class SessionFiles {
           `${name} changed${offset > 0 ? ' while it was being sent' : ''}: its sha256 is ${row.sha256}, not ${expectedSha256}`,
         )
       }
+      // Moved to a blob mid-send (moveToBlobs): sent again from the start by the caller.
+      if (row.part === null) throw new WorkspaceError('conflict', `${name} changed while it was being sent`)
       if (row.part.length > 0) yield row.part
       offset += row.part.length
       if (row.part.length === 0 || offset >= row.size) return
@@ -388,6 +486,9 @@ export class SessionFiles {
     const digest = sha256(data)
     const mediaType = options.mediaType?.trim() || guessMediaType(name, data)
     const source = options.source ?? null
+    // Checked before any upload too, so a refused write sends nothing; the checks under the lock below are the ones that hold.
+    if (this.blobs) await this.#precheck(key, name, data.byteLength, workspaceMaxBytes, options.expectedSha256)
+    const placed = await this.#place(ws, name, data, digest)
     return this.sql.begin(async (tx) => {
       if (options.alongside) await lockSession(tx, sessionId)
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${key}`}, 0))`
@@ -416,11 +517,12 @@ export class SessionFiles {
         )
       }
       const [row] = await tx<Row[]>`
-        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size, source)
-        VALUES (${key}, ${sessionId}, ${name}, ${mediaType}, ${data}, ${digest}, ${data.byteLength},
-                ${source === null ? null : tx.json(source)})
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source)
+        VALUES (${key}, ${sessionId}, ${name}, ${mediaType}, ${placed.data}, ${placed.blobKey}, ${placed.keySealed}, ${placed.kekId},
+                ${digest}, ${data.byteLength}, ${source === null ? null : tx.json(source)})
         ON CONFLICT (workspace, path) DO UPDATE SET
-          media_type = EXCLUDED.media_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256,
+          media_type = EXCLUDED.media_type, data = EXCLUDED.data, blob_key = EXCLUDED.blob_key,
+          key_sealed = EXCLUDED.key_sealed, key_kek_id = EXCLUDED.key_kek_id, sha256 = EXCLUDED.sha256,
           size = EXCLUDED.size, source = EXCLUDED.source, updated_at = now()
         RETURNING path, media_type, size, sha256, source, created_at, updated_at`
       const file = infoOf(row!)
@@ -460,13 +562,90 @@ export class SessionFiles {
     })
   }
 
-  /** A fork's copy of its parent's files. */
+  /** The write's conflict and quota checks, without the lock, before its upload. */
+  async #precheck(key: string, name: string, size: number, workspaceMaxBytes: number, expected: string | null | undefined): Promise<void> {
+    const [row] = await this.sql<{ current: string | null; held: string }[]>`
+      SELECT (SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}) AS current,
+             (SELECT coalesce(sum(size), 0)::bigint FROM ai_session_files WHERE workspace = ${key} AND path <> ${name}) AS held`
+    const current = row?.current ?? null
+    if (expected === null && current !== null) {
+      throw new WorkspaceError('conflict', `${name} already exists (sha256 ${current}); nothing was written`)
+    }
+    if (expected !== undefined && expected !== null && current !== expected) {
+      throw new WorkspaceError(
+        'conflict',
+        current !== null
+          ? `${name} changed since it was read: its sha256 is ${current}, not ${expected}; read it again. Nothing was written`
+          : `${name} does not exist any more; nothing was written`,
+      )
+    }
+    const total = Number(row?.held ?? 0) + size
+    if (total > workspaceMaxBytes) {
+      throw new WorkspaceError(
+        'quota',
+        `the workspace would hold ${total} bytes; it holds at most ${workspaceMaxBytes}. Delete files with workspace_delete first`,
+      )
+    }
+  }
+
+  /**
+   * A fork's copy of its parent's files. A blob's row names the parent's blob, its file
+   * key wrapped again for the child: no bytes are copied (copy-on-write, #4212).
+   */
   async copy(fromSession: string, toSession: string): Promise<void> {
+    const to = `session:${toSession}`
     await this.sql`
       INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size, source, created_at, updated_at)
-      SELECT ${`session:${toSession}`}, ${toSession}, path, media_type, data, sha256, size, source, created_at, updated_at
-      FROM ai_session_files WHERE workspace = ${`session:${fromSession}`}
+      SELECT ${to}, ${toSession}, path, media_type, data, sha256, size, source, created_at, updated_at
+      FROM ai_session_files WHERE workspace = ${`session:${fromSession}`} AND data IS NOT NULL
       ON CONFLICT (workspace, path) DO NOTHING`
+    const rows = await this.sql<(Row & Stored)[]>`
+      SELECT path, media_type, size, sha256, source, created_at, updated_at, NULL::bytea AS data, blob_key, key_sealed, key_kek_id
+      FROM ai_session_files WHERE workspace = ${`session:${fromSession}`} AND blob_key IS NOT NULL`
+    if (rows.length === 0) return
+    const { sealing } = this.#blobs()
+    const parent: WorkspaceRef = { kind: 'session', sessionId: fromSession }
+    const child: WorkspaceRef = { kind: 'session', sessionId: toSession }
+    for (const row of rows) {
+      const fileKey = await sealing.unwrap(parent, row.path, row.blob_key!, row.key_sealed!, null)
+      try {
+        const { sealed } = await sealing.wrap(child, row.path, row.blob_key!, fileKey)
+        await this.sql`
+          INSERT INTO ai_session_files (workspace, session_id, path, media_type, blob_key, key_sealed, sha256, size, source, created_at, updated_at)
+          VALUES (${to}, ${toSession}, ${row.path}, ${row.media_type}, ${row.blob_key}, ${sealed}, ${row.sha256}, ${row.size},
+                  ${row.source === null ? null : this.sql.json(row.source)}, ${row.created_at}, ${row.updated_at})
+          ON CONFLICT (workspace, path) DO NOTHING`
+      } finally {
+        fileKey.fill(0)
+      }
+    }
+  }
+
+  /**
+   * Moves every file still kept in `data` to a sealed blob (#4789; main.ts, at start), one
+   * row at a time; a row written meanwhile is left as its writer left it. Idempotent: a
+   * row once moved is not read again. `unavailable` when the backend keeps no blobs
+   * (store_backend local), which moves nothing more.
+   */
+  async moveToBlobs(batch = 50): Promise<{ moved: number; unavailable: boolean }> {
+    if (!this.blobs) return { moved: 0, unavailable: true }
+    let moved = 0
+    for (;;) {
+      const rows = await this.sql<{ workspace: string; path: string; sha256: string }[]>`
+        SELECT workspace, path, sha256 FROM ai_session_files WHERE data IS NOT NULL ORDER BY workspace, path LIMIT ${batch}`
+      if (rows.length === 0) return { moved, unavailable: false }
+      for (const { workspace, path, sha256: digest } of rows) {
+        const [held] = await this.sql<{ data: Buffer }[]>`
+          SELECT data FROM ai_session_files WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND data IS NOT NULL`
+        if (!held) continue
+        const placed = await this.#place(refOf(workspace), path, held.data, digest)
+        if (placed.blobKey === null) return { moved, unavailable: true }
+        const updated = await this.sql`
+          UPDATE ai_session_files SET data = NULL, blob_key = ${placed.blobKey}, key_sealed = ${placed.keySealed}, key_kek_id = ${placed.kekId}
+          WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND data IS NOT NULL`
+        moved += updated.count
+      }
+    }
   }
 
   /** Deletes principals' files last written more than `ttlMs` ago; how many went. Sessions' files go with their session. */
