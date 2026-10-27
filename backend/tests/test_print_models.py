@@ -101,8 +101,22 @@ def test_a_printer_that_is_not_a_registry_id_is_refused() -> None:
         ({"preferred_path": "auto", "lan_host": "10.0.0.9"}, NOW - STALE_AFTER, "bambuddy"),
         ({"preferred_path": "auto", "lan_host": "10.0.0.9"}, None, "bambuddy"),
         ({"preferred_path": "auto"}, NOW, "bambuddy"),
+        # #4747: a Bambuddy virtual printer is never on the hot path, LAN link or not.
+        (
+            {"preferred_path": "native", "lan_host": "10.0.0.9", "kind": "bambuddy_virtual"},
+            NOW,
+            "bambuddy",
+        ),
     ],
-    ids=["bambuddy", "native", "auto-fresh", "auto-stale", "auto-unheard", "auto-no-lan"],
+    ids=[
+        "bambuddy",
+        "native",
+        "auto-fresh",
+        "auto-stale",
+        "auto-unheard",
+        "auto-no-lan",
+        "virtual",
+    ],
 )
 def test_the_path_follows_the_row_and_its_report(
     fields: dict[str, object], seen: datetime | None, path: str
@@ -118,3 +132,21 @@ def test_a_run_planned_before_the_registry_decodes_as_bambuddys() -> None:
     [payload] = converter.to_payloads([prepared])
     [back] = converter.from_payloads([payload], [PreparedPlates])
     assert back == prepared
+
+
+async def test_a_virtual_printer_is_not_a_print_target() -> None:
+    """#4747: a run naming a Bambuddy virtual printer's row is refused."""
+    from typing import cast
+
+    from scadbuddy.bambuddy.print_run import RunRefusalError, _named_printer
+    from scadbuddy.library.settings_store import StoredSettings
+    from scadbuddy.printers.store import PrinterStore
+
+    virtual = row(kind="bambuddy_virtual", bambuddy_vp_id=1, name="H2C virtual")
+
+    class Store:
+        def get(self, printer_id: str) -> PrinterRow:
+            return virtual
+
+    with pytest.raises(RunRefusalError, match="virtual printer"):
+        await _named_printer(PRINTER, None, StoredSettings(), cast(PrinterStore, Store()))

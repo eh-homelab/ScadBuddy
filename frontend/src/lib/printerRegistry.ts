@@ -1,4 +1,4 @@
-import type { Settings } from '../api/types'
+import type { PrinterSyncResult, Settings } from '../api/types'
 import type { RealtimeSignal } from './realtime'
 
 /**
@@ -9,6 +9,20 @@ import type { RealtimeSignal } from './realtime'
  */
 export const PRINTER_TOPICS = ['printers'] as const
 export const registryNews = (signal: RealtimeSignal) => signal === 'resync' || signal.kind === 'printer.changed'
+
+/** #4439 — the Bambuddy printer sync's counts, in words. */
+export function syncSummary(result: PrinterSyncResult): string {
+  const parts = [
+    `${result.created} added`,
+    `${result.linked} linked`,
+    `${result.already_linked} already linked`,
+    `${result.skipped} skipped`,
+    `${result.conflicts} conflicts`,
+  ]
+  if (result.lan_linked) parts.push(`${result.lan_linked} LAN links filled`)
+  if (result.lan_failed) parts.push(`${result.lan_failed} LAN links not filled`)
+  return parts.join(', ')
+}
 
 /**
  * #3818 — the backends the hot path needs (plan 2026-10-18 D2, `hot_path_native`): the

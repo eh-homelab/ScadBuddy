@@ -329,6 +329,20 @@ describe('extractors', () => {
     expect(JSON.stringify(touches('create_printer', { serial: '01P00A0000000AA', name: 'G' }, {}))).not.toContain('01P00A')
   })
 
+  it('records the rows a Bambuddy sync made or changed, and nothing for a dry run (#4439)', () => {
+    const P = '00000000-0000-4000-8000-0000000000aa'
+    const Q = '00000000-0000-4000-8000-0000000000bb'
+    const entries = [
+      { printer_id: P, action: 'created', lan: 'linked' },
+      { printer_id: Q, action: 'already_linked', lan: 'kept' },
+      { printer_id: null, action: 'skipped' },
+    ]
+    expect(touches('sync_printers_from_bambuddy', {}, { dry_run: false, entries }, 'outward')).toEqual([
+      { type: 'setting', id: `printer:${P}`, action: 'created' },
+    ])
+    expect(touches('sync_printers_from_bambuddy', { dry_run: true }, { dry_run: true, entries }, 'outward')).toEqual([])
+  })
+
   it("records Bambuddy projects, files and a print's timelapse", () => {
     expect(touches('create_print_project', { name: 'Bins' }, { id: 9, name: 'Bins' }, 'outward')).toEqual([
       { type: 'project', id: '9', action: 'created' },

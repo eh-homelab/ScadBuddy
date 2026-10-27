@@ -468,6 +468,18 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   unlink_printer_bambuddy: (input) => setting(registryPrinter(input.printer)),
   unlink_printer_lan: (input) => setting(registryPrinter(input.printer)),
   delete_printer: (input) => setting(registryPrinter(input.printer), { action: 'deleted' }),
+  // #4439, #4747: every row the sync made or changed; a dry run touched nothing.
+  sync_printers_from_bambuddy: (_input, result) => {
+    const entries = field(result, 'entries')
+    if (field(result, 'dry_run') !== false || !Array.isArray(entries)) return []
+    return entries.flatMap((entry) =>
+      field(entry, 'action') === 'created' || field(entry, 'action') === 'linked' || field(entry, 'lan') === 'linked'
+        ? setting(registryPrinter(field(entry, 'printer_id')), {
+            action: field(entry, 'action') === 'created' ? 'created' : 'modified',
+          })
+        : [],
+    )
+  },
   remember_printer_bed_type: (input) => {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)
