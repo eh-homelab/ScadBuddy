@@ -408,7 +408,7 @@ const sessions =
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true, access: accessResolver }),
         // The http_request tool (#827): on for a turn unless `builtin:http` is
         // switched off in ai_access (routes/httpRequest.ts, #2171).
         httpRequest: {},
@@ -616,7 +616,7 @@ const turnToolDeps = temporal
                 load: () => loadPackagesForRun(pluginPackages, packageInstaller),
                 root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
                 localRoot: path.join(paths.stateDir, 'plugins-local'),
-                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { access: accessResolver }),
               },
             }
           : {}),

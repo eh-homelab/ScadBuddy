@@ -366,7 +366,15 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       secrets.push(...forwardedPackages.secrets)
       for (const plugin of forwardedPackages.plugins) {
         browserPlugins.push(plugin.name)
-        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward', ...browserParts })
+        // Its tiers from ai_access (#2171), an unlisted tool outward, as a remote plugin's above.
+        const tiers = pluginTierResolver([plugin])
+        servers.push({
+          name: plugin.name,
+          connect: () => connectHttp(plugin.url),
+          listingKey: JSON.stringify(plugin.disabledTools),
+          tierOf: (name) => tiers(name) ?? 'outward',
+          ...browserParts,
+        })
       }
     }
     return {
