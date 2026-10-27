@@ -444,9 +444,12 @@ function SettingsSections() {
   }
   /** The write each field was last sent in: a late answer is still the truth for these. */
   const fieldWriter = useRef(new Map<FieldName, number>())
+  /** Each write in flight: the writer each of its fields had before it was sent. */
+  const priorWriter = useRef(new Map<number, Map<FieldName, number | undefined>>())
   /**
    * The settings as last cached, read when an answer lands: the render's `settings` can
-   * be a step behind when two answers land together.
+   * be a step behind when two answers land together. Any new `settingsState.setData`
+   * caller must update `cached` too, or the next late answer is patched into stale settings.
    */
   const cached = useRef<Settings | undefined>(undefined)
   useEffect(() => {
@@ -458,10 +461,13 @@ function SettingsSections() {
    * A late one is not: a newer answer has landed. Yet the server may have applied the
    * writes in another order than they were sent, so that newer answer can lack this
    * write's fields. The late answer's own fields, the ones no newer write was sent for,
-   * are patched into the cache from it.
+   * are patched into the cache from it. `patchFields` copies only those fields, their
+   * `has_*` flags and their `sources`, not values the server derives from a write (e.g.
+   * `library_backend` and `store_backend` on a Connection fallback).
    */
   const cacheWrite = (sent: number, next: Settings, written: FieldName[], seed: FieldName[], since: Edits): Settings => {
     requestSeed(seed, since)
+    priorWriter.current.delete(sent)
     if (landed(sent) || !cached.current) {
       cached.current = next
       settingsState.setData(next)
@@ -476,8 +482,44 @@ function SettingsSections() {
   /** Numbers a write as sent, and marks it the last one sent for each of `written`. */
   const sendWrite = (written: FieldName[]): number => {
     const sent = ++writeSent.current
+    priorWriter.current.set(sent, new Map(written.map((name) => [name, fieldWriter.current.get(name)])))
     for (const name of written) fieldWriter.current.set(name, sent)
     return sent
+  }
+  /**
+   * A write that failed gives its fields back to the writer each had before, unless a newer
+   * write was sent for it since: a late answer from that older write is still their truth.
+   * A newer write still in flight inherits the same prior, should it fail too.
+   */
+  const failWrite = (sent: number) => {
+    for (const [name, prior] of priorWriter.current.get(sent) ?? []) {
+      for (const priors of priorWriter.current.values()) {
+        if (priors.get(name) === sent) priors.set(name, prior)
+      }
+      if (fieldWriter.current.get(name) !== sent) continue
+      if (prior === undefined) fieldWriter.current.delete(name)
+      else fieldWriter.current.set(name, prior)
+    }
+    priorWriter.current.delete(sent)
+  }
+
+  /**
+   * Numbers a read as sent and refreshes the settings. `onAccept` runs only when no newer
+   * write has landed, and takes the read by returning the edits to seed the form since, or
+   * refuses it with `undefined`. A taken read is the newest landed and is cached whole.
+   */
+  const numberedRead = (onAccept: () => Edits | undefined) => {
+    const sent = ++writeSent.current
+    settingsState.refresh((next) => {
+      // #4803: a save or reset sent after this read has landed already, and is newer.
+      if (sent <= writeLanded.current) return false
+      const since = onAccept()
+      if (since === undefined) return false
+      landed(sent)
+      requestSeed('all', since)
+      cached.current = next
+      return true
+    })
   }
 
   // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
@@ -486,14 +528,7 @@ function SettingsSections() {
   const loadLatest = () => {
     setChangedElsewhere(false)
     const since = beginSeed()
-    const sent = ++writeSent.current
-    settingsState.refresh((next) => {
-      // #4803: a save or reset sent after this read has landed already, and is newer.
-      if (!landed(sent)) return false
-      requestSeed('all', since)
-      cached.current = next
-      return true
-    })
+    numberedRead(() => since)
   }
 
   // Read when the answer lands, not when the event came: typing may have started since.
@@ -505,18 +540,10 @@ function SettingsSections() {
       setChangedElsewhere(true)
       return
     }
-    const sent = ++writeSent.current
-    settingsState.refresh((next) => {
-      // #4803: a save or reset sent after this read has landed already, and is newer.
-      if (sent <= writeLanded.current) return false
-      if (!isDirty.current()) {
-        landed(sent)
-        requestSeed('all', beginSeed())
-        cached.current = next
-        return true
-      }
+    numberedRead(() => {
+      if (!isDirty.current()) return beginSeed()
       setChangedElsewhere(true)
-      return false
+      return undefined
     })
   })
 
@@ -569,10 +596,11 @@ function SettingsSections() {
     if (Object.keys(body).length === 0) return true
     setSaving(id)
     setSectionError((current) => ({ ...current, [id]: undefined }))
+    let sent: number | undefined
     try {
       const since = beginSeed()
       const written = Object.keys(body) as FieldName[]
-      const sent = sendWrite(written)
+      sent = sendWrite(written)
       const next = await api.putSettings(body)
       const names = [...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])]
       // What is cached, not this answer: a late answer is only patched in (#4803).
@@ -586,6 +614,7 @@ function SettingsSections() {
       }
       return true
     } catch (cause) {
+      if (sent !== undefined) failWrite(sent)
       // A 422 names each refused field (`loc: ["body", <field>]`): shown beside it.
       const fieldErrors: Partial<Record<FieldName, string>> = {}
       const reported = cause instanceof ApiError ? (cause.problem as { errors?: unknown }).errors : undefined
@@ -621,6 +650,7 @@ function SettingsSections() {
   async function resetField(name: FieldName) {
     setResetting(name)
     setError(null)
+    let sent: number | undefined
     try {
       // Resetting what the Bambuddy store needs takes the store back to local with it, as a
       // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
@@ -630,7 +660,7 @@ function SettingsSections() {
         settings.library_backend !== 'native'
       const since = beginSeed()
       const written: FieldName[] = fallBack ? [name, 'store_backend'] : [name]
-      const sent = sendWrite(written)
+      sent = sendWrite(written)
       const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
       setBambuddyLinks(cacheWrite(sent, next, written, written, since))
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
@@ -638,6 +668,7 @@ function SettingsSections() {
         projectsState.reload()
       }
     } catch (cause) {
+      if (sent !== undefined) failWrite(sent)
       setError(cause instanceof ApiError ? cause.detail : 'Could not reset the setting.')
     } finally {
       setResetting(null)
