@@ -14,6 +14,7 @@ run's failure, recorded with its text.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Mapping
 from contextlib import aclosing
@@ -26,14 +27,17 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import OutputSource
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import declares_pipeline
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
-from scadbuddy.orders.models import Actor
+from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
@@ -45,11 +49,16 @@ from scadbuddy.orders.quote import (
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.render.job_models import Job
+from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.runner import OpenSCADError, cached_schema
+from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
 from scadbuddy.store.cache import StaleBlobError
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
+
+logger = logging.getLogger(__name__)
 
 ORDER_ITEM_QUOTE = "order_item_quote"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
@@ -175,6 +184,28 @@ class PreviewSlicer:
         return bytes(data)
 
 
+async def reference_schema(core: Core, reference: Reference) -> CustomizerSchema | None:
+    """The schema of the reference's commit, for the quote's `output_matches` (#4774);
+    None for a pipeline template, whose params need not be `model.scad`'s, or when it
+    cannot be read: then the inputs are compared exactly, as before."""
+    try:
+        source = await resolve_source(
+            reference.slug,
+            reference.commit,
+            paths=core.paths,
+            history=core.history,
+            fetcher=CheckoutFetcher(core.libraries, core.installs, core.checkouts),
+        )
+        if await asyncio.to_thread(declares_pipeline, source.scad.parent, reference.slug):
+            return None
+        return await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(core.config)
+        )
+    except (OSError, ValueError, GitError, RevisionNotFoundError, OpenSCADError):
+        logger.warning("no schema for an item's reference", exc_info=True)
+        return None
+
+
 class _Renders:
     """``RenderService`` as ``orders/quote.py`` ``ensure_output`` reads it."""
 
@@ -229,6 +260,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             slicer=PreviewSlicer(core, components),
             blobs=core.store.blobs,
             refs=orders.refs,
+            schema_of=lambda reference: reference_schema(core, reference),
         )
         quote = await quote_run(
             run,

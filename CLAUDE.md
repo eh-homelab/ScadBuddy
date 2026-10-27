@@ -1048,6 +1048,15 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `needs`, so `go` is required: a skip is a failure, a "no Go changes" run a pass. The
   `freshness` job also regenerates the Go client when the API or the client changed and
   pushes it to a same-repo PR with the `RUNNER_APP` token.
+- Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
+  shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
+  the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
+  (`rust`, `slicer-image`) and `image` (the app image job: any backend change, plus
+  `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
+  does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
+  where the lane was needed is a failure. A push, the schedule, a dispatch, the
+  Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
+  that opens a file outside its tree) needs its path in that lane's pattern.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
   touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
