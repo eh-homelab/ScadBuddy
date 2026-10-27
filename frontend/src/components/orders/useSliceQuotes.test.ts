@@ -158,6 +158,20 @@ describe('useSliceQuotes (#4693)', () => {
     expect(running).toHaveBeenCalledTimes(2)
   })
 
+  it('follows an operation once, though its activity row stays running after it ended (#4736 review)', async () => {
+    const running = vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-stale', subject: 'order_item:item-1' }], next_cursor: null })
+    const followed = vi.spyOn(api, 'followQuote').mockResolvedValue({} as Quote)
+    const onQuoted = vi.fn()
+    const first = [{ id: 'item-1', order_id: 'order-1', quotes: [] }] as unknown as OrderItemDetail[]
+    const { rerender } = renderHook(({ items }) => useSliceQuotes('order-1', items, onQuoted), { initialProps: { items: first } })
+    await waitFor(() => expect(onQuoted).toHaveBeenCalledTimes(1))
+    // The reload that quote brought: the stale row is listed again, and not followed again.
+    rerender({ items: [...first] })
+    await waitFor(() => expect(running).toHaveBeenCalledTimes(2))
+    expect(followed).toHaveBeenCalledTimes(1)
+    expect(onQuoted).toHaveBeenCalledTimes(1)
+  })
+
   it('shows a picked-up quote that failed as failed (#4736)', async () => {
     vi.spyOn(api, 'runningQuotes').mockResolvedValue({ items: [{ ...ROW, id: 'operation:op-1', subject: 'order_item:item-1' }], next_cursor: null })
     vi.spyOn(api, 'followQuote').mockRejectedValue(new ApiError(422, 'No printer takes this plate.'))

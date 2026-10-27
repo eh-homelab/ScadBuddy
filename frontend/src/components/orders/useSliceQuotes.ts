@@ -46,8 +46,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   const quoted = useRef(onQuoted)
   // What the recovery below reads without running again on each change.
   const seen = useRef({ items, runs })
-  // The operations a recovery follows, so a second recovery does not follow one twice.
-  const recovering = useRef(new Set<string>())
+  // The operations a recovery followed on this order, running or ended: an activity row can
+  // stay `running` after its operation ended (its write was swallowed until the repair),
+  // and following it again on each reload would reload the order without end.
+  const followed = useRef(new Set<string>())
   useEffect(() => {
     quoted.current = onQuoted
     seen.current = { items, runs }
@@ -58,6 +60,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     follows.current = controller
     // Another order's runs are not this one's.
     setRuns(new Map())
+    followed.current = new Set()
     return () => {
       current.current = ''
       controller.abort()
@@ -136,8 +139,8 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
           const operationId = row.id.startsWith(OPERATION) ? row.id.slice(OPERATION.length) : ''
           const itemId = row.subject.startsWith(SUBJECT) ? row.subject.slice(SUBJECT.length) : ''
           const item = seen.current.items?.find((i) => i.id === itemId)
-          if (!operationId || !item || seen.current.runs.has(itemId) || recovering.current.has(operationId)) continue
-          recovering.current.add(operationId)
+          if (!operationId || !item || seen.current.runs.has(itemId) || followed.current.has(operationId)) continue
+          followed.current.add(operationId)
           const started = row.created_at ? Date.parse(row.created_at) : NaN
           const run: SliceQuoteRun = { startedAt: Number.isNaN(started) ? Date.now() : started, error: null, known: item.quotes.map((q) => q.id) }
           update(forOrder, itemId, run)
@@ -150,7 +153,6 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
               },
               (cause: unknown) => update(forOrder, itemId, mayHaveRun(cause) ? { ...run, detached: true } : { ...run, error: refusalText(cause) }),
             )
-            .finally(() => recovering.current.delete(operationId))
         }
       },
       (cause: unknown) => console.debug('could not read the running slice quotes; their items show idle', cause),
