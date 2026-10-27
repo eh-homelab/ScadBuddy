@@ -256,6 +256,11 @@ class OutputStore:
         #: and a listing's details asked about ten times per output. A hit is checked
         #: with one stat, so a moved or deleted output is looked for again.
         self._dirs: dict[str, Path] = {}
+        #: #4775 — whether an output with no thumbnail gets one drawn from its preview
+        #: mesh on first read; `preview_renders`, set at boot as the model previews are.
+        self.draw_thumbnails = False
+        #: Bounds those draws: a History page of new outputs asks for every one at once.
+        self.thumbnail_draws = asyncio.Semaphore(2)
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -801,6 +806,25 @@ class OutputStore:
 
     def write_thumbnail(self, output_id: str, png: bytes) -> None:
         self.thumbnail_path(output_id).write_bytes(png)
+
+    def drawable_thumbnail(self, output_id: str) -> bool:
+        """True when the output has no thumbnail and the server may draw one from its
+        preview mesh (#4775)."""
+        return self.draw_thumbnails and (self._find_dir(output_id) / PREVIEW_NAME).is_file()
+
+    def write_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
+        """``png`` as the thumbnail only when the output still has none: an upload that
+        landed while the server drew stays (#4775). Written whole or not at all."""
+        path = self.thumbnail_path(output_id)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        temporary.write_bytes(png)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        finally:
+            temporary.unlink()
+        return True
 
     def _write_meta(self, directory: Path, meta: OutputMeta) -> None:
         (directory / META_NAME).write_text(
