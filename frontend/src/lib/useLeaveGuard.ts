@@ -164,7 +164,9 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
       }
       // Within the page, on the sentinel (#4840): pushed over, the sentinel would be buried
       // where saving cannot reach it. A push takes its place, and a sentinel goes over it;
-      // a replace (a redirect) replaces it and is marked as it, so it adds no entry.
+      // a replace (a redirect) replaces it and is marked as it, so it adds no entry. Saving
+      // then pops back to the entry under it, the address before the redirect: a page using
+      // this must redirect from there again (the Settings shell does).
       const under = entryKey()
       replace.call(navigator, to, state, opts)
       if (replacing) {

@@ -157,8 +157,10 @@ describe('SettingsPage, live (#269)', () => {
     const get = vi.spyOn(api, 'getSettings')
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
     await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+    const read = get.mock.results[0]
+    expect(read).toBeDefined()
     await act(async () => {
-      await get.mock.results[0]?.value
+      await read?.value
     })
     expect(screen.queryByText(/Settings were changed elsewhere/)).not.toBeInTheDocument()
     expect(field).toHaveValue('https://tested.test')

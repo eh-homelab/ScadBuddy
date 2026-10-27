@@ -260,6 +260,8 @@ describe('useLeaveGuard (#322)', () => {
           // Re-armed where it landed: there is no Forward entry left to land on and bounce.
           const length = window.history.length
           act(() => window.history.forward())
+          // A Forward with no entry fires no event to wait on: one task is when its popstate
+          // would have come, as jsdom traverses history a task later.
           await act(() => new Promise((resolve) => setTimeout(resolve, 0)))
           expect(window.location.pathname).toBe('/settings/general')
           expect(window.history.length).toBe(length)

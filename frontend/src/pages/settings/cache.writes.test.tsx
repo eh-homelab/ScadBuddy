@@ -260,9 +260,11 @@ describe('Settings saves, resets and reads in order (#4776)', () => {
     await act(async () => newest.release())
     await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
     // The older save's answer, awaited after the page's own wait on it, which has run by then.
+    const answer = put.mock.results[0]
+    expect(answer).toBeDefined()
     await act(async () => {
       older.release()
-      await put.mock.results[0]?.value
+      await answer?.value
     })
     expect(field).toHaveValue('https://newest.test')
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
